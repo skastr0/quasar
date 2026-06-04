@@ -10,6 +10,7 @@ const provider = v.union(
   v.literal("pi"),
   v.literal("kimi"),
   v.literal("droid"),
+  v.literal("hermes"),
   v.literal("antigravity"),
   v.literal("cursor"),
   v.literal("gemini"),

@@ -5,6 +5,7 @@ import { codexAdapter } from "./codex";
 import { cursorAdapter } from "./cursor";
 import { droidAdapter } from "./droid";
 import { grokAdapter } from "./grok";
+import { hermesAdapter } from "./hermes";
 import { kimiAdapter } from "./kimi";
 import { opencodeAdapter } from "./opencode";
 import { piAdapter } from "./pi";
@@ -19,6 +20,7 @@ export const stableAdapters = [
   piAdapter,
   kimiAdapter,
   droidAdapter,
+  hermesAdapter,
   antigravityAdapter,
   cursorAdapter,
 ] as const;

@@ -34,6 +34,8 @@ type BuildSessionArgs = {
   readonly nativeSessionId: string;
   readonly nativeProjectKey?: string;
   readonly title?: string;
+  readonly startedAt?: string;
+  readonly updatedAt?: string;
   readonly sourceRoot: string;
   readonly sourcePath: string;
   readonly projectPath?: string;
@@ -568,6 +570,8 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
       ? { nativeProjectKey: args.nativeProjectKey }
       : {}),
     ...(args.title !== undefined ? { title: args.title } : {}),
+    ...(args.startedAt !== undefined ? { startedAt: args.startedAt } : {}),
+    ...(args.updatedAt !== undefined ? { updatedAt: args.updatedAt } : {}),
     sourceRoot: args.sourceRoot,
     sourcePath: args.sourcePath,
     ...(args.rawMetadata !== undefined ? { rawMetadata: args.rawMetadata } : {}),

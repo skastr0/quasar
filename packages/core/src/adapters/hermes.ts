@@ -1,0 +1,595 @@
+import { execFileSync } from "node:child_process";
+import { copyFileSync, existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
+
+import type { Artifact, NormalizedSession, SessionEdge, SessionEventKind, ToolCall, UsageRecord } from "../schemas";
+import {
+  buildSession,
+  compactText,
+  contentBlocksFromNative,
+  edgeIdFor,
+  eventIdFor,
+  homePath,
+  numberValue,
+  parseJsonString,
+  readJsonFile,
+  recordFrom,
+  roleFrom,
+  scopedId,
+  sourceRoot,
+  stringValue,
+  type NativeValue,
+  usageIdFor,
+} from "./common";
+import type { SessionAdapter } from "./types";
+
+type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
+type HermesDatabase = NonNullable<Awaited<ReturnType<typeof maybeDatabase>>>;
+type HermesRow = Record<string, unknown>;
+type HermesSessionRow = HermesRow & { id?: unknown; source?: unknown; started_at?: unknown };
+type HermesMessageRow = HermesRow & {
+  id?: unknown;
+  session_id?: unknown;
+  role?: unknown;
+  content?: unknown;
+  tool_call_id?: unknown;
+  tool_calls?: unknown;
+  tool_name?: unknown;
+  timestamp?: unknown;
+};
+type HermesToolCallDraft = Omit<
+  ToolCall,
+  "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
+>;
+type HermesUsageDraft = Omit<
+  UsageRecord,
+  "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
+>;
+type HermesEdgeDraft = Omit<
+  SessionEdge,
+  "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
+>;
+type HermesArtifactDraft = Omit<
+  Artifact,
+  "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
+>;
+
+const maybeDatabase = async (path: string) => {
+  try {
+    const { Database } = await import("bun:sqlite");
+    return new Database(path, { readonly: true });
+  } catch {
+    return undefined;
+  }
+};
+
+const sql = (value: string) => `'${value.replaceAll("'", "''")}'`;
+
+const sqliteJson = <A>(dbPath: string, query: string): A[] => {
+  try {
+    const output = execFileSync("sqlite3", ["-json", dbPath, query], { encoding: "utf8" });
+    return output.trim().length === 0 ? [] : (JSON.parse(output) as A[]);
+  } catch {
+    return [];
+  }
+};
+
+const copyDatabaseForRead = (dbPath: string) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "quasar-hermes-"));
+  const tempDbPath = join(tempDir, basename(dbPath));
+  copyFileSync(dbPath, tempDbPath);
+  for (const suffix of ["-wal", "-shm"]) {
+    const source = `${dbPath}${suffix}`;
+    if (existsSync(source)) copyFileSync(source, `${tempDbPath}${suffix}`);
+  }
+  return {
+    path: tempDbPath,
+    cleanup: () => rmSync(tempDir, { recursive: true, force: true }),
+  };
+};
+
+const hermesDbPath = (root: string | undefined) => {
+  if (root === undefined) return undefined;
+  try {
+    return statSync(root).isFile() ? root : join(root, "state.db");
+  } catch {
+    return join(root, "state.db");
+  }
+};
+
+const hermesHomeFromRoot = (root: string) => {
+  try {
+    return statSync(root).isFile() ? dirname(root) : root;
+  } catch {
+    return root;
+  }
+};
+
+const readSessionRows = (db: HermesDatabase, limit: number | undefined) =>
+  db.query("select * from sessions order by started_at desc limit ?").all(limit ?? 500) as HermesSessionRow[];
+
+const readMessageRows = (db: HermesDatabase, sessionId: string) =>
+  db
+    .query("select * from messages where session_id = ? order by timestamp, id")
+    .all(sessionId) as HermesMessageRow[];
+
+const readSessionRowsCli = (dbPath: string, limit: number | undefined) =>
+  sqliteJson<HermesSessionRow>(
+    dbPath,
+    `select * from sessions order by started_at desc limit ${Math.max(1, Math.floor(limit ?? 500))}`,
+  );
+
+const readMessageRowsCli = (dbPath: string, sessionId: string) =>
+  sqliteJson<HermesMessageRow>(
+    dbPath,
+    `select * from messages where session_id = ${sql(sessionId)} order by timestamp, id`,
+  );
+
+const isoFromEpoch = (value: unknown) => {
+  const numeric = numberValue(value);
+  if (numeric === undefined) return stringValue(value);
+  return new Date(numeric > 10_000_000_000 ? numeric : numeric * 1000).toISOString();
+};
+
+const parsedJsonField = (value: unknown): NativeValue | undefined => {
+  const parsed = parseJsonString(value);
+  if (parsed === undefined || parsed === null || parsed === "") return undefined;
+  return parsed as NativeValue;
+};
+
+const parsedModelConfig = (session: HermesSessionRow) => parsedJsonField(session.model_config);
+
+const parsedReasoningFields = (message: HermesMessageRow) => ({
+  reasoningDetails: parsedJsonField(message.reasoning_details),
+  codexReasoningItems: parsedJsonField(message.codex_reasoning_items),
+  codexMessageItems: parsedJsonField(message.codex_message_items),
+});
+
+const toolCallRecords = (value: unknown) => {
+  const parsed = parseJsonString(value);
+  if (Array.isArray(parsed)) return parsed.map(recordFrom).filter((record) => Object.keys(record).length > 0);
+  const record = recordFrom(parsed);
+  return Object.keys(record).length === 0 ? [] : [record];
+};
+
+const toolNameFromCall = (call: Record<string, unknown>) => {
+  const functionRecord = recordFrom(call.function);
+  return (
+    stringValue(functionRecord.name) ??
+    stringValue(call.name) ??
+    stringValue(call.tool_name) ??
+    stringValue(call.toolName) ??
+    "hermes_tool"
+  );
+};
+
+const toolInputFromCall = (call: Record<string, unknown>) => {
+  const functionRecord = recordFrom(call.function);
+  return (
+    parseJsonString(functionRecord.arguments) ??
+    parseJsonString(call.arguments) ??
+    call.args ??
+    call.input ??
+    call
+  );
+};
+
+const nativeToolIdFromCall = (call: Record<string, unknown>, fallback: unknown) =>
+  stringValue(call.id) ??
+  stringValue(call.call_id) ??
+  stringValue(call.tool_call_id) ??
+  stringValue(call.toolCallId) ??
+  String(fallback);
+
+const statusFromFinishReason = (finishReason: unknown) => {
+  const value = stringValue(finishReason);
+  if (value === undefined) return undefined;
+  return value.includes("tool") ? "started" : value;
+};
+
+const messageKind = (
+  message: HermesMessageRow,
+  calls: readonly Record<string, unknown>[],
+): SessionEventKind => {
+  if (message.tool_call_id !== undefined || stringValue(message.role) === "tool") return "tool_result";
+  if (calls.length > 0) return "tool_call";
+  if (
+    stringValue(message.reasoning) !== undefined ||
+    stringValue(message.reasoning_content) !== undefined ||
+    message.reasoning_details !== undefined
+  ) {
+    return stringValue(message.content) === undefined ? "reasoning" : "message";
+  }
+  return "message";
+};
+
+const messageContent = (
+  message: HermesMessageRow,
+  calls: readonly Record<string, unknown>[],
+): NativeValue => {
+  const reasoning = parsedReasoningFields(message);
+  return {
+    content: stringValue(message.content),
+    reasoning: stringValue(message.reasoning),
+    reasoning_content: stringValue(message.reasoning_content),
+    ...(reasoning.reasoningDetails !== undefined ? { reasoning_details: reasoning.reasoningDetails } : {}),
+    ...(reasoning.codexReasoningItems !== undefined ? { codex_reasoning_items: reasoning.codexReasoningItems } : {}),
+    ...(reasoning.codexMessageItems !== undefined ? { codex_message_items: reasoning.codexMessageItems } : {}),
+    ...(calls.length > 0 ? { tool_calls: calls as NativeValue[] } : {}),
+    finish_reason: stringValue(message.finish_reason),
+    platform_message_id: stringValue(message.platform_message_id),
+  };
+};
+
+const messageBlocks = (
+  machineId: string,
+  dbPath: string,
+  eventId: string,
+  message: HermesMessageRow,
+  calls: readonly Record<string, unknown>[],
+) => {
+  const reasoning = parsedReasoningFields(message);
+  const blockInputs: NativeValue[] = [];
+  const content = stringValue(message.content);
+  if (content !== undefined) blockInputs.push({ type: "text", text: content });
+  const thinking = stringValue(message.reasoning_content) ?? stringValue(message.reasoning);
+  if (thinking !== undefined) blockInputs.push({ type: "thinking", thinking });
+  if (reasoning.reasoningDetails !== undefined) {
+    blockInputs.push({ type: "json", value: reasoning.reasoningDetails, label: "reasoning_details" });
+  }
+  if (reasoning.codexReasoningItems !== undefined) {
+    blockInputs.push({ type: "json", value: reasoning.codexReasoningItems, label: "codex_reasoning_items" });
+  }
+  if (reasoning.codexMessageItems !== undefined) {
+    blockInputs.push({ type: "json", value: reasoning.codexMessageItems, label: "codex_message_items" });
+  }
+  if (calls.length > 0) blockInputs.push({ type: "json", value: calls as NativeValue[], label: "tool_calls" });
+  return contentBlocksFromNative("hermes", machineId, dbPath, eventId, blockInputs);
+};
+
+const messageUsage = (
+  dbPath: string,
+  machineId: string,
+  nativeSessionId: string,
+  eventId: string,
+  message: HermesMessageRow,
+  index: number,
+  session: HermesSessionRow,
+): HermesUsageDraft | undefined => {
+  const totalTokens = numberValue(message.token_count);
+  if (totalTokens === undefined) return undefined;
+  return {
+    id: usageIdFor("hermes", machineId, dbPath, nativeSessionId, eventId, index),
+    eventId,
+    timestamp: isoFromEpoch(message.timestamp),
+    model: stringValue(session.model),
+    modelProvider: stringValue(session.billing_provider),
+    totalTokens,
+    raw: {
+      table: "messages",
+      rowId: String(message.id ?? index),
+      token_count: totalTokens,
+    },
+  };
+};
+
+const sessionUsage = (
+  dbPath: string,
+  machineId: string,
+  session: HermesSessionRow,
+): HermesUsageDraft | undefined => {
+  const nativeSessionId = String(session.id ?? "");
+  const inputTokens = numberValue(session.input_tokens);
+  const outputTokens = numberValue(session.output_tokens);
+  const cacheReadInputTokens = numberValue(session.cache_read_tokens);
+  const cacheCreationInputTokens = numberValue(session.cache_write_tokens);
+  const reasoningTokens = numberValue(session.reasoning_tokens);
+  const totalTokens = sumNumbers([
+    inputTokens,
+    outputTokens,
+    cacheReadInputTokens,
+    cacheCreationInputTokens,
+    reasoningTokens,
+  ]);
+  const cost = numberValue(session.actual_cost_usd) ?? numberValue(session.estimated_cost_usd);
+  if (totalTokens === undefined && cost === undefined) return undefined;
+  return {
+    id: usageIdFor("hermes", machineId, dbPath, nativeSessionId, undefined, -1),
+    timestamp: isoFromEpoch(session.ended_at) ?? isoFromEpoch(session.started_at),
+    model: stringValue(session.model),
+    modelProvider: stringValue(session.billing_provider),
+    inputTokens,
+    outputTokens,
+    cacheCreationInputTokens,
+    cacheReadInputTokens,
+    reasoningTokens,
+    totalTokens,
+    cost,
+    currency: cost === undefined ? undefined : "USD",
+    raw: session as NativeValue,
+  };
+};
+
+const sumNumbers = (values: readonly (number | undefined)[]) => {
+  const present = values.filter((value): value is number => value !== undefined);
+  return present.length === 0
+    ? undefined
+    : present.reduce((sum, value) => sum + value, 0);
+};
+
+const routingEntriesBySession = (root: string) => {
+  const indexPath = join(hermesHomeFromRoot(root), "sessions", "sessions.json");
+  const index = readJsonFile(indexPath);
+  const entries = new Map<string, NativeValue[]>();
+  const push = (sessionId: string, entry: NativeValue) => {
+    const list = entries.get(sessionId) ?? [];
+    list.push(entry);
+    entries.set(sessionId, list);
+  };
+  const visit = (value: unknown, path: readonly string[]) => {
+    if (Array.isArray(value)) {
+      value.forEach((item, index) => visit(item, [...path, String(index)]));
+      return;
+    }
+    if (value === null || typeof value !== "object") {
+      if (typeof value === "string" && /session/i.test(path.at(-1) ?? "")) {
+        push(value, { key: path.join("."), session_id: value });
+      }
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    const sessionId =
+      stringValue(record.session_id) ??
+      stringValue(record.sessionId) ??
+      stringValue(record.active_session_id) ??
+      stringValue(record.activeSessionId);
+    if (sessionId !== undefined) {
+      push(sessionId, { key: path.join("."), ...(record as Record<string, NativeValue | undefined>) });
+    }
+    for (const [key, child] of Object.entries(record)) visit(child, [...path, key]);
+  };
+  visit(index, []);
+  return entries;
+};
+
+const buildHermesSessionFromRows = (
+  dbPath: string,
+  root: string,
+  options: AdapterOptions,
+  session: HermesSessionRow,
+  messages: readonly HermesMessageRow[],
+  routingIndex: ReadonlyMap<string, NativeValue[]>,
+) => {
+  const nativeSessionId = String(session.id ?? "");
+  const machineId = options.machine.machineId;
+  const toolCallsByNativeId = new Map<string, HermesToolCallDraft>();
+  const toolEventByNativeId = new Map<string, string>();
+  const usageRecords: HermesUsageDraft[] = [];
+  const sessionEdges: HermesEdgeDraft[] = [];
+  const artifacts: HermesArtifactDraft[] = [];
+  const sessionLevelUsage = sessionUsage(dbPath, machineId, session);
+  if (sessionLevelUsage !== undefined) usageRecords.push(sessionLevelUsage);
+  const parentSessionId = stringValue(session.parent_session_id);
+  if (parentSessionId !== undefined) {
+    sessionEdges.push({
+      id: edgeIdFor("hermes", machineId, dbPath, "parent", parentSessionId, nativeSessionId),
+      kind: "parent",
+      fromId: parentSessionId,
+      toId: nativeSessionId,
+      rawReference: { sourcePath: dbPath, table: "sessions", rowId: nativeSessionId, nativeType: "parent_session_id" },
+    });
+  }
+
+  const events = messages.map((message, index) => {
+    const nativeEventId = String(message.id ?? index);
+    const eventId = eventIdFor("hermes", machineId, dbPath, index, nativeEventId);
+    const calls = toolCallRecords(message.tool_calls);
+    let eventToolCallId: string | undefined;
+    for (const [callIndex, call] of calls.entries()) {
+      const nativeToolId = nativeToolIdFromCall(call, `${nativeEventId}:${callIndex}`);
+      const toolCall: HermesToolCallDraft = {
+        id: scopedId("hermes", machineId, dbPath, "tool", nativeSessionId, nativeToolId),
+        eventId,
+        toolName: toolNameFromCall(call),
+        status: statusFromFinishReason(message.finish_reason),
+        input: toolInputFromCall(call),
+        startedAt: isoFromEpoch(message.timestamp),
+        raw: call as NativeValue,
+      };
+      toolCallsByNativeId.set(nativeToolId, toolCall);
+      toolEventByNativeId.set(nativeToolId, eventId);
+      eventToolCallId ??= toolCall.id;
+    }
+
+    const resultNativeToolId = stringValue(message.tool_call_id);
+    if (resultNativeToolId !== undefined) {
+      const existing = toolCallsByNativeId.get(resultNativeToolId);
+      const resultToolCall =
+        existing ??
+        ({
+          id: scopedId("hermes", machineId, dbPath, "tool", nativeSessionId, resultNativeToolId),
+          eventId,
+          toolName: stringValue(message.tool_name) ?? "hermes_tool",
+          input: undefined,
+          raw: {},
+        } satisfies HermesToolCallDraft);
+      const completed = {
+        ...resultToolCall,
+        status: "completed",
+        output: stringValue(message.content) ?? message.content,
+        completedAt: isoFromEpoch(message.timestamp),
+        raw: { call: resultToolCall.raw, result: message } as NativeValue,
+      };
+      toolCallsByNativeId.set(resultNativeToolId, completed);
+      eventToolCallId = completed.id;
+      const callEventId = toolEventByNativeId.get(resultNativeToolId);
+      if (callEventId !== undefined) {
+        sessionEdges.push({
+          id: edgeIdFor("hermes", machineId, dbPath, "tool_result_for", callEventId, eventId),
+          kind: "tool_result_for",
+          fromEventId: callEventId,
+          toEventId: eventId,
+        });
+      }
+    }
+
+    const usage = messageUsage(dbPath, machineId, nativeSessionId, eventId, message, index, session);
+    if (usage !== undefined) usageRecords.push(usage);
+    const content = messageContent(message, calls);
+    return {
+      id: eventId,
+      nativeEventId,
+      sequence: index,
+      timestamp: isoFromEpoch(message.timestamp),
+      role: roleFrom(stringValue(message.role)),
+      kind: messageKind(message, calls),
+      contentText: compactText(content),
+      content,
+      contentBlocks: messageBlocks(machineId, dbPath, eventId, message, calls),
+      ...(eventToolCallId !== undefined ? { toolCallId: eventToolCallId } : {}),
+      rawReference: { sourcePath: dbPath, table: "messages", rowId: nativeEventId, nativeType: "message" },
+      raw: message as NativeValue,
+    };
+  });
+
+  return buildSession({
+    provider: "hermes",
+    agentName: "hermes",
+    machine: options.machine,
+    nativeSessionId,
+    nativeProjectKey: stringValue(session.cwd),
+    title: stringValue(session.title),
+    startedAt: isoFromEpoch(session.started_at),
+    updatedAt: isoFromEpoch(session.ended_at),
+    sourceRoot: root,
+    sourcePath: dbPath,
+    projectPath: stringValue(session.cwd),
+    rawMetadata: {
+      ...session,
+      model_config: parsedModelConfig(session),
+      gateway_routing: routingIndex.get(nativeSessionId),
+    } as NativeValue,
+    events,
+    toolCalls: [...toolCallsByNativeId.values()],
+    sessionEdges,
+    usageRecords,
+    artifacts,
+  });
+};
+
+const readHermesWithBun = (
+  db: HermesDatabase,
+  dbPath: string,
+  root: string,
+  options: AdapterOptions,
+) => {
+  const routingIndex = routingEntriesBySession(root);
+  return readSessionRows(db, options.limit).map((session) =>
+    buildHermesSessionFromRows(
+      dbPath,
+      root,
+      options,
+      session,
+      readMessageRows(db, String(session.id ?? "")),
+      routingIndex,
+    ),
+  );
+};
+
+const readHermesWithCli = (
+  queryDbPath: string,
+  sourceDbPath: string,
+  root: string,
+  options: AdapterOptions,
+) => {
+  const routingIndex = routingEntriesBySession(root);
+  return readSessionRowsCli(queryDbPath, options.limit).map((session) =>
+    buildHermesSessionFromRows(
+      sourceDbPath,
+      root,
+      options,
+      session,
+      readMessageRowsCli(queryDbPath, String(session.id ?? "")),
+      routingIndex,
+    ),
+  );
+};
+
+const missingDatabaseResult = (root: string | undefined) => ({
+  sourceRoots: [],
+  sessions: [],
+  diagnostics: [
+    {
+      adapterId: hermesAdapter.id,
+      provider: "hermes" as const,
+      status: "no_data_found" as const,
+      parserConfidence: "documented" as const,
+      message: "Hermes state.db was not found.",
+      ...(root !== undefined ? { rootPath: root } : {}),
+    },
+  ],
+});
+
+const readHermes = async (options: AdapterOptions) => {
+  const root = options.roots?.hermes ?? hermesAdapter.defaultRoot();
+  const dbPath = hermesDbPath(root);
+  if (root === undefined || dbPath === undefined || !existsSync(dbPath)) {
+    return missingDatabaseResult(root);
+  }
+  const tempDb = copyDatabaseForRead(dbPath);
+  const db = await maybeDatabase(tempDb.path);
+  let sessions: NormalizedSession[] = [];
+  let usedFallback = false;
+  try {
+    if (db === undefined) {
+      usedFallback = true;
+      sessions = readHermesWithCli(tempDb.path, dbPath, root, options);
+    } else {
+      sessions = readHermesWithBun(db, dbPath, root, options);
+    }
+  } catch (error) {
+    sessions = [];
+    return {
+      sourceRoots: [sourceRoot("hermes", hermesAdapter.id, root, options.machine, options.now)],
+      sessions,
+      diagnostics: [
+        {
+          adapterId: hermesAdapter.id,
+          provider: "hermes" as const,
+          status: "unsupported" as const,
+          parserConfidence: "documented" as const,
+          rootPath: dbPath,
+          message: "Hermes state.db did not match the documented sessions/messages schema.",
+          details: { error: error instanceof Error ? error.message : String(error) },
+        },
+      ],
+    };
+  } finally {
+    db?.close();
+    tempDb.cleanup();
+  }
+  return {
+    sourceRoots: [sourceRoot("hermes", hermesAdapter.id, root, options.machine, options.now)],
+    sessions,
+    diagnostics: [
+      {
+        adapterId: hermesAdapter.id,
+        provider: "hermes" as const,
+        status: sessions.length > 0 ? ("available" as const) : ("no_data_found" as const),
+        parserConfidence: "documented" as const,
+        rootPath: dbPath,
+        message: `Discovered ${sessions.length} Hermes session(s)${usedFallback ? " via sqlite3 fallback" : ""}.`,
+      },
+    ],
+  };
+};
+
+export const hermesAdapter: SessionAdapter = {
+  id: "hermes-state-sqlite",
+  provider: "hermes",
+  displayName: "Hermes state.db SQLite",
+  stable: true,
+  defaultRoot: () => process.env.HERMES_HOME ?? homePath(".hermes"),
+  read: readHermes,
+};

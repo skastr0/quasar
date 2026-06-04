@@ -4,9 +4,10 @@ Quasar is a local-first repository for AI agent sessions. It ingests local
 agent histories, normalizes them into an analysis-oriented event graph, and
 serves text, semantic, and fusion search through Convex.
 
-V1 focuses on Codex, Claude Code, OpenCode, and Grok history importers. Other
-agents are exposed through honest discovery diagnostics until stable local
-formats are available.
+V1 includes local history importers for Codex, Claude Code, OpenCode, Grok,
+Amp, Pi, Kimi, Factory/Droid, Hermes, Antigravity, and Cursor. Stable,
+documented or observed formats are parsed first-class; brittle local formats
+fail soft with diagnostics rather than writing to native history.
 
 ## Workspace
 

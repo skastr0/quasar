@@ -9,6 +9,7 @@ export const Provider = Schema.Literal(
   "pi",
   "kimi",
   "droid",
+  "hermes",
   "antigravity",
   "cursor",
   "gemini",

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { describe, expect, test } from "vitest";
 
 import { buildIngestBatch } from "../src/ingest";
-import type { Provider } from "../src/schemas";
+import type { NormalizedSession, Provider } from "../src/schemas";
 
 const machine = {
   machineId: "machine:test",
@@ -28,6 +28,7 @@ const localProviders = [
   "pi",
   "kimi",
   "droid",
+  "hermes",
   "antigravity",
   "cursor",
 ] as const;
@@ -132,8 +133,9 @@ describe("adapter ingestion", () => {
     expect(session.events[0]?.contentBlocks[0]?.id).toContain("codex:block:machine:test:");
   });
 
-  test("reads graph fixtures for all ten local adapters", async () => {
+  test("reads graph fixtures for all local adapters", async () => {
     const fixtures = await makeAllAdapterFixtures();
+    const sessionsByProvider = new Map<Provider, NormalizedSession>();
     for (const provider of localProviders) {
       const batch = await buildIngestBatch({
         providers: [provider],
@@ -147,12 +149,13 @@ describe("adapter ingestion", () => {
       expect(session.events.length, provider).toBeGreaterThan(0);
       expect(session.events.flatMap((event) => event.contentBlocks).length, provider).toBeGreaterThan(0);
       expect(session.sessionEdges.some((edge) => edge.kind === "next"), provider).toBe(true);
+      sessionsByProvider.set(provider, session);
     }
 
-    const codex = await providerSession("codex", fixtures.codex);
+    const codex = sessionsByProvider.get("codex")!;
     expect(codex.toolCalls[0]?.toolName).toBe("exec_command");
 
-    const claude = await providerSession("claude", fixtures.claude);
+    const claude = sessionsByProvider.get("claude")!;
     expect(claude.toolCalls[0]).toMatchObject({ toolName: "Read", status: "completed" });
     expect(claude.sessionEdges.some((edge) => edge.kind === "parent")).toBe(true);
     expect(claude.usageRecords[0]?.inputTokens).toBe(3);
@@ -160,35 +163,54 @@ describe("adapter ingestion", () => {
       expect.arrayContaining(["text", "image", "file", "json"]),
     );
 
-    const opencode = await providerSession("opencode", fixtures.opencode);
+    const opencode = sessionsByProvider.get("opencode")!;
     expect(opencode.toolCalls[0]).toMatchObject({ toolName: "bash", status: "completed" });
     expect(opencode.usageRecords[0]?.totalTokens).toBe(12);
 
-    const grok = await providerSession("grok", fixtures.grok);
+    const grok = sessionsByProvider.get("grok")!;
     expect(grok.artifacts[0]).toMatchObject({ kind: "edit_hunk" });
 
-    const amp = await providerSession("amp", fixtures.amp);
+    const amp = sessionsByProvider.get("amp")!;
     expect(amp.toolCalls[0]?.toolName).toBe("bash");
     expect(amp.sessionEdges.some((edge) => edge.kind === "parent")).toBe(true);
     expect(amp.usageRecords[0]?.totalTokens).toBe(3);
 
-    const pi = await providerSession("pi", fixtures.pi);
+    const pi = sessionsByProvider.get("pi")!;
     expect(pi.toolCalls[0]?.toolName).toBe("bash");
     expect(pi.sessionEdges.some((edge) => edge.kind === "parent")).toBe(true);
     expect(pi.usageRecords[0]?.totalTokens).toBe(3);
 
-    const kimi = await providerSession("kimi", fixtures.kimi);
+    const kimi = sessionsByProvider.get("kimi")!;
     expect(kimi.sessionEdges.some((edge) => edge.kind === "subagent_of")).toBe(true);
     expect(kimi.artifacts[0]).toMatchObject({ kind: "plan" });
 
-    const droid = await providerSession("droid", fixtures.droid);
+    const droid = sessionsByProvider.get("droid")!;
     expect(droid.toolCalls[0]?.toolName).toBe("bash");
     expect(droid.artifacts[0]?.kind).toBe("diff");
 
-    const antigravity = await providerSession("antigravity", fixtures.antigravity);
+    const hermes = sessionsByProvider.get("hermes")!;
+    expect(hermes.toolCalls[0]).toMatchObject({
+      toolName: "terminal",
+      status: "completed",
+      input: { command: "pwd" },
+      output: "/Users/a/Projects/quasar",
+    });
+    expect(hermes.sessionEdges.some((edge) => edge.kind === "parent" && edge.fromId === "h0")).toBe(true);
+    expect(hermes.sessionEdges.some((edge) => edge.kind === "tool_result_for")).toBe(true);
+    expect(hermes.usageRecords.some((usage) => usage.inputTokens === 10 && usage.cost === 0.02)).toBe(true);
+    expect(hermes.events[1]?.contentBlocks.map((block) => block.kind)).toEqual(
+      expect.arrayContaining(["text", "thinking", "json"]),
+    );
+    expect(hermes.rawMetadata).toMatchObject({
+      gateway_routing: expect.arrayContaining([
+        expect.objectContaining({ session_id: "h1", source: "telegram" }),
+      ]),
+    });
+
+    const antigravity = sessionsByProvider.get("antigravity")!;
     expect(antigravity.artifacts[0]).toMatchObject({ kind: "file" });
 
-    const cursor = await providerSession("cursor", fixtures.cursor);
+    const cursor = sessionsByProvider.get("cursor")!;
     expect(cursor.toolCalls[0]?.toolName).toBe("read_file");
     expect(cursor.artifacts[0]?.kind).toBe("diff");
   });
@@ -274,6 +296,7 @@ const makeAllAdapterFixtures = async (): Promise<Record<(typeof localProviders)[
   const pi = makePiFixture();
   const kimi = makeKimiFixture();
   const droid = makeDroidFixture();
+  const hermes = await makeHermesFixture();
   const antigravity = makeAntigravityFixture();
   const cursor = await makeCursorFixture();
 
@@ -286,6 +309,7 @@ const makeAllAdapterFixtures = async (): Promise<Record<(typeof localProviders)[
     pi,
     kimi,
     droid,
+    hermes,
     antigravity,
     cursor,
   };
@@ -374,6 +398,94 @@ const makeDroidFixture = () => {
     { id: "d1", role: "user", content: "inspect" },
     { id: "d2", type: "tool", tool: "bash", input: { command: "pwd" }, output: "/repo" },
     { id: "d3", type: "diff", path: "/Users/a/Projects/quasar/a.ts", patch: "@@" },
+  ]);
+  return root;
+};
+
+const makeHermesFixture = async () => {
+  const root = mkdtempSync(join(tmpdir(), "quasar-all-hermes-"));
+  const routingDir = join(root, "sessions");
+  mkdirSync(routingDir, { recursive: true });
+  writeFileSync(
+    join(routingDir, "sessions.json"),
+    JSON.stringify({
+      "agent:main:telegram:dm:123": {
+        session_id: "h1",
+        source: "telegram",
+        origin: { chat_id: "123" },
+      },
+    }),
+  );
+  const dbPath = join(root, "state.db");
+  execFileSync("sqlite3", [
+    dbPath,
+    [
+      [
+        "create table sessions (",
+        "id text primary key,",
+        "source text not null,",
+        "user_id text,",
+        "model text,",
+        "model_config text,",
+        "system_prompt text,",
+        "parent_session_id text,",
+        "started_at real not null,",
+        "ended_at real,",
+        "end_reason text,",
+        "message_count integer default 0,",
+        "tool_call_count integer default 0,",
+        "input_tokens integer default 0,",
+        "output_tokens integer default 0,",
+        "cache_read_tokens integer default 0,",
+        "cache_write_tokens integer default 0,",
+        "reasoning_tokens integer default 0,",
+        "cwd text,",
+        "billing_provider text,",
+        "billing_base_url text,",
+        "billing_mode text,",
+        "estimated_cost_usd real,",
+        "actual_cost_usd real,",
+        "cost_status text,",
+        "cost_source text,",
+        "pricing_version text,",
+        "title text,",
+        "api_call_count integer default 0",
+        ");",
+      ].join(" "),
+      [
+        "create table messages (",
+        "id integer primary key autoincrement,",
+        "session_id text not null references sessions(id),",
+        "role text not null,",
+        "content text,",
+        "tool_call_id text,",
+        "tool_calls text,",
+        "tool_name text,",
+        "timestamp real not null,",
+        "token_count integer,",
+        "finish_reason text,",
+        "reasoning text,",
+        "reasoning_content text,",
+        "reasoning_details text,",
+        "codex_reasoning_items text,",
+        "codex_message_items text,",
+        "platform_message_id text,",
+        "observed integer default 0,",
+        "active integer not null default 1",
+        ");",
+      ].join(" "),
+      `insert into sessions (id, source, user_id, model, model_config, system_prompt, started_at, title) values ('h0', 'cli', 'u1', 'openai/gpt-test', '{}', 'system', 1760000000, 'Hermes parent');`,
+      [
+        "insert into sessions (id, source, user_id, model, model_config, system_prompt, parent_session_id, started_at, ended_at, end_reason, message_count, tool_call_count, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, cwd, billing_provider, estimated_cost_usd, actual_cost_usd, title, api_call_count) values",
+        `('h1', 'cli', 'u1', 'openai/gpt-test', ${sql(JSON.stringify({ temperature: 0.2 }))}, 'system prompt', 'h0', 1760000100, 1760000110, 'user_exit', 3, 1, 10, 20, 3, 4, 5, '/Users/a/Projects/quasar', 'openai', 0.01, 0.02, 'Hermes test', 1);`,
+      ].join(" "),
+      `insert into messages (session_id, role, content, timestamp, token_count) values ('h1', 'user', 'run pwd', 1760000101, 2);`,
+      [
+        "insert into messages (session_id, role, content, tool_calls, timestamp, token_count, finish_reason, reasoning_content, reasoning_details) values",
+        `('h1', 'assistant', 'I will run terminal.', ${sql(JSON.stringify([{ id: "call_1", function: { name: "terminal", arguments: JSON.stringify({ command: "pwd" }) } }]))}, 1760000102, 3, 'tool_calls', 'Need the working directory.', ${sql(JSON.stringify({ effort: "low" }))});`,
+      ].join(" "),
+      `insert into messages (session_id, role, content, tool_call_id, tool_name, timestamp, token_count) values ('h1', 'tool', '/Users/a/Projects/quasar', 'call_1', 'terminal', 1760000103, 1);`,
+    ].join("\n"),
   ]);
   return root;
 };
