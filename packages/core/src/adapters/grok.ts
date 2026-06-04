@@ -12,6 +12,7 @@ import {
   readJsonLines,
   roleFrom,
   sourceRoot,
+  type NativeValue,
 } from "./common";
 
 const decodeProjectPath = (encoded: string) => {
@@ -73,9 +74,9 @@ export const grokAdapter: SessionAdapter = {
             id: eventIdFor("grok", chatPath, index, nativeEventId ?? lineNumber),
             nativeEventId,
             sequence: index,
-            role: roleFrom(record.type),
+            role: roleFrom(typeof record.type === "string" ? record.type : undefined),
             kind: type === "tool_result" ? ("tool_result" as const) : ("message" as const),
-            contentText: compactText(record.content),
+            contentText: compactText(record.content as NativeValue | undefined),
             content: record.content,
             rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: type },
             raw: value,
@@ -101,7 +102,7 @@ export const grokAdapter: SessionAdapter = {
                 ? ("tool_result" as const)
                 : ("tool_call" as const)
               : ("lifecycle" as const),
-            contentText: compactText(record),
+            contentText: compactText(record as NativeValue),
             content: record,
             rawReference: {
               sourcePath: eventPath,
@@ -125,7 +126,7 @@ export const grokAdapter: SessionAdapter = {
         sourceRoot: sessionsRoot,
         sourcePath: sessionDir,
         projectPath,
-        rawMetadata: summary,
+        rawMetadata: summary as NativeValue | undefined,
         events,
       });
     });

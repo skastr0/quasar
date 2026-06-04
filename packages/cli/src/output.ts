@@ -1,10 +1,18 @@
 import * as Cause from "effect/Cause";
 import { Effect } from "effect";
 
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly JsonValue[]
+  | { readonly [key: string]: JsonValue };
+
 export interface SuccessEnvelope {
   readonly ok: true;
   readonly command: string;
-  readonly data: unknown;
+  readonly data: JsonValue;
 }
 
 export interface FailureEnvelope {
@@ -13,7 +21,7 @@ export interface FailureEnvelope {
   readonly error: {
     readonly type: string;
     readonly message: string;
-    readonly details?: unknown;
+    readonly details?: JsonValue;
   };
 }
 
@@ -28,96 +36,115 @@ export const setExitCode = (exitCode: number) =>
   });
 
 const isTaggedError = (
-  error: unknown,
+  error: Error,
 ): error is Error & { _tag: string; [key: string]: unknown } =>
-  error instanceof Error &&
   "_tag" in error &&
   typeof (error as Record<string, unknown>)._tag === "string";
 
-export const errorDetails = (error: unknown): FailureEnvelope["error"] => {
-  if (isTaggedError(error)) {
-    if (error._tag === "ConfigurationError") {
-      return {
-        type: error._tag,
-        message: error.message,
-        details: { field: error.field },
-      };
-    }
-    if (error._tag === "MissingApiKeyError") {
-      return {
-        type: error._tag,
-        message: `${String(error.envVar)} is not configured`,
-        details: { env_var: error.envVar, hint: error.hint },
-      };
-    }
-    if (error._tag === "JsonInputError") {
-      return {
-        type: error._tag,
-        message: error.message,
-        details: { source: error.source, reason: error.reason },
-      };
-    }
-    if (error._tag === "CommandInputError") {
-      return {
-        type: error._tag,
-        message: error.message,
-        details: { field: error.field },
-      };
-    }
-    if (error._tag === "ApiRequestError") {
-      return {
-        type: error._tag,
-        message: error.message,
-        details: {
-          method: error.method,
-          path: error.path,
-          reason: error.reason,
-        },
-      };
-    }
-    if (error._tag === "ApiResponseError") {
-      return {
-        type: error._tag,
-        message: error.message,
-        details: {
-          method: error.method,
-          path: error.path,
-          status: error.status,
-          body: error.body,
-        },
-      };
-    }
-    if (error._tag === "ApiDecodeError") {
-      return {
-        type: error._tag,
-        message: error.message,
-        details: { method: error.method, path: error.path },
-      };
-    }
+const toJsonValue = (value: unknown, depth = 0): JsonValue => {
+  if (value === undefined || value === null) return null;
+  if (typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "bigint") return value.toString();
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+    };
   }
-  if (error instanceof Error) {
-    return { type: error.name || "Error", message: error.message };
+  if (Array.isArray(value)) {
+    return depth > 8 ? "[truncated]" : value.map((item) => toJsonValue(item, depth + 1));
   }
-  return { type: "Error", message: String(error) };
+  if (typeof value === "object") {
+    if (depth > 8) return "[truncated]";
+    const record: Record<string, JsonValue> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (item !== undefined) record[key] = toJsonValue(item, depth + 1);
+    }
+    return record;
+  }
+  return String(value);
 };
 
-export const renderSuccessEnvelope = (command: string, data: unknown) =>
+const asError = (error: unknown): Error =>
+  error instanceof Error ? error : new Error(String(error));
+
+const errorDetails = (error: Error): FailureEnvelope["error"] => {
+  if (isTaggedError(error)) return taggedErrorDetails(error);
+  return { type: error.name || "Error", message: error.message };
+};
+
+const taggedErrorDetails = (
+  error: Error & { _tag: string; [key: string]: unknown },
+): FailureEnvelope["error"] => {
+  switch (error._tag) {
+    case "ConfigurationError":
+      return taggedDetails(error, { field: toJsonValue(error.field) });
+    case "MissingApiKeyError":
+      return taggedDetails(error, {
+        env_var: toJsonValue(error.envVar),
+        hint: toJsonValue(error.hint),
+      }, `${String(error.envVar)} is not configured`);
+    case "JsonInputError":
+      return taggedDetails(error, {
+        source: toJsonValue(error.source),
+        reason: toJsonValue(error.reason),
+      });
+    case "CommandInputError":
+      return taggedDetails(error, { field: toJsonValue(error.field) });
+    case "ApiRequestError":
+      return taggedDetails(error, {
+        method: toJsonValue(error.method),
+        path: toJsonValue(error.path),
+        reason: toJsonValue(error.reason),
+      });
+    case "ApiResponseError":
+      return taggedDetails(error, {
+        method: toJsonValue(error.method),
+        path: toJsonValue(error.path),
+        status: toJsonValue(error.status),
+        body: toJsonValue(error.body),
+      });
+    case "ApiDecodeError":
+      return taggedDetails(error, {
+        method: toJsonValue(error.method),
+        path: toJsonValue(error.path),
+      });
+    default:
+      return { type: error._tag, message: error.message };
+  }
+};
+
+const taggedDetails = (
+  error: Error & { _tag: string },
+  details: JsonValue,
+  message = error.message,
+): FailureEnvelope["error"] => ({
+  type: error._tag,
+  message,
+  details,
+});
+
+export const renderSuccessEnvelope = (command: string, data: JsonValue) =>
   JSON.stringify({ ok: true, command, data } satisfies SuccessEnvelope, null, 2);
 
-export const renderFailureEnvelope = (command: string, error: unknown) =>
+export const renderFailureEnvelope = (
+  command: string,
+  error: FailureEnvelope["error"],
+) =>
   JSON.stringify(
-    { ok: false, command, error: errorDetails(error) } satisfies FailureEnvelope,
+    { ok: false, command, error } satisfies FailureEnvelope,
     null,
     2,
   );
 
-export const writeSuccessEnvelope = (command: string, data: unknown) =>
+export const writeSuccessEnvelope = (command: string, data: JsonValue) =>
   writeLine(process.stdout, renderSuccessEnvelope(command, data));
 
-export const writeFailureEnvelope = (command: string, error: unknown) =>
-  writeLine(process.stderr, renderFailureEnvelope(command, error));
+export const writeFailureEnvelope = (command: string, error: Error) =>
+  writeLine(process.stderr, renderFailureEnvelope(command, errorDetails(error)));
 
-export const writeCauseEnvelope = (command: string, cause: Cause.Cause<unknown>) =>
+export const writeCauseEnvelope = (command: string, cause: Cause.Cause<never>) =>
   writeLine(
     process.stderr,
     JSON.stringify(
@@ -136,8 +163,10 @@ export const executeJsonCommand = <A, E, R>(
   effect: Effect.Effect<A, E, R>,
 ) =>
   effect.pipe(
-    Effect.flatMap((data) => writeSuccessEnvelope(command, data)),
+    Effect.flatMap((data) => writeSuccessEnvelope(command, toJsonValue(data))),
     Effect.catchAll((error) =>
-      setExitCode(1).pipe(Effect.zipRight(writeFailureEnvelope(command, error))),
+      setExitCode(1).pipe(
+        Effect.zipRight(writeFailureEnvelope(command, asError(error))),
+      ),
     ),
   );

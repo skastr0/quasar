@@ -429,369 +429,546 @@ const upsertProjectIdentity = async (
   return canonicalProjectIdentityKey;
 };
 
+type ParsedIngestBatch = ReturnType<typeof parseIngestBatch>;
+type SessionIngestState = Awaited<ReturnType<typeof prepareSessionIngest>>;
+type SessionPatch = ReturnType<typeof buildSessionPatch>;
+type EventPatch = ReturnType<typeof buildEventPatch>;
+
 const ingestBatchHandler = async (ctx: MutationCtx, args: { batch: unknown }) => {
-    const batch = args.batch as Record<string, unknown>;
-    const machine = batch.machine as Record<string, unknown>;
-    const sessions = Array.isArray(batch.sessions) ? batch.sessions : [];
-    const sourceRoots = Array.isArray(batch.sourceRoots) ? batch.sourceRoots : [];
-    const diagnostics = Array.isArray(batch.diagnostics) ? batch.diagnostics : [];
-    const sanitizedDiagnostics = redactSensitive(diagnostics) as unknown[];
-    const now = Date.now();
-    const importRunId = `import:${wideHash(JSON.stringify([machine, batch.generatedAt, sessions.map((s) => (s as Record<string, unknown>).id)]))}`;
-    await ensureMachine(ctx, machine);
-    const eventCount = sessions.reduce((sum, session) => sum + (((session as Record<string, unknown>).events as unknown[])?.length ?? 0), 0);
-    const toolCallCount = sessions.reduce((sum, session) => sum + (((session as Record<string, unknown>).toolCalls as unknown[])?.length ?? 0), 0);
-    const existingRun = await ctx.db.query("importRuns").withIndex("by_importRunId", (q) => q.eq("importRunId", importRunId)).unique();
-    if (existingRun === null) {
-      await ctx.db.insert("importRuns", {
-        importRunId,
-        machineId: String(machine.machineId ?? ""),
-        status: diagnostics.some((diag) => (diag as Record<string, unknown>).status === "error") ? "partial_failure" : "succeeded",
-        sourceRootCount: sourceRoots.length,
-        sessionCount: sessions.length,
-        eventCount,
-        toolCallCount,
-        diagnostics: sanitizedDiagnostics,
-        createdAt: now,
-        updatedAt: now,
-      });
-    } else {
-      await ctx.db.patch(existingRun._id, {
-        status: diagnostics.some((diag) => (diag as Record<string, unknown>).status === "error") ? "partial_failure" : "succeeded",
-        sourceRootCount: sourceRoots.length,
-        sessionCount: sessions.length,
-        eventCount,
-        toolCallCount,
-        diagnostics: sanitizedDiagnostics,
-        updatedAt: now,
-      });
-    }
+  const batch = parseIngestBatch(args.batch);
+  await ensureMachine(ctx, batch.machine);
+  await upsertImportRun(ctx, batch);
+  await upsertSourceRoots(ctx, batch);
 
-    for (const root of sourceRoots as Record<string, unknown>[]) {
-      const existing = await ctx.db
-        .query("sourceRoots")
-        .withIndex("by_machine_provider_root", (q) =>
-          q
-            .eq("machineId", String(root.machineId ?? ""))
-            .eq("provider", root.provider as never)
-            .eq("rootPath", String(root.rootPath ?? "")),
-        )
-        .unique();
-      const patch = {
-        provider: root.provider as never,
-        adapterId: String(root.adapterId ?? ""),
-        rootPath: String(root.rootPath ?? ""),
-        machineId: String(root.machineId ?? ""),
-        discoveredAt: String(root.discoveredAt ?? ""),
-        updatedAt: now,
-      };
-      if (existing === null) await ctx.db.insert("sourceRoots", { ...patch, createdAt: now });
-      else await ctx.db.patch(existing._id, patch);
-    }
+  for (const session of batch.sessions) {
+    await ingestSession(ctx, batch, session);
+  }
 
-    for (const sessionValue of sessions as Record<string, unknown>[]) {
-      const project = sessionValue.projectIdentity as Record<string, unknown>;
-      const canonicalProjectIdentityKey = await upsertProjectIdentity(ctx, project);
-      const sessionId = String(sessionValue.id ?? "");
-      const providerValue = String(sessionValue.provider ?? "unknown");
-      const agentName = String(sessionValue.agentName ?? providerValue);
-      await ensureAgent(ctx, providerValue, agentName);
-      const events = Array.isArray(sessionValue.events) ? sessionValue.events as Record<string, unknown>[] : [];
-      const declaredToolCalls = Array.isArray(sessionValue.toolCalls) ? sessionValue.toolCalls as Record<string, unknown>[] : [];
-      const keepEventIds = new Set(events.map((event) => String(event.id ?? "")));
-      const declaredToolCallIds = new Set(
-        declaredToolCalls.map((toolCall) => String(toolCall.id ?? "")),
-      );
-      const countedToolCallIds = new Set<string>(
-        [...declaredToolCallIds].filter((id) => id.length > 0),
-      );
-      const countToolCallsByName = new Map<string, string>();
-      for (const event of events) {
-        const eventId = String(event.id ?? "");
-        const kindValue = String(event.kind ?? "unknown");
-        if (kindValue !== "tool_call" && kindValue !== "tool_result") continue;
-        countedToolCallIds.add(
-          normalizeToolCallId(sessionId, event, eventId, countToolCallsByName),
-        );
-      }
-      const keepToolCallIds = new Set<string>(declaredToolCallIds);
-      const lastToolCallByName = new Map<string, string>();
-      const existingSession = await ctx.db.query("sessions").withIndex("by_sessionId", (q) => q.eq("sessionId", sessionId)).unique();
-      const sessionPatch = {
-        sessionId,
-        nativeSessionId: String(sessionValue.nativeSessionId ?? ""),
-        provider: providerValue as never,
-        agentName,
-        machineId: String(sessionValue.machineId ?? machine.machineId ?? ""),
-        projectIdentityKey: String(project.projectIdentityKey ?? ""),
-        canonicalProjectIdentityKey,
-        nativeProjectKey:
-          typeof sessionValue.nativeProjectKey === "string"
-            ? sessionValue.nativeProjectKey
-            : undefined,
-        title: typeof sessionValue.title === "string" ? sessionValue.title : undefined,
-        startedAt:
-          typeof sessionValue.startedAt === "string" ? sessionValue.startedAt : undefined,
-        updatedAtNative:
-          typeof sessionValue.updatedAt === "string" ? sessionValue.updatedAt : undefined,
-        sourceRoot: String(sessionValue.sourceRoot ?? ""),
-        sourcePath: String(sessionValue.sourcePath ?? ""),
-        rawMetadata: redactSensitive(sessionValue.rawMetadata),
-        eventCount: events.length,
-        toolCallCount: countedToolCallIds.size,
-        importRunId,
-        updatedAt: now,
-      };
-      if (existingSession === null) await ctx.db.insert("sessions", { ...sessionPatch, createdAt: now });
-      else await ctx.db.patch(existingSession._id, sessionPatch);
-      await upsertSearchDocument(ctx, {
-        searchDocumentId: `session:${sessionId}`,
-        sourceTable: "sessions",
-        sourceId: sessionId,
-        family: "sessions",
-        projectIdentityKey: sessionPatch.projectIdentityKey,
-        canonicalProjectIdentityKey,
-        machineId: sessionPatch.machineId,
-        provider: providerValue as never,
-        agentName,
-        title: sessionPatch.title ?? `${providerValue} session`,
-        summary: sessionPatch.nativeProjectKey,
-        searchText: compactText([
-          sessionPatch.title,
-          sessionPatch.nativeProjectKey,
-          sessionPatch.rawMetadata,
-        ]),
-        searchTextHash: "",
-        sourcePath: sessionPatch.sourcePath,
-        sourceRef: { sessionId },
-        occurredAt:
-          dateMillis(sessionPatch.updatedAtNative) ??
-          dateMillis(sessionPatch.startedAt),
-        activeProject: "",
-        activeMachine: "",
-        activeProvider: "",
-        sourceUpdatedAt: now,
-      });
+  return importRunSummary(batch);
+};
 
-      for (const event of events) {
-        const eventId = String(event.id ?? "");
-        const kindValue = String(event.kind ?? "unknown");
-        if (kindValue === "tool_call" || kindValue === "tool_result") {
-          keepToolCallIds.add(
-            normalizeToolCallId(sessionId, event, eventId, lastToolCallByName),
-          );
-        }
-        const existingEvent = await ctx.db.query("sessionEvents").withIndex("by_eventId", (q) => q.eq("eventId", eventId)).unique();
-        const safeContent = redactSensitive(event.content);
-        const normalizedToolCallId =
-          kindValue === "tool_call" || kindValue === "tool_result"
-            ? normalizeToolCallId(sessionId, event, eventId, lastToolCallByName)
-            : undefined;
-        const eventPatch = {
-          eventId,
-          sessionId,
-          nativeEventId:
-            typeof event.nativeEventId === "string" ? event.nativeEventId : undefined,
-          sequence: Number(event.sequence ?? 0),
-          timestamp: typeof event.timestamp === "string" ? event.timestamp : undefined,
-          machineId: sessionPatch.machineId,
-          provider: providerValue as never,
-          agentName,
-          projectIdentityKey: sessionPatch.projectIdentityKey,
-          canonicalProjectIdentityKey,
-          role: event.role as never,
-          kind: event.kind as never,
-          contentText:
-            typeof event.contentText === "string" ? event.contentText : undefined,
-          content: safeContent,
-          toolCallId: normalizedToolCallId,
-          parentEventId:
-            typeof event.parentEventId === "string"
-              ? event.parentEventId
-              : undefined,
-          rawReference: event.rawReference ?? {},
-          raw: undefined,
-          importRunId,
-          updatedAt: now,
-        };
-        if (existingEvent === null) await ctx.db.insert("sessionEvents", { ...eventPatch, createdAt: now });
-        else await ctx.db.patch(existingEvent._id, eventPatch);
-        await upsertSearchDocument(ctx, {
-          searchDocumentId: `event:${eventId}`,
-          sourceTable: "sessionEvents",
-          sourceId: eventId,
-          family: "sessionEvents",
-          projectIdentityKey: sessionPatch.projectIdentityKey,
-          canonicalProjectIdentityKey,
-          machineId: sessionPatch.machineId,
-          provider: providerValue as never,
-          agentName,
-          role: eventPatch.role,
-          kind: eventPatch.kind,
-          title: `${providerValue} ${String(event.kind ?? "event")}`,
-          summary: eventPatch.contentText,
-          searchText: compactText([eventPatch.contentText, safeContent]),
-          searchTextHash: "",
-          sourcePath:
-            typeof (event.rawReference as Record<string, unknown> | undefined)?.sourcePath === "string"
-              ? ((event.rawReference as Record<string, unknown>).sourcePath as string)
-              : sessionPatch.sourcePath,
-          sourceRef: { sessionId, eventId },
-          occurredAt: dateMillis(eventPatch.timestamp),
-          activeProject: "",
-          activeMachine: "",
-          activeProvider: "",
-          activeKind: "",
-          sourceUpdatedAt: now,
-        });
-        if (eventPatch.kind === "tool_call" || eventPatch.kind === "tool_result") {
-          const toolCallId = eventPatch.toolCallId ?? `tool:${eventId}`;
-          const toolName = extractToolName({
-            kind: String(event.kind ?? ""),
-            content: safeContent,
-            raw: undefined,
-          });
-          const existingTool = await ctx.db.query("toolCalls").withIndex("by_toolCallId", (q) => q.eq("toolCallId", toolCallId)).unique();
-          const toolPatch = {
-            toolCallId,
-            sessionId,
-            eventId,
-            machineId: sessionPatch.machineId,
-            provider: providerValue as never,
-            agentName,
-            projectIdentityKey: sessionPatch.projectIdentityKey,
-            canonicalProjectIdentityKey,
-            toolName,
-            status: eventPatch.kind === "tool_result" ? "completed" : "started",
-            input:
-              eventPatch.kind === "tool_call"
-                ? safeContent
-                : existingTool?.input,
-            output:
-              eventPatch.kind === "tool_result"
-                ? safeContent
-                : existingTool?.output,
-            startedAt:
-              eventPatch.kind === "tool_call"
-                ? eventPatch.timestamp
-                : existingTool?.startedAt,
-            completedAt:
-              eventPatch.kind === "tool_result"
-                ? eventPatch.timestamp
-                : existingTool?.completedAt,
-            raw: undefined,
-            importRunId,
-            updatedAt: now,
-          };
-          if (existingTool === null) await ctx.db.insert("toolCalls", { ...toolPatch, createdAt: now });
-          else await ctx.db.patch(existingTool._id, toolPatch);
-          await upsertSearchDocument(ctx, {
-            searchDocumentId: `tool:${toolCallId}`,
-            sourceTable: "toolCalls",
-            sourceId: toolCallId,
-            family: "toolCalls",
-            projectIdentityKey: sessionPatch.projectIdentityKey,
-            canonicalProjectIdentityKey,
-            machineId: sessionPatch.machineId,
-            provider: providerValue as never,
-            agentName,
-            toolName,
-            title: toolName,
-            summary: eventPatch.contentText,
-            searchText: compactText([
-              toolName,
-              eventPatch.contentText,
-              eventPatch.kind === "tool_result" ? safeContent : undefined,
-            ]),
-            searchTextHash: "",
-            sourcePath: sessionPatch.sourcePath,
-            sourceRef: { sessionId, eventId, toolCallId },
-            occurredAt: dateMillis(eventPatch.timestamp),
-            activeProject: "",
-            activeMachine: "",
-            activeProvider: "",
-            sourceUpdatedAt: now,
-          });
-        }
-      }
-
-      for (const toolCall of declaredToolCalls) {
-        const toolCallId = String(toolCall.id ?? "");
-        if (toolCallId.length === 0) continue;
-        keepToolCallIds.add(toolCallId);
-        const existingTool = await ctx.db
-          .query("toolCalls")
-          .withIndex("by_toolCallId", (q) => q.eq("toolCallId", toolCallId))
-          .unique();
-        const eventId =
-          typeof toolCall.eventId === "string" ? toolCall.eventId : `declared:${toolCallId}`;
-        const toolName =
-          typeof toolCall.toolName === "string" ? toolCall.toolName : "tool";
-        const toolPatch = {
-          toolCallId,
-          sessionId,
-          eventId,
-          machineId: sessionPatch.machineId,
-          provider: providerValue as never,
-          agentName,
-          projectIdentityKey: sessionPatch.projectIdentityKey,
-          canonicalProjectIdentityKey,
-          toolName,
-          status:
-            typeof toolCall.status === "string" ? toolCall.status : undefined,
-          input: redactSensitive(toolCall.input),
-          output: redactSensitive(toolCall.output),
-          startedAt:
-            typeof toolCall.startedAt === "string" ? toolCall.startedAt : undefined,
-          completedAt:
-            typeof toolCall.completedAt === "string"
-              ? toolCall.completedAt
-              : undefined,
-          raw: undefined,
-          importRunId,
-          updatedAt: now,
-        };
-        if (existingTool === null) await ctx.db.insert("toolCalls", { ...toolPatch, createdAt: now });
-        else await ctx.db.patch(existingTool._id, toolPatch);
-        await upsertSearchDocument(ctx, {
-          searchDocumentId: `tool:${toolCallId}`,
-          sourceTable: "toolCalls",
-          sourceId: toolCallId,
-          family: "toolCalls",
-          projectIdentityKey: sessionPatch.projectIdentityKey,
-          canonicalProjectIdentityKey,
-          machineId: sessionPatch.machineId,
-          provider: providerValue as never,
-          agentName,
-          toolName,
-          title: toolName,
-          summary: compactText([toolCall.status, toolCall.output]),
-          searchText: compactText([
-            toolName,
-            toolPatch.status,
-            toolPatch.output,
-          ]),
-          sourcePath: sessionPatch.sourcePath,
-          sourceRef: { sessionId, eventId, toolCallId },
-          occurredAt:
-            dateMillis(toolPatch.completedAt) ?? dateMillis(toolPatch.startedAt),
-          sourceUpdatedAt: now,
-        });
-      }
-
-      await cleanupMissingSessionRows(ctx, sessionId, keepEventIds, keepToolCallIds);
-    }
-
-    return {
-      importRunId,
-      status: "succeeded",
-      sourceRootCount: sourceRoots.length,
-      sessionCount: sessions.length,
-      eventCount,
-      toolCallCount,
-      diagnostics: sanitizedDiagnostics,
-    };
+const parseIngestBatch = (value: unknown) => {
+  const batch = value as Record<string, unknown>;
+  const machine = batch.machine as Record<string, unknown>;
+  const sessions = recordArray(batch.sessions);
+  const sourceRoots = recordArray(batch.sourceRoots);
+  const diagnostics = recordArray(batch.diagnostics);
+  const now = Date.now();
+  const importRunId = `import:${wideHash(
+    JSON.stringify([machine, batch.generatedAt, sessions.map((s) => s.id)]),
+  )}`;
+  return {
+    machine,
+    sessions,
+    sourceRoots,
+    diagnostics,
+    sanitizedDiagnostics: redactSensitive(diagnostics) as unknown[],
+    now,
+    importRunId,
+    eventCount: sumNestedArrayLengths(sessions, "events"),
+    toolCallCount: sumNestedArrayLengths(sessions, "toolCalls"),
   };
+};
+
+const recordArray = (value: unknown) =>
+  Array.isArray(value) ? (value as Record<string, unknown>[]) : [];
+
+const sumNestedArrayLengths = (
+  records: Record<string, unknown>[],
+  key: string,
+) =>
+  records.reduce(
+    (sum, record) => sum + (Array.isArray(record[key]) ? recordArray(record[key]).length : 0),
+    0,
+  );
+
+const upsertImportRun = async (ctx: MutationCtx, batch: ParsedIngestBatch) => {
+  const existing = await ctx.db
+    .query("importRuns")
+    .withIndex("by_importRunId", (q) => q.eq("importRunId", batch.importRunId))
+    .unique();
+  const status = batch.diagnostics.some((diag) => diag.status === "error")
+    ? ("partial_failure" as const)
+    : ("succeeded" as const);
+  const patch = {
+    status,
+    sourceRootCount: batch.sourceRoots.length,
+    sessionCount: batch.sessions.length,
+    eventCount: batch.eventCount,
+    toolCallCount: batch.toolCallCount,
+    diagnostics: batch.sanitizedDiagnostics,
+    updatedAt: batch.now,
+  };
+  if (existing === null) {
+    await ctx.db.insert("importRuns", {
+      importRunId: batch.importRunId,
+      machineId: String(batch.machine.machineId ?? ""),
+      ...patch,
+      createdAt: batch.now,
+    });
+  } else {
+    await ctx.db.patch(existing._id, patch);
+  }
+};
+
+const upsertSourceRoots = async (ctx: MutationCtx, batch: ParsedIngestBatch) => {
+  for (const root of batch.sourceRoots) {
+    const existing = await ctx.db
+      .query("sourceRoots")
+      .withIndex("by_machine_provider_root", (q) =>
+        q
+          .eq("machineId", String(root.machineId ?? ""))
+          .eq("provider", root.provider as never)
+          .eq("rootPath", String(root.rootPath ?? "")),
+      )
+      .unique();
+    const patch = {
+      provider: root.provider as never,
+      adapterId: String(root.adapterId ?? ""),
+      rootPath: String(root.rootPath ?? ""),
+      machineId: String(root.machineId ?? ""),
+      discoveredAt: String(root.discoveredAt ?? ""),
+      updatedAt: batch.now,
+    };
+    if (existing === null) await ctx.db.insert("sourceRoots", { ...patch, createdAt: batch.now });
+    else await ctx.db.patch(existing._id, patch);
+  }
+};
+
+const ingestSession = async (
+  ctx: MutationCtx,
+  batch: ParsedIngestBatch,
+  sessionValue: Record<string, unknown>,
+) => {
+  const state = await prepareSessionIngest(ctx, batch, sessionValue);
+  await upsertSessionRecordAndSearch(ctx, state);
+  await upsertSessionEvents(ctx, state);
+  await upsertDeclaredToolCalls(ctx, state);
+  await cleanupMissingSessionRows(
+    ctx,
+    state.sessionId,
+    state.keepEventIds,
+    state.keepToolCallIds,
+  );
+};
+
+const prepareSessionIngest = async (
+  ctx: MutationCtx,
+  batch: ParsedIngestBatch,
+  sessionValue: Record<string, unknown>,
+) => {
+  const project = sessionValue.projectIdentity as Record<string, unknown>;
+  const canonicalProjectIdentityKey = await upsertProjectIdentity(ctx, project);
+  const sessionId = String(sessionValue.id ?? "");
+  const providerValue = String(sessionValue.provider ?? "unknown");
+  const agentName = String(sessionValue.agentName ?? providerValue);
+  await ensureAgent(ctx, providerValue, agentName);
+  const events = recordArray(sessionValue.events);
+  const declaredToolCalls = recordArray(sessionValue.toolCalls);
+  const declaredIds = declaredToolCallIds(declaredToolCalls);
+  const sessionPatch = buildSessionPatch({
+    batch,
+    sessionValue,
+    project,
+    canonicalProjectIdentityKey,
+    events,
+    declaredIds,
+    sessionId,
+    providerValue,
+    agentName,
+  });
+  return {
+    batch,
+    sessionValue,
+    project,
+    canonicalProjectIdentityKey,
+    sessionId,
+    providerValue,
+    agentName,
+    events,
+    declaredToolCalls,
+    sessionPatch,
+    keepEventIds: new Set(events.map((event) => String(event.id ?? ""))),
+    keepToolCallIds: new Set<string>(declaredIds),
+    lastToolCallByName: new Map<string, string>(),
+  };
+};
+
+const declaredToolCallIds = (toolCalls: Record<string, unknown>[]) =>
+  toolCalls.map((toolCall) => String(toolCall.id ?? "")).filter(Boolean);
+
+const buildSessionPatch = (input: {
+  batch: ParsedIngestBatch;
+  sessionValue: Record<string, unknown>;
+  project: Record<string, unknown>;
+  canonicalProjectIdentityKey: string;
+  events: Record<string, unknown>[];
+  declaredIds: string[];
+  sessionId: string;
+  providerValue: string;
+  agentName: string;
+}) => ({
+  sessionId: input.sessionId,
+  nativeSessionId: String(input.sessionValue.nativeSessionId ?? ""),
+  provider: input.providerValue as never,
+  agentName: input.agentName,
+  machineId: String(input.sessionValue.machineId ?? input.batch.machine.machineId ?? ""),
+  projectIdentityKey: String(input.project.projectIdentityKey ?? ""),
+  canonicalProjectIdentityKey: input.canonicalProjectIdentityKey,
+  nativeProjectKey:
+    typeof input.sessionValue.nativeProjectKey === "string"
+      ? input.sessionValue.nativeProjectKey
+      : undefined,
+  title: typeof input.sessionValue.title === "string" ? input.sessionValue.title : undefined,
+  startedAt:
+    typeof input.sessionValue.startedAt === "string" ? input.sessionValue.startedAt : undefined,
+  updatedAtNative:
+    typeof input.sessionValue.updatedAt === "string" ? input.sessionValue.updatedAt : undefined,
+  sourceRoot: String(input.sessionValue.sourceRoot ?? ""),
+  sourcePath: String(input.sessionValue.sourcePath ?? ""),
+  rawMetadata: redactSensitive(input.sessionValue.rawMetadata),
+  eventCount: input.events.length,
+  toolCallCount: countToolCallIds(input.sessionId, input.events, input.declaredIds),
+  importRunId: input.batch.importRunId,
+  updatedAt: input.batch.now,
+});
+
+const countToolCallIds = (
+  sessionId: string,
+  events: Record<string, unknown>[],
+  declaredIds: string[],
+) => {
+  const counted = new Set<string>(declaredIds);
+  const byName = new Map<string, string>();
+  for (const event of events) {
+    const eventId = String(event.id ?? "");
+    if (!isToolEventKind(String(event.kind ?? "unknown"))) continue;
+    counted.add(normalizeToolCallId(sessionId, event, eventId, byName));
+  }
+  return counted.size;
+};
+
+const upsertSessionRecordAndSearch = async (
+  ctx: MutationCtx,
+  state: SessionIngestState,
+) => {
+  const existing = await ctx.db
+    .query("sessions")
+    .withIndex("by_sessionId", (q) => q.eq("sessionId", state.sessionId))
+    .unique();
+  if (existing === null) {
+    await ctx.db.insert("sessions", { ...state.sessionPatch, createdAt: state.batch.now });
+  } else {
+    await ctx.db.patch(existing._id, state.sessionPatch);
+  }
+  await upsertSearchDocument(ctx, sessionSearchDocument(state));
+};
+
+const sessionSearchDocument = (state: SessionIngestState): SearchDocumentUpsertInput => ({
+  searchDocumentId: `session:${state.sessionId}`,
+  sourceTable: "sessions",
+  sourceId: state.sessionId,
+  family: "sessions",
+  projectIdentityKey: state.sessionPatch.projectIdentityKey,
+  canonicalProjectIdentityKey: state.canonicalProjectIdentityKey,
+  machineId: state.sessionPatch.machineId,
+  provider: state.providerValue as never,
+  agentName: state.agentName,
+  title: state.sessionPatch.title ?? `${state.providerValue} session`,
+  summary: state.sessionPatch.nativeProjectKey,
+  searchText: compactText([
+    state.sessionPatch.title,
+    state.sessionPatch.nativeProjectKey,
+    state.sessionPatch.rawMetadata,
+  ]),
+  sourcePath: state.sessionPatch.sourcePath,
+  sourceRef: { sessionId: state.sessionId },
+  occurredAt:
+    dateMillis(state.sessionPatch.updatedAtNative) ??
+    dateMillis(state.sessionPatch.startedAt),
+  activeProject: "",
+  activeMachine: "",
+  activeProvider: "",
+  sourceUpdatedAt: state.batch.now,
+});
+
+const upsertSessionEvents = async (ctx: MutationCtx, state: SessionIngestState) => {
+  for (const event of state.events) {
+    await upsertSessionEvent(ctx, state, event);
+  }
+};
+
+const upsertSessionEvent = async (
+  ctx: MutationCtx,
+  state: SessionIngestState,
+  event: Record<string, unknown>,
+) => {
+  const eventId = String(event.id ?? "");
+  const kindValue = String(event.kind ?? "unknown");
+  const safeContent = redactSensitive(event.content);
+  const normalizedToolCallId = isToolEventKind(kindValue)
+    ? normalizeToolCallId(state.sessionId, event, eventId, state.lastToolCallByName)
+    : undefined;
+  if (normalizedToolCallId !== undefined) state.keepToolCallIds.add(normalizedToolCallId);
+
+  const eventPatch = buildEventPatch(state, event, eventId, safeContent, normalizedToolCallId);
+  const existing = await ctx.db
+    .query("sessionEvents")
+    .withIndex("by_eventId", (q) => q.eq("eventId", eventId))
+    .unique();
+  if (existing === null) {
+    await ctx.db.insert("sessionEvents", { ...eventPatch, createdAt: state.batch.now });
+  } else {
+    await ctx.db.patch(existing._id, eventPatch);
+  }
+  await upsertSearchDocument(ctx, eventSearchDocument(state, event, eventPatch, safeContent));
+  if (isToolEventKind(String(eventPatch.kind))) {
+    await upsertToolCallFromEvent(ctx, state, event, eventPatch, safeContent);
+  }
+};
+
+const buildEventPatch = (
+  state: SessionIngestState,
+  event: Record<string, unknown>,
+  eventId: string,
+  safeContent: unknown,
+  normalizedToolCallId: string | undefined,
+) => ({
+  eventId,
+  sessionId: state.sessionId,
+  nativeEventId: typeof event.nativeEventId === "string" ? event.nativeEventId : undefined,
+  sequence: Number(event.sequence ?? 0),
+  timestamp: typeof event.timestamp === "string" ? event.timestamp : undefined,
+  machineId: state.sessionPatch.machineId,
+  provider: state.providerValue as never,
+  agentName: state.agentName,
+  projectIdentityKey: state.sessionPatch.projectIdentityKey,
+  canonicalProjectIdentityKey: state.canonicalProjectIdentityKey,
+  role: event.role as never,
+  kind: event.kind as never,
+  contentText: typeof event.contentText === "string" ? event.contentText : undefined,
+  content: safeContent,
+  toolCallId: normalizedToolCallId,
+  parentEventId: typeof event.parentEventId === "string" ? event.parentEventId : undefined,
+  rawReference: event.rawReference ?? {},
+  raw: undefined,
+  importRunId: state.batch.importRunId,
+  updatedAt: state.batch.now,
+});
+
+const eventSearchDocument = (
+  state: SessionIngestState,
+  event: Record<string, unknown>,
+  eventPatch: EventPatch,
+  safeContent: unknown,
+): SearchDocumentUpsertInput => ({
+  searchDocumentId: `event:${eventPatch.eventId}`,
+  sourceTable: "sessionEvents",
+  sourceId: eventPatch.eventId,
+  family: "sessionEvents",
+  projectIdentityKey: state.sessionPatch.projectIdentityKey,
+  canonicalProjectIdentityKey: state.canonicalProjectIdentityKey,
+  machineId: state.sessionPatch.machineId,
+  provider: state.providerValue as never,
+  agentName: state.agentName,
+  role: eventPatch.role,
+  kind: eventPatch.kind,
+  title: `${state.providerValue} ${String(event.kind ?? "event")}`,
+  summary: eventPatch.contentText,
+  searchText: compactText([eventPatch.contentText, safeContent]),
+  sourcePath: eventSourcePath(event, state.sessionPatch.sourcePath),
+  sourceRef: { sessionId: state.sessionId, eventId: eventPatch.eventId },
+  occurredAt: dateMillis(eventPatch.timestamp),
+  activeProject: "",
+  activeMachine: "",
+  activeProvider: "",
+  activeKind: "",
+  sourceUpdatedAt: state.batch.now,
+});
+
+const eventSourcePath = (event: Record<string, unknown>, fallback: string) => {
+  const rawReference = event.rawReference as Record<string, unknown> | undefined;
+  return typeof rawReference?.sourcePath === "string" ? rawReference.sourcePath : fallback;
+};
+
+const upsertToolCallFromEvent = async (
+  ctx: MutationCtx,
+  state: SessionIngestState,
+  event: Record<string, unknown>,
+  eventPatch: EventPatch,
+  safeContent: unknown,
+) => {
+  const toolCallId = eventPatch.toolCallId ?? `tool:${eventPatch.eventId}`;
+  const toolName = extractToolName({
+    kind: String(event.kind ?? ""),
+    content: safeContent,
+    raw: undefined,
+  });
+  const existingTool = await ctx.db
+    .query("toolCalls")
+    .withIndex("by_toolCallId", (q) => q.eq("toolCallId", toolCallId))
+    .unique();
+  const toolPatch = eventToolPatch(state, eventPatch, toolCallId, toolName, safeContent, existingTool);
+  if (existingTool === null) await ctx.db.insert("toolCalls", { ...toolPatch, createdAt: state.batch.now });
+  else await ctx.db.patch(existingTool._id, toolPatch);
+  await upsertSearchDocument(ctx, toolSearchDocumentFromEvent(state, eventPatch, toolCallId, toolName, safeContent));
+};
+
+const eventToolPatch = (
+  state: SessionIngestState,
+  eventPatch: EventPatch,
+  toolCallId: string,
+  toolName: string,
+  safeContent: unknown,
+  existingTool: Doc<"toolCalls"> | null,
+) => ({
+  toolCallId,
+  sessionId: state.sessionId,
+  eventId: eventPatch.eventId,
+  machineId: state.sessionPatch.machineId,
+  provider: state.providerValue as never,
+  agentName: state.agentName,
+  projectIdentityKey: state.sessionPatch.projectIdentityKey,
+  canonicalProjectIdentityKey: state.canonicalProjectIdentityKey,
+  toolName,
+  status: eventPatch.kind === "tool_result" ? "completed" : "started",
+  input: eventPatch.kind === "tool_call" ? safeContent : existingTool?.input,
+  output: eventPatch.kind === "tool_result" ? safeContent : existingTool?.output,
+  startedAt: eventPatch.kind === "tool_call" ? eventPatch.timestamp : existingTool?.startedAt,
+  completedAt:
+    eventPatch.kind === "tool_result" ? eventPatch.timestamp : existingTool?.completedAt,
+  raw: undefined,
+  importRunId: state.batch.importRunId,
+  updatedAt: state.batch.now,
+});
+
+const toolSearchDocumentFromEvent = (
+  state: SessionIngestState,
+  eventPatch: EventPatch,
+  toolCallId: string,
+  toolName: string,
+  safeContent: unknown,
+): SearchDocumentUpsertInput => ({
+  searchDocumentId: `tool:${toolCallId}`,
+  sourceTable: "toolCalls",
+  sourceId: toolCallId,
+  family: "toolCalls",
+  projectIdentityKey: state.sessionPatch.projectIdentityKey,
+  canonicalProjectIdentityKey: state.canonicalProjectIdentityKey,
+  machineId: state.sessionPatch.machineId,
+  provider: state.providerValue as never,
+  agentName: state.agentName,
+  toolName,
+  title: toolName,
+  summary: eventPatch.contentText,
+  searchText: compactText([
+    toolName,
+    eventPatch.contentText,
+    eventPatch.kind === "tool_result" ? safeContent : undefined,
+  ]),
+  sourcePath: state.sessionPatch.sourcePath,
+  sourceRef: { sessionId: state.sessionId, eventId: eventPatch.eventId, toolCallId },
+  occurredAt: dateMillis(eventPatch.timestamp),
+  activeProject: "",
+  activeMachine: "",
+  activeProvider: "",
+  sourceUpdatedAt: state.batch.now,
+});
+
+const upsertDeclaredToolCalls = async (
+  ctx: MutationCtx,
+  state: SessionIngestState,
+) => {
+  for (const toolCall of state.declaredToolCalls) {
+    await upsertDeclaredToolCall(ctx, state, toolCall);
+  }
+};
+
+const upsertDeclaredToolCall = async (
+  ctx: MutationCtx,
+  state: SessionIngestState,
+  toolCall: Record<string, unknown>,
+) => {
+  const toolCallId = String(toolCall.id ?? "");
+  if (toolCallId.length === 0) return;
+  state.keepToolCallIds.add(toolCallId);
+  const existingTool = await ctx.db
+    .query("toolCalls")
+    .withIndex("by_toolCallId", (q) => q.eq("toolCallId", toolCallId))
+    .unique();
+  const eventId = typeof toolCall.eventId === "string" ? toolCall.eventId : `declared:${toolCallId}`;
+  const toolName = typeof toolCall.toolName === "string" ? toolCall.toolName : "tool";
+  const toolPatch = declaredToolPatch(state, toolCall, toolCallId, eventId, toolName);
+  if (existingTool === null) await ctx.db.insert("toolCalls", { ...toolPatch, createdAt: state.batch.now });
+  else await ctx.db.patch(existingTool._id, toolPatch);
+  await upsertSearchDocument(ctx, declaredToolSearchDocument(state, toolCall, toolPatch, eventId, toolCallId, toolName));
+};
+
+const declaredToolPatch = (
+  state: SessionIngestState,
+  toolCall: Record<string, unknown>,
+  toolCallId: string,
+  eventId: string,
+  toolName: string,
+) => ({
+  toolCallId,
+  sessionId: state.sessionId,
+  eventId,
+  machineId: state.sessionPatch.machineId,
+  provider: state.providerValue as never,
+  agentName: state.agentName,
+  projectIdentityKey: state.sessionPatch.projectIdentityKey,
+  canonicalProjectIdentityKey: state.canonicalProjectIdentityKey,
+  toolName,
+  status: typeof toolCall.status === "string" ? toolCall.status : undefined,
+  input: redactSensitive(toolCall.input),
+  output: redactSensitive(toolCall.output),
+  startedAt: typeof toolCall.startedAt === "string" ? toolCall.startedAt : undefined,
+  completedAt: typeof toolCall.completedAt === "string" ? toolCall.completedAt : undefined,
+  raw: undefined,
+  importRunId: state.batch.importRunId,
+  updatedAt: state.batch.now,
+});
+
+const declaredToolSearchDocument = (
+  state: SessionIngestState,
+  toolCall: Record<string, unknown>,
+  toolPatch: ReturnType<typeof declaredToolPatch>,
+  eventId: string,
+  toolCallId: string,
+  toolName: string,
+): SearchDocumentUpsertInput => ({
+  searchDocumentId: `tool:${toolCallId}`,
+  sourceTable: "toolCalls",
+  sourceId: toolCallId,
+  family: "toolCalls",
+  projectIdentityKey: state.sessionPatch.projectIdentityKey,
+  canonicalProjectIdentityKey: state.canonicalProjectIdentityKey,
+  machineId: state.sessionPatch.machineId,
+  provider: state.providerValue as never,
+  agentName: state.agentName,
+  toolName,
+  title: toolName,
+  summary: compactText([toolCall.status, toolCall.output]),
+  searchText: compactText([toolName, toolPatch.status, toolPatch.output]),
+  sourcePath: state.sessionPatch.sourcePath,
+  sourceRef: { sessionId: state.sessionId, eventId, toolCallId },
+  occurredAt: dateMillis(toolPatch.completedAt) ?? dateMillis(toolPatch.startedAt),
+  sourceUpdatedAt: state.batch.now,
+});
+
+const isToolEventKind = (kind: string) =>
+  kind === "tool_call" || kind === "tool_result";
+
+const importRunSummary = (batch: ParsedIngestBatch) => ({
+  importRunId: batch.importRunId,
+  status: "succeeded",
+  sourceRootCount: batch.sourceRoots.length,
+  sessionCount: batch.sessions.length,
+  eventCount: batch.eventCount,
+  toolCallCount: batch.toolCallCount,
+  diagnostics: batch.sanitizedDiagnostics,
+});
 
 export const ingestBatchInternal = internalMutation({
   args: { batch: v.any() },

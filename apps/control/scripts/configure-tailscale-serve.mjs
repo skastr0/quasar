@@ -1,7 +1,16 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { quasarConvexLocalRoot } from "./quasar-state.mjs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, resolve } from "node:path";
+import {
+  quasarClientConfigPath,
+  quasarConvexLocalRoot,
+} from "./quasar-state.mjs";
 
 const host = process.env.QUASAR_TAILSCALE_HOST ?? "quasar.tail6742f6.ts.net";
 const service = process.env.QUASAR_TAILSCALE_SERVICE ?? "svc:quasar";
@@ -23,7 +32,14 @@ configureTcpFallback(status, fallbackWebPort, webPort);
 configureTcpFallback(status, fallbackConvexPort, convexPort);
 configureTcpFallback(status, fallbackApiPort, apiPort);
 
-console.log(`Configured Tailscale Serve for https://${host}/ and fallback ports ${fallbackWebPort}, ${fallbackConvexPort}, ${fallbackApiPort}.`);
+const tailnetIp = process.env.QUASAR_TAILSCALE_IP ?? tailscaleIp();
+if (tailnetIp !== undefined) {
+  writeClientConfig(tailnetIp);
+}
+
+console.log(
+  `Configured Tailscale Serve for https://${host}/ and fallback ports ${fallbackWebPort}, ${fallbackConvexPort}, ${fallbackApiPort}.`,
+);
 
 function configureServicePath(path, port) {
   run("tailscale", [
@@ -42,6 +58,9 @@ function configureServicePath(path, port) {
 function configureTcpFallback(status, port, targetPort) {
   const target = `127.0.0.1:${targetPort}`;
   if (status?.TCP?.[port]?.TCPForward === target) return;
+
+  // Clear any previous web-mode fallback before switching to raw TCP. Web-mode
+  // fallbacks are host-header scoped and do not work for DNS-free IP URLs.
   run("tailscale", ["serve", `--http=${port}`, "off"], { allowFailure: true });
   run("tailscale", ["serve", "--tcp", port, "--bg", target]);
 }
@@ -58,6 +77,46 @@ function readServeStatus() {
   });
   if (result.status !== 0) return undefined;
   return JSON.parse(result.stdout);
+}
+
+function tailscaleIp() {
+  const result = spawnSync("tailscale", ["ip", "-4"], {
+    encoding: "utf8",
+  });
+  if (result.status !== 0) return undefined;
+  return result.stdout.trim().split(/\s+/u).find(Boolean);
+}
+
+function writeClientConfig(tailnetIp) {
+  const configPath = quasarClientConfigPath();
+  const apiUrl = `http://${tailnetIp}:${fallbackApiPort}`;
+  const token = process.env.QUASAR_CONTROL_TOKEN?.trim();
+  const config = {
+    url: apiUrl,
+    apiUrl,
+    dashboardUrl: `http://${tailnetIp}:${fallbackWebPort}`,
+    convexUrl: `http://${tailnetIp}:${fallbackConvexPort}`,
+    projectKey: "quasar",
+    tailnetIp,
+    service,
+    serviceUrls: {
+      dashboardUrl: `https://${host}/`,
+      convexUrl: `https://${host}/quasar-convex`,
+      apiUrl: `https://${host}/quasar-api`,
+    },
+    updatedAt: new Date().toISOString(),
+  };
+  if (token !== undefined && token.length > 0) {
+    config.token = token;
+  }
+
+  mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 });
+  writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  chmodSync(configPath, 0o600);
+  console.log(`Wrote Quasar local client config to ${configPath}.`);
 }
 
 function run(command, args, options = {}) {

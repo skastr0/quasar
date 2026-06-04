@@ -47,6 +47,19 @@ bun run local:build
 bun run local:serve
 ```
 
+Routine local deploys mirror Tower/Booth:
+
+```bash
+cd apps/control
+bun run deploy
+```
+
+`deploy` verifies tests/types, backs up local Convex state, ensures the local
+backend is running, pushes Convex functions, builds the dashboard for Tailscale
+URLs, installs launchd agents, configures Tailscale Serve, and verifies local
+fallback endpoints. It initializes local Convex metadata only when that metadata
+is missing.
+
 The dashboard defaults to port `5177`. Tailscale Serve is configured with:
 
 ```bash
@@ -55,7 +68,16 @@ bun run local:configure-tailscale
 ```
 
 Paths are `/` for the dashboard, `/quasar-convex` for the Convex backend, and
-`/quasar-api` for the Convex site API.
+`/quasar-api` for the Convex site API. The service hostname is
+`https://quasar.tail6742f6.ts.net/`; Tailscale may require admin approval before
+`svc:quasar` becomes reachable there.
+
+`local:configure-tailscale` also exposes DNS-free fallback ports and writes the
+CLI config to `~/.config/quasar/config.json`:
+
+- dashboard: `http://100.96.152.41:8177`
+- Convex client endpoint: `http://100.96.152.41:8178`
+- Convex HTTP actions endpoint: `http://100.96.152.41:8179`
 
 ## CLI Smoke
 

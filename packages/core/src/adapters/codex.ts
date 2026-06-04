@@ -13,6 +13,7 @@ import {
   readJsonLines,
   roleFrom,
   sourceRoot,
+  type NativeValue,
 } from "./common";
 
 export const codexAdapter: SessionAdapter = {
@@ -76,7 +77,9 @@ export const codexAdapter: SessionAdapter = {
           payloadValue !== null && typeof payloadValue === "object"
             ? (payloadValue as Record<string, unknown>)
             : {};
-        const role = roleFrom(payloadRecord.role);
+        const role = roleFrom(
+          typeof payloadRecord.role === "string" ? payloadRecord.role : undefined,
+        );
         const nativeEventId =
           typeof payloadRecord.id === "string"
             ? payloadRecord.id
@@ -91,7 +94,7 @@ export const codexAdapter: SessionAdapter = {
             typeof record.timestamp === "string" ? record.timestamp : undefined,
           role,
           kind: kindFromNative(nativeType),
-          contentText: compactText(payloadValue),
+          contentText: compactText(payloadValue as NativeValue | undefined),
           content: payloadValue,
           rawReference: { sourcePath: path, line: lineNumber, nativeType },
           raw: value,
@@ -107,7 +110,7 @@ export const codexAdapter: SessionAdapter = {
         sourceRoot: sessionsRoot,
         sourcePath: path,
         projectPath,
-        rawMetadata: sessionMeta,
+        rawMetadata: sessionMeta as NativeValue | undefined,
         events,
       });
     });
