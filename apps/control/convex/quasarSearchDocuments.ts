@@ -52,7 +52,11 @@ export const scheduleSearchDocumentRagSync = async (
   expectedContentHash: string,
 ) => {
   if (!serverEmbeddingsConfigured()) return;
-  await ctx.scheduler.runAfter(0, internal.quasar.syncSearchDocumentRagInternal, {
+  const state = ctx as MutationCtx & { __quasarRagSchedules?: number };
+  state.__quasarRagSchedules = state.__quasarRagSchedules ?? 0;
+  if (state.__quasarRagSchedules >= 900) return;
+  state.__quasarRagSchedules += 1;
+  await ctx.scheduler.runAfter(5 * 60_000, internal.quasar.syncSearchDocumentRagInternal, {
     searchDocumentId,
     expectedContentHash,
   });
@@ -78,7 +82,9 @@ export const upsertSearchDocument = async (
     existing.searchTextHash !== patch.searchTextHash ||
     existing.ragContentHash !== ragContentHash;
   await ctx.db.patch(existing._id, patch);
-  if (changed) await scheduleSearchDocumentRagSync(ctx, existing._id, ragContentHash);
+  if (changed || existing.ragSyncState === "pending" || existing.ragSyncState === undefined) {
+    await scheduleSearchDocumentRagSync(ctx, existing._id, ragContentHash);
+  }
   return existing._id;
 };
 

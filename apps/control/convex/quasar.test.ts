@@ -138,6 +138,88 @@ const toolPairBatch = (path: string, machineId: string) => ({
   ],
 });
 
+const graphBatch = (path: string, machineId: string) => ({
+  ...testBatch(path, machineId),
+  sessions: [
+    {
+      ...testBatch(path, machineId).sessions[0],
+      events: [
+        {
+          ...testBatch(path, machineId).sessions[0].events[0],
+          id: `event:${machineId}:graph-1`,
+          sequence: 0,
+          contentText: "Graph block text",
+          contentBlocks: [
+            {
+              id: `block:${machineId}:1`,
+              sequence: 0,
+              kind: "markdown",
+              markdown: "Graph block text for semantic indexing",
+            },
+          ],
+        },
+        {
+          ...testBatch(path, machineId).sessions[0].events[0],
+          id: `event:${machineId}:graph-2`,
+          sequence: 1,
+          role: "assistant",
+          kind: "tool_call",
+          toolCallId: `tool:${machineId}:graph`,
+          contentText: "Run graph tool",
+          content: { name: "exec_command", cmd: "pwd" },
+          contentBlocks: [
+            {
+              id: `block:${machineId}:2`,
+              sequence: 0,
+              kind: "json",
+              value: { cmd: "pwd", note: "graph json block" },
+            },
+          ],
+        },
+      ],
+      toolCalls: [
+        {
+          id: `tool:${machineId}:graph`,
+          eventId: `event:${machineId}:graph-2`,
+          toolName: "exec_command",
+          status: "completed",
+          input: { cmd: "pwd" },
+          output: "/repo",
+        },
+      ],
+      sessionEdges: [
+        {
+          id: `edge:${machineId}:parent`,
+          kind: "parent",
+          fromEventId: `event:${machineId}:graph-1`,
+          toEventId: `event:${machineId}:graph-2`,
+        },
+      ],
+      usageRecords: [
+        {
+          id: `usage:${machineId}:1`,
+          eventId: `event:${machineId}:graph-2`,
+          model: "gpt-test",
+          modelProvider: "openai",
+          inputTokens: 7,
+          outputTokens: 11,
+          totalTokens: 18,
+        },
+      ],
+      artifacts: [
+        {
+          id: `artifact:${machineId}:1`,
+          eventId: `event:${machineId}:graph-2`,
+          kind: "diff",
+          path: `${path}/src/index.ts`,
+          contentHash: "hash:artifact",
+          metadata: { label: "artifact diff searchable" },
+        },
+      ],
+    },
+  ],
+});
+
 const setup = () => {
   const t = convexTest(schema, modules);
   t.registerComponent("rag", ragSchema, ragModules);
@@ -230,8 +312,10 @@ describe("quasar ingestion and search", () => {
     const t = setup();
     const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
     const mutableEvent = batch.sessions[0]!.events[0]! as Record<string, unknown>;
-    mutableEvent.contentText = "Bearer should-not-leak AIzaSySecretSecretSecretSecretSecret";
-    mutableEvent.content = "Bearer should-not-leak AIzaSySecretSecretSecretSecretSecret";
+    mutableEvent.contentText =
+      "Bearer should-not-leak AIzaSySecretSecretSecretSecretSecret ghp_1234567890abcdef1234567890abcdef1234 DATABASE_URL=postgres://user:passw0rd@example.com/db";
+    mutableEvent.content =
+      "Bearer should-not-leak AIzaSySecretSecretSecretSecretSecret ghp_1234567890abcdef1234567890abcdef1234 DATABASE_URL=postgres://user:passw0rd@example.com/db";
 
     await t.mutation(internal.quasar.ingestBatchInternal, { batch });
 
@@ -242,6 +326,8 @@ describe("quasar ingestion and search", () => {
     expect(event?.contentText).toContain("Bearer [redacted]");
     expect(JSON.stringify(event)).not.toContain("should-not-leak");
     expect(JSON.stringify(event)).not.toContain("AIzaSySecret");
+    expect(JSON.stringify(event)).not.toContain("ghp_1234567890");
+    expect(JSON.stringify(event)).not.toContain("passw0rd");
 
     const search = await t.query(internal.quasar.textSearchInternal, {
       query: "should-not-leak",
@@ -266,6 +352,105 @@ describe("quasar ingestion and search", () => {
     expect(tools[0]?.status).toBe("completed");
     expect(tools[0]?.input).toEqual({ name: "read_file", path: "src/index.ts" });
     expect(tools[0]?.output).toEqual({ name: "read_file", output: "done" });
+
+    const filtered = await t.query(internal.quasar.listToolCallsInternal, {
+      provider: "codex",
+      toolName: "read_file",
+      limit: 10,
+    });
+    expect(filtered).toHaveLength(1);
+
+    const missing = await t.query(internal.quasar.listToolCallsInternal, {
+      provider: "opencode",
+      toolName: "read_file",
+      limit: 10,
+    });
+    expect(missing).toHaveLength(0);
+  });
+
+  test("ingests graph rows and returns materialized session views", async () => {
+    const t = setup();
+    await t.mutation(internal.quasar.ingestBatchInternal, {
+      batch: graphBatch("/Users/a/Projects/quasar", "machine:a"),
+    });
+
+    const session = await t.query(internal.quasar.readSessionInternal, {
+      sessionId: "codex:machine:a:session",
+      view: "tool-expanded",
+    });
+    expect(session?.contentBlocks).toHaveLength(2);
+    expect(session?.sessionEdges.some((edge) => edge.kind === "parent")).toBe(true);
+    expect(session?.usageRecords[0]?.totalTokens).toBe(18);
+    expect(session?.artifacts[0]?.kind).toBe("diff");
+    expect(session?.views.chronological[0]?.contentBlocks).toHaveLength(1);
+    expect(session?.views.branch.map((event) => event.eventId)).toEqual([
+      "event:machine:a:graph-1",
+      "event:machine:a:graph-2",
+    ]);
+    expect(session?.views.toolExpanded[1]?.toolCall?.toolName).toBe("exec_command");
+
+    const blockSearch = await t.query(internal.quasar.textSearchInternal, {
+      query: "semantic indexing",
+      limit: 10,
+    });
+    expect(blockSearch.matches.some((match) => match.family === "contentBlocks")).toBe(true);
+
+    const artifactSearch = await t.query(internal.quasar.textSearchInternal, {
+      query: "artifact diff searchable",
+      limit: 10,
+    });
+    expect(artifactSearch.matches.some((match) => match.family === "artifacts")).toBe(true);
+  });
+
+  test("fusion search returns text graph matches when semantic search is unavailable", async () => {
+    const keys = ["GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY"] as const;
+    const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    for (const key of keys) delete process.env[key];
+    try {
+      const t = setup();
+      await t.mutation(internal.quasar.ingestBatchInternal, {
+        batch: graphBatch("/Users/a/Projects/quasar", "machine:a"),
+      });
+
+      const result = await t.action(internal.quasar.fusionSearchInternal, {
+        query: "semantic indexing",
+        limit: 10,
+      });
+
+      expect(result.mode).toBe("fusion");
+      expect(result.diagnostics.semanticStatus).toBe("embedding_provider_unconfigured");
+      expect(result.matches.some((match) => match.family === "contentBlocks")).toBe(true);
+    } finally {
+      for (const key of keys) {
+        const value = previous[key];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
+  test("re-ingest removes stale graph rows and graph search documents", async () => {
+    const t = setup();
+    await t.mutation(internal.quasar.ingestBatchInternal, {
+      batch: graphBatch("/Users/a/Projects/quasar", "machine:a"),
+    });
+    await t.mutation(internal.quasar.ingestBatchInternal, {
+      batch: testBatch("/Users/a/Projects/quasar", "machine:a"),
+    });
+
+    const session = await t.query(internal.quasar.readSessionInternal, {
+      sessionId: "codex:machine:a:session",
+    });
+    expect(session?.contentBlocks).toHaveLength(0);
+    expect(session?.sessionEdges).toHaveLength(0);
+    expect(session?.usageRecords).toHaveLength(0);
+    expect(session?.artifacts).toHaveLength(0);
+
+    const search = await t.query(internal.quasar.textSearchInternal, {
+      query: "semantic indexing",
+      limit: 10,
+    });
+    expect(search.matches).toHaveLength(0);
   });
 
   test("keeps low-confidence path identities separate until manually aliased", async () => {

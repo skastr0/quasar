@@ -8,6 +8,11 @@ const REPLACEMENT_CHAR = /\ufffd/g;
 const NON_INDEXABLE_KEY = /(encrypted[_-]?content|cipher[_-]?text)/i;
 const SENSITIVE_KEY =
   /(authorization|password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|bearer|cookie|credential|private[_-]?key|encrypted[_-]?content|cipher[_-]?text)/i;
+const SECRET_ENV_ASSIGNMENT =
+  /\b([A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API_KEY|ACCESS_KEY|PRIVATE_KEY|DATABASE_URL)[A-Z0-9_]*\s*=(?!=)\s*)([^\s"'`]+)/gi;
+const CREDENTIAL_URL = /\b([a-z][a-z0-9+.-]*:\/\/[^:\s/@]+:)[^@\s"'`]+(@[^\s"'`]+)/gi;
+const PEM_PRIVATE_KEY =
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g;
 
 const compactString = (value: string) => {
   const controlCount =
@@ -32,9 +37,15 @@ export const compactText = (value: unknown) => {
 
 export const redactString = (value: string) =>
   value
+    .replace(PEM_PRIVATE_KEY, "-----BEGIN PRIVATE KEY-----[redacted]-----END PRIVATE KEY-----")
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/g, "Bearer [redacted]")
     .replace(/AIza[0-9A-Za-z_-]{20,}/g, REDACTED)
-    .replace(/sk-[A-Za-z0-9_-]{20,}/g, REDACTED);
+    .replace(/sk-[A-Za-z0-9_-]{20,}/g, REDACTED)
+    .replace(/gh[pousr]_[A-Za-z0-9_]{20,}/g, REDACTED)
+    .replace(/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, REDACTED)
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, REDACTED)
+    .replace(CREDENTIAL_URL, `$1${REDACTED}$2`)
+    .replace(SECRET_ENV_ASSIGNMENT, `$1${REDACTED}`);
 
 export const redactSensitive = (value: unknown, depth = 0): unknown => {
   if (depth > 8) return "[redacted:depth]";

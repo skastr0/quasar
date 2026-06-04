@@ -102,10 +102,14 @@ const dashboardCss = `
         display: grid;
         gap: 8px;
       }
+      .shell .table {
+        display: grid;
+        gap: 8px;
+      }
       .shell .row,
       .shell .session-row {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) auto auto;
+        grid-template-columns: minmax(0, 1fr) auto auto auto auto;
         gap: 10px;
         align-items: center;
         border: 1px solid var(--line);
@@ -114,7 +118,7 @@ const dashboardCss = `
         background: var(--panel-2);
       }
       .shell .session-row {
-        grid-template-columns: minmax(0, 1fr) 120px 100px 220px 92px;
+        grid-template-columns: minmax(180px, 1.2fr) 96px 140px 92px minmax(160px, 1fr) minmax(160px, 1fr) 180px 92px;
       }
       .shell .tool-row {
         display: grid;
@@ -123,6 +127,31 @@ const dashboardCss = `
         border: 1px solid var(--line);
         border-radius: 6px;
         padding: 10px;
+        background: var(--panel-2);
+      }
+      .shell .artifact-row {
+        display: grid;
+        grid-template-columns: 140px minmax(0, 1fr);
+        gap: 10px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 10px;
+        background: var(--panel-2);
+      }
+      .shell .filter-row,
+      .shell .graph-counts {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .shell .graph-counts {
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        margin-bottom: 14px;
+      }
+      .shell .graph-counts span {
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 8px;
         background: var(--panel-2);
       }
       .shell .alias-form {
@@ -204,9 +233,12 @@ const dashboardCss = `
           grid-template-columns: 1fr;
         }
         .shell .control-row,
+        .shell .filter-row,
+        .shell .graph-counts,
         .shell .meta-grid,
         .shell .event-row,
-        .shell .tool-row {
+        .shell .tool-row,
+        .shell .artifact-row {
 	          grid-template-columns: 1fr;
 	        }
 	      }

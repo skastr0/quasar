@@ -64,7 +64,11 @@ export const listSessionsInternal = internalQuery({
 });
 
 export const readSessionInternal = internalQuery({
-  args: { sessionId: v.string() },
+  args: {
+    sessionId: v.string(),
+    view: v.optional(v.union(v.literal("chronological"), v.literal("branch"), v.literal("tool-expanded"))),
+    leafEventId: v.optional(v.string()),
+  },
   handler: readSessionHandler,
 });
 
@@ -72,6 +76,11 @@ export const listToolCallsInternal = internalQuery({
   args: {
     toolCallId: v.optional(v.string()),
     sessionId: v.optional(v.string()),
+    projectIdentityKey: v.optional(v.string()),
+    machineId: v.optional(v.string()),
+    provider: v.optional(provider),
+    agentName: v.optional(v.string()),
+    toolName: v.optional(v.string()),
     limit: v.optional(v.number()),
   },
   handler: listToolCallsHandler,

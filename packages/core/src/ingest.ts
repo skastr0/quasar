@@ -78,5 +78,22 @@ export const summarizeBatch = (batch: IngestBatch) => ({
     (sum, session) => sum + session.toolCalls.length,
     0,
   ),
+  contentBlockCount: batch.sessions.reduce(
+    (sum, session) =>
+      sum + session.events.reduce((eventSum, event) => eventSum + event.contentBlocks.length, 0),
+    0,
+  ),
+  sessionEdgeCount: batch.sessions.reduce(
+    (sum, session) => sum + session.sessionEdges.length,
+    0,
+  ),
+  usageRecordCount: batch.sessions.reduce(
+    (sum, session) => sum + session.usageRecords.length,
+    0,
+  ),
+  artifactCount: batch.sessions.reduce(
+    (sum, session) => sum + session.artifacts.length,
+    0,
+  ),
   diagnostics: batch.diagnostics,
 });

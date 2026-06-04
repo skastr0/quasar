@@ -19,6 +19,7 @@ export const syncSearchDocumentRagHandler = async (
   })) as SearchDocument | null;
   if (doc === null) return { status: "missing" };
   if (doc.ragContentHash !== args.expectedContentHash) return { status: "stale" };
+  if (process.env.QUASAR_RAG_SYNC_PAUSED === "1") return { status: "skipped" };
   if (!serverEmbeddingsConfigured()) return await markSkipped(ctx, args.searchDocumentId);
 
   await markSyncing(ctx, args.searchDocumentId, args.expectedContentHash);

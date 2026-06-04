@@ -3,6 +3,8 @@ import { Effect, Schema } from "effect";
 
 import {
   buildIngestBatch,
+  type IngestBatch,
+  type NormalizedSession,
   sanitizeIngestBatchForTransport,
   summarizeBatch,
 } from "@quasar/core";
@@ -72,15 +74,99 @@ const runCommand = Command.make("run", { input: inputArg }, ({ input }) =>
       if (options.dryRun === true) {
         return { dryRun: true, summary: summarizeBatch(batch) };
       }
-      return yield* requestJson({
-        method: "POST",
-        path: "/api/ingest/batches",
-        body: batch,
-        responseSchema: Schema.Unknown,
-      });
+      const chunks = chunkIngestBatch(batch);
+      const results = [];
+      for (const [index, chunk] of chunks.entries()) {
+        results.push(
+          yield* requestJson({
+            method: "POST",
+            path: "/api/ingest/batches",
+            body: chunk,
+            responseSchema: Schema.Unknown,
+          }),
+        );
+        if (index < chunks.length - 1) yield* Effect.sleep("750 millis");
+      }
+      return {
+        ...summarizeBatch(batch),
+        chunkCount: chunks.length,
+        results,
+      };
     }),
   ),
 );
+
+export const MAX_EVENTS_PER_CHUNK = 50;
+
+export const chunkIngestBatch = (batch: IngestBatch): IngestBatch[] => {
+  const chunks: IngestBatch[] = [];
+  for (const session of batch.sessions) {
+    const sessionChunks = chunkSession(session);
+    for (const sessionChunk of sessionChunks) {
+      chunks.push({ ...batch, sessions: [sessionChunk] });
+    }
+  }
+  return chunks.length === 0 ? [{ ...batch, sessions: [] }] : chunks;
+};
+
+const chunkSession = (session: NormalizedSession): NormalizedSession[] => {
+  if (session.events.length <= MAX_EVENTS_PER_CHUNK) return [sessionWithExpectedIds(session)];
+  const chunks: NormalizedSession[] = [];
+  for (let start = 0; start < session.events.length; start += MAX_EVENTS_PER_CHUNK) {
+    const events = session.events.slice(start, start + MAX_EVENTS_PER_CHUNK);
+    const eventIds = new Set(events.map((event) => event.id));
+    const isLast = start + MAX_EVENTS_PER_CHUNK >= session.events.length;
+    chunks.push(
+      sessionWithExpectedIds(
+        {
+          ...session,
+          events,
+          toolCalls: session.toolCalls.filter((toolCall) => eventIds.has(toolCall.eventId)),
+          sessionEdges: session.sessionEdges.filter((edge) =>
+            edgeBelongsToChunk(edge.fromEventId, edge.toEventId, eventIds),
+          ),
+          usageRecords: session.usageRecords.filter((usageRecord) =>
+            usageRecord.eventId === undefined || eventIds.has(usageRecord.eventId),
+          ),
+          artifacts: session.artifacts.filter((artifact) =>
+            artifact.eventId === undefined ? start === 0 : eventIds.has(artifact.eventId),
+          ),
+          ...(!isLast ? { partialSession: true } : {}),
+        } as NormalizedSession & { partialSession?: boolean },
+        session,
+      ),
+    );
+  }
+  return chunks;
+};
+
+const edgeBelongsToChunk = (
+  fromEventId: string | undefined,
+  toEventId: string | undefined,
+  eventIds: Set<string>,
+) =>
+  (fromEventId !== undefined && eventIds.has(fromEventId)) ||
+  (toEventId !== undefined && eventIds.has(toEventId)) ||
+  (fromEventId === undefined && toEventId === undefined);
+
+const sessionWithExpectedIds = (
+  session: NormalizedSession & { partialSession?: boolean },
+  fullSession: NormalizedSession = session,
+) =>
+  ({
+    ...session,
+    eventCount: fullSession.events.length,
+    toolCallCount: fullSession.toolCalls.length,
+    expectedEventIds: fullSession.events.map((event) => event.id),
+    expectedToolCallIds: fullSession.toolCalls.map((toolCall) => toolCall.id),
+    expectedContentBlockIds: fullSession.events.flatMap((event) =>
+      event.contentBlocks.map((block) => block.id),
+    ),
+    expectedSessionEdgeIds: fullSession.sessionEdges.map((edge) => edge.id),
+    expectedUsageRecordIds: fullSession.usageRecords.map((usageRecord) => usageRecord.id),
+    expectedArtifactIds: fullSession.artifacts.map((artifact) => artifact.id),
+    ...(session.partialSession === true ? { partialSession: true } : {}),
+  }) as NormalizedSession;
 
 const inspectCommand = Command.make("inspect", {}, () =>
   executeJsonCommand(

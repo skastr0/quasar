@@ -8,6 +8,10 @@ export type ParsedIngestBatch = {
   importRunId: string;
   eventCount: number;
   toolCallCount: number;
+  contentBlockCount: number;
+  sessionEdgeCount: number;
+  usageRecordCount: number;
+  artifactCount: number;
 };
 
 export type SessionPatch = {
@@ -46,6 +50,7 @@ export type EventPatch = {
   kind: never;
   contentText?: string;
   content: unknown;
+  contentBlocks?: unknown[];
   toolCallId?: string;
   parentEventId?: string;
   rawReference: unknown;
@@ -64,8 +69,16 @@ export type SessionIngestState = {
   agentName: string;
   events: Record<string, unknown>[];
   declaredToolCalls: Record<string, unknown>[];
+  contentBlocksByEvent: Map<string, Record<string, unknown>[]>;
+  sessionEdges: Record<string, unknown>[];
+  usageRecords: Record<string, unknown>[];
+  artifacts: Record<string, unknown>[];
   sessionPatch: SessionPatch;
   keepEventIds: Set<string>;
   keepToolCallIds: Set<string>;
+  keepContentBlockIds: Set<string>;
+  keepSessionEdgeIds: Set<string>;
+  keepUsageRecordIds: Set<string>;
+  keepArtifactIds: Set<string>;
   lastToolCallByName: Map<string, string>;
 };

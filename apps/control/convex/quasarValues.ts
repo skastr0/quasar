@@ -22,6 +22,7 @@ export const provider = v.union(
 export const role = v.union(
   v.literal("user"),
   v.literal("assistant"),
+  v.literal("developer"),
   v.literal("system"),
   v.literal("tool"),
   v.literal("thinking"),
@@ -33,12 +34,33 @@ export const eventKind = v.union(
   v.literal("tool_call"),
   v.literal("tool_result"),
   v.literal("reasoning"),
+  v.literal("preamble"),
   v.literal("system"),
   v.literal("summary"),
   v.literal("edit"),
   v.literal("snapshot"),
   v.literal("lifecycle"),
+  v.literal("usage"),
   v.literal("unknown"),
+);
+
+export const contentBlockKind = v.union(
+  v.literal("text"),
+  v.literal("markdown"),
+  v.literal("thinking"),
+  v.literal("image"),
+  v.literal("file"),
+  v.literal("json"),
+);
+
+export const sessionEdgeKind = v.union(
+  v.literal("next"),
+  v.literal("parent"),
+  v.literal("tool_result_for"),
+  v.literal("forked_from"),
+  v.literal("subagent_of"),
+  v.literal("compacted_into"),
+  v.literal("artifact_of"),
 );
 
 export const searchArgs = {

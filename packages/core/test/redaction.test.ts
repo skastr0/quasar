@@ -71,10 +71,14 @@ describe("redaction", () => {
               kind: "message",
               contentText: "Bearer should-not-leak AIzaSySecretSecretSecretSecret",
               content: "Bearer should-not-leak AIzaSySecretSecretSecretSecret",
+              contentBlocks: [],
               rawReference: { sourcePath: "/tmp/session.jsonl" },
             },
           ],
           toolCalls: [],
+          sessionEdges: [],
+          usageRecords: [],
+          artifacts: [],
         },
       ],
     });
@@ -84,5 +88,26 @@ describe("redaction", () => {
     expect(event.contentText).not.toContain("should-not-leak");
     expect(event.contentText).not.toContain("AIzaSySecret");
     expect(event.content).toContain("Bearer [redacted]");
+  });
+
+  test("redacts common free-text secret shapes", () => {
+    const text = [
+      "ghp_1234567890abcdef1234567890abcdef1234",
+      "AKIA1234567890ABCDEF",
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
+      "DATABASE_URL=postgres://user:passw0rd@example.com/db",
+      "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----",
+    ].join("\n");
+
+    const redacted = redactSensitive(text) as string;
+    expect(redacted).not.toContain("ghp_1234567890");
+    expect(redacted).not.toContain("AKIA1234567890ABCDEF");
+    expect(redacted).not.toContain("eyJhbGci");
+    expect(redacted).not.toContain("passw0rd");
+    expect(redacted).not.toContain("abc");
+    expect(redacted).toContain("[redacted]");
+    expect(redactSensitive("return data.password === data.confirmPassword")).toBe(
+      "return data.password === data.confirmPassword",
+    );
   });
 });
