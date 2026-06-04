@@ -226,6 +226,31 @@ describe("quasar ingestion and search", () => {
     expect(search.matches).toHaveLength(0);
   });
 
+  test("redacts string contentText before session storage and search indexing", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const mutableEvent = batch.sessions[0]!.events[0]! as Record<string, unknown>;
+    mutableEvent.contentText = "Bearer should-not-leak AIzaSySecretSecretSecretSecretSecret";
+    mutableEvent.content = "Bearer should-not-leak AIzaSySecretSecretSecretSecretSecret";
+
+    await t.mutation(internal.quasar.ingestBatchInternal, { batch });
+
+    const session = await t.query(internal.quasar.readSessionInternal, {
+      sessionId: "codex:machine:a:session",
+    });
+    const event = session?.events[0];
+    expect(event?.contentText).toContain("Bearer [redacted]");
+    expect(JSON.stringify(event)).not.toContain("should-not-leak");
+    expect(JSON.stringify(event)).not.toContain("AIzaSySecret");
+
+    const search = await t.query(internal.quasar.textSearchInternal, {
+      query: "should-not-leak",
+      limit: 10,
+    });
+    expect(JSON.stringify(search.matches)).not.toContain("should-not-leak");
+    expect(search.matches).toHaveLength(0);
+  });
+
   test("links tool call and result events into one tool-call row", async () => {
     const t = setup();
     await t.mutation(internal.quasar.ingestBatchInternal, {

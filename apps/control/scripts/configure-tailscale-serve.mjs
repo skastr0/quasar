@@ -90,7 +90,12 @@ function tailscaleIp() {
 function writeClientConfig(tailnetIp) {
   const configPath = quasarClientConfigPath();
   const apiUrl = `http://${tailnetIp}:${fallbackApiPort}`;
-  const token = process.env.QUASAR_CONTROL_TOKEN?.trim();
+  const previous = existsSync(configPath)
+    ? JSON.parse(readFileSync(configPath, "utf8"))
+    : {};
+  const token =
+    process.env.QUASAR_CONTROL_TOKEN?.trim() ??
+    (typeof previous.token === "string" ? previous.token.trim() : "");
   const config = {
     url: apiUrl,
     apiUrl,
