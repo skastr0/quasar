@@ -57,6 +57,7 @@ const providerValues = new Set([
   "pi",
   "kimi",
   "droid",
+  "hermes",
   "antigravity",
   "cursor",
   "gemini",
