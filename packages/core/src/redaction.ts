@@ -2,7 +2,7 @@ import type { IngestBatch } from "./schemas";
 
 const REDACTED = "[redacted]";
 const SENSITIVE_KEY =
-  /(authorization|password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|bearer|cookie|credential|private[_-]?key)/i;
+  /(authorization|password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|bearer|cookie|credential|private[_-]?key|encrypted[_-]?content|cipher[_-]?text)/i;
 
 const redactString = (value: string) =>
   value
@@ -36,6 +36,10 @@ export const sanitizeIngestBatchForTransport = (batch: IngestBatch): IngestBatch
     rawMetadata: redactSensitive(session.rawMetadata),
     events: session.events.map((event) => ({
       ...event,
+      contentText:
+        typeof event.contentText === "string"
+          ? (redactSensitive(event.contentText) as string)
+          : event.contentText,
       content: redactSensitive(event.content),
       raw: undefined,
     })),

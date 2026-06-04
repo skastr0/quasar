@@ -1,0 +1,95 @@
+export const MAX_SEARCH_TEXT_LENGTH = 64_000;
+export const MAX_SUMMARY_LENGTH = 1_000;
+
+const REDACTED = "[redacted]";
+const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+const ESCAPED_CONTROL_CHARS = /\\u00(?:0[0-9a-f]|1[0-9a-f]|7f)/gi;
+const REPLACEMENT_CHAR = /\ufffd/g;
+const NON_INDEXABLE_KEY = /(encrypted[_-]?content|cipher[_-]?text)/i;
+const SENSITIVE_KEY =
+  /(authorization|password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|bearer|cookie|credential|private[_-]?key|encrypted[_-]?content|cipher[_-]?text)/i;
+
+const compactString = (value: string) => {
+  const controlCount =
+    (value.match(CONTROL_CHARS)?.length ?? 0) +
+    (value.match(ESCAPED_CONTROL_CHARS)?.length ?? 0) +
+    (value.match(REPLACEMENT_CHAR)?.length ?? 0);
+  if (value.length > 200 && controlCount > 20 && controlCount / value.length > 0.02) {
+    return "[binary output omitted]";
+  }
+  return value.replace(CONTROL_CHARS, " ").replace(/\s+/g, " ").trim();
+};
+
+export const compactText = (value: unknown) => {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return compactString(value);
+  try {
+    return JSON.stringify(value).replace(/\s+/g, " ").trim();
+  } catch {
+    return String(value);
+  }
+};
+
+export const redactString = (value: string) =>
+  value
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/g, "Bearer [redacted]")
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, REDACTED)
+    .replace(/sk-[A-Za-z0-9_-]{20,}/g, REDACTED);
+
+export const redactSensitive = (value: unknown, depth = 0): unknown => {
+  if (depth > 8) return "[redacted:depth]";
+  if (typeof value === "string") return redactString(value);
+  if (value === null || value === undefined) return value;
+  if (typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    return value.map((item) => redactSensitive(item, depth + 1));
+  }
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+      key,
+      SENSITIVE_KEY.test(key) ? REDACTED : redactSensitive(item, depth + 1),
+    ]),
+  );
+};
+
+export const stripNonIndexable = (value: unknown, depth = 0): unknown => {
+  if (depth > 8 || value === null || value === undefined) return value;
+  if (typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    return value.map((item) => stripNonIndexable(item, depth + 1));
+  }
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !NON_INDEXABLE_KEY.test(key))
+      .map(([key, item]) => [key, stripNonIndexable(item, depth + 1)]),
+  );
+};
+
+export const compactSearchText = (value: unknown) =>
+  compactText(stripNonIndexable(redactSensitive(value)));
+
+export const safeSummary = (preferred: unknown, fallback: unknown) => {
+  const text = compactSearchText(preferred);
+  if (text.length > 0 && !NON_INDEXABLE_KEY.test(text)) return text;
+  return compactSearchText(fallback);
+};
+
+export const truncate = (value: string, limit: number) =>
+  value.length <= limit ? value : value.slice(0, limit);
+
+export const hashText = (value: string) => {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+};
+
+export const wideHash = (value: string) =>
+  [
+    hashText(`a:${value}`),
+    hashText(`b:${value}`),
+    hashText(`c:${value}`),
+    hashText(`d:${value}`),
+  ].join("");

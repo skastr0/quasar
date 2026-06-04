@@ -3,6 +3,7 @@ import { basename, dirname, join } from "node:path";
 
 import { stableJsonHash, stableWideHash } from "../hash";
 import { resolveProjectIdentity } from "../project-normalization";
+import { redactSensitive } from "../redaction";
 import type {
   MachineIdentity,
   NormalizedSession,
@@ -73,6 +74,36 @@ export const readJsonFile = (path: string) => {
   }
 };
 
+const NON_INDEXABLE_KEY = /(encrypted[_-]?content|cipher[_-]?text)/i;
+const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+const ESCAPED_CONTROL_CHARS = /\\u00(?:0[0-9a-f]|1[0-9a-f]|7f)/gi;
+const REPLACEMENT_CHAR = /\ufffd/g;
+
+const compactString = (value: string) => {
+  const controlCount =
+    (value.match(CONTROL_CHARS)?.length ?? 0) +
+    (value.match(ESCAPED_CONTROL_CHARS)?.length ?? 0) +
+    (value.match(REPLACEMENT_CHAR)?.length ?? 0);
+  if (value.length > 200 && controlCount > 20 && controlCount / value.length > 0.02) {
+    return "[binary output omitted]";
+  }
+  const text = value.replace(CONTROL_CHARS, " ").replace(/\s+/g, " ").trim();
+  return text.length === 0 ? undefined : text;
+};
+
+const stripNonIndexable = (value: unknown, depth = 0): unknown => {
+  if (depth > 8 || value === null || value === undefined) return value;
+  if (typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    return value.map((item) => stripNonIndexable(item, depth + 1));
+  }
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !NON_INDEXABLE_KEY.test(key))
+      .map(([key, item]) => [key, stripNonIndexable(item, depth + 1)]),
+  );
+};
+
 export const collectFiles = (
   root: string,
   predicate: (path: string) => boolean,
@@ -102,8 +133,8 @@ export const collectFiles = (
 export const compactText = (value: NativeValue | undefined): string | undefined => {
   if (value === undefined || value === null) return undefined;
   if (typeof value === "string") {
-    const text = value.replace(/\s+/g, " ").trim();
-    return text.length === 0 ? undefined : text;
+    const text = compactString(value);
+    return text === undefined ? undefined : (redactSensitive(text) as string);
   }
   if (Array.isArray(value)) {
     const text = value.map(compactText).filter(Boolean).join(" ").trim();
@@ -114,7 +145,7 @@ export const compactText = (value: NativeValue | undefined): string | undefined 
     if (typeof record.text === "string") return compactText(record.text);
     if (typeof record.content === "string") return compactText(record.content);
     try {
-      return JSON.stringify(value).slice(0, 4_000);
+      return JSON.stringify(stripNonIndexable(redactSensitive(value))).slice(0, 4_000);
     } catch {
       return undefined;
     }

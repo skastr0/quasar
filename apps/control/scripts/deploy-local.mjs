@@ -38,6 +38,7 @@ for (const [command, args] of [
 
 await ensureLocalConvexBackend(localConvexUrl);
 
+run("bun", ["scripts/configure-convex-env.mjs"]);
 run("bun", ["scripts/push-local-convex.mjs"]);
 run("bun", ["scripts/build-tailscale.mjs"]);
 run("bun", ["scripts/install-launchd.mjs"]);
@@ -60,7 +61,9 @@ if (process.env.QUASAR_VERIFY_SERVICE_HOST === "true") {
 
   await verify("dashboard", dashboardUrl, { method: "HEAD" }, serviceIp);
 
-  const token = process.env.QUASAR_CONTROL_TOKEN?.trim();
+  const token =
+    process.env.QUASAR_CONTROL_TOKEN?.trim() ??
+    (typeof clientConfig.token === "string" ? clientConfig.token.trim() : "");
   if (token === undefined || token.length === 0) {
     console.log(
       "Skipping authenticated API smoke check: QUASAR_CONTROL_TOKEN is not set.",
