@@ -10,6 +10,7 @@ import {
   homePath,
   readJsonFile,
   sourceRoot,
+  type NativeValue,
 } from "./common";
 
 const maybeDatabase = async (path: string) => {
@@ -110,11 +111,11 @@ export const opencodeAdapter: SessionAdapter = {
         time_created: number;
         data: string;
       }[];
-      const partsByMessage = new Map<string, unknown[]>();
+      const partsByMessage = new Map<string, NativeValue[]>();
       for (const part of parts) {
         const list = partsByMessage.get(part.message_id) ?? [];
         try {
-          list.push(JSON.parse(part.data));
+          list.push(JSON.parse(part.data) as NativeValue);
         } catch {
           list.push(part.data);
         }
@@ -125,9 +126,9 @@ export const opencodeAdapter: SessionAdapter = {
         "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
       >[] = [];
       const events = messages.map((message, index) => {
-        let data: Record<string, unknown> = {};
+        let data: Record<string, NativeValue | undefined> = {};
         try {
-          data = JSON.parse(message.data) as Record<string, unknown>;
+          data = JSON.parse(message.data) as Record<string, NativeValue | undefined>;
         } catch {
           data = { raw: message.data };
         }
@@ -158,7 +159,7 @@ export const opencodeAdapter: SessionAdapter = {
           timestamp: new Date(message.time_created).toISOString(),
           role: eventRole,
           kind: "message" as const,
-          contentText: compactText(content),
+          contentText: compactText(content as NativeValue),
           content,
           rawReference: {
             sourcePath: dbPath,
@@ -179,7 +180,7 @@ export const opencodeAdapter: SessionAdapter = {
         sourceRoot: root,
         sourcePath: dbPath,
         projectPath: sessionRow.path ?? sessionRow.directory,
-        rawMetadata: sessionRow,
+        rawMetadata: sessionRow as unknown as NativeValue,
         events,
         toolCalls,
       });

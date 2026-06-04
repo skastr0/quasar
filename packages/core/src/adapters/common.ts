@@ -14,6 +14,37 @@ import type {
   ToolCall,
 } from "../schemas";
 
+export type NativeValue =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly NativeValue[]
+  | { readonly [key: string]: NativeValue | undefined };
+
+type BuildSessionArgs = {
+  readonly provider: Provider;
+  readonly agentName: string;
+  readonly machine: MachineIdentity;
+  readonly nativeSessionId: string;
+  readonly nativeProjectKey?: string;
+  readonly title?: string;
+  readonly sourceRoot: string;
+  readonly sourcePath: string;
+  readonly projectPath?: string;
+  readonly gitRemote?: string;
+  readonly packageName?: string;
+  readonly rawMetadata?: NativeValue;
+  readonly events: Omit<
+    SessionEvent,
+    "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
+  >[];
+  readonly toolCalls?: Omit<
+    ToolCall,
+    "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
+  >[];
+};
+
 export const homePath = (relative: string) => {
   const home = process.env.HOME;
   return home === undefined ? undefined : join(home, relative);
@@ -47,9 +78,11 @@ export const collectFiles = (
   predicate: (path: string) => boolean,
   limit = Number.POSITIVE_INFINITY,
 ) => {
+  const input = parseCollectFilesInput(root, limit);
+  if (input === undefined) return [];
   const files: string[] = [];
   const visit = (path: string) => {
-    if (files.length >= limit) return;
+    if (files.length >= input.limit) return;
     let stat;
     try {
       stat = statSync(path);
@@ -62,11 +95,11 @@ export const collectFiles = (
     }
     if (predicate(path)) files.push(path);
   };
-  if (existsSync(root)) visit(root);
+  if (existsSync(input.root)) visit(input.root);
   return files.sort();
 };
 
-export const compactText = (value: unknown): string | undefined => {
+export const compactText = (value: NativeValue | undefined): string | undefined => {
   if (value === undefined || value === null) return undefined;
   if (typeof value === "string") {
     const text = value.replace(/\s+/g, " ").trim();
@@ -89,7 +122,7 @@ export const compactText = (value: unknown): string | undefined => {
   return String(value);
 };
 
-export const roleFrom = (value: unknown): SessionRole => {
+export const roleFrom = (value: string | undefined): SessionRole => {
   if (
     value === "user" ||
     value === "assistant" ||
@@ -102,8 +135,8 @@ export const roleFrom = (value: unknown): SessionRole => {
   return "unknown";
 };
 
-export const kindFromNative = (type: unknown): SessionEventKind => {
-  if (typeof type !== "string") return "unknown";
+export const kindFromNative = (type: string | undefined): SessionEventKind => {
+  if (type === undefined) return "unknown";
   if (type.includes("tool") && type.includes("result")) return "tool_result";
   if (type.includes("tool")) return "tool_call";
   if (type.includes("thinking") || type.includes("reasoning")) return "reasoning";
@@ -133,28 +166,8 @@ export const sourceRoot = (
   discoveredAt: now,
 });
 
-export const buildSession = (args: {
-  readonly provider: Provider;
-  readonly agentName: string;
-  readonly machine: MachineIdentity;
-  readonly nativeSessionId: string;
-  readonly nativeProjectKey?: string;
-  readonly title?: string;
-  readonly sourceRoot: string;
-  readonly sourcePath: string;
-  readonly projectPath?: string;
-  readonly gitRemote?: string;
-  readonly packageName?: string;
-  readonly rawMetadata?: unknown;
-  readonly events: Omit<
-    SessionEvent,
-    "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
-  >[];
-  readonly toolCalls?: Omit<
-    ToolCall,
-    "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
-  >[];
-}): NormalizedSession => {
+export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
+  const args = parseBuildSessionArgs(input);
   const projectIdentity = resolveProjectIdentity({
     machineId: args.machine.machineId,
     rawPath: args.projectPath ?? args.nativeProjectKey,
@@ -204,10 +217,29 @@ export const eventIdFor = (
   provider: Provider,
   sourcePath: string,
   sequence: number,
-  stableKey: unknown,
+  stableKey: string | number,
 ) => `${provider}:event:${stableJsonHash([sourcePath, sequence, stableKey])}`;
 
 export const nativeSessionIdFromPath = (path: string) =>
   basename(path).replace(/\.(jsonl|json|db)$/i, "");
 
 export const parentDirectoryName = (path: string) => basename(dirname(path));
+
+const parseCollectFilesInput = (root: string, limit: number) => {
+  const trimmedRoot = root.trim();
+  if (trimmedRoot.length === 0 || limit <= 0) return undefined;
+  return {
+    root: trimmedRoot,
+    limit: Number.isFinite(limit) ? Math.floor(limit) : Number.POSITIVE_INFINITY,
+  };
+};
+
+const parseBuildSessionArgs = (args: BuildSessionArgs) => {
+  if (args.nativeSessionId.trim().length === 0) {
+    throw new Error("Native session ID cannot be empty.");
+  }
+  if (args.sourceRoot.trim().length === 0 || args.sourcePath.trim().length === 0) {
+    throw new Error("Session source paths cannot be empty.");
+  }
+  return args;
+};

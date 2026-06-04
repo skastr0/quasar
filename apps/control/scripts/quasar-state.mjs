@@ -5,6 +5,14 @@ export function quasarStateRoot() {
   return resolve(process.env.QUASAR_CONTROL_HOME ?? join(homedir(), ".quasar-control"));
 }
 
+export function quasarCliConfigRoot() {
+  return resolve(process.env.QUASAR_HOME ?? join(homedir(), ".config", "quasar"));
+}
+
+export function quasarClientConfigPath() {
+  return join(quasarCliConfigRoot(), "config.json");
+}
+
 export function quasarConvexLocalRoot() {
   return resolve(
     process.env.QUASAR_CONVEX_LOCAL_ROOT ??

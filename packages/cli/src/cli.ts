@@ -41,6 +41,8 @@ const unknownRootCommand = (args: readonly string[]) => {
     ? command
     : undefined;
 };
+const asError = (error: unknown): Error =>
+  error instanceof Error ? error : new Error(String(error));
 
 export const rootCommand = Command.make(CLI_NAME).pipe(
   Command.withDescription("Local-first AI session repository CLI"),
@@ -80,10 +82,14 @@ export const runCli = (args: readonly string[]) =>
     return cli(args);
   }).pipe(
     Effect.catchAll((error) =>
-      setExitCode(1).pipe(Effect.zipRight(writeFailureEnvelope(CLI_NAME, error))),
+      setExitCode(1).pipe(
+        Effect.zipRight(writeFailureEnvelope(CLI_NAME, asError(error))),
+      ),
     ),
     Effect.catchAllCause((cause) =>
-      setExitCode(1).pipe(Effect.zipRight(writeCauseEnvelope(CLI_NAME, cause))),
+      setExitCode(1).pipe(
+        Effect.zipRight(writeCauseEnvelope(CLI_NAME, cause as never)),
+      ),
     ),
     Effect.provide(runtimeLayer),
   );

@@ -14,6 +14,7 @@ import {
   readJsonLines,
   roleFrom,
   sourceRoot,
+  type NativeValue,
 } from "./common";
 
 const projectPathFromClaudeKey = (key: string) =>
@@ -63,7 +64,7 @@ export const claudeAdapter: SessionAdapter = {
           record.message !== null && typeof record.message === "object"
             ? (record.message as Record<string, unknown>)
             : undefined;
-        const content = message?.content ?? record;
+        const content = (message?.content ?? record) as NativeValue;
         const nativeEventId = typeof record.uuid === "string" ? record.uuid : undefined;
         return {
           id: eventIdFor("claude", path, index, nativeEventId ?? lineNumber),
@@ -73,7 +74,9 @@ export const claudeAdapter: SessionAdapter = {
           sequence: index,
           timestamp:
             typeof record.timestamp === "string" ? record.timestamp : undefined,
-          role: roleFrom(message?.role ?? type),
+          role: roleFrom(
+            typeof message?.role === "string" ? message.role : type,
+          ),
           kind: kindFromNative(type),
           contentText: compactText(content),
           content,
@@ -90,7 +93,7 @@ export const claudeAdapter: SessionAdapter = {
         sourceRoot: projectsRoot,
         sourcePath: path,
         projectPath,
-        rawMetadata: firstRecord,
+        rawMetadata: firstRecord as NativeValue | undefined,
         events,
       });
     });
