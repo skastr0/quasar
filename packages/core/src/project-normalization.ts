@@ -60,77 +60,120 @@ export const resolveProjectIdentity = (
   hints: ProjectHints,
 ): ProjectResolution => {
   const signals: ProjectSignal[] = [];
+  const context = projectPathContext(hints);
+  return (
+    explicitProject(hints, context, signals) ??
+    gitRemoteProject(hints, context, signals) ??
+    packageProject(hints, context, signals) ??
+    workspaceProject(hints, context, signals) ??
+    fallbackProject(hints, context, signals)
+  );
+};
+
+type ProjectPathContext = {
+  readonly rawPath?: string;
+  readonly normalizedPath?: string;
+};
+
+const projectPathContext = (hints: ProjectHints): ProjectPathContext => {
   const rawPath = hints.rawPath?.trim();
-  const normalizedPath =
-    rawPath !== undefined && rawPath.length > 0 ? compactPath(rawPath) : undefined;
+  return {
+    ...(rawPath !== undefined ? { rawPath } : {}),
+    ...(rawPath !== undefined && rawPath.length > 0
+      ? { normalizedPath: compactPath(rawPath) }
+      : {}),
+  };
+};
 
-  if (hints.explicitProjectKey?.trim()) {
-    const value = hints.explicitProjectKey.trim();
-    signals.push(signal("explicit", value, "explicit"));
-    return {
-      projectIdentityKey: `project:${value}`,
-      displayName: value,
-      confidence: "explicit",
-      ...(rawPath !== undefined ? { rawPath } : {}),
-      ...(normalizedPath !== undefined ? { normalizedPath } : {}),
-      ...(hints.gitRemote !== undefined ? { gitRemote: hints.gitRemote } : {}),
-      ...(hints.packageName !== undefined ? { packageName: hints.packageName } : {}),
-      signals,
-    };
-  }
+const commonFields = (
+  hints: ProjectHints,
+  context: ProjectPathContext,
+) => ({
+  ...context,
+  ...(hints.gitRemote !== undefined ? { gitRemote: hints.gitRemote } : {}),
+  ...(hints.packageName !== undefined ? { packageName: hints.packageName } : {}),
+});
 
+const explicitProject = (
+  hints: ProjectHints,
+  context: ProjectPathContext,
+  signals: ProjectSignal[],
+) => {
+  if (!hints.explicitProjectKey?.trim()) return undefined;
+  const value = hints.explicitProjectKey.trim();
+  signals.push(signal("explicit", value, "explicit"));
+  return {
+    projectIdentityKey: `project:${value}`,
+    displayName: value,
+    confidence: "explicit" as const,
+    ...commonFields(hints, context),
+    signals,
+  };
+};
+
+const gitRemoteProject = (
+  hints: ProjectHints,
+  context: ProjectPathContext,
+  signals: ProjectSignal[],
+) => {
   const normalizedRemote =
     hints.gitRemote === undefined ? undefined : normalizeGitRemote(hints.gitRemote);
-  if (normalizedRemote !== undefined) {
-    signals.push(signal("git_remote", normalizedRemote, "high"));
-    return {
-      projectIdentityKey: `git:${normalizedRemote}`,
-      displayName: normalizedRemote.split("/").slice(-1)[0] ?? normalizedRemote,
-      confidence: "high",
-      ...(rawPath !== undefined ? { rawPath } : {}),
-      ...(normalizedPath !== undefined ? { normalizedPath } : {}),
-      gitRemote: hints.gitRemote,
-      gitRemoteNormalized: normalizedRemote,
-      ...(hints.packageName !== undefined ? { packageName: hints.packageName } : {}),
-      signals,
-    };
-  }
+  if (normalizedRemote === undefined) return undefined;
+  signals.push(signal("git_remote", normalizedRemote, "high"));
+  return {
+    projectIdentityKey: `git:${normalizedRemote}`,
+    displayName: normalizedRemote.split("/").slice(-1)[0] ?? normalizedRemote,
+    confidence: "high" as const,
+    ...commonFields(hints, context),
+    gitRemoteNormalized: normalizedRemote,
+    signals,
+  };
+};
 
-  if (hints.packageName?.trim()) {
-    const packageName = hints.packageName.trim();
-    signals.push(signal("package", packageName, "medium"));
-    return {
-      projectIdentityKey: `package:${packageName}`,
-      displayName: packageName,
-      confidence: "medium",
-      ...(rawPath !== undefined ? { rawPath } : {}),
-      ...(normalizedPath !== undefined ? { normalizedPath } : {}),
-      packageName,
-      signals,
-    };
-  }
+const packageProject = (
+  hints: ProjectHints,
+  context: ProjectPathContext,
+  signals: ProjectSignal[],
+) => namedProject("package", hints.packageName, context, signals);
 
-  if (hints.workspaceName?.trim()) {
-    const workspaceName = hints.workspaceName.trim();
-    signals.push(signal("workspace", workspaceName, "medium"));
-    return {
-      projectIdentityKey: `workspace:${workspaceName}`,
-      displayName: workspaceName,
-      confidence: "medium",
-      ...(rawPath !== undefined ? { rawPath } : {}),
-      ...(normalizedPath !== undefined ? { normalizedPath } : {}),
-      signals,
-    };
-  }
+const workspaceProject = (
+  hints: ProjectHints,
+  context: ProjectPathContext,
+  signals: ProjectSignal[],
+) => namedProject("workspace", hints.workspaceName, context, signals);
 
+const namedProject = (
+  kind: "package" | "workspace",
+  value: string | undefined,
+  context: ProjectPathContext,
+  signals: ProjectSignal[],
+) => {
+  if (!value?.trim()) return undefined;
+  const name = value.trim();
+  signals.push(signal(kind, name, "medium"));
+  return {
+    projectIdentityKey: `${kind}:${name}`,
+    displayName: name,
+    confidence: "medium" as const,
+    ...context,
+    ...(kind === "package" ? { packageName: name } : {}),
+    signals,
+  };
+};
+
+const fallbackProject = (
+  hints: ProjectHints,
+  context: ProjectPathContext,
+  signals: ProjectSignal[],
+): ProjectResolution => {
   const fallbackPath =
-    normalizedPath ?? resolve(process.env.HOME ?? "/", "unknown-project");
+    context.normalizedPath ?? resolve(process.env.HOME ?? "/", "unknown-project");
   signals.push(signal("path", fallbackPath, "low"));
   return {
     projectIdentityKey: `path:${hints.machineId}:${stableWideHash(fallbackPath)}`,
     displayName: pathDisplayName(fallbackPath),
     confidence: "low",
-    ...(rawPath !== undefined ? { rawPath } : {}),
+    ...(context.rawPath !== undefined ? { rawPath: context.rawPath } : {}),
     normalizedPath: fallbackPath,
     signals,
   };
