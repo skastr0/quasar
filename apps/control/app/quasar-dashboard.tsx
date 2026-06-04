@@ -21,7 +21,6 @@ import {
 import { DashboardStyles } from "./quasar-dashboard-styles";
 import type {
   DashboardData,
-  ImportRunSummary,
   SearchMode,
   SessionDetail,
   SessionSummary,
@@ -29,21 +28,9 @@ import type {
 
 export type { DashboardData } from "./quasar-dashboard-types";
 
-export function Dashboard({ initial }: { initial: DashboardData }) {
-  const [data, setData] = useState(initial);
+const useConnectionSettings = () => {
   const [apiBase, setApiBase] = useState(defaultApiBase);
   const [token, setToken] = useState("");
-  const [query, setQuery] = useState("");
-  const [mode, setMode] = useState<SearchMode>("fusion");
-  const [results, setResults] = useState<unknown>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [selectedSession, setSelectedSession] = useState<SessionDetail | null>(null);
-  const [sessionBusy, setSessionBusy] = useState(false);
-  const [sourceAlias, setSourceAlias] = useState("");
-  const [targetAlias, setTargetAlias] = useState("");
-  const [aliasReason, setAliasReason] = useState("");
-  const [aliasResult, setAliasResult] = useState<unknown>(null);
 
   useEffect(() => {
     setApiBase(sessionStorage.getItem("quasar.apiBase") ?? defaultApiBase);
@@ -61,6 +48,23 @@ export function Dashboard({ initial }: { initial: DashboardData }) {
     sessionStorage.setItem("quasar.token", value);
   };
 
+  return { apiBase, token, persistApiBase, persistToken };
+};
+
+export function Dashboard({ initial }: { initial: DashboardData }) {
+  const [data, setData] = useState(initial);
+  const [query, setQuery] = useState("");
+  const [mode, setMode] = useState<SearchMode>("fusion");
+  const [results, setResults] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [selectedSession, setSelectedSession] = useState<SessionDetail | null>(null);
+  const [sessionBusy, setSessionBusy] = useState(false);
+  const [sourceAlias, setSourceAlias] = useState("");
+  const [targetAlias, setTargetAlias] = useState("");
+  const [aliasReason, setAliasReason] = useState("");
+  const [aliasResult, setAliasResult] = useState<unknown>(null);
+  const { apiBase, token, persistApiBase, persistToken } = useConnectionSettings();
   const client = useMemo(() => createDashboardClient(apiBase, token), [apiBase, token]);
 
   const loadDashboard = async () => {
@@ -69,7 +73,7 @@ export function Dashboard({ initial }: { initial: DashboardData }) {
     try {
       const [projects, importRuns, sessions, health] = await Promise.all([
         client.fetchJson<DashboardData["projects"]>("/api/projects"),
-        client.fetchJson<ImportRunSummary[]>("/api/import-runs"),
+        client.fetchJson<DashboardData["importRuns"]>("/api/import-runs"),
         client.fetchJson<SessionSummary[]>("/api/sessions?limit=30"),
         client.fetchJson<{ embeddingsConfigured?: boolean }>("/api/health"),
       ]);
@@ -87,14 +91,6 @@ export function Dashboard({ initial }: { initial: DashboardData }) {
       setBusy(false);
     }
   };
-
-  const recentRuns = useMemo(
-    () =>
-      [...data.importRuns]
-        .sort((left, right) => right.createdAt - left.createdAt)
-        .slice(0, 6),
-    [data.importRuns],
-  );
 
   const runSearch = async () => {
     setBusy(true);
@@ -153,52 +149,126 @@ export function Dashboard({ initial }: { initial: DashboardData }) {
 
   return (
     <main className="shell">
-      <DashboardHeader
-        embeddingsConfigured={data.searchDiagnostics.embeddingsConfigured}
-        busy={busy}
-        onRefresh={loadDashboard}
-      />
-      <ConnectionControls
+      <DashboardTop
+        data={data}
         apiBase={apiBase}
         token={token}
-        onApiBaseChange={persistApiBase}
-        onTokenChange={persistToken}
-      />
-      <SearchControls
         query={query}
         mode={mode}
         busy={busy}
+        onRefresh={loadDashboard}
+        onApiBaseChange={persistApiBase}
+        onTokenChange={persistToken}
         onQueryChange={setQuery}
         onModeChange={setMode}
         onSearch={runSearch}
       />
-
       {error !== null ? <div className="error">{error}</div> : null}
-
-      <section className="grid">
-        <SearchResultsPanel results={results} />
-        <ProjectAliasPanel
-          projects={data.projects}
-          sourceAlias={sourceAlias}
-          targetAlias={targetAlias}
-          aliasReason={aliasReason}
-          aliasResult={aliasResult}
-          onSourceAliasChange={setSourceAlias}
-          onTargetAliasChange={setTargetAlias}
-          onAliasReasonChange={setAliasReason}
-          onAliasProject={aliasProject}
-        />
-        <ProjectsPanel projects={data.projects} />
-        <ImportsPanel runs={recentRuns} />
-        <RecentSessionsPanel
-          sessions={data.sessions}
-          sessionBusy={sessionBusy}
-          onReadSession={readSession}
-        />
-        <SessionDetailPanel selectedSession={selectedSession} />
-      </section>
+      <DashboardPanels
+        data={data}
+        results={results}
+        selectedSession={selectedSession}
+        sessionBusy={sessionBusy}
+        sourceAlias={sourceAlias}
+        targetAlias={targetAlias}
+        aliasReason={aliasReason}
+        aliasResult={aliasResult}
+        onReadSession={readSession}
+        onSourceAliasChange={setSourceAlias}
+        onTargetAliasChange={setTargetAlias}
+        onAliasReasonChange={setAliasReason}
+        onAliasProject={aliasProject}
+      />
 
       <DashboardStyles />
     </main>
+  );
+}
+
+type DashboardTopProps = {
+  data: DashboardData;
+  apiBase: string;
+  token: string;
+  query: string;
+  mode: SearchMode;
+  busy: boolean;
+  onRefresh: () => void;
+  onApiBaseChange: (value: string) => void;
+  onTokenChange: (value: string) => void;
+  onQueryChange: (value: string) => void;
+  onModeChange: (value: SearchMode) => void;
+  onSearch: () => void;
+};
+
+function DashboardTop(props: DashboardTopProps) {
+  return (
+    <>
+      <DashboardHeader
+        embeddingsConfigured={props.data.searchDiagnostics.embeddingsConfigured}
+        busy={props.busy}
+        onRefresh={props.onRefresh}
+      />
+      <ConnectionControls
+        apiBase={props.apiBase}
+        token={props.token}
+        onApiBaseChange={props.onApiBaseChange}
+        onTokenChange={props.onTokenChange}
+      />
+      <SearchControls
+        query={props.query}
+        mode={props.mode}
+        busy={props.busy}
+        onQueryChange={props.onQueryChange}
+        onModeChange={props.onModeChange}
+        onSearch={props.onSearch}
+      />
+    </>
+  );
+}
+
+type DashboardPanelsProps = {
+  data: DashboardData;
+  results: unknown;
+  selectedSession: SessionDetail | null;
+  sessionBusy: boolean;
+  sourceAlias: string;
+  targetAlias: string;
+  aliasReason: string;
+  aliasResult: unknown;
+  onReadSession: (sessionId: string) => void;
+  onSourceAliasChange: (value: string) => void;
+  onTargetAliasChange: (value: string) => void;
+  onAliasReasonChange: (value: string) => void;
+  onAliasProject: () => void;
+};
+
+function DashboardPanels(props: DashboardPanelsProps) {
+  const recentRuns = [...props.data.importRuns]
+    .sort((left, right) => right.createdAt - left.createdAt)
+    .slice(0, 6);
+
+  return (
+    <section className="grid">
+      <SearchResultsPanel results={props.results} />
+      <ProjectAliasPanel
+        projects={props.data.projects}
+        sourceAlias={props.sourceAlias}
+        targetAlias={props.targetAlias}
+        aliasReason={props.aliasReason}
+        aliasResult={props.aliasResult}
+        onSourceAliasChange={props.onSourceAliasChange}
+        onTargetAliasChange={props.onTargetAliasChange}
+        onAliasReasonChange={props.onAliasReasonChange}
+        onAliasProject={props.onAliasProject}
+      />
+      <ProjectsPanel projects={props.data.projects} />
+      <ImportsPanel runs={recentRuns} />
+      <RecentSessionsPanel
+        sessions={props.data.sessions}
+        sessionBusy={props.sessionBusy}
+        onReadSession={props.onReadSession}
+      />
+      <SessionDetailPanel selectedSession={props.selectedSession} />
+    </section>
   );
 }
