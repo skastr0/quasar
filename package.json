@@ -1,0 +1,23 @@
+{
+  "name": "quasar",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "bun@1.3.14",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "bun run --cwd apps/control dev",
+    "build": "bun run --cwd packages/core build && bun run --cwd packages/cli build && bun run --cwd apps/control build",
+    "typecheck": "bun run --cwd packages/core typecheck && bun run --cwd packages/cli typecheck && bun run --cwd apps/control typecheck",
+    "test": "bun run --cwd packages/core test && bun run --cwd packages/cli test && bun run --cwd apps/control test",
+    "verify": "bun run typecheck && bun run test && bun run build"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5"
+  }
+}
