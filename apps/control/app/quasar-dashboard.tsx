@@ -10,6 +10,7 @@ import {
 import {
   ConnectionControls,
   DashboardHeader,
+  BrowseFiltersPanel,
   ImportsPanel,
   ProjectAliasPanel,
   ProjectsPanel,
@@ -22,6 +23,7 @@ import { DashboardStyles } from "./quasar-dashboard-styles";
 import type {
   DashboardData,
   SearchMode,
+  SessionBrowseFilters,
   SessionDetail,
   SessionSummary,
 } from "./quasar-dashboard-types";
@@ -55,6 +57,12 @@ export function Dashboard({ initial }: { initial: DashboardData }) {
   const [data, setData] = useState(initial);
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<SearchMode>("fusion");
+  const [filters, setFilters] = useState<SessionBrowseFilters>({
+    projectIdentityKey: "",
+    provider: "",
+    agentName: "",
+    machineId: "",
+  });
   const [results, setResults] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -74,7 +82,7 @@ export function Dashboard({ initial }: { initial: DashboardData }) {
       const [projects, importRuns, sessions, health] = await Promise.all([
         client.fetchJson<DashboardData["projects"]>("/api/projects"),
         client.fetchJson<DashboardData["importRuns"]>("/api/import-runs"),
-        client.fetchJson<SessionSummary[]>("/api/sessions?limit=30"),
+        client.fetchJson<SessionSummary[]>("/api/sessions?limit=100"),
         client.fetchJson<{ embeddingsConfigured?: boolean }>("/api/health"),
       ]);
       setData({
@@ -99,7 +107,14 @@ export function Dashboard({ initial }: { initial: DashboardData }) {
       const response = await fetch(client.endpoint(`/api/search/${mode}`), {
         method: "POST",
         headers: { "content-type": "application/json", ...client.authHeaders() },
-        body: JSON.stringify({ query, limit: 12 }),
+        body: JSON.stringify({
+          query,
+          limit: 12,
+          projectIdentityKey: filters.projectIdentityKey || undefined,
+          provider: filters.provider || undefined,
+          agentName: filters.agentName || undefined,
+          machineId: filters.machineId || undefined,
+        }),
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error ?? "Search failed");
@@ -167,6 +182,7 @@ export function Dashboard({ initial }: { initial: DashboardData }) {
       <DashboardPanels
         data={data}
         results={results}
+        filters={filters}
         selectedSession={selectedSession}
         sessionBusy={sessionBusy}
         sourceAlias={sourceAlias}
@@ -174,6 +190,7 @@ export function Dashboard({ initial }: { initial: DashboardData }) {
         aliasReason={aliasReason}
         aliasResult={aliasResult}
         onReadSession={readSession}
+        onFiltersChange={setFilters}
         onSourceAliasChange={setSourceAlias}
         onTargetAliasChange={setTargetAlias}
         onAliasReasonChange={setAliasReason}
@@ -229,6 +246,7 @@ function DashboardTop(props: DashboardTopProps) {
 type DashboardPanelsProps = {
   data: DashboardData;
   results: unknown;
+  filters: SessionBrowseFilters;
   selectedSession: SessionDetail | null;
   sessionBusy: boolean;
   sourceAlias: string;
@@ -236,6 +254,7 @@ type DashboardPanelsProps = {
   aliasReason: string;
   aliasResult: unknown;
   onReadSession: (sessionId: string) => void;
+  onFiltersChange: (filters: SessionBrowseFilters) => void;
   onSourceAliasChange: (value: string) => void;
   onTargetAliasChange: (value: string) => void;
   onAliasReasonChange: (value: string) => void;
@@ -246,10 +265,32 @@ function DashboardPanels(props: DashboardPanelsProps) {
   const recentRuns = [...props.data.importRuns]
     .sort((left, right) => right.createdAt - left.createdAt)
     .slice(0, 6);
+  const filteredSessions = props.data.sessions
+    .filter((session) =>
+      props.filters.projectIdentityKey === ""
+        ? true
+        : session.projectIdentityKey === props.filters.projectIdentityKey,
+    )
+    .filter((session) =>
+      props.filters.provider === "" ? true : session.provider === props.filters.provider,
+    )
+    .filter((session) =>
+      props.filters.agentName === "" ? true : session.agentName === props.filters.agentName,
+    )
+    .filter((session) =>
+      props.filters.machineId === "" ? true : session.machineId === props.filters.machineId,
+    )
+    .sort((left, right) => right.updatedAt - left.updatedAt);
 
   return (
     <section className="grid">
       <SearchResultsPanel results={props.results} />
+      <BrowseFiltersPanel
+        filters={props.filters}
+        projects={props.data.projects}
+        sessions={props.data.sessions}
+        onFiltersChange={props.onFiltersChange}
+      />
       <ProjectAliasPanel
         projects={props.data.projects}
         sourceAlias={props.sourceAlias}
@@ -264,7 +305,7 @@ function DashboardPanels(props: DashboardPanelsProps) {
       <ProjectsPanel projects={props.data.projects} />
       <ImportsPanel runs={recentRuns} />
       <RecentSessionsPanel
-        sessions={props.data.sessions}
+        sessions={filteredSessions}
         sessionBusy={props.sessionBusy}
         onReadSession={props.onReadSession}
       />

@@ -1,16 +1,23 @@
-import { existsSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 
 import type { SessionAdapter } from "./types";
-import type { SessionRole, ToolCall } from "../schemas";
+import type { Artifact, SessionEdge, SessionRole, ToolCall, UsageRecord } from "../schemas";
 import {
+  artifactIdFor,
   buildSession,
   compactText,
+  edgeIdFor,
   eventIdFor,
   homePath,
-  readJsonFile,
+  numberValue,
+  recordFrom,
+  scopedId,
   sourceRoot,
   type NativeValue,
+  usageIdFor,
 } from "./common";
 
 const maybeDatabase = async (path: string) => {
@@ -58,6 +65,23 @@ const toolNameFromPart = (part: unknown) => {
   return "opencode-tool";
 };
 
+type OpenCodeToolCallDraft = Omit<
+  ToolCall,
+  "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
+>;
+type OpenCodeUsageDraft = Omit<
+  UsageRecord,
+  "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
+>;
+type OpenCodeEdgeDraft = Omit<
+  SessionEdge,
+  "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
+>;
+type OpenCodeArtifactDraft = Omit<
+  Artifact,
+  "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
+>;
+
 const missingDatabaseResult = (root: string | undefined) => ({
   sourceRoots: [],
   sessions: [],
@@ -66,6 +90,7 @@ const missingDatabaseResult = (root: string | undefined) => ({
       adapterId: opencodeAdapter.id,
       provider: "opencode" as const,
       status: "no_data_found" as const,
+      parserConfidence: "observed" as const,
       message: "OpenCode database was not found.",
       ...(root !== undefined ? { rootPath: root } : {}),
     },
@@ -80,6 +105,7 @@ const unsupportedRuntimeResult = (dbPath: string) => ({
       adapterId: opencodeAdapter.id,
       provider: "opencode" as const,
       status: "unsupported" as const,
+      parserConfidence: "observed" as const,
       rootPath: dbPath,
       message: "OpenCode SQLite import requires Bun's sqlite runtime.",
     },
@@ -115,6 +141,43 @@ const readPartsByMessage = (db: OpenCodeDatabase, sessionId: string) => {
   return partsByMessage;
 };
 
+const readSessionRowsCli = (dbPath: string, limit: number | undefined) =>
+  sqliteJson<OpenCodeSessionRow>(
+    dbPath,
+    `select id, title, directory, path, time_created, time_updated from session order by time_updated desc limit ${Math.max(1, Math.floor(limit ?? 500))}`,
+  );
+
+const readMessagesCli = (dbPath: string, sessionId: string) =>
+  sqliteJson<OpenCodeMessageRow>(
+    dbPath,
+    `select id, time_created, data from message where session_id = ${sql(sessionId)} order by time_created, id`,
+  );
+
+const readPartsByMessageCli = (dbPath: string, sessionId: string) => {
+  const rows = sqliteJson<OpenCodePartRow>(
+    dbPath,
+    `select id, message_id, time_created, data from part where session_id = ${sql(sessionId)} order by time_created, id`,
+  );
+  const partsByMessage = new Map<string, NativeValue[]>();
+  for (const part of rows) {
+    const list = partsByMessage.get(part.message_id) ?? [];
+    list.push(parsePartData(part.data));
+    partsByMessage.set(part.message_id, list);
+  }
+  return partsByMessage;
+};
+
+const sqliteJson = <A>(dbPath: string, query: string): A[] => {
+  try {
+    const output = execFileSync("sqlite3", ["-json", dbPath, query], { encoding: "utf8" });
+    return output.trim().length === 0 ? [] : (JSON.parse(output) as A[]);
+  } catch {
+    return [];
+  }
+};
+
+const sql = (value: string) => `'${value.replaceAll("'", "''")}'`;
+
 const parsePartData = (data: string): NativeValue => {
   try {
     return JSON.parse(data) as NativeValue;
@@ -131,16 +194,126 @@ const parseMessageData = (message: OpenCodeMessageRow) => {
   }
 };
 
+const toolStatusFromPart = (part: Record<string, unknown>) => {
+  const state = recordFrom(part.state);
+  return typeof state.status === "string"
+    ? state.status
+    : typeof part.status === "string"
+      ? part.status
+      : undefined;
+};
+
 const collectToolCalls = (
   parts: NativeValue[],
+  machineId: string,
+  sourcePath: string,
+  nativeSessionId: string,
   messageId: string,
   eventId: string,
 ) =>
   parts.flatMap((part, partIndex) => {
     const toolName = toolNameFromPart(part);
-    return toolName === undefined
-      ? []
-      : [{ id: `opencode:tool:${messageId}:${partIndex}`, eventId, toolName, input: part, raw: part }];
+    if (toolName === undefined) return [];
+    const record = recordFrom(part);
+    const state = recordFrom(record.state);
+    const partId =
+      typeof record.callID === "string"
+        ? record.callID
+        : typeof record.id === "string"
+          ? record.id
+          : partIndex;
+    const startedAt =
+      typeof record.time_created === "string"
+        ? record.time_created
+        : dateFromNestedTime(state.time, "start");
+    const completedAt = dateFromNestedTime(state.time, "end");
+    return [
+      {
+        id: scopedId("opencode", machineId, sourcePath, "tool", nativeSessionId, messageId, partId),
+        eventId,
+        toolName,
+        status: toolStatusFromPart(record),
+        input: state.input ?? record.input ?? part,
+        output: state.output ?? record.output,
+        ...(startedAt !== undefined ? { startedAt } : {}),
+        ...(completedAt !== undefined ? { completedAt } : {}),
+        raw: part,
+      },
+    ];
+  });
+
+const dateFromNestedTime = (value: unknown, key: string) => {
+  const time = recordFrom(value);
+  const millis = numberValue(time[key]);
+  return millis === undefined ? undefined : new Date(millis).toISOString();
+};
+
+const usageFromMessage = (
+  machineId: string,
+  dbPath: string,
+  nativeSessionId: string,
+  messageId: string,
+  eventId: string,
+  index: number,
+  data: Record<string, NativeValue | undefined>,
+): OpenCodeUsageDraft | undefined => {
+  const tokens = recordFrom(data.tokens);
+  const hasTokens = Object.keys(tokens).length > 0;
+  const cost = numberValue(data.cost);
+  if (!hasTokens && cost === undefined) return undefined;
+  const cache = recordFrom(tokens.cache);
+  const inputTokens = numberValue(tokens.input);
+  const outputTokens = numberValue(tokens.output);
+  const reasoningTokens = numberValue(tokens.reasoning);
+  const totalTokens =
+    numberValue(tokens.total) ?? sumNumbers([inputTokens, outputTokens, reasoningTokens]);
+  return {
+    id: usageIdFor("opencode", machineId, dbPath, nativeSessionId, eventId, index),
+    eventId,
+    timestamp: dateFromNestedTime(data.time, "created"),
+    model: typeof data.modelID === "string" ? data.modelID : undefined,
+    modelProvider: typeof data.providerID === "string" ? data.providerID : undefined,
+    inputTokens,
+    outputTokens,
+    reasoningTokens,
+    cacheCreationInputTokens: numberValue(cache.write),
+    cacheReadInputTokens: numberValue(cache.read),
+    totalTokens,
+    cost,
+    raw: { messageId, tokens, cost },
+  };
+};
+
+const sumNumbers = (values: readonly (number | undefined)[]) => {
+  const present = values.filter((value): value is number => value !== undefined);
+  return present.length === 0
+    ? undefined
+    : present.reduce((sum, value) => sum + value, 0);
+};
+
+const collectArtifacts = (
+  machineId: string,
+  dbPath: string,
+  nativeSessionId: string,
+  eventId: string,
+  parts: NativeValue[],
+): OpenCodeArtifactDraft[] =>
+  parts.flatMap((part, index) => {
+    const record = recordFrom(part);
+    const type = typeof record.type === "string" ? record.type.toLowerCase() : "";
+    if (!type.includes("diff") && !type.includes("patch")) return [];
+    const path = typeof record.path === "string" ? record.path : undefined;
+    return [
+      {
+        id: artifactIdFor("opencode", machineId, dbPath, nativeSessionId, [eventId, index, path, type]),
+        eventId,
+        kind: type || "diff",
+        ...(path !== undefined ? { path } : {}),
+        sourcePath: dbPath,
+        sourceRef: { table: "part", eventId, index },
+        raw: part,
+      },
+    ];
   });
 
 const eventFromMessage = (
@@ -148,22 +321,27 @@ const eventFromMessage = (
   message: OpenCodeMessageRow,
   index: number,
   parts: NativeValue[],
+  machineId: string,
+  nativeSessionId: string,
 ) => {
   const data = parseMessageData(message);
   const content = { message: data, parts };
   const role: SessionRole =
     data.role === "assistant" || data.role === "user" ? data.role : "unknown";
-  const eventId = eventIdFor("opencode", dbPath, index, message.id);
+  const eventId = eventIdFor("opencode", machineId, dbPath, index, message.id);
   return {
     eventId,
-    toolCalls: collectToolCalls(parts, message.id, eventId),
+    parentId: typeof data.parentID === "string" ? data.parentID : undefined,
+    toolCalls: collectToolCalls(parts, machineId, dbPath, nativeSessionId, message.id, eventId),
+    usageRecord: usageFromMessage(machineId, dbPath, nativeSessionId, message.id, eventId, index, data),
+    artifacts: collectArtifacts(machineId, dbPath, nativeSessionId, eventId, parts),
     event: {
       id: eventId,
       nativeEventId: message.id,
       sequence: index,
       timestamp: new Date(message.time_created).toISOString(),
       role,
-      kind: "message" as const,
+      kind: parts.some((part) => toolNameFromPart(part) !== undefined) ? ("tool_call" as const) : ("message" as const),
       contentText: compactText(content as NativeValue),
       content,
       rawReference: { sourcePath: dbPath, table: "message", rowId: message.id, nativeType: "message" },
@@ -180,10 +358,52 @@ const buildOpenCodeSession = (
   sessionRow: OpenCodeSessionRow,
 ) => {
   const partsByMessage = readPartsByMessage(db, sessionRow.id);
+  return buildOpenCodeSessionFromRows(
+    dbPath,
+    root,
+    options,
+    sessionRow,
+    readMessages(db, sessionRow.id),
+    partsByMessage,
+  );
+};
+
+const buildOpenCodeSessionFromRows = (
+  dbPath: string,
+  root: string,
+  options: AdapterOptions,
+  sessionRow: OpenCodeSessionRow,
+  messages: OpenCodeMessageRow[],
+  partsByMessage: Map<string, NativeValue[]>,
+) => {
   const toolCalls: Omit<ToolCall, "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey">[] = [];
-  const events = readMessages(db, sessionRow.id).map((message, index) => {
-    const result = eventFromMessage(dbPath, message, index, partsByMessage.get(message.id) ?? []);
+  const usageRecords: OpenCodeUsageDraft[] = [];
+  const sessionEdges: OpenCodeEdgeDraft[] = [];
+  const artifacts: OpenCodeArtifactDraft[] = [];
+  const messageIdToEventId = new Map<string, string>();
+  const events = messages.map((message, index) => {
+    const result = eventFromMessage(
+      dbPath,
+      message,
+      index,
+      partsByMessage.get(message.id) ?? [],
+      options.machine.machineId,
+      sessionRow.id,
+    );
+    messageIdToEventId.set(message.id, result.eventId);
+    if (result.parentId !== undefined) {
+      const parentEventId = messageIdToEventId.get(result.parentId);
+      sessionEdges.push({
+        id: edgeIdFor("opencode", options.machine.machineId, dbPath, "parent", result.parentId, message.id),
+        kind: "parent",
+        ...(parentEventId !== undefined ? { fromEventId: parentEventId } : { fromId: result.parentId }),
+        toEventId: result.eventId,
+        rawReference: { sourcePath: dbPath, table: "message", rowId: message.id, nativeType: "parentID" },
+      });
+    }
     toolCalls.push(...result.toolCalls);
+    if (result.usageRecord !== undefined) usageRecords.push(result.usageRecord);
+    artifacts.push(...result.artifacts);
     return result.event;
   });
   return buildSession({
@@ -199,7 +419,40 @@ const buildOpenCodeSession = (
     rawMetadata: sessionRow as unknown as NativeValue,
     events,
     toolCalls,
+    sessionEdges,
+    usageRecords,
+    artifacts,
   });
+};
+
+const buildOpenCodeSessionCli = (
+  queryDbPath: string,
+  sourceDbPath: string,
+  root: string,
+  options: AdapterOptions,
+  sessionRow: OpenCodeSessionRow,
+) =>
+  buildOpenCodeSessionFromRows(
+    sourceDbPath,
+    root,
+    options,
+    sessionRow,
+    readMessagesCli(queryDbPath, sessionRow.id),
+    readPartsByMessageCli(queryDbPath, sessionRow.id),
+  );
+
+const copyDatabaseForRead = (dbPath: string) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "quasar-opencode-"));
+  const tempDbPath = join(tempDir, "opencode.db");
+  copyFileSync(dbPath, tempDbPath);
+  for (const suffix of ["-wal", "-shm"]) {
+    const source = `${dbPath}${suffix}`;
+    if (existsSync(source)) copyFileSync(source, `${tempDbPath}${suffix}`);
+  }
+  return {
+    path: tempDbPath,
+    cleanup: () => rmSync(tempDir, { recursive: true, force: true }),
+  };
 };
 
 const readOpenCode = async (options: AdapterOptions) => {
@@ -208,12 +461,38 @@ const readOpenCode = async (options: AdapterOptions) => {
   if (root === undefined || dbPath === undefined || !existsSync(dbPath)) {
     return missingDatabaseResult(root);
   }
-  const db = await maybeDatabase(dbPath);
-  if (db === undefined) return unsupportedRuntimeResult(dbPath);
-  const sessions = readSessionRows(db, options.limit).map((row) =>
-    buildOpenCodeSession(db, dbPath, root, options, row),
-  );
-  db.close();
+  const tempDb = copyDatabaseForRead(dbPath);
+  const db = await maybeDatabase(tempDb.path);
+  if (db === undefined) {
+    const sessions = readSessionRowsCli(tempDb.path, options.limit).map((row) =>
+      buildOpenCodeSessionCli(tempDb.path, dbPath, root, options, row),
+    );
+    tempDb.cleanup();
+    if (sessions.length === 0) return unsupportedRuntimeResult(dbPath);
+    return {
+      sourceRoots: [sourceRoot("opencode", opencodeAdapter.id, root, options.machine, options.now)],
+      sessions,
+      diagnostics: [
+        {
+          adapterId: opencodeAdapter.id,
+          provider: "opencode" as const,
+          status: "available" as const,
+          parserConfidence: "observed" as const,
+          rootPath: dbPath,
+          message: `Discovered ${sessions.length} OpenCode session(s) via sqlite3 fallback.`,
+        },
+      ],
+    };
+  }
+  let sessions;
+  try {
+    sessions = readSessionRows(db, options.limit).map((row) =>
+      buildOpenCodeSession(db, dbPath, root, options, row),
+    );
+  } finally {
+    db.close();
+    tempDb.cleanup();
+  }
   return {
     sourceRoots: [sourceRoot("opencode", opencodeAdapter.id, root, options.machine, options.now)],
     sessions,
@@ -222,6 +501,7 @@ const readOpenCode = async (options: AdapterOptions) => {
         adapterId: opencodeAdapter.id,
         provider: "opencode" as const,
         status: sessions.length > 0 ? ("available" as const) : ("no_data_found" as const),
+        parserConfidence: "observed" as const,
         rootPath: dbPath,
         message: `Discovered ${sessions.length} OpenCode session(s).`,
       },

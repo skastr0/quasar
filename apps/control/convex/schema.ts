@@ -26,6 +26,7 @@ const confidence = v.union(
 const role = v.union(
   v.literal("user"),
   v.literal("assistant"),
+  v.literal("developer"),
   v.literal("system"),
   v.literal("tool"),
   v.literal("thinking"),
@@ -37,18 +38,41 @@ const eventKind = v.union(
   v.literal("tool_call"),
   v.literal("tool_result"),
   v.literal("reasoning"),
+  v.literal("preamble"),
   v.literal("system"),
   v.literal("summary"),
   v.literal("edit"),
   v.literal("snapshot"),
   v.literal("lifecycle"),
+  v.literal("usage"),
   v.literal("unknown"),
+);
+
+const contentBlockKind = v.union(
+  v.literal("text"),
+  v.literal("markdown"),
+  v.literal("thinking"),
+  v.literal("image"),
+  v.literal("file"),
+  v.literal("json"),
+);
+
+const sessionEdgeKind = v.union(
+  v.literal("next"),
+  v.literal("parent"),
+  v.literal("tool_result_for"),
+  v.literal("forked_from"),
+  v.literal("subagent_of"),
+  v.literal("compacted_into"),
+  v.literal("artifact_of"),
 );
 
 const searchFamily = v.union(
   v.literal("sessions"),
   v.literal("sessionEvents"),
+  v.literal("contentBlocks"),
   v.literal("toolCalls"),
+  v.literal("artifacts"),
   v.literal("projectIdentities"),
 );
 
@@ -156,6 +180,7 @@ export default defineSchema({
     kind: eventKind,
     contentText: v.optional(v.string()),
     content: v.optional(v.any()),
+    contentBlocks: v.optional(v.array(v.any())),
     toolCallId: v.optional(v.string()),
     parentEventId: v.optional(v.string()),
     rawReference: v.any(),
@@ -169,6 +194,86 @@ export default defineSchema({
     .index("by_project", ["canonicalProjectIdentityKey", "updatedAt"])
     .index("by_kind", ["kind", "updatedAt"])
     .index("by_role", ["role", "updatedAt"]),
+
+  contentBlocks: defineTable({
+    blockId: v.string(),
+    eventId: v.string(),
+    sessionId: v.string(),
+    sequence: v.number(),
+    machineId: v.string(),
+    provider,
+    agentName: v.string(),
+    projectIdentityKey: v.string(),
+    canonicalProjectIdentityKey: v.string(),
+    kind: contentBlockKind,
+    text: v.optional(v.string()),
+    markdown: v.optional(v.string()),
+    thinking: v.optional(v.string()),
+    path: v.optional(v.string()),
+    uri: v.optional(v.string()),
+    mediaType: v.optional(v.string()),
+    value: v.optional(v.any()),
+    metadata: v.optional(v.any()),
+    importRunId: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_blockId", ["blockId"])
+    .index("by_eventId", ["eventId"])
+    .index("by_session_sequence", ["sessionId", "sequence"])
+    .index("by_project", ["canonicalProjectIdentityKey", "updatedAt"]),
+
+  sessionEdges: defineTable({
+    edgeId: v.string(),
+    sessionId: v.string(),
+    machineId: v.string(),
+    provider,
+    agentName: v.string(),
+    projectIdentityKey: v.string(),
+    canonicalProjectIdentityKey: v.string(),
+    kind: sessionEdgeKind,
+    fromEventId: v.optional(v.string()),
+    toEventId: v.optional(v.string()),
+    fromId: v.optional(v.string()),
+    toId: v.optional(v.string()),
+    rawReference: v.optional(v.any()),
+    metadata: v.optional(v.any()),
+    importRunId: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_edgeId", ["edgeId"])
+    .index("by_sessionId", ["sessionId"])
+    .index("by_kind", ["kind", "updatedAt"]),
+
+  usageRecords: defineTable({
+    usageId: v.string(),
+    sessionId: v.string(),
+    eventId: v.optional(v.string()),
+    machineId: v.string(),
+    provider,
+    agentName: v.string(),
+    projectIdentityKey: v.string(),
+    canonicalProjectIdentityKey: v.string(),
+    timestamp: v.optional(v.string()),
+    model: v.optional(v.string()),
+    modelProvider: v.optional(v.string()),
+    inputTokens: v.optional(v.number()),
+    outputTokens: v.optional(v.number()),
+    reasoningTokens: v.optional(v.number()),
+    cacheCreationInputTokens: v.optional(v.number()),
+    cacheReadInputTokens: v.optional(v.number()),
+    totalTokens: v.optional(v.number()),
+    cost: v.optional(v.number()),
+    currency: v.optional(v.string()),
+    raw: v.optional(v.any()),
+    importRunId: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_usageId", ["usageId"])
+    .index("by_sessionId", ["sessionId"])
+    .index("by_eventId", ["eventId"]),
 
   toolCalls: defineTable({
     toolCallId: v.string(),
@@ -198,14 +303,27 @@ export default defineSchema({
   artifacts: defineTable({
     artifactId: v.string(),
     sessionId: v.string(),
+    eventId: v.optional(v.string()),
     machineId: v.string(),
     provider,
+    agentName: v.optional(v.string()),
+    projectIdentityKey: v.optional(v.string()),
+    canonicalProjectIdentityKey: v.optional(v.string()),
     kind: v.string(),
     path: v.optional(v.string()),
+    uri: v.optional(v.string()),
+    contentHash: v.optional(v.string()),
+    sourcePath: v.optional(v.string()),
+    sourceRef: v.optional(v.any()),
     metadata: v.optional(v.any()),
+    raw: v.optional(v.any()),
+    importRunId: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
-  }).index("by_sessionId", ["sessionId"]),
+  })
+    .index("by_artifactId", ["artifactId"])
+    .index("by_sessionId", ["sessionId"])
+    .index("by_project", ["canonicalProjectIdentityKey", "updatedAt"]),
 
   importRuns: defineTable({
     importRunId: v.string(),
@@ -215,6 +333,10 @@ export default defineSchema({
     sessionCount: v.number(),
     eventCount: v.number(),
     toolCallCount: v.number(),
+    contentBlockCount: v.optional(v.number()),
+    sessionEdgeCount: v.optional(v.number()),
+    usageRecordCount: v.optional(v.number()),
+    artifactCount: v.optional(v.number()),
     diagnostics: v.array(v.any()),
     error: v.optional(v.string()),
     createdAt: v.number(),

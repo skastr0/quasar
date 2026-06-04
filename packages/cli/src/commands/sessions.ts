@@ -45,9 +45,9 @@ const readCommand = Command.make("read", { input: inputArg }, ({ input }) =>
     Effect.gen(function* () {
       const body = yield* loadJsonInput(SessionReadInput, input);
       return yield* requestJson({
-        method: "GET",
+        method: "POST",
         path: "/api/sessions/read",
-        query: { sessionId: body.sessionId },
+        body,
         responseSchema: Schema.Unknown,
       });
     }),

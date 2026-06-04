@@ -12,6 +12,7 @@ import type * as http from "../http.js";
 import type * as httpAuth from "../httpAuth.js";
 import type * as quasar from "../quasar.js";
 import type * as quasarIngestEvents from "../quasarIngestEvents.js";
+import type * as quasarIngestGraph from "../quasarIngestGraph.js";
 import type * as quasarIngestSessions from "../quasarIngestSessions.js";
 import type * as quasarIngestToolCalls from "../quasarIngestToolCalls.js";
 import type * as quasarIngestTypes from "../quasarIngestTypes.js";
@@ -37,6 +38,7 @@ declare const fullApi: ApiFromModules<{
   httpAuth: typeof httpAuth;
   quasar: typeof quasar;
   quasarIngestEvents: typeof quasarIngestEvents;
+  quasarIngestGraph: typeof quasarIngestGraph;
   quasarIngestSessions: typeof quasarIngestSessions;
   quasarIngestToolCalls: typeof quasarIngestToolCalls;
   quasarIngestTypes: typeof quasarIngestTypes;

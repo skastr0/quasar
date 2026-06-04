@@ -2,6 +2,7 @@ import type {
   ImportRunSummary,
   ProjectSummary,
   SearchMode,
+  SessionBrowseFilters,
   SessionDetail,
   SessionSummary,
 } from "./quasar-dashboard-types";
@@ -104,6 +105,68 @@ export function SearchResultsPanel({ results }: { results: unknown }) {
   );
 }
 
+type BrowseFiltersPanelProps = {
+  filters: SessionBrowseFilters;
+  projects: ProjectSummary[];
+  sessions: SessionSummary[];
+  onFiltersChange: (filters: SessionBrowseFilters) => void;
+};
+
+export function BrowseFiltersPanel({
+  filters,
+  projects,
+  sessions,
+  onFiltersChange,
+}: BrowseFiltersPanelProps) {
+  const providers = unique(sessions.map((session) => session.provider));
+  const agents = unique(sessions.map((session) => session.agentName));
+  const machines = unique(sessions.map((session) => session.machineId));
+  const update = (patch: Partial<SessionBrowseFilters>) =>
+    onFiltersChange({ ...filters, ...patch });
+  return (
+    <div className="panel wide">
+      <h2>Browse Filters</h2>
+      <div className="filter-row">
+        <select
+          value={filters.projectIdentityKey}
+          onChange={(event) => update({ projectIdentityKey: event.target.value })}
+        >
+          <option value="">All projects</option>
+          {projects.map((project) => (
+            <option key={project.projectIdentityKey} value={project.projectIdentityKey}>
+              {project.displayName}
+            </option>
+          ))}
+        </select>
+        <select value={filters.provider} onChange={(event) => update({ provider: event.target.value })}>
+          <option value="">All providers</option>
+          {providers.map((provider) => (
+            <option key={provider} value={provider}>
+              {provider}
+            </option>
+          ))}
+        </select>
+        <select value={filters.agentName} onChange={(event) => update({ agentName: event.target.value })}>
+          <option value="">All agents</option>
+          {agents.map((agent) => (
+            <option key={agent} value={agent}>
+              {agent}
+            </option>
+          ))}
+        </select>
+        <select value={filters.machineId} onChange={(event) => update({ machineId: event.target.value })}>
+          <option value="">All machines</option>
+          {machines.map((machine) => (
+            <option key={machine} value={machine}>
+              {machine}
+            </option>
+          ))}
+        </select>
+      </div>
+    </div>
+  );
+}
+
 type ProjectAliasPanelProps = {
   projects: ProjectSummary[];
   sourceAlias: string;
@@ -191,6 +254,8 @@ export function ImportsPanel({ runs }: { runs: ImportRunSummary[] }) {
           <div key={run.importRunId} className="row">
             <strong>{run.status}</strong>
             <span>{run.sessionCount} sessions</span>
+            <span>{run.contentBlockCount ?? 0} blocks</span>
+            <span>{run.artifactCount ?? 0} artifacts</span>
             <small>{new Date(run.createdAt).toLocaleString()}</small>
           </div>
         ))}
@@ -218,8 +283,11 @@ export function RecentSessionsPanel({
           <div key={session.id} className="session-row">
             <span>{session.title ?? session.nativeSessionId ?? session.id}</span>
             <span>{session.provider}</span>
+            <span>{session.agentName}</span>
             <span>{session.eventCount} events</span>
+            <span>{session.projectIdentityKey}</span>
             <span>{session.machineId}</span>
+            <small>{new Date(session.updatedAt).toLocaleString()}</small>
             <button type="button" onClick={() => onReadSession(session.id)} disabled={sessionBusy}>
               Open
             </button>
@@ -245,6 +313,14 @@ export function SessionDetailPanel({ selectedSession }: { selectedSession: Sessi
             <span>{selectedSession.session.canonicalProjectIdentityKey}</span>
             <span>{selectedSession.session.sourcePath}</span>
           </div>
+          <div className="graph-counts">
+            <span>{selectedSession.events.length} events</span>
+            <span>{selectedSession.contentBlocks?.length ?? 0} blocks</span>
+            <span>{selectedSession.sessionEdges?.length ?? 0} edges</span>
+            <span>{selectedSession.toolCalls.length} tools</span>
+            <span>{selectedSession.usageRecords?.length ?? 0} usage</span>
+            <span>{selectedSession.artifacts?.length ?? 0} artifacts</span>
+          </div>
           <div className="timeline">
             {selectedSession.events.map((event) => (
               <div key={event.eventId} className="event-row">
@@ -252,6 +328,15 @@ export function SessionDetailPanel({ selectedSession }: { selectedSession: Sessi
                 <strong>{event.role}</strong>
                 <span>{event.kind}</span>
                 <p>{event.contentText ?? event.toolCallId ?? event.eventId}</p>
+              </div>
+            ))}
+          </div>
+          <h2>Artifacts</h2>
+          <div className="table">
+            {(selectedSession.artifacts ?? []).map((artifact) => (
+              <div key={artifact.artifactId} className="artifact-row">
+                <span>{artifact.kind}</span>
+                <span>{artifact.path ?? artifact.sourcePath ?? artifact.artifactId}</span>
               </div>
             ))}
           </div>
@@ -270,3 +355,8 @@ export function SessionDetailPanel({ selectedSession }: { selectedSession: Sessi
     </div>
   );
 }
+
+const unique = (values: string[]) =>
+  [...new Set(values.filter((value) => value.length > 0))].sort((left, right) =>
+    left.localeCompare(right),
+  );

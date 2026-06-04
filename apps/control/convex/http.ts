@@ -48,6 +48,31 @@ const readJson = async (req: Request): Promise<unknown> => {
   return text.trim().length === 0 ? {} : JSON.parse(text);
 };
 
+const providerValues = new Set([
+  "codex",
+  "claude",
+  "opencode",
+  "grok",
+  "amp",
+  "pi",
+  "kimi",
+  "droid",
+  "antigravity",
+  "cursor",
+  "gemini",
+  "unknown",
+]);
+
+const optionalSearchParam = (url: URL, key: string) =>
+  url.searchParams.get(key) ?? undefined;
+
+const optionalProviderParam = (url: URL) => {
+  const value = optionalSearchParam(url, "provider");
+  if (value === undefined) return undefined;
+  if (!providerValues.has(value)) throw new Error("provider must be a supported provider.");
+  return value as never;
+};
+
 const handle = (fn: (ctx: ActionCtx, req: Request) => Promise<Response>) =>
   httpAction(async (ctx, req) => {
     try {
@@ -191,9 +216,30 @@ http.route({
   path: "/api/sessions/read",
   method: "GET",
   handler: handle(async (ctx, req) => {
-    const sessionId = new URL(req.url).searchParams.get("sessionId");
+    const url = new URL(req.url);
+    const sessionId = url.searchParams.get("sessionId");
     if (sessionId === null) return json({ error: "sessionId is required" }, 400);
-    const session = await ctx.runQuery(internal.quasar.readSessionInternal, { sessionId });
+    const session = await ctx.runQuery(internal.quasar.readSessionInternal, {
+      sessionId,
+      view: (url.searchParams.get("view") as never) ?? undefined,
+      leafEventId: url.searchParams.get("leafEventId") ?? undefined,
+    });
+    return session === null ? json({ error: "not found" }, 404) : json(session);
+  }),
+});
+
+http.route({
+  path: "/api/sessions/read",
+  method: "POST",
+  handler: handle(async (ctx, req) => {
+    const body = (await readJson(req)) as Record<string, unknown>;
+    const sessionId = typeof body.sessionId === "string" ? body.sessionId : undefined;
+    if (sessionId === undefined) return json({ error: "sessionId is required" }, 400);
+    const session = await ctx.runQuery(internal.quasar.readSessionInternal, {
+      sessionId,
+      view: (body.view as never) ?? undefined,
+      leafEventId: typeof body.leafEventId === "string" ? body.leafEventId : undefined,
+    });
     return session === null ? json({ error: "not found" }, 404) : json(session);
   }),
 });
@@ -274,8 +320,13 @@ http.route({
     const url = new URL(req.url);
     return json(
       await ctx.runQuery(internal.quasar.listToolCallsInternal, {
-        toolCallId: url.searchParams.get("toolCallId") ?? undefined,
-        sessionId: url.searchParams.get("sessionId") ?? undefined,
+        toolCallId: optionalSearchParam(url, "toolCallId"),
+        sessionId: optionalSearchParam(url, "sessionId"),
+        projectIdentityKey: optionalSearchParam(url, "projectIdentityKey"),
+        machineId: optionalSearchParam(url, "machineId"),
+        provider: optionalProviderParam(url),
+        agentName: optionalSearchParam(url, "agentName"),
+        toolName: optionalSearchParam(url, "toolName"),
         limit:
           url.searchParams.get("limit") === null
             ? undefined

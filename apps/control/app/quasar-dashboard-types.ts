@@ -11,6 +11,11 @@ export type ImportRunSummary = {
   status: string;
   sessionCount: number;
   eventCount: number;
+  toolCallCount?: number;
+  contentBlockCount?: number;
+  sessionEdgeCount?: number;
+  usageRecordCount?: number;
+  artifactCount?: number;
   createdAt: number;
 };
 
@@ -24,6 +29,13 @@ export type SessionSummary = {
   projectIdentityKey: string;
   eventCount: number;
   updatedAt: number;
+};
+
+export type SessionBrowseFilters = {
+  projectIdentityKey: string;
+  provider: string;
+  agentName: string;
+  machineId: string;
 };
 
 export type DashboardData = {
@@ -54,13 +66,24 @@ export type SessionDetail = {
     contentText?: string;
     toolCallId?: string;
     timestamp?: string;
+    contentBlocks?: unknown[];
   }>;
+  contentBlocks?: unknown[];
+  sessionEdges?: Array<{ edgeId: string; kind: string; fromEventId?: string; toEventId?: string }>;
   toolCalls: Array<{
     toolCallId: string;
     toolName: string;
     status?: string;
     eventId: string;
   }>;
+  usageRecords?: unknown[];
+  artifacts?: Array<{ artifactId: string; kind: string; path?: string; sourcePath?: string }>;
+  views?: {
+    chronological?: unknown[];
+    branch?: Array<{ eventId: string }>;
+    toolExpanded?: unknown[];
+    selected?: string;
+  };
 };
 
 export type SearchMode = "text" | "semantic" | "fusion";
