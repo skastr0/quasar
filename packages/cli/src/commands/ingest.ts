@@ -1,5 +1,5 @@
 import { Args, Command } from "@effect/cli";
-import { Effect, Schema } from "effect";
+import { Duration, Effect, Schema } from "effect";
 
 import {
   buildIngestBatch,
@@ -74,7 +74,11 @@ const runCommand = Command.make("run", { input: inputArg }, ({ input }) =>
       if (options.dryRun === true) {
         return { dryRun: true, summary: summarizeBatch(batch) };
       }
-      const chunks = chunkIngestBatch(batch);
+      const chunks = chunkIngestBatch(batch, chunkOptionsFromEnv());
+      const chunkDelayMs = envPositiveInteger(
+        "QUASAR_INGEST_CHUNK_DELAY_MS",
+        DEFAULT_CHUNK_DELAY_MS,
+      );
       const results = [];
       for (const [index, chunk] of chunks.entries()) {
         results.push(
@@ -85,7 +89,9 @@ const runCommand = Command.make("run", { input: inputArg }, ({ input }) =>
             responseSchema: Schema.Unknown,
           }),
         );
-        if (index < chunks.length - 1) yield* Effect.sleep("750 millis");
+        if (index < chunks.length - 1 && chunkDelayMs > 0) {
+          yield* Effect.sleep(Duration.millis(chunkDelayMs));
+        }
       }
       return {
         ...summarizeBatch(batch),
@@ -97,11 +103,40 @@ const runCommand = Command.make("run", { input: inputArg }, ({ input }) =>
 );
 
 export const MAX_EVENTS_PER_CHUNK = 50;
+export const MAX_OPERATIONS_PER_CHUNK = 120;
+export const DEFAULT_CHUNK_DELAY_MS = 750;
 
-export const chunkIngestBatch = (batch: IngestBatch): IngestBatch[] => {
+export interface ChunkOptions {
+  readonly maxEventsPerChunk?: number;
+  readonly maxOperationsPerChunk?: number;
+}
+
+const chunkOptionsFromEnv = (): Required<ChunkOptions> => ({
+  maxEventsPerChunk: envPositiveInteger(
+    "QUASAR_INGEST_MAX_EVENTS_PER_CHUNK",
+    MAX_EVENTS_PER_CHUNK,
+  ),
+  maxOperationsPerChunk: envPositiveInteger(
+    "QUASAR_INGEST_MAX_OPERATIONS_PER_CHUNK",
+    MAX_OPERATIONS_PER_CHUNK,
+  ),
+});
+
+const envPositiveInteger = (name: string, fallback: number) => {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim().length === 0) return fallback;
+  const value = Number.parseInt(raw, 10);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+};
+
+export const chunkIngestBatch = (
+  batch: IngestBatch,
+  options: ChunkOptions = {},
+): IngestBatch[] => {
   const chunks: IngestBatch[] = [];
+  const chunkOptions = normalizeChunkOptions(options);
   for (const session of batch.sessions) {
-    const sessionChunks = chunkSession(session);
+    const sessionChunks = chunkSession(session, chunkOptions);
     for (const sessionChunk of sessionChunks) {
       chunks.push({ ...batch, sessions: [sessionChunk] });
     }
@@ -109,35 +144,117 @@ export const chunkIngestBatch = (batch: IngestBatch): IngestBatch[] => {
   return chunks.length === 0 ? [{ ...batch, sessions: [] }] : chunks;
 };
 
-const chunkSession = (session: NormalizedSession): NormalizedSession[] => {
-  if (session.events.length <= MAX_EVENTS_PER_CHUNK) return [sessionWithExpectedIds(session)];
-  const chunks: NormalizedSession[] = [];
-  for (let start = 0; start < session.events.length; start += MAX_EVENTS_PER_CHUNK) {
-    const events = session.events.slice(start, start + MAX_EVENTS_PER_CHUNK);
-    const eventIds = new Set(events.map((event) => event.id));
-    const isLast = start + MAX_EVENTS_PER_CHUNK >= session.events.length;
-    chunks.push(
-      sessionWithExpectedIds(
-        {
-          ...session,
-          events,
-          toolCalls: session.toolCalls.filter((toolCall) => eventIds.has(toolCall.eventId)),
-          sessionEdges: session.sessionEdges.filter((edge) =>
-            edgeBelongsToChunk(edge.fromEventId, edge.toEventId, eventIds),
-          ),
-          usageRecords: session.usageRecords.filter((usageRecord) =>
-            usageRecord.eventId === undefined || eventIds.has(usageRecord.eventId),
-          ),
-          artifacts: session.artifacts.filter((artifact) =>
-            artifact.eventId === undefined ? start === 0 : eventIds.has(artifact.eventId),
-          ),
-          ...(!isLast ? { partialSession: true } : {}),
-        } as NormalizedSession & { partialSession?: boolean },
-        session,
-      ),
-    );
+const normalizeChunkOptions = (
+  options: ChunkOptions,
+): Required<ChunkOptions> => ({
+  maxEventsPerChunk: positiveInteger(
+    options.maxEventsPerChunk,
+    MAX_EVENTS_PER_CHUNK,
+  ),
+  maxOperationsPerChunk: positiveInteger(
+    options.maxOperationsPerChunk,
+    MAX_OPERATIONS_PER_CHUNK,
+  ),
+});
+
+const positiveInteger = (value: number | undefined, fallback: number) =>
+  value !== undefined && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : fallback;
+
+const chunkSession = (
+  session: NormalizedSession,
+  options: Required<ChunkOptions>,
+): NormalizedSession[] => {
+  if (
+    session.events.length <= options.maxEventsPerChunk &&
+    estimatedChunkOperations(session, session.events, 0) <=
+      options.maxOperationsPerChunk
+  ) {
+    return [sessionWithExpectedIds(session)];
   }
-  return chunks;
+  const chunks: NormalizedSession[] = [];
+  let start = 0;
+  let operations = 0;
+
+  for (let index = 0; index < session.events.length; index += 1) {
+    const event = session.events[index]!;
+    const eventOperations = estimatedEventOperations(session, event);
+    const eventLimitReached = index - start >= options.maxEventsPerChunk;
+    const operationLimitReached =
+      index > start && operations + eventOperations > options.maxOperationsPerChunk;
+
+    if (eventLimitReached || operationLimitReached) {
+      chunks.push(sessionChunk(session, start, index));
+      start = index;
+      operations = 0;
+    }
+
+    operations += eventOperations;
+  }
+
+  if (start < session.events.length) {
+    chunks.push(sessionChunk(session, start, session.events.length));
+  }
+  return chunks.length === 0 ? [sessionWithExpectedIds(session)] : chunks;
+};
+
+const sessionChunk = (
+  session: NormalizedSession,
+  start: number,
+  end: number,
+) => {
+  const events = session.events.slice(start, end);
+  const eventIds = new Set(events.map((event) => event.id));
+  const isLast = end >= session.events.length;
+  return sessionWithExpectedIds(
+    {
+      ...session,
+      events,
+      toolCalls: session.toolCalls.filter((toolCall) => eventIds.has(toolCall.eventId)),
+      sessionEdges: session.sessionEdges.filter((edge) =>
+        edgeBelongsToChunk(edge.fromEventId, edge.toEventId, eventIds),
+      ),
+      usageRecords: session.usageRecords.filter((usageRecord) =>
+        usageRecord.eventId === undefined || eventIds.has(usageRecord.eventId),
+      ),
+      artifacts: session.artifacts.filter((artifact) =>
+        artifact.eventId === undefined ? start === 0 : eventIds.has(artifact.eventId),
+      ),
+      ...(!isLast ? { partialSession: true } : {}),
+    } as NormalizedSession & { partialSession?: boolean },
+    session,
+  );
+};
+
+const estimatedChunkOperations = (
+  session: NormalizedSession,
+  events: readonly NormalizedSession["events"][number][],
+  start: number,
+) => {
+  const eventIds = new Set(events.map((event) => event.id));
+  return (
+    events.length +
+    events.reduce((sum, event) => sum + event.contentBlocks.length, 0) +
+    session.toolCalls.filter((toolCall) => eventIds.has(toolCall.eventId)).length +
+    session.sessionEdges.filter((edge) =>
+      edgeBelongsToChunk(edge.fromEventId, edge.toEventId, eventIds),
+    ).length +
+    session.usageRecords.filter((usageRecord) =>
+      usageRecord.eventId === undefined || eventIds.has(usageRecord.eventId),
+    ).length +
+    session.artifacts.filter((artifact) =>
+      artifact.eventId === undefined ? start === 0 : eventIds.has(artifact.eventId),
+    ).length
+  );
+};
+
+const estimatedEventOperations = (
+  session: NormalizedSession,
+  event: NormalizedSession["events"][number],
+) => {
+  const eventIds = new Set([event.id]);
+  return estimatedChunkOperations(session, [event], session.events.indexOf(event));
 };
 
 const edgeBelongsToChunk = (
