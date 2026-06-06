@@ -1,7 +1,7 @@
 import { Args, Command } from "@effect/cli";
 import { Effect } from "effect";
 
-import { buildIngestBatch, summarizeBatch } from "@quasar/core";
+import { buildIngestBatch, summarizeBatch } from "@skastr0/quasar-core";
 
 import { loadOptionalJsonInput } from "../json";
 import { executeJsonCommand } from "../output";

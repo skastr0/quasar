@@ -1,24 +1,49 @@
 {
-  "name": "@quasar/cli",
+  "name": "@skastr0/quasar-cli",
   "version": "0.1.0",
+  "description": "Command line importer and client for Quasar AI agent sessions.",
+  "license": "MIT",
   "type": "module",
   "bin": {
-    "quasar": "./src/cli.ts"
+    "quasar": "bin/quasar.js"
+  },
+  "files": [
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/skastr0/quasar.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/skastr0/quasar#readme",
+  "bugs": {
+    "url": "https://github.com/skastr0/quasar/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "dev": "bun run ./src/cli.ts",
-    "build": "bun build ./src/cli.ts --target bun --outfile ./dist/quasar",
+    "build": "bun build --compile ./src/cli.ts --outfile ./dist/quasar",
+    "build:npm-packages": "bun scripts/build-npm-packages.mjs",
+    "pack:dry-run": "npm pack --dry-run",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
-  "dependencies": {
+  "optionalDependencies": {
+    "@skastr0/quasar-cli-darwin-arm64": "0.1.0",
+    "@skastr0/quasar-cli-darwin-x64": "0.1.0",
+    "@skastr0/quasar-cli-linux-arm64": "0.1.0",
+    "@skastr0/quasar-cli-linux-x64": "0.1.0"
+  },
+  "devDependencies": {
     "@effect/cli": "^0.75.0",
     "@effect/platform": "^0.96.0",
     "@effect/platform-bun": "^0.89.0",
-    "@quasar/core": "workspace:*",
-    "effect": "^3.21.2"
-  },
-  "devDependencies": {
+    "@skastr0/quasar-core": "workspace:*",
+    "effect": "^3.21.2",
     "@types/bun": "^1.3.1",
     "typescript": "^6.0.3",
     "vitest": "^4.1.5"

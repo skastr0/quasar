@@ -312,10 +312,18 @@ describe("quasar ingestion and search", () => {
     const t = setup();
     const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
     const mutableEvent = batch.sessions[0]!.events[0]! as Record<string, unknown>;
-    mutableEvent.contentText =
-      "Bearer should-not-leak AIzaSySecretSecretSecretSecretSecret ghp_1234567890abcdef1234567890abcdef1234 DATABASE_URL=postgres://user:passw0rd@example.com/db";
-    mutableEvent.content =
-      "Bearer should-not-leak AIzaSySecretSecretSecretSecretSecret ghp_1234567890abcdef1234567890abcdef1234 DATABASE_URL=postgres://user:passw0rd@example.com/db";
+    const googleKeyFixture = `AIza${"S".repeat(24)}`;
+    const githubTokenFixture = `ghp_${"1234567890abcdef".repeat(2)}1234`;
+    const passwordFixture = ["pass", "w0rd"].join("");
+    const databaseUrlFixture = `DATABASE_URL=postgres://user:${passwordFixture}@example.com/db`;
+    const secretText = [
+      "Bearer should-not-leak",
+      googleKeyFixture,
+      githubTokenFixture,
+      databaseUrlFixture,
+    ].join(" ");
+    mutableEvent.contentText = secretText;
+    mutableEvent.content = secretText;
 
     await t.mutation(internal.quasar.ingestBatchInternal, { batch });
 
@@ -325,9 +333,9 @@ describe("quasar ingestion and search", () => {
     const event = session?.events[0];
     expect(event?.contentText).toContain("Bearer [redacted]");
     expect(JSON.stringify(event)).not.toContain("should-not-leak");
-    expect(JSON.stringify(event)).not.toContain("AIzaSySecret");
-    expect(JSON.stringify(event)).not.toContain("ghp_1234567890");
-    expect(JSON.stringify(event)).not.toContain("passw0rd");
+    expect(JSON.stringify(event)).not.toContain("AIza");
+    expect(JSON.stringify(event)).not.toContain("ghp_");
+    expect(JSON.stringify(event)).not.toContain(passwordFixture);
 
     const search = await t.query(internal.quasar.textSearchInternal, {
       query: "should-not-leak",
