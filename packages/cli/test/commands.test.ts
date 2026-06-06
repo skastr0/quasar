@@ -55,7 +55,10 @@ describe("CLI command graph", () => {
         machine: { machineId: "machine:test", hostname: "test", platform: "test" },
       }),
     );
-    const chunks = chunkIngestBatch(batch);
+    const chunks = chunkIngestBatch(batch, {
+      maxEventsPerChunk: 50,
+      maxOperationsPerChunk: Number.MAX_SAFE_INTEGER,
+    });
     const firstSession = chunks[0]!.sessions[0]! as (typeof batch.sessions)[number] & ChunkMetadata;
     const secondSession = chunks[1]!.sessions[0]! as (typeof batch.sessions)[number] & ChunkMetadata;
 
@@ -66,6 +69,36 @@ describe("CLI command graph", () => {
     expect(secondSession.events).toHaveLength(5);
     expect(secondSession.eventCount).toBe(55);
     expect(secondSession.expectedEventIds).toHaveLength(55);
+  }, 20_000);
+
+  test("chunks ingest sessions by graph operation budget", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-cli-pi-"));
+    writePiFixture(root, 55);
+
+    const batch = sanitizeIngestBatchForTransport(
+      await buildIngestBatch({
+        providers: ["pi"],
+        roots: { pi: root },
+        machine: { machineId: "machine:test", hostname: "test", platform: "test" },
+      }),
+    );
+    const chunks = chunkIngestBatch(batch, {
+      maxEventsPerChunk: 50,
+      maxOperationsPerChunk: 30,
+    });
+
+    expect(chunks.length).toBeGreaterThan(2);
+    expect(
+      chunks.slice(0, -1).every((chunk) => {
+        const session = chunk.sessions[0] as
+          | ((typeof batch.sessions)[number] & ChunkMetadata)
+          | undefined;
+        return session?.partialSession === true;
+      }),
+    ).toBe(true);
+    expect(chunks.at(-1)?.sessions[0]?.events.length).toBeGreaterThan(0);
+    expect((chunks.at(-1)?.sessions[0] as ChunkMetadata | undefined)?.partialSession).toBeUndefined();
+    expect((chunks.at(-1)?.sessions[0] as ChunkMetadata | undefined)?.expectedEventIds).toHaveLength(55);
   }, 20_000);
 });
 
