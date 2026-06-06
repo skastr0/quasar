@@ -1,6 +1,6 @@
 import { Schema } from "effect";
 
-import { Provider, SearchRequest } from "@quasar/core";
+import { Provider, SearchRequest } from "@skastr0/quasar-core";
 
 export const IngestOptions = Schema.Struct({
   providers: Schema.optional(Schema.Array(Provider)),

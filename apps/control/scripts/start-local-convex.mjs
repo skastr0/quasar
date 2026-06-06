@@ -36,12 +36,17 @@ const runtimeTmpRoot =
   process.env.QUASAR_CONVEX_TMP_ROOT ?? join(homedir(), ".quasar-control", "tmp");
 mkdirSync(runtimeTmpRoot, { recursive: true, mode: 0o700 });
 const runtimeTmpDir = mkdtempSync(join(runtimeTmpRoot, "convex-"));
-const host =
-  process.env.QUASAR_TAILSCALE_HOST ?? "quasar.tail6742f6.ts.net";
+const host = process.env.QUASAR_TAILSCALE_HOST?.trim();
 const convexOrigin =
-  process.env.QUASAR_CONVEX_PUBLIC_URL ?? `https://${host}/quasar-convex`;
+  process.env.QUASAR_CONVEX_PUBLIC_URL?.trim() ??
+  (host !== undefined && host.length > 0
+    ? `https://${host}/quasar-convex`
+    : `http://127.0.0.1:${config.ports.cloud}`);
 const convexSite =
-  process.env.QUASAR_CONVEX_SITE_PUBLIC_URL ?? `https://${host}/quasar-api`;
+  process.env.QUASAR_CONVEX_SITE_PUBLIC_URL?.trim() ??
+  (host !== undefined && host.length > 0
+    ? `https://${host}/quasar-api`
+    : `http://127.0.0.1:${config.ports.site}`);
 
 if (!existsSync(binaryPath)) {
   console.error(`Missing ${binaryPath}. Run bunx convex dev --local --once first.`);

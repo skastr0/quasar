@@ -1,7 +1,7 @@
 import { Command } from "@effect/cli";
 import { Effect } from "effect";
 
-import { allAdapters } from "@quasar/core";
+import { allAdapters } from "@skastr0/quasar-core";
 
 import { CLI_NAME, CLI_VERSION } from "../constants";
 import { executeJsonCommand } from "../output";

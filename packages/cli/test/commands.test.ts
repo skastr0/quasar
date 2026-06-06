@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, test } from "vitest";
 
-import { buildIngestBatch, sanitizeIngestBatchForTransport } from "@quasar/core";
+import { buildIngestBatch, sanitizeIngestBatchForTransport } from "@skastr0/quasar-core";
 import { chunkIngestBatch } from "../src/commands/ingest";
 
 const testDir = dirname(fileURLToPath(import.meta.url));

@@ -7,7 +7,7 @@ import {
   type NormalizedSession,
   sanitizeIngestBatchForTransport,
   summarizeBatch,
-} from "@quasar/core";
+} from "@skastr0/quasar-core";
 
 import { requestJson } from "../api";
 import { loadOptionalJsonInput } from "../json";

@@ -26,3 +26,27 @@ export function quasarConvexBackupRoot() {
       join(quasarStateRoot(), "backups", "convex"),
   );
 }
+
+export function quasarTailscaleHost() {
+  const host = process.env.QUASAR_TAILSCALE_HOST?.trim();
+  if (host !== undefined && host.length > 0) return host;
+
+  console.error(
+    "Missing QUASAR_TAILSCALE_HOST. Set it to your Tailscale Serve hostname, for example quasar.<tailnet>.ts.net.",
+  );
+  process.exit(1);
+}
+
+export function quasarConvexPublicUrl() {
+  return (
+    process.env.QUASAR_CONVEX_PUBLIC_URL?.trim() ??
+    `https://${quasarTailscaleHost()}/quasar-convex`
+  );
+}
+
+export function quasarConvexSitePublicUrl() {
+  return (
+    process.env.QUASAR_CONVEX_SITE_PUBLIC_URL?.trim() ??
+    `https://${quasarTailscaleHost()}/quasar-api`
+  );
+}

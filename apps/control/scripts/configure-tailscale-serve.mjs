@@ -10,9 +10,10 @@ import { dirname, resolve } from "node:path";
 import {
   quasarClientConfigPath,
   quasarConvexLocalRoot,
+  quasarTailscaleHost,
 } from "./quasar-state.mjs";
 
-const host = process.env.QUASAR_TAILSCALE_HOST ?? "quasar.tail6742f6.ts.net";
+const host = quasarTailscaleHost();
 const service = process.env.QUASAR_TAILSCALE_SERVICE ?? "svc:quasar";
 const webPort = process.env.QUASAR_WEB_PORT ?? "5177";
 const fallbackWebPort = process.env.QUASAR_FALLBACK_WEB_PORT ?? "8177";

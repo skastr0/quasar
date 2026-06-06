@@ -37,6 +37,7 @@ describe("redaction", () => {
   });
 
   test("redacts string contentText before transport", () => {
+    const googleKeyFixture = `AIza${"S".repeat(24)}`;
     const batch = sanitizeIngestBatchForTransport({
       protocolVersion: "quasar.ingest/v1",
       machine: { machineId: "machine:test" },
@@ -69,8 +70,8 @@ describe("redaction", () => {
               projectIdentityKey: "path:test",
               role: "assistant",
               kind: "message",
-              contentText: "Bearer should-not-leak AIzaSySecretSecretSecretSecret",
-              content: "Bearer should-not-leak AIzaSySecretSecretSecretSecret",
+              contentText: `Bearer should-not-leak ${googleKeyFixture}`,
+              content: `Bearer should-not-leak ${googleKeyFixture}`,
               contentBlocks: [],
               rawReference: { sourcePath: "/tmp/session.jsonl" },
             },
@@ -86,24 +87,34 @@ describe("redaction", () => {
     const [event] = batch.sessions[0]!.events;
     expect(event.contentText).toContain("Bearer [redacted]");
     expect(event.contentText).not.toContain("should-not-leak");
-    expect(event.contentText).not.toContain("AIzaSySecret");
+    expect(event.contentText).not.toContain("AIza");
     expect(event.content).toContain("Bearer [redacted]");
   });
 
   test("redacts common free-text secret shapes", () => {
+    const githubTokenFixture = `ghp_${"1234567890abcdef".repeat(2)}1234`;
+    const awsKeyFixture = `AKIA${"1234567890ABCDEF"}`;
+    const jwtFixture = ["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxIn0", "signature"].join(".");
+    const passwordFixture = ["pass", "w0rd"].join("");
+    const databaseUrlFixture = `DATABASE_URL=postgres://user:${passwordFixture}@example.com/db`;
+    const privateKeyFixture = [
+      ["-----BEGIN OPENSSH", "PRIVATE KEY-----"].join(" "),
+      "abc",
+      ["-----END OPENSSH", "PRIVATE KEY-----"].join(" "),
+    ].join("\n");
     const text = [
-      "ghp_1234567890abcdef1234567890abcdef1234",
-      "AKIA1234567890ABCDEF",
-      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
-      "DATABASE_URL=postgres://user:passw0rd@example.com/db",
-      "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----",
+      githubTokenFixture,
+      awsKeyFixture,
+      jwtFixture,
+      databaseUrlFixture,
+      privateKeyFixture,
     ].join("\n");
 
     const redacted = redactSensitive(text) as string;
-    expect(redacted).not.toContain("ghp_1234567890");
-    expect(redacted).not.toContain("AKIA1234567890ABCDEF");
+    expect(redacted).not.toContain("ghp_");
+    expect(redacted).not.toContain("AKIA");
     expect(redacted).not.toContain("eyJhbGci");
-    expect(redacted).not.toContain("passw0rd");
+    expect(redacted).not.toContain(passwordFixture);
     expect(redacted).not.toContain("abc");
     expect(redacted).toContain("[redacted]");
     expect(redactSensitive("return data.password === data.confirmPassword")).toBe(

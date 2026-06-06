@@ -4,13 +4,14 @@ import { resolve } from "node:path";
 import {
   quasarClientConfigPath,
   quasarConvexLocalRoot,
+  quasarConvexSitePublicUrl,
+  quasarTailscaleHost,
 } from "./quasar-state.mjs";
 
-const host = process.env.QUASAR_TAILSCALE_HOST ?? "quasar.tail6742f6.ts.net";
+const host = quasarTailscaleHost();
 const service = process.env.QUASAR_TAILSCALE_SERVICE ?? "svc:quasar";
 const dashboardUrl = process.env.QUASAR_DASHBOARD_URL ?? `https://${host}/`;
-const apiUrl =
-  process.env.QUASAR_CONVEX_SITE_PUBLIC_URL ?? `https://${host}/quasar-api`;
+const apiUrl = quasarConvexSitePublicUrl();
 const localDashboardUrl =
   process.env.QUASAR_LOCAL_DASHBOARD_URL ??
   `http://127.0.0.1:${process.env.QUASAR_WEB_PORT ?? "5177"}/`;

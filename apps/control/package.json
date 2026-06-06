@@ -1,7 +1,9 @@
 {
-  "name": "@quasar/control",
+  "name": "@skastr0/quasar-control",
   "private": true,
   "version": "0.1.0",
+  "description": "Private Convex and Next.js control app for Quasar.",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "convex dev --start 'next dev --port 5177'",
@@ -27,7 +29,7 @@
     "@convex-dev/migrations": "^0.3.4",
     "@convex-dev/rag": "^0.7.4",
     "@convex-dev/workpool": "^0.4.7",
-    "@quasar/core": "workspace:*",
+    "@skastr0/quasar-core": "workspace:*",
     "ai": "^6.0.184",
     "convex": "^1.36.1",
     "effect": "^3.21.2",

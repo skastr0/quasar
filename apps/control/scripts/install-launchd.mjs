@@ -2,6 +2,11 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import {
+  quasarConvexPublicUrl,
+  quasarConvexSitePublicUrl,
+  quasarTailscaleHost,
+} from "./quasar-state.mjs";
 
 const repoRoot = process.cwd();
 const nodePath = process.execPath;
@@ -10,11 +15,9 @@ const launchAgentsDir = join(homeDir, "Library", "LaunchAgents");
 const logsDir = join(repoRoot, "logs");
 const tmpDir = join(homeDir, ".quasar-control", "tmp");
 const domain = `gui/${process.getuid?.() ?? spawnOutput("id", ["-u"])}`;
-const host = process.env.QUASAR_TAILSCALE_HOST ?? "quasar.tail6742f6.ts.net";
-const publicConvexUrl =
-  process.env.QUASAR_CONVEX_PUBLIC_URL ?? `https://${host}/quasar-convex`;
-const publicConvexSiteUrl =
-  process.env.QUASAR_CONVEX_SITE_PUBLIC_URL ?? `https://${host}/quasar-api`;
+const host = quasarTailscaleHost();
+const publicConvexUrl = quasarConvexPublicUrl();
+const publicConvexSiteUrl = quasarConvexSitePublicUrl();
 
 const agents = [
   {
@@ -65,7 +68,7 @@ function plist(agent) {
     <key>HOME</key>
     <string>${homeDir}</string>
     <key>USER</key>
-    <string>${process.env.USER ?? "guilhermecastro"}</string>
+    <string>${process.env.USER ?? "quasar"}</string>
     <key>TMPDIR</key>
     <string>${tmpDir}</string>
     <key>QUASAR_CONVEX_TMP_ROOT</key>

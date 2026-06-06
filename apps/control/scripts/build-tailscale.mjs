@@ -1,10 +1,11 @@
 import { spawnSync } from "node:child_process";
+import {
+  quasarConvexPublicUrl,
+  quasarConvexSitePublicUrl,
+} from "./quasar-state.mjs";
 
-const host = process.env.QUASAR_TAILSCALE_HOST ?? "quasar.tail6742f6.ts.net";
-const convexUrl =
-  process.env.QUASAR_CONVEX_PUBLIC_URL ?? `https://${host}/quasar-convex`;
-const convexSiteUrl =
-  process.env.QUASAR_CONVEX_SITE_PUBLIC_URL ?? `https://${host}/quasar-api`;
+const convexUrl = quasarConvexPublicUrl();
+const convexSiteUrl = quasarConvexSitePublicUrl();
 
 const result = spawnSync("bunx", ["next", "build"], {
   stdio: "inherit",
