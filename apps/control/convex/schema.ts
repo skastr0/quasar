@@ -83,6 +83,38 @@ const ragSyncState = v.union(
   v.literal("ready"),
   v.literal("skipped"),
   v.literal("failed"),
+  v.literal("dead_letter"),
+);
+
+const importJobStatus = v.union(
+  v.literal("queued"),
+  v.literal("running"),
+  v.literal("succeeded"),
+  v.literal("partial_failure"),
+  v.literal("failed"),
+);
+
+const importChunkStatus = v.union(
+  v.literal("pending"),
+  v.literal("running"),
+  v.literal("succeeded"),
+  v.literal("failed"),
+  v.literal("dead_letter"),
+);
+
+const sessionIngestState = v.union(
+  v.literal("partial"),
+  v.literal("complete"),
+  v.literal("failed"),
+);
+
+const embeddingOutboxStatus = v.union(
+  v.literal("pending"),
+  v.literal("syncing"),
+  v.literal("ready"),
+  v.literal("failed"),
+  v.literal("skipped"),
+  v.literal("dead_letter"),
 );
 
 export default defineSchema({
@@ -118,7 +150,8 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index("by_projectIdentityKey", ["projectIdentityKey"])
-    .index("by_canonicalProjectIdentityKey", ["canonicalProjectIdentityKey"]),
+    .index("by_canonicalProjectIdentityKey", ["canonicalProjectIdentityKey"])
+    .index("by_updatedAt", ["updatedAt"]),
 
   projectAliases: defineTable({
     sourceProjectIdentityKey: v.string(),
@@ -158,13 +191,29 @@ export default defineSchema({
     eventCount: v.number(),
     toolCallCount: v.number(),
     importRunId: v.string(),
+    importJobId: v.optional(v.string()),
+    importChunkId: v.optional(v.string()),
+    ingestState: v.optional(sessionIngestState),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
     .index("by_sessionId", ["sessionId"])
     .index("by_project", ["canonicalProjectIdentityKey", "updatedAt"])
+    .index("by_project_provider", ["canonicalProjectIdentityKey", "provider", "updatedAt"])
+    .index("by_project_machine", ["canonicalProjectIdentityKey", "machineId", "updatedAt"])
+    .index("by_project_agent", ["canonicalProjectIdentityKey", "agentName", "updatedAt"])
+    .index("by_project_provider_machine", [
+      "canonicalProjectIdentityKey",
+      "provider",
+      "machineId",
+      "updatedAt",
+    ])
+    .index("by_provider_machine", ["provider", "machineId", "updatedAt"])
+    .index("by_provider_agent", ["provider", "agentName", "updatedAt"])
     .index("by_machine", ["machineId", "updatedAt"])
-    .index("by_provider", ["provider", "updatedAt"]),
+    .index("by_agent", ["agentName", "updatedAt"])
+    .index("by_provider", ["provider", "updatedAt"])
+    .index("by_updatedAt", ["updatedAt"]),
 
   sessionEvents: defineTable({
     eventId: v.string(),
@@ -187,6 +236,8 @@ export default defineSchema({
     rawReference: v.any(),
     raw: v.optional(v.any()),
     importRunId: v.string(),
+    importJobId: v.optional(v.string()),
+    importChunkId: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -216,6 +267,8 @@ export default defineSchema({
     value: v.optional(v.any()),
     metadata: v.optional(v.any()),
     importRunId: v.string(),
+    importJobId: v.optional(v.string()),
+    importChunkId: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -240,6 +293,8 @@ export default defineSchema({
     rawReference: v.optional(v.any()),
     metadata: v.optional(v.any()),
     importRunId: v.string(),
+    importJobId: v.optional(v.string()),
+    importChunkId: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -269,6 +324,8 @@ export default defineSchema({
     currency: v.optional(v.string()),
     raw: v.optional(v.any()),
     importRunId: v.string(),
+    importJobId: v.optional(v.string()),
+    importChunkId: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -293,13 +350,31 @@ export default defineSchema({
     completedAt: v.optional(v.string()),
     raw: v.optional(v.any()),
     importRunId: v.string(),
+    importJobId: v.optional(v.string()),
+    importChunkId: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
     .index("by_toolCallId", ["toolCallId"])
     .index("by_sessionId", ["sessionId"])
     .index("by_toolName", ["toolName", "updatedAt"])
-    .index("by_project", ["canonicalProjectIdentityKey", "updatedAt"]),
+    .index("by_provider", ["provider", "updatedAt"])
+    .index("by_provider_machine", ["provider", "machineId", "updatedAt"])
+    .index("by_machine", ["machineId", "updatedAt"])
+    .index("by_agent", ["agentName", "updatedAt"])
+    .index("by_project", ["canonicalProjectIdentityKey", "updatedAt"])
+    .index("by_project_provider", ["canonicalProjectIdentityKey", "provider", "updatedAt"])
+    .index("by_project_machine", ["canonicalProjectIdentityKey", "machineId", "updatedAt"])
+    .index("by_project_agent", ["canonicalProjectIdentityKey", "agentName", "updatedAt"])
+    .index("by_project_tool", ["canonicalProjectIdentityKey", "toolName", "updatedAt"])
+    .index("by_project_provider_tool", [
+      "canonicalProjectIdentityKey",
+      "provider",
+      "toolName",
+      "updatedAt",
+    ])
+    .index("by_provider_tool", ["provider", "toolName", "updatedAt"])
+    .index("by_updatedAt", ["updatedAt"]),
 
   artifacts: defineTable({
     artifactId: v.string(),
@@ -319,6 +394,8 @@ export default defineSchema({
     metadata: v.optional(v.any()),
     raw: v.optional(v.any()),
     importRunId: v.optional(v.string()),
+    importJobId: v.optional(v.string()),
+    importChunkId: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -340,12 +417,206 @@ export default defineSchema({
     artifactCount: v.optional(v.number()),
     diagnostics: v.array(v.any()),
     error: v.optional(v.string()),
+    importJobId: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
     .index("by_importRunId", ["importRunId"])
     .index("by_createdAt", ["createdAt"])
     .index("by_machineId", ["machineId"]),
+
+  importJobs: defineTable({
+    importJobId: v.string(),
+    idempotencyKey: v.string(),
+    machineId: v.string(),
+    status: importJobStatus,
+    generatedAt: v.optional(v.string()),
+    sourceRootCount: v.number(),
+    sessionCount: v.number(),
+    eventCount: v.number(),
+    toolCallCount: v.number(),
+    contentBlockCount: v.optional(v.number()),
+    sessionEdgeCount: v.optional(v.number()),
+    usageRecordCount: v.optional(v.number()),
+    artifactCount: v.optional(v.number()),
+    chunkCount: v.number(),
+    expectedChunkCount: v.optional(v.number()),
+    uploadedChunkCount: v.optional(v.number()),
+    succeededChunkCount: v.number(),
+    failedChunkCount: v.number(),
+    terminalChunkSequenceSum: v.optional(v.number()),
+    diagnostics: v.array(v.any()),
+    error: v.optional(v.string()),
+    startedAt: v.optional(v.number()),
+    completedAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_importJobId", ["importJobId"])
+    .index("by_idempotencyKey", ["idempotencyKey"])
+    .index("by_status", ["status", "updatedAt"])
+    .index("by_createdAt", ["createdAt"]),
+
+  importShards: defineTable({
+    shardId: v.string(),
+    importJobId: v.string(),
+    provider,
+    machineId: v.string(),
+    status: importJobStatus,
+    sessionCount: v.number(),
+    eventCount: v.number(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_shardId", ["shardId"])
+    .index("by_importJobId", ["importJobId"])
+    .index("by_job_provider", ["importJobId", "provider"]),
+
+  importChunks: defineTable({
+    chunkId: v.string(),
+    importJobId: v.string(),
+    idempotencyKey: v.string(),
+    sequence: v.number(),
+    status: importChunkStatus,
+    sessionCount: v.number(),
+    eventCount: v.number(),
+    toolCallCount: v.number(),
+    contentBlockCount: v.optional(v.number()),
+    sessionEdgeCount: v.optional(v.number()),
+    usageRecordCount: v.optional(v.number()),
+    artifactCount: v.optional(v.number()),
+    attempts: v.number(),
+    maxAttempts: v.optional(v.number()),
+    batch: v.optional(v.any()),
+    error: v.optional(v.string()),
+    nextAttemptAt: v.optional(v.number()),
+    leaseExpiresAt: v.optional(v.number()),
+    leaseToken: v.optional(v.string()),
+    payloadStoredAt: v.optional(v.number()),
+    startedAt: v.optional(v.number()),
+    completedAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_chunkId", ["chunkId"])
+    .index("by_idempotencyKey", ["idempotencyKey"])
+    .index("by_job_sequence", ["importJobId", "sequence"])
+    .index("by_importJobId", ["importJobId", "sequence"])
+    .index("by_job_status", ["importJobId", "status"])
+    .index("by_job_status_nextAttempt", ["importJobId", "status", "nextAttemptAt"])
+    .index("by_job_status_lease", ["importJobId", "status", "leaseExpiresAt"])
+    .index("by_status_nextAttempt", ["status", "nextAttemptAt"])
+    .index("by_status_lease", ["status", "leaseExpiresAt"]),
+
+  importCheckpoints: defineTable({
+    checkpointId: v.string(),
+    importJobId: v.string(),
+    chunkId: v.string(),
+    provider,
+    machineId: v.string(),
+    sessionId: v.optional(v.string()),
+    nativeRowId: v.optional(v.string()),
+    sequence: v.number(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_checkpointId", ["checkpointId"])
+    .index("by_importJobId", ["importJobId"])
+    .index("by_chunkId", ["chunkId"]),
+
+  importFailures: defineTable({
+    failureId: v.string(),
+    importJobId: v.string(),
+    chunkId: v.optional(v.string()),
+    provider: v.optional(provider),
+    machineId: v.optional(v.string()),
+    sessionId: v.optional(v.string()),
+    error: v.string(),
+    retryable: v.boolean(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_failureId", ["failureId"])
+    .index("by_importJobId", ["importJobId"])
+    .index("by_chunkId", ["chunkId"]),
+
+  embeddingScopes: defineTable({
+    embeddingScopeId: v.string(),
+    canonicalProjectIdentityKey: v.string(),
+    salt: v.string(),
+    policyVersion: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_embeddingScopeId", ["embeddingScopeId"])
+    .index("by_canonicalProjectIdentityKey", ["canonicalProjectIdentityKey"]),
+
+  embeddingOutbox: defineTable({
+    outboxKey: v.string(),
+    searchDocumentId: v.string(),
+    searchDocumentRowId: v.id("searchDocuments"),
+    expectedContentHash: v.string(),
+    embeddingScopeId: v.string(),
+    embeddingCacheKey: v.string(),
+    status: embeddingOutboxStatus,
+    attempts: v.number(),
+    maxAttempts: v.optional(v.number()),
+    nextAttemptAt: v.number(),
+    leaseExpiresAt: v.optional(v.number()),
+    leaseToken: v.optional(v.string()),
+    lastError: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_outboxKey", ["outboxKey"])
+    .index("by_status_nextAttempt", ["status", "nextAttemptAt"])
+    .index("by_status_lease", ["status", "leaseExpiresAt"])
+    .index("by_searchDocumentId", ["searchDocumentId"]),
+
+  embeddingControls: defineTable({
+    controlKey: v.string(),
+    paused: v.boolean(),
+    activeDrainToken: v.optional(v.string()),
+    activeDrainLeaseExpiresAt: v.optional(v.number()),
+    updatedAt: v.number(),
+  }).index("by_controlKey", ["controlKey"]),
+
+  embeddingCache: defineTable({
+    embeddingCacheKey: v.string(),
+    embeddingScopeId: v.string(),
+    modelId: v.string(),
+    dimensions: v.number(),
+    policyVersion: v.string(),
+    chunkerVersion: v.string(),
+    normalizedChunkHash: v.string(),
+    chunks: v.array(v.any()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_embeddingCacheKey", ["embeddingCacheKey"])
+    .index("by_scope", ["embeddingScopeId", "updatedAt"]),
+
+  embeddingReadiness: defineTable({
+    aggregateKey: v.string(),
+    importJobId: v.optional(v.string()),
+    canonicalProjectIdentityKey: v.string(),
+    machineId: v.optional(v.string()),
+    provider: v.optional(provider),
+    agentName: v.optional(v.string()),
+    role: v.optional(role),
+    kind: v.optional(eventKind),
+    toolName: v.optional(v.string()),
+    family: searchFamily,
+    ragSyncState,
+    documentCount: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_aggregateKey", ["aggregateKey"])
+    .index("by_job", ["importJobId"])
+    .index("by_project", ["canonicalProjectIdentityKey"])
+    .index("by_provider", ["provider"])
+    .index("by_family", ["family"])
+    .index("by_state", ["ragSyncState"]),
 
   searchDocuments: defineTable({
     searchDocumentId: v.string(),
@@ -364,6 +635,14 @@ export default defineSchema({
     summary: v.optional(v.string()),
     searchText: v.string(),
     searchTextHash: v.string(),
+    lexicalText: v.optional(v.string()),
+    embeddingText: v.optional(v.string()),
+    embeddingTextHash: v.optional(v.string()),
+    embeddingEligible: v.optional(v.boolean()),
+    embeddingSkipReason: v.optional(v.string()),
+    embeddingScopeId: v.optional(v.string()),
+    embeddingPolicyVersion: v.optional(v.string()),
+    embeddingCacheKey: v.optional(v.string()),
     sourcePath: v.optional(v.string()),
     sourceRef: v.optional(v.any()),
     occurredAt: v.optional(v.number()),
@@ -376,6 +655,8 @@ export default defineSchema({
     ragSyncState: v.optional(ragSyncState),
     ragSyncedAt: v.optional(v.number()),
     ragError: v.optional(v.string()),
+    importJobId: v.optional(v.string()),
+    importChunkId: v.optional(v.string()),
     sourceUpdatedAt: v.number(),
     createdAt: v.number(),
     updatedAt: v.number(),
@@ -383,6 +664,11 @@ export default defineSchema({
     .index("by_searchDocumentId", ["searchDocumentId"])
     .index("by_sourceTable_and_sourceId", ["sourceTable", "sourceId"])
     .index("by_project", ["canonicalProjectIdentityKey", "updatedAt"])
+    .index("by_occurredAt", ["occurredAt"])
+    .index("by_project_occurredAt", ["canonicalProjectIdentityKey", "occurredAt"])
+    .index("by_importJobId", ["importJobId", "updatedAt"])
+    .index("by_ragSyncState", ["ragSyncState", "updatedAt"])
+    .index("by_project_ragSyncState", ["canonicalProjectIdentityKey", "ragSyncState", "updatedAt"])
     .searchIndex("search_text", {
       searchField: "searchText",
       filterFields: [

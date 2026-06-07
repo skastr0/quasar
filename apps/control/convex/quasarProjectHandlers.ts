@@ -1,20 +1,21 @@
 import type { Doc } from "./_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "./_generated/server";
-import { serverEmbeddingsConfigured } from "./quasarRag";
-import {
-  scheduleSearchDocumentRagSync,
-  searchDocumentRagContentHash,
-  upsertSearchDocument,
-} from "./quasarSearchDocuments";
+import type {
+  MachineIdentityBoundary,
+  ProjectResolutionBoundary,
+  ProviderSchema,
+} from "./quasarDomainSchemas";
+import { updateEmbeddingReadinessAggregates } from "./quasarEmbeddingReadiness";
+import { upsertSearchDocument } from "./quasarSearchDocuments";
 import { compactSearchText } from "./quasarText";
 import { canonicalFilter } from "./quasarValues";
 
 export const ensureMachine = async (
   ctx: MutationCtx,
-  machine: Record<string, unknown>,
+  machine: MachineIdentityBoundary,
 ) => {
   const now = Date.now();
-  const machineId = String(machine.machineId ?? "");
+  const machineId = machine.machineId;
   const existing = await ctx.db
     .query("machines")
     .withIndex("by_machineId", (q) => q.eq("machineId", machineId))
@@ -32,19 +33,19 @@ export const ensureMachine = async (
 
 export const ensureAgent = async (
   ctx: MutationCtx,
-  providerValue: string,
+  providerValue: ProviderSchema,
   agentName: string,
 ) => {
   const now = Date.now();
   const existing = await ctx.db
     .query("agentDefinitions")
     .withIndex("by_provider_and_agentName", (q) =>
-      q.eq("provider", providerValue as never).eq("agentName", agentName),
+      q.eq("provider", providerValue).eq("agentName", agentName),
     )
     .unique();
   if (existing === null) {
     await ctx.db.insert("agentDefinitions", {
-      provider: providerValue as never,
+      provider: providerValue,
       agentName,
       displayName: agentName,
       createdAt: now,
@@ -57,7 +58,7 @@ export const ensureAgent = async (
 
 export const upsertProjectIdentity = async (
   ctx: MutationCtx,
-  project: Record<string, unknown>,
+  project: ProjectResolutionBoundary,
 ) => {
   const now = Date.now();
   const key = String(project.projectIdentityKey ?? "");
@@ -77,7 +78,7 @@ const findProjectIdentity = async (ctx: MutationCtx, key: string) =>
     .unique();
 
 const projectIdentityPatch = (
-  project: Record<string, unknown>,
+  project: ProjectResolutionBoundary,
   key: string,
   canonicalProjectIdentityKey: string,
   now: number,
@@ -85,19 +86,19 @@ const projectIdentityPatch = (
   projectIdentityKey: key,
   canonicalProjectIdentityKey,
   displayName: String(project.displayName ?? key),
-  confidence: project.confidence as never,
+  confidence: project.confidence,
   rawPath: stringValue(project.rawPath),
   normalizedPath: stringValue(project.normalizedPath),
   gitRemote: stringValue(project.gitRemote),
   gitRemoteNormalized: stringValue(project.gitRemoteNormalized),
   packageName: stringValue(project.packageName),
-  signals: Array.isArray(project.signals) ? project.signals : [],
+  signals: [...project.signals],
   updatedAt: now,
 });
 
 const upsertProjectSearchDocument = async (
   ctx: MutationCtx,
-  project: Record<string, unknown>,
+  project: ProjectResolutionBoundary,
   patch: ReturnType<typeof projectIdentityPatch>,
   key: string,
   canonicalProjectIdentityKey: string,
@@ -186,10 +187,15 @@ const repointGraphRows = async (
   targetCanonical: string,
 ) => {
   for (const tableName of ["sessions", "sessionEvents", "toolCalls"] as const) {
-    const rows = await ctx.db.query(tableName).collect();
-    for (const row of rows) {
-      if (rowMatchesProject(row, sourceProjectIdentityKey)) {
-        await ctx.db.patch(row._id, { canonicalProjectIdentityKey: targetCanonical });
+    for (const key of [sourceProjectIdentityKey, targetCanonical]) {
+      const rows = await ctx.db
+        .query(tableName)
+        .withIndex("by_project", (q) => q.eq("canonicalProjectIdentityKey", key))
+        .take(PROJECT_ALIAS_REPOINT_LIMIT);
+      for (const row of rows) {
+        if (rowMatchesProject(row, sourceProjectIdentityKey)) {
+          await ctx.db.patch(row._id, { canonicalProjectIdentityKey: targetCanonical });
+        }
       }
     }
   }
@@ -201,21 +207,29 @@ const repointSearchRows = async (
   targetCanonical: string,
   now: number,
 ) => {
-  const rows = await ctx.db.query("searchDocuments").collect();
-  for (const row of rows) {
-    if (!rowMatchesProject(row, sourceProjectIdentityKey)) continue;
-    const nextContentHash = searchDocumentRagContentHash({
-      ...row,
-      canonicalProjectIdentityKey: targetCanonical,
-    });
-    await ctx.db.patch(row._id, {
-      canonicalProjectIdentityKey: targetCanonical,
-      activeProject: canonicalFilter(targetCanonical),
-      ragContentHash: serverEmbeddingsConfigured() ? nextContentHash : undefined,
-      ragSyncState: serverEmbeddingsConfigured() ? "pending" : "skipped",
-      updatedAt: now,
-    });
-    await scheduleSearchDocumentRagSync(ctx, row._id, nextContentHash);
+  for (const key of [sourceProjectIdentityKey, targetCanonical]) {
+    const rows = await ctx.db
+      .query("searchDocuments")
+      .withIndex("by_project", (q) => q.eq("canonicalProjectIdentityKey", key))
+      .take(PROJECT_ALIAS_REPOINT_LIMIT);
+    for (const row of rows) {
+      if (!rowMatchesProject(row, sourceProjectIdentityKey)) continue;
+      const patch = {
+        canonicalProjectIdentityKey: targetCanonical,
+        activeProject: canonicalFilter(targetCanonical),
+        ragEntryId: undefined,
+        ragContentHash: undefined,
+        ragSyncState: "skipped",
+        ragSyncedAt: undefined,
+        embeddingScopeId: undefined,
+        embeddingCacheKey: undefined,
+        embeddingSkipReason: "project_alias_rebuild_required",
+        updatedAt: now,
+      } as const;
+      const next = { ...row, ...patch };
+      await ctx.db.patch(row._id, patch);
+      await updateEmbeddingReadinessAggregates(ctx, row, next);
+    }
   }
 };
 
@@ -226,28 +240,47 @@ const rowMatchesProject = (
   row.projectIdentityKey === sourceProjectIdentityKey ||
   row.canonicalProjectIdentityKey === sourceProjectIdentityKey;
 
-export const listProjectsHandler = async (ctx: QueryCtx) => {
-  const projects = await ctx.db.query("projectIdentities").collect();
-  const sessions = await ctx.db.query("sessions").collect();
-  return projects
-    .map((project) => ({
+export const listProjectsHandler = async (
+  ctx: QueryCtx,
+  args: { cursor?: string | null; limit?: number } = {},
+) => {
+  const limit = Math.min(100, Math.max(1, Math.trunc(args.limit ?? 50)));
+  const projects = await ctx.db
+    .query("projectIdentities")
+    .withIndex("by_updatedAt")
+    .order("desc")
+    .paginate({ cursor: args.cursor ?? null, numItems: limit });
+  const rows = [];
+  for (const project of projects.page) {
+    const sessions = await ctx.db
+      .query("sessions")
+      .withIndex("by_project", (q) =>
+        q.eq("canonicalProjectIdentityKey", project.canonicalProjectIdentityKey),
+      )
+      .take(1000);
+    rows.push({
       projectIdentityKey: project.projectIdentityKey,
       canonicalProjectIdentityKey: project.canonicalProjectIdentityKey,
       displayName: project.displayName,
       confidence: project.confidence,
       rawPath: project.rawPath,
       gitRemoteNormalized: project.gitRemoteNormalized,
-      sessionCount: sessions.filter(
-        (session) =>
-          session.canonicalProjectIdentityKey === project.canonicalProjectIdentityKey,
-      ).length,
+      sessionCount: sessions.length,
+      sessionCountTruncated: sessions.length >= 1000,
       updatedAt: project.updatedAt,
-    }))
-    .sort(
+    });
+  }
+  return {
+    items: rows.sort(
       (left, right) =>
         right.sessionCount - left.sessionCount || right.updatedAt - left.updatedAt,
-    );
+    ),
+    isDone: projects.isDone,
+    continueCursor: projects.continueCursor,
+  };
 };
 
 const stringValue = (value: unknown) =>
   typeof value === "string" ? value : undefined;
+
+const PROJECT_ALIAS_REPOINT_LIMIT = 500;

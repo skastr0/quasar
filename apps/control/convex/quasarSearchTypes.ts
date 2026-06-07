@@ -1,7 +1,28 @@
 import type { Doc } from "./_generated/dataModel";
+import type {
+  ProviderSchema,
+  SessionEventKindSchema,
+  SessionRoleSchema,
+} from "./quasarDomainSchemas";
 
 export type SearchDocument = Doc<"searchDocuments">;
 export type SearchDocumentInsert = Omit<SearchDocument, "_creationTime" | "_id">;
+
+export type SearchFamily =
+  | "sessions"
+  | "sessionEvents"
+  | "contentBlocks"
+  | "toolCalls"
+  | "artifacts"
+  | "projectIdentities";
+
+export type RagSyncState =
+  | "pending"
+  | "syncing"
+  | "ready"
+  | "skipped"
+  | "failed"
+  | "dead_letter";
 
 export type SearchDocumentUpsertInput = Omit<
   SearchDocumentInsert,
@@ -38,10 +59,10 @@ export type SearchArgs = {
   query: string;
   projectIdentityKey?: string;
   machineId?: string;
-  provider?: SearchDocument["provider"];
+  provider?: ProviderSchema;
   agentName?: string;
-  role?: SearchDocument["role"];
-  kind?: SearchDocument["kind"];
+  role?: SessionRoleSchema;
+  kind?: SessionEventKindSchema;
   toolName?: string;
   from?: string;
   to?: string;
@@ -55,6 +76,15 @@ export type SearchDiagnostics = {
   readonly semanticSearched: boolean;
   readonly semanticStatus?: string;
   readonly embeddingDimensions?: number;
+  readonly readiness?: {
+    readonly total: number;
+    readonly pending: number;
+    readonly syncing: number;
+    readonly ready: number;
+    readonly skipped: number;
+    readonly failed: number;
+    readonly deadLetter?: number;
+  };
 };
 
 export type SearchResult = {

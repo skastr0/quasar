@@ -1,13 +1,23 @@
 import { Effect } from "effect";
+import type { InputChunk } from "@convex-dev/rag";
 
 import { internal } from "./_generated/api";
 import type { ActionCtx } from "./_generated/server";
 import {
   QUASAR_RAG_NAMESPACE,
   embedDocumentChunksEffect,
+  QUASAR_EMBEDDING_DIMENSIONS,
+  QUASAR_EMBEDDING_MODEL_ID,
   quasarRag,
   serverEmbeddingsConfigured,
 } from "./quasarRag";
+import {
+  decodeEmbeddingChunksSync,
+} from "./quasarDomainSchemas";
+import {
+  EMBEDDING_CHUNKER_VERSION,
+  EMBEDDING_POLICY_VERSION,
+} from "./quasarSearchDocuments";
 import type { RagSyncResult, SearchDocument } from "./quasarSearchTypes";
 
 export const syncSearchDocumentRagHandler = async (
@@ -27,9 +37,82 @@ export const syncSearchDocumentRagHandler = async (
     const entryId = await addRagEntry(ctx, doc, args.expectedContentHash);
     return await completeRagSync(ctx, args.searchDocumentId, args.expectedContentHash, entryId);
   } catch (error) {
-    await markFailed(ctx, args.searchDocumentId, error);
     return { status: "failed" };
   }
+};
+
+export const drainEmbeddingOutboxHandler = async (
+  ctx: ActionCtx,
+  args: { limit?: number },
+) => {
+  const limit = Math.max(1, Math.min(50, Math.trunc(args.limit ?? 20)));
+  const leaseMs = Math.max(15 * 60_000, limit * 5 * 60_000);
+  const drain = (await ctx.runMutation(internal.quasar.acquireEmbeddingDrainInternal, {
+    now: Date.now(),
+    leaseMs,
+  })) as { drainToken: string } | null;
+  if (drain === null) return { processed: 0, skipped: "active_drain" };
+  let processed = 0;
+
+  try {
+    for (let index = 0; index < limit; index += 1) {
+      const renewal = (await ctx.runMutation(internal.quasar.renewEmbeddingDrainInternal, {
+        drainToken: drain.drainToken,
+        now: Date.now(),
+        leaseMs,
+      })) as { renewed: boolean };
+      if (!renewal.renewed) break;
+      const row = (await ctx.runMutation(internal.quasar.claimEmbeddingOutboxInternal, {
+        now: Date.now(),
+      })) as
+        | {
+            outboxKey: string;
+            searchDocumentRowId: unknown;
+            expectedContentHash: string;
+            attempts: number;
+            leaseToken: string;
+          }
+        | null;
+      if (row === null) break;
+      processed += 1;
+      try {
+        const result = await syncSearchDocumentRagHandler(ctx, {
+          searchDocumentId: row.searchDocumentRowId,
+          expectedContentHash: row.expectedContentHash,
+        });
+        await ctx.runMutation(internal.quasar.completeEmbeddingOutboxInternal, {
+          outboxKey: row.outboxKey,
+          leaseToken: row.leaseToken,
+          status: outboxStatusFor(result.status),
+          lastError: result.status === "failed" ? "embedding sync failed" : undefined,
+        });
+      } catch (error) {
+        await ctx.runMutation(internal.quasar.completeEmbeddingOutboxInternal, {
+          outboxKey: row.outboxKey,
+          leaseToken: row.leaseToken,
+          status: "failed",
+          lastError: error instanceof Error ? error.message : String(error),
+        });
+      }
+      const completionRenewal = (await ctx.runMutation(internal.quasar.renewEmbeddingDrainInternal, {
+        drainToken: drain.drainToken,
+        now: Date.now(),
+        leaseMs,
+      })) as { renewed: boolean };
+      if (!completionRenewal.renewed) break;
+    }
+  } finally {
+    await ctx.runMutation(internal.quasar.releaseEmbeddingDrainInternal, {
+      drainToken: drain.drainToken,
+    });
+  }
+
+  if (processed === limit) {
+    await ctx.scheduler.runAfter(30_000, internal.quasar.drainEmbeddingOutboxInternal, {
+      limit,
+    });
+  }
+  return { processed };
 };
 
 const markSkipped = async (
@@ -59,9 +142,7 @@ const addRagEntry = async (
   doc: SearchDocument,
   expectedContentHash: string,
 ) => {
-  const chunks = await Effect.runPromise(
-    embedDocumentChunksEffect({ title: doc.title, text: doc.searchText }),
-  );
+  const chunks = await embeddingChunksFor(ctx, doc);
   const result = await quasarRag.add(ctx, {
     namespace: QUASAR_RAG_NAMESPACE,
     key: doc.searchDocumentId,
@@ -80,6 +161,37 @@ const addRagEntry = async (
     },
   });
   return result.entryId;
+};
+
+const embeddingChunksFor = async (
+  ctx: ActionCtx,
+  doc: SearchDocument,
+) => {
+  if (doc.embeddingCacheKey !== undefined) {
+    const cached = (await ctx.runQuery(internal.quasar.fetchEmbeddingCacheInternal, {
+      embeddingCacheKey: doc.embeddingCacheKey,
+    })) as { chunks: unknown[] } | null;
+    if (cached !== null) {
+      return decodeEmbeddingChunksSync(cached.chunks, QUASAR_EMBEDDING_DIMENSIONS) as InputChunk[];
+    }
+  }
+  const text = doc.embeddingText ?? doc.searchText;
+  const chunks = await Effect.runPromise(
+    embedDocumentChunksEffect({ title: doc.title, text }),
+  );
+  if (doc.embeddingCacheKey !== undefined && doc.embeddingScopeId !== undefined) {
+    await ctx.runMutation(internal.quasar.putEmbeddingCacheInternal, {
+      embeddingCacheKey: doc.embeddingCacheKey,
+      embeddingScopeId: doc.embeddingScopeId,
+      modelId: QUASAR_EMBEDDING_MODEL_ID,
+      dimensions: QUASAR_EMBEDDING_DIMENSIONS,
+      policyVersion: doc.embeddingPolicyVersion ?? EMBEDDING_POLICY_VERSION,
+      chunkerVersion: EMBEDDING_CHUNKER_VERSION,
+      normalizedChunkHash: doc.ragContentHash ?? "",
+      chunks,
+    });
+  }
+  return chunks;
 };
 
 const completeRagSync = async (
@@ -101,9 +213,7 @@ const completeRagSync = async (
     : completion;
 };
 
-const markFailed = async (ctx: ActionCtx, id: unknown, error: unknown) =>
-  await ctx.runMutation(internal.quasar.patchSearchDocumentRagInternal, {
-    id: id as never,
-    ragSyncState: "failed",
-    ragError: error instanceof Error ? error.message : String(error),
-  });
+const outboxStatusFor = (status: RagSyncResult["status"]) =>
+  status === "ready" || status === "failed" || status === "skipped"
+    ? status
+    : "skipped";

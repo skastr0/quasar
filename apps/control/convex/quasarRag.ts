@@ -9,7 +9,7 @@ import {
   embedMany,
   wrapEmbeddingModel,
 } from "ai";
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
 
 import { components } from "./_generated/api";
 
@@ -91,12 +91,7 @@ export const embedQueryEffect = (query: string) =>
         }),
       catch: (error) => (error instanceof Error ? error : new Error(String(error))),
     });
-    if (result.embedding.length !== QUASAR_EMBEDDING_DIMENSIONS) {
-      throw new Error(
-        `Embedding returned ${result.embedding.length} dimensions; expected ${QUASAR_EMBEDDING_DIMENSIONS}.`,
-      );
-    }
-    return result.embedding;
+    return validateEmbeddingVector(result.embedding);
   });
 
 export const embedDocumentChunksEffect = (args: {
@@ -127,7 +122,17 @@ export const embedDocumentChunksEffect = (args: {
       (chunk, index): InputChunk => ({
         text: chunk,
         keywords: chunk,
-        embedding: result.embeddings[index] ?? [],
+        embedding: validateEmbeddingVector(result.embeddings[index]),
       }),
     );
   });
+
+const validateEmbeddingVector = (value: unknown) => {
+  const vector = Schema.decodeUnknownSync(Schema.Array(Schema.Number))(value);
+  if (vector.length !== QUASAR_EMBEDDING_DIMENSIONS) {
+    throw new Error(
+      `Embedding returned ${vector.length} dimensions; expected ${QUASAR_EMBEDDING_DIMENSIONS}.`,
+    );
+  }
+  return [...vector];
+};

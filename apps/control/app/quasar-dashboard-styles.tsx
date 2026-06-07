@@ -118,7 +118,36 @@ const dashboardCss = `
         background: var(--panel-2);
       }
       .shell .session-row {
-        grid-template-columns: minmax(180px, 1.2fr) 96px 140px 92px minmax(160px, 1fr) minmax(160px, 1fr) 180px 92px;
+        grid-template-columns: minmax(180px, 1.2fr) 96px 140px 92px 96px minmax(160px, 1fr) minmax(160px, 1fr) 180px 92px;
+      }
+      .shell .import-job-row {
+        display: grid;
+        grid-template-columns: 110px 120px 88px 80px 110px 110px 140px 180px 92px;
+        gap: 10px;
+        align-items: center;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 10px;
+        background: var(--panel-2);
+      }
+      .shell .chunk-row,
+      .shell .failure-row {
+        display: grid;
+        grid-template-columns: 60px 110px 110px 100px minmax(0, 1fr);
+        gap: 10px;
+        align-items: center;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 10px;
+        background: var(--panel-2);
+      }
+      .shell .failure-row {
+        grid-template-columns: 110px 180px minmax(0, 1fr);
+      }
+      .shell .job-detail {
+        display: grid;
+        gap: 12px;
+        margin: 14px 0;
       }
       .shell .tool-row {
         display: grid;
@@ -133,6 +162,21 @@ const dashboardCss = `
         display: grid;
         grid-template-columns: 140px minmax(0, 1fr);
         gap: 10px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 10px;
+        background: var(--panel-2);
+      }
+      .shell .edge-row {
+        display: grid;
+        grid-template-columns: 140px minmax(0, 1fr) minmax(0, 1fr);
+        gap: 10px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 10px;
+        background: var(--panel-2);
+      }
+      .shell .generic-row {
         border: 1px solid var(--line);
         border-radius: 6px;
         padding: 10px;
@@ -232,13 +276,17 @@ const dashboardCss = `
         .shell .session-row {
           grid-template-columns: 1fr;
         }
+        .shell .import-job-row {
+          grid-template-columns: 1fr;
+        }
         .shell .control-row,
         .shell .filter-row,
         .shell .graph-counts,
         .shell .meta-grid,
         .shell .event-row,
         .shell .tool-row,
-        .shell .artifact-row {
+        .shell .artifact-row,
+        .shell .edge-row {
 	          grid-template-columns: 1fr;
 	        }
 	      }

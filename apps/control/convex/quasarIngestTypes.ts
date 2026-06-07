@@ -1,8 +1,23 @@
+import type {
+  AdapterDiagnosticBoundary,
+  ArtifactBoundary,
+  IngestSessionBoundary,
+  MachineIdentityBoundary,
+  ProviderSchema,
+  SessionEdgeBoundary,
+  SessionEventBoundary,
+  SessionEventKindSchema,
+  SessionRoleSchema,
+  SourceRootBoundary,
+  ToolCallBoundary,
+  UsageRecordBoundary,
+} from "./quasarDomainSchemas";
+
 export type ParsedIngestBatch = {
-  machine: Record<string, unknown>;
-  sessions: Record<string, unknown>[];
-  sourceRoots: Record<string, unknown>[];
-  diagnostics: Record<string, unknown>[];
+  machine: MachineIdentityBoundary;
+  sessions: readonly IngestSessionBoundary[];
+  sourceRoots: readonly SourceRootBoundary[];
+  diagnostics: readonly AdapterDiagnosticBoundary[];
   sanitizedDiagnostics: unknown[];
   now: number;
   importRunId: string;
@@ -12,12 +27,14 @@ export type ParsedIngestBatch = {
   sessionEdgeCount: number;
   usageRecordCount: number;
   artifactCount: number;
+  importJobId?: string;
+  importChunkId?: string;
 };
 
 export type SessionPatch = {
   sessionId: string;
   nativeSessionId: string;
-  provider: never;
+  provider: ProviderSchema;
   agentName: string;
   machineId: string;
   projectIdentityKey: string;
@@ -32,6 +49,9 @@ export type SessionPatch = {
   eventCount: number;
   toolCallCount: number;
   importRunId: string;
+  importJobId?: string;
+  importChunkId?: string;
+  ingestState?: "partial" | "complete" | "failed";
   updatedAt: number;
 };
 
@@ -42,12 +62,12 @@ export type EventPatch = {
   sequence: number;
   timestamp?: string;
   machineId: string;
-  provider: never;
+  provider: ProviderSchema;
   agentName: string;
   projectIdentityKey: string;
   canonicalProjectIdentityKey: string;
-  role: never;
-  kind: never;
+  role: SessionRoleSchema;
+  kind: SessionEventKindSchema;
   contentText?: string;
   content: unknown;
   contentBlocks?: unknown[];
@@ -56,23 +76,25 @@ export type EventPatch = {
   rawReference: unknown;
   raw: undefined;
   importRunId: string;
+  importJobId?: string;
+  importChunkId?: string;
   updatedAt: number;
 };
 
 export type SessionIngestState = {
   batch: ParsedIngestBatch;
-  sessionValue: Record<string, unknown>;
-  project: Record<string, unknown>;
+  sessionValue: IngestSessionBoundary;
+  project: IngestSessionBoundary["projectIdentity"];
   canonicalProjectIdentityKey: string;
   sessionId: string;
-  providerValue: string;
+  providerValue: ProviderSchema;
   agentName: string;
-  events: Record<string, unknown>[];
-  declaredToolCalls: Record<string, unknown>[];
-  contentBlocksByEvent: Map<string, Record<string, unknown>[]>;
-  sessionEdges: Record<string, unknown>[];
-  usageRecords: Record<string, unknown>[];
-  artifacts: Record<string, unknown>[];
+  events: SessionEventBoundary[];
+  declaredToolCalls: ToolCallBoundary[];
+  contentBlocksByEvent: Map<string, SessionEventBoundary["contentBlocks"]>;
+  sessionEdges: SessionEdgeBoundary[];
+  usageRecords: UsageRecordBoundary[];
+  artifacts: ArtifactBoundary[];
   sessionPatch: SessionPatch;
   keepEventIds: Set<string>;
   keepToolCallIds: Set<string>;

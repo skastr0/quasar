@@ -37,11 +37,17 @@ describe("CLI command graph", () => {
     expect(result.status, result.stderr).toBe(0);
     const envelope = JSON.parse(result.stdout) as {
       ok: true;
-      data: { dryRun: true; summary: { eventCount: number } };
+      data: {
+        dryRun: true;
+        summary: { eventCount: number };
+        sourceSafetyReport: { sourceReadMode: string; sourceMutations: unknown[] };
+      };
     };
     expect(envelope.ok).toBe(true);
     expect(envelope.data.dryRun).toBe(true);
     expect(envelope.data.summary.eventCount).toBe(3);
+    expect(envelope.data.sourceSafetyReport.sourceReadMode).toBe("read_only");
+    expect(envelope.data.sourceSafetyReport.sourceMutations).toHaveLength(0);
   }, 20_000);
 
   test("chunks large ingest sessions with final expected-id cleanup metadata", async () => {
@@ -99,6 +105,29 @@ describe("CLI command graph", () => {
     expect(chunks.at(-1)?.sessions[0]?.events.length).toBeGreaterThan(0);
     expect((chunks.at(-1)?.sessions[0] as ChunkMetadata | undefined)?.partialSession).toBeUndefined();
     expect((chunks.at(-1)?.sessions[0] as ChunkMetadata | undefined)?.expectedEventIds).toHaveLength(55);
+  }, 20_000);
+
+  test("chunks a synthetic large corpus without dropping expected ids", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-cli-pi-"));
+    writePiFixture(root, 1_000);
+
+    const batch = sanitizeIngestBatchForTransport(
+      await buildIngestBatch({
+        providers: ["pi"],
+        roots: { pi: root },
+        machine: { machineId: "machine:test", hostname: "test", platform: "test" },
+      }),
+    );
+    const chunks = chunkIngestBatch(batch, {
+      maxEventsPerChunk: 50,
+      maxOperationsPerChunk: 120,
+    });
+
+    expect(chunks.length).toBeGreaterThan(10);
+    expect((chunks.at(-1)?.sessions[0] as ChunkMetadata | undefined)?.expectedEventIds).toHaveLength(1_000);
+    expect(
+      chunks.every((chunk) => (chunk.sessions[0]?.events.length ?? 0) <= 50),
+    ).toBe(true);
   }, 20_000);
 });
 

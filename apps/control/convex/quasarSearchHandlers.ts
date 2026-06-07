@@ -3,6 +3,7 @@ import { Effect } from "effect";
 
 import { internal } from "./_generated/api";
 import type { ActionCtx, QueryCtx } from "./_generated/server";
+import { embeddingReadinessForSearchFilters } from "./quasarEmbeddingReadiness";
 import {
   QUASAR_EMBEDDING_DIMENSIONS,
   QUASAR_RAG_NAMESPACE,
@@ -35,6 +36,7 @@ export const textSearchHandler = async (
   if (queryText.length === 0) throw new Error("Search query is required.");
   const limit = boundedLimit(args.limit);
   const rows = await textSearchRows(ctx, args, queryText, limit);
+  const readiness = await embeddingReadinessForSearchFilters(ctx, args);
   const matches = rows
     .filter((doc) => matchesFilters(doc, args))
     .slice(0, limit)
@@ -44,7 +46,11 @@ export const textSearchHandler = async (
     query: queryText,
     limit,
     matches,
-    diagnostics: { textSearched: true, semanticSearched: false },
+    diagnostics: {
+      textSearched: true,
+      semanticSearched: false,
+      readiness,
+    },
   };
 };
 
@@ -101,8 +107,23 @@ export const semanticSearchHandler = async (
 ): Promise<SearchResult> => {
   const queryText = args.query.trim();
   const limit = boundedLimit(args.limit);
+  const readiness = (await ctx.runQuery(
+    internal.quasar.embeddingReadinessInternal,
+    {
+      projectIdentityKey: args.projectIdentityKey,
+      machineId: args.machineId,
+      provider: args.provider,
+      agentName: args.agentName,
+      role: args.role,
+      kind: args.kind,
+      toolName: args.toolName,
+      from: args.from,
+      to: args.to,
+      limit: args.limit,
+    },
+  )) as SearchResult["diagnostics"]["readiness"];
   if (!serverEmbeddingsConfigured()) {
-    return semanticUnavailable(queryText, limit);
+    return semanticUnavailable(queryText, limit, readiness);
   }
   const embedding = await Effect.runPromise(embedQueryEffect(queryText));
   const result = await quasarRag.search(ctx, {
@@ -125,10 +146,14 @@ export const semanticSearchHandler = async (
     .map((doc, index) =>
       baseMatch(doc, scores.get(doc.ragEntryId ?? "") ?? 1 / (RRF_K + index + 1)),
     );
-  return semanticReady(queryText, limit, matches);
+  return semanticReady(queryText, limit, matches, readiness);
 };
 
-const semanticUnavailable = (queryText: string, limit: number): SearchResult => ({
+const semanticUnavailable = (
+  queryText: string,
+  limit: number,
+  readiness: SearchResult["diagnostics"]["readiness"],
+): SearchResult => ({
   mode: "semantic",
   query: queryText,
   limit,
@@ -138,6 +163,7 @@ const semanticUnavailable = (queryText: string, limit: number): SearchResult => 
     semanticSearched: false,
     semanticStatus: "embedding_provider_unconfigured",
     embeddingDimensions: QUASAR_EMBEDDING_DIMENSIONS,
+    readiness,
   },
 });
 
@@ -145,6 +171,7 @@ const semanticReady = (
   queryText: string,
   limit: number,
   matches: SearchMatch[],
+  readiness: SearchResult["diagnostics"]["readiness"],
 ): SearchResult => ({
   mode: "semantic",
   query: queryText,
@@ -155,6 +182,7 @@ const semanticReady = (
     semanticSearched: true,
     semanticStatus: "ready",
     embeddingDimensions: QUASAR_EMBEDDING_DIMENSIONS,
+    readiness,
   },
 });
 
@@ -213,6 +241,7 @@ export const fusionSearchHandler = async (
       semanticSearched: semantic.diagnostics.semanticSearched,
       semanticStatus: semantic.diagnostics.semanticStatus,
       embeddingDimensions: semantic.diagnostics.embeddingDimensions,
+      readiness: semantic.diagnostics.readiness ?? text.diagnostics.readiness,
     },
   };
 };

@@ -299,6 +299,158 @@ export const IngestBatch = Schema.Struct({
 });
 export type IngestBatch = typeof IngestBatch.Type;
 
+export const ImportJobStatus = Schema.Literal(
+  "queued",
+  "running",
+  "succeeded",
+  "partial_failure",
+  "failed",
+);
+export type ImportJobStatus = typeof ImportJobStatus.Type;
+
+export const ImportChunkStatus = Schema.Literal(
+  "pending",
+  "running",
+  "succeeded",
+  "failed",
+  "dead_letter",
+);
+export type ImportChunkStatus = typeof ImportChunkStatus.Type;
+
+export const IngestSessionManifest = Schema.Struct({
+  id: Schema.String,
+  nativeSessionId: Schema.String,
+  provider: Provider,
+  machineId: Schema.String,
+  projectIdentityKey: Schema.String,
+  sourceRoot: Schema.String,
+  sourcePath: Schema.String,
+  eventCount: Schema.Number,
+  toolCallCount: Schema.Number,
+  contentBlockCount: Schema.Number,
+  sessionEdgeCount: Schema.Number,
+  usageRecordCount: Schema.Number,
+  artifactCount: Schema.Number,
+});
+export type IngestSessionManifest = typeof IngestSessionManifest.Type;
+
+export const IngestManifest = Schema.Struct({
+  protocolVersion: Schema.Literal("quasar.ingest-manifest/v1"),
+  machine: MachineIdentity,
+  sourceRoots: Schema.Array(SourceRoot),
+  sessions: Schema.Array(IngestSessionManifest),
+  diagnostics: Schema.Array(AdapterDiagnostic),
+  generatedAt: Schema.String,
+  sessionCount: Schema.Number,
+  eventCount: Schema.Number,
+  toolCallCount: Schema.Number,
+  contentBlockCount: Schema.Number,
+  sessionEdgeCount: Schema.Number,
+  usageRecordCount: Schema.Number,
+  artifactCount: Schema.Number,
+});
+export type IngestManifest = typeof IngestManifest.Type;
+
+export class ImportJobStartRequest extends Schema.Class<ImportJobStartRequest>(
+  "ImportJobStartRequest",
+)({
+  batch: Schema.optional(IngestBatch),
+  manifest: Schema.optional(IngestManifest),
+  idempotencyKey: Schema.optional(Schema.String),
+  expectedChunkCount: Schema.optional(Schema.Number),
+}) {}
+
+export class ImportJobStartResponse extends Schema.Class<ImportJobStartResponse>(
+  "ImportJobStartResponse",
+)({
+  importJobId: Schema.String,
+  status: ImportJobStatus,
+  chunkCount: Schema.Number,
+  expectedChunkCount: Schema.optional(Schema.Number),
+}) {}
+
+export class ImportJobChunkRequest extends Schema.Class<ImportJobChunkRequest>(
+  "ImportJobChunkRequest",
+)({
+  importJobId: Schema.String,
+  batch: IngestBatch,
+  chunkId: Schema.optional(Schema.String),
+  idempotencyKey: Schema.optional(Schema.String),
+  sequence: Schema.optional(Schema.Number),
+  expectedChunkCount: Schema.optional(Schema.Number),
+  completeJob: Schema.optional(Schema.Boolean),
+}) {}
+
+export class ImportJobChunkResponse extends Schema.Class<ImportJobChunkResponse>(
+  "ImportJobChunkResponse",
+)({
+  importJobId: Schema.String,
+  chunkId: Schema.String,
+  status: ImportChunkStatus,
+  jobStatus: ImportJobStatus,
+  enqueued: Schema.optional(Schema.Boolean),
+}) {}
+
+export const EmbeddingReadinessCounts = Schema.Struct({
+  total: Schema.Number,
+  pending: Schema.Number,
+  syncing: Schema.Number,
+  ready: Schema.Number,
+  skipped: Schema.Number,
+  failed: Schema.Number,
+  deadLetter: Schema.optional(Schema.Number),
+});
+export type EmbeddingReadinessCounts = typeof EmbeddingReadinessCounts.Type;
+
+export const ImportJobStatusPayload = Schema.Struct({
+  job: Schema.Unknown,
+  chunks: Schema.optional(Schema.Array(Schema.Unknown)),
+  failures: Schema.optional(Schema.Array(Schema.Unknown)),
+  readiness: EmbeddingReadinessCounts,
+  pagination: Schema.optional(Schema.Unknown),
+});
+export type ImportJobStatusPayload = typeof ImportJobStatusPayload.Type;
+
+export class ImportJobStatusResponse extends Schema.Class<ImportJobStatusResponse>(
+  "ImportJobStatusResponse",
+)({
+  job: Schema.Unknown,
+  chunks: Schema.optional(Schema.Array(Schema.Unknown)),
+  failures: Schema.optional(Schema.Array(Schema.Unknown)),
+  readiness: EmbeddingReadinessCounts,
+  pagination: Schema.optional(Schema.Unknown),
+}) {}
+
+export const SourceManifestEntry = Schema.Struct({
+  path: Schema.String,
+  role: Schema.Literal("source_root", "session_source"),
+  exists: Schema.Boolean,
+  kind: Schema.Literal("file", "directory", "missing", "other"),
+  size: Schema.optional(Schema.Number),
+  mtimeMs: Schema.optional(Schema.Number),
+  contentHash: Schema.optional(Schema.String),
+});
+export type SourceManifestEntry = typeof SourceManifestEntry.Type;
+
+export const SourceManifestChange = Schema.Struct({
+  path: Schema.String,
+  role: Schema.Literal("source_root", "session_source"),
+  before: Schema.optional(SourceManifestEntry),
+  after: Schema.optional(SourceManifestEntry),
+  changed: Schema.Boolean,
+});
+export type SourceManifestChange = typeof SourceManifestChange.Type;
+
+export const SourceSafetyReport = Schema.Struct({
+  sourceReadMode: Schema.Literal("read_only"),
+  quasarStateWrites: Schema.Boolean,
+  before: Schema.Array(SourceManifestEntry),
+  after: Schema.Array(SourceManifestEntry),
+  sourceMutations: Schema.Array(SourceManifestChange),
+  checkedAt: Schema.String,
+});
+export type SourceSafetyReport = typeof SourceSafetyReport.Type;
+
 export const SearchMode = Schema.Literal("text", "semantic", "fusion");
 export type SearchMode = typeof SearchMode.Type;
 

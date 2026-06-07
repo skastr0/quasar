@@ -1,4 +1,6 @@
 import type {
+  ImportJobSummary,
+  ImportJobDetail,
   ImportRunSummary,
   ProjectSummary,
   SearchMode,
@@ -245,10 +247,92 @@ export function ProjectsPanel({ projects }: { projects: ProjectSummary[] }) {
   );
 }
 
-export function ImportsPanel({ runs }: { runs: ImportRunSummary[] }) {
+export function ImportsPanel({
+  jobs,
+  runs,
+  selectedJob,
+  busy,
+  onSelectJob,
+  onLoadChunks,
+  onLoadFailures,
+}: {
+  jobs: ImportJobSummary[];
+  runs: ImportRunSummary[];
+  selectedJob: ImportJobDetail | null;
+  busy: boolean;
+  onSelectJob: (importJobId: string) => void;
+  onLoadChunks: () => void;
+  onLoadFailures: () => void;
+}) {
   return (
-    <div className="panel">
-      <h2>Imports</h2>
+    <div className="panel wide">
+      <h2>Import Jobs</h2>
+      <div className="list">
+        {jobs.map((item) => {
+          const expected = item.job.expectedChunkCount ?? item.job.chunkCount;
+          return (
+            <div key={item.job.importJobId} className="import-job-row">
+              <strong>{item.job.status}</strong>
+              <span>
+                {item.job.succeededChunkCount}/{expected} chunks
+              </span>
+              <span>{item.job.failedChunkCount} failed</span>
+              <span>{item.job.sourceRootCount} roots</span>
+              <span>{item.job.sessionCount} sessions</span>
+              <span>{item.job.eventCount} events</span>
+              <span>{item.readiness.ready}/{item.readiness.total} embedded</span>
+              <small>{new Date(item.job.updatedAt).toLocaleString()}</small>
+              <button type="button" onClick={() => onSelectJob(item.job.importJobId)}>
+                Open
+              </button>
+            </div>
+          );
+        })}
+      </div>
+      {selectedJob === null ? null : (
+        <div className="job-detail">
+          <h2>Job Detail</h2>
+          <div className="graph-counts">
+            <span>{selectedJob.chunks.length} chunks shown</span>
+            <span>{selectedJob.failures.length} failures shown</span>
+            <span>{selectedJob.readiness.pending} pending</span>
+            <span>{selectedJob.readiness.failed} failed</span>
+            <span>{selectedJob.readiness.deadLetter ?? 0} dead-letter</span>
+            <span>{selectedJob.readiness.skipped} skipped</span>
+          </div>
+          <div className="table">
+            {selectedJob.chunks.map((chunk) => (
+              <div key={chunk.chunkId} className="chunk-row">
+                <span>{chunk.sequence}</span>
+                <strong>{chunk.status}</strong>
+                <span>{chunk.attempts} attempts</span>
+                <span>{chunk.eventCount} events</span>
+                <small>{chunk.error ?? chunk.chunkId}</small>
+              </div>
+            ))}
+          </div>
+          {selectedJob.pagination?.chunks?.isDone === false ? (
+            <button type="button" onClick={onLoadChunks} disabled={busy}>
+              Load More Chunks
+            </button>
+          ) : null}
+          <div className="table">
+            {selectedJob.failures.map((failure) => (
+              <div key={failure.failureId} className="failure-row">
+                <span>{failure.retryable ? "retryable" : "terminal"}</span>
+                <span>{failure.chunkId ?? "job"}</span>
+                <small>{failure.error}</small>
+              </div>
+            ))}
+          </div>
+          {selectedJob.pagination?.failures?.isDone === false ? (
+            <button type="button" onClick={onLoadFailures} disabled={busy}>
+              Load More Failures
+            </button>
+          ) : null}
+        </div>
+      )}
+      <h2>Legacy Runs</h2>
       <div className="list">
         {runs.map((run) => (
           <div key={run.importRunId} className="row">
@@ -268,23 +352,28 @@ type RecentSessionsPanelProps = {
   sessions: SessionSummary[];
   sessionBusy: boolean;
   onReadSession: (sessionId: string) => void;
+  onLoadMore: () => void;
+  hasMore: boolean;
 };
 
 export function RecentSessionsPanel({
   sessions,
   sessionBusy,
   onReadSession,
+  onLoadMore,
+  hasMore,
 }: RecentSessionsPanelProps) {
   return (
     <div className="panel wide">
       <h2>Recent Sessions</h2>
       <div className="table">
-        {sessions.slice(0, 20).map((session) => (
+        {sessions.map((session) => (
           <div key={session.id} className="session-row">
             <span>{session.title ?? session.nativeSessionId ?? session.id}</span>
             <span>{session.provider}</span>
             <span>{session.agentName}</span>
             <span>{session.eventCount} events</span>
+            <span>{session.ingestState ?? "unknown"}</span>
             <span>{session.projectIdentityKey}</span>
             <span>{session.machineId}</span>
             <small>{new Date(session.updatedAt).toLocaleString()}</small>
@@ -294,11 +383,34 @@ export function RecentSessionsPanel({
           </div>
         ))}
       </div>
+      {hasMore ? (
+        <button type="button" onClick={onLoadMore} disabled={sessionBusy}>
+          Load More
+        </button>
+      ) : null}
     </div>
   );
 }
 
-export function SessionDetailPanel({ selectedSession }: { selectedSession: SessionDetail | null }) {
+export function SessionDetailPanel({
+  selectedSession,
+  sessionBusy,
+  onLoadEvents,
+  onLoadContentBlocks,
+  onLoadEdges,
+  onLoadToolCalls,
+  onLoadUsage,
+  onLoadArtifacts,
+}: {
+  selectedSession: SessionDetail | null;
+  sessionBusy: boolean;
+  onLoadEvents: () => void;
+  onLoadContentBlocks: () => void;
+  onLoadEdges: () => void;
+  onLoadToolCalls: () => void;
+  onLoadUsage: () => void;
+  onLoadArtifacts: () => void;
+}) {
   return (
     <div className="panel wide">
       <h2>Session Detail</h2>
@@ -331,6 +443,39 @@ export function SessionDetailPanel({ selectedSession }: { selectedSession: Sessi
               </div>
             ))}
           </div>
+          {selectedSession.pagination?.events?.isDone === false ? (
+            <button type="button" onClick={onLoadEvents} disabled={sessionBusy}>
+              Load More Events
+            </button>
+          ) : null}
+          <h2>Content Blocks</h2>
+          <div className="table">
+            {(selectedSession.contentBlocks ?? []).map((block, index) => (
+              <div key={`block:${index}`} className="generic-row">
+                <small>{compactValue(block)}</small>
+              </div>
+            ))}
+          </div>
+          {selectedSession.pagination?.contentBlocks?.isDone === false ? (
+            <button type="button" onClick={onLoadContentBlocks} disabled={sessionBusy}>
+              Load More Blocks
+            </button>
+          ) : null}
+          <h2>Session Edges</h2>
+          <div className="table">
+            {(selectedSession.sessionEdges ?? []).map((edge) => (
+              <div key={edge.edgeId} className="edge-row">
+                <span>{edge.kind}</span>
+                <span>{edge.fromEventId ?? ""}</span>
+                <span>{edge.toEventId ?? ""}</span>
+              </div>
+            ))}
+          </div>
+          {selectedSession.pagination?.sessionEdges?.isDone === false ? (
+            <button type="button" onClick={onLoadEdges} disabled={sessionBusy}>
+              Load More Edges
+            </button>
+          ) : null}
           <h2>Artifacts</h2>
           <div className="table">
             {(selectedSession.artifacts ?? []).map((artifact) => (
@@ -340,6 +485,11 @@ export function SessionDetailPanel({ selectedSession }: { selectedSession: Sessi
               </div>
             ))}
           </div>
+          {selectedSession.pagination?.artifacts?.isDone === false ? (
+            <button type="button" onClick={onLoadArtifacts} disabled={sessionBusy}>
+              Load More Artifacts
+            </button>
+          ) : null}
           <h2>Tool Calls</h2>
           <div className="table">
             {selectedSession.toolCalls.map((tool) => (
@@ -350,6 +500,24 @@ export function SessionDetailPanel({ selectedSession }: { selectedSession: Sessi
               </div>
             ))}
           </div>
+          {selectedSession.pagination?.toolCalls?.isDone === false ? (
+            <button type="button" onClick={onLoadToolCalls} disabled={sessionBusy}>
+              Load More Tool Calls
+            </button>
+          ) : null}
+          <h2>Usage Records</h2>
+          <div className="table">
+            {(selectedSession.usageRecords ?? []).map((record, index) => (
+              <div key={`usage:${index}`} className="generic-row">
+                <small>{compactValue(record)}</small>
+              </div>
+            ))}
+          </div>
+          {selectedSession.pagination?.usageRecords?.isDone === false ? (
+            <button type="button" onClick={onLoadUsage} disabled={sessionBusy}>
+              Load More Usage
+            </button>
+          ) : null}
         </div>
       )}
     </div>
@@ -360,3 +528,13 @@ const unique = (values: string[]) =>
   [...new Set(values.filter((value) => value.length > 0))].sort((left, right) =>
     left.localeCompare(right),
   );
+
+const compactValue = (value: unknown) => {
+  try {
+    const text = typeof value === "string" ? value : JSON.stringify(value);
+    if (text === undefined) return String(value);
+    return text.length > 320 ? `${text.slice(0, 320)}...` : text;
+  } catch {
+    return String(value);
+  }
+};

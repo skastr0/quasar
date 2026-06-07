@@ -13,6 +13,13 @@ import {
   cleanupMissingGraphRows,
   upsertSessionGraphRows,
 } from "./quasarIngestGraph";
+import {
+  decodeBoundarySync,
+  IngestBatchBoundary,
+  type IngestSessionBoundary,
+  type SessionEventBoundary,
+  type ToolCallBoundary,
+} from "./quasarDomainSchemas";
 import { ensureAgent, ensureMachine, upsertProjectIdentity } from "./quasarProjectHandlers";
 import { upsertSearchDocument } from "./quasarSearchDocuments";
 import type { SearchDocumentUpsertInput } from "./quasarSearchTypes";
@@ -22,9 +29,12 @@ import { dateMillis } from "./quasarValues";
 
 export const ingestBatchHandler = async (
   ctx: MutationCtx,
-  args: { batch: unknown },
+  args: { batch: unknown; importJobId?: string; importChunkId?: string },
 ) => {
-  const batch = parseIngestBatch(args.batch);
+  const batch = parseIngestBatch(args.batch, {
+    importJobId: args.importJobId,
+    importChunkId: args.importChunkId,
+  });
   await ensureMachine(ctx, batch.machine);
   await upsertImportRun(ctx, batch);
   await upsertSourceRoots(ctx, batch);
@@ -36,12 +46,15 @@ export const ingestBatchHandler = async (
   return importRunSummary(batch);
 };
 
-const parseIngestBatch = (value: unknown): ParsedIngestBatch => {
-  const batch = value as Record<string, unknown>;
-  const machine = batch.machine as Record<string, unknown>;
-  const sessions = recordArray(batch.sessions);
-  const sourceRoots = recordArray(batch.sourceRoots);
-  const diagnostics = recordArray(batch.diagnostics);
+const parseIngestBatch = (
+  value: unknown,
+  metadata: { importJobId?: string; importChunkId?: string } = {},
+): ParsedIngestBatch => {
+  const batch = decodeBoundarySync(IngestBatchBoundary, value, "ingest batch");
+  const machine = batch.machine;
+  const sessions = batch.sessions;
+  const sourceRoots = batch.sourceRoots;
+  const diagnostics = batch.diagnostics;
   const now = Date.now();
   return {
     machine,
@@ -57,34 +70,27 @@ const parseIngestBatch = (value: unknown): ParsedIngestBatch => {
     sessionEdgeCount: sumNestedArrayLengths(sessions, "sessionEdges"),
     usageRecordCount: sumNestedArrayLengths(sessions, "usageRecords"),
     artifactCount: sumNestedArrayLengths(sessions, "artifacts"),
+    importJobId: metadata.importJobId,
+    importChunkId: metadata.importChunkId,
   };
 };
 
 const importRunId = (
-  machine: Record<string, unknown>,
+  machine: ParsedIngestBatch["machine"],
   generatedAt: unknown,
-  sessions: Record<string, unknown>[],
+  sessions: readonly IngestSessionBoundary[],
 ) => `import:${wideHash(JSON.stringify([machine, generatedAt, sessions.map((s) => s.id)]))}`;
 
-const recordArray = (value: unknown) =>
-  Array.isArray(value) ? (value as Record<string, unknown>[]) : [];
+const sumNestedArrayLengths = (
+  records: readonly IngestSessionBoundary[],
+  key: "events" | "toolCalls" | "sessionEdges" | "usageRecords" | "artifacts",
+) => records.reduce((sum, record) => sum + record[key].length, 0);
 
-const sumNestedArrayLengths = (records: Record<string, unknown>[], key: string) =>
-  records.reduce(
-    (sum, record) => sum + (Array.isArray(record[key]) ? recordArray(record[key]).length : 0),
-    0,
-  );
-
-const sumEventContentBlocks = (sessions: Record<string, unknown>[]) =>
+const sumEventContentBlocks = (sessions: readonly IngestSessionBoundary[]) =>
   sessions.reduce(
     (sum, session) =>
       sum +
-      recordArray(session.events).reduce(
-        (eventSum, event) =>
-          eventSum +
-          (Array.isArray(event.contentBlocks) ? recordArray(event.contentBlocks).length : 0),
-        0,
-      ),
+      session.events.reduce((eventSum, event) => eventSum + event.contentBlocks.length, 0),
     0,
   );
 
@@ -107,6 +113,7 @@ const upsertImportRun = async (ctx: MutationCtx, batch: ParsedIngestBatch) => {
     usageRecordCount: batch.usageRecordCount,
     artifactCount: batch.artifactCount,
     diagnostics: batch.sanitizedDiagnostics,
+    importJobId: batch.importJobId,
     updatedAt: batch.now,
   };
   if (existing === null) {
@@ -127,17 +134,17 @@ const upsertSourceRoots = async (ctx: MutationCtx, batch: ParsedIngestBatch) => 
       .query("sourceRoots")
       .withIndex("by_machine_provider_root", (q) =>
         q
-          .eq("machineId", String(root.machineId ?? ""))
-          .eq("provider", root.provider as never)
-          .eq("rootPath", String(root.rootPath ?? "")),
+          .eq("machineId", root.machineId)
+          .eq("provider", root.provider)
+          .eq("rootPath", root.rootPath),
       )
       .unique();
     const patch = {
-      provider: root.provider as never,
-      adapterId: String(root.adapterId ?? ""),
-      rootPath: String(root.rootPath ?? ""),
-      machineId: String(root.machineId ?? ""),
-      discoveredAt: String(root.discoveredAt ?? ""),
+      provider: root.provider,
+      adapterId: root.adapterId,
+      rootPath: root.rootPath,
+      machineId: root.machineId,
+      discoveredAt: root.discoveredAt,
       updatedAt: batch.now,
     };
     if (existing === null) await ctx.db.insert("sourceRoots", { ...patch, createdAt: batch.now });
@@ -148,7 +155,7 @@ const upsertSourceRoots = async (ctx: MutationCtx, batch: ParsedIngestBatch) => 
 const ingestSession = async (
   ctx: MutationCtx,
   batch: ParsedIngestBatch,
-  sessionValue: Record<string, unknown>,
+  sessionValue: IngestSessionBoundary,
 ) => {
   const state = await prepareSessionIngest(ctx, batch, sessionValue);
   await upsertSessionRecordAndSearch(ctx, state);
@@ -156,32 +163,51 @@ const ingestSession = async (
   await upsertDeclaredToolCalls(ctx, state);
   await upsertSessionGraphRows(ctx, state);
   if (sessionValue.partialSession === true) return;
-  await cleanupMissingSessionRows(
+  const sessionCleanup = await cleanupMissingSessionRows(
     ctx,
     state.sessionId,
     state.keepEventIds,
     state.keepToolCallIds,
   );
-  await cleanupMissingGraphRows(ctx, state);
+  const graphCleanup = await cleanupMissingGraphRows(ctx, state);
+  if (
+    sessionCleanup.eventsTruncated ||
+    sessionCleanup.toolsTruncated ||
+    graphCleanup.contentBlocksTruncated ||
+    graphCleanup.edgesTruncated ||
+    graphCleanup.usageTruncated ||
+    graphCleanup.artifactsTruncated
+  ) {
+    const existing = await ctx.db
+      .query("sessions")
+      .withIndex("by_sessionId", (q) => q.eq("sessionId", state.sessionId))
+      .unique();
+    if (existing !== null) {
+      await ctx.db.patch(existing._id, {
+        ingestState: "partial",
+        updatedAt: batch.now,
+      });
+    }
+  }
 };
 
 const prepareSessionIngest = async (
   ctx: MutationCtx,
   batch: ParsedIngestBatch,
-  sessionValue: Record<string, unknown>,
+  sessionValue: IngestSessionBoundary,
 ): Promise<SessionIngestState> => {
-  const project = sessionValue.projectIdentity as Record<string, unknown>;
+  const project = sessionValue.projectIdentity;
   const canonicalProjectIdentityKey = await upsertProjectIdentity(ctx, project);
-  const sessionId = String(sessionValue.id ?? "");
-  const providerValue = String(sessionValue.provider ?? "unknown");
-  const agentName = String(sessionValue.agentName ?? providerValue);
+  const sessionId = sessionValue.id;
+  const providerValue = sessionValue.provider;
+  const agentName = sessionValue.agentName;
   await ensureAgent(ctx, providerValue, agentName);
-  const events = recordArray(sessionValue.events);
-  const declaredToolCalls = recordArray(sessionValue.toolCalls);
+  const events = [...sessionValue.events];
+  const declaredToolCalls = [...sessionValue.toolCalls];
   const contentBlocksByEvent = collectContentBlocksByEvent(events);
-  const sessionEdges = recordArray(sessionValue.sessionEdges);
-  const usageRecords = recordArray(sessionValue.usageRecords);
-  const artifacts = recordArray(sessionValue.artifacts);
+  const sessionEdges = [...sessionValue.sessionEdges];
+  const usageRecords = [...sessionValue.usageRecords];
+  const artifacts = [...sessionValue.artifacts];
   const declaredIds = declaredToolCallIds(declaredToolCalls);
   const sessionPatch = buildSessionPatch({
     batch,
@@ -227,62 +253,63 @@ const stringSet = (value: unknown, fallback: string[]) => {
   return new Set<string>(items);
 };
 
-const collectContentBlocksByEvent = (events: Record<string, unknown>[]) => {
-  const blocksByEvent = new Map<string, Record<string, unknown>[]>();
+const collectContentBlocksByEvent = (events: SessionEventBoundary[]) => {
+  const blocksByEvent = new Map<string, SessionEventBoundary["contentBlocks"]>();
   for (const event of events) {
-    const eventId = String(event.id ?? "");
+    const eventId = event.id;
     if (eventId.length === 0) continue;
-    blocksByEvent.set(eventId, recordArray(event.contentBlocks));
+    blocksByEvent.set(eventId, event.contentBlocks);
   }
   return blocksByEvent;
 };
 
-const declaredToolCallIds = (toolCalls: Record<string, unknown>[]) =>
-  toolCalls.map((toolCall) => String(toolCall.id ?? "")).filter(Boolean);
+const declaredToolCallIds = (toolCalls: ToolCallBoundary[]) =>
+  toolCalls.map((toolCall) => toolCall.id).filter(Boolean);
 
 const buildSessionPatch = (input: {
   batch: ParsedIngestBatch;
-  sessionValue: Record<string, unknown>;
-  project: Record<string, unknown>;
+  sessionValue: IngestSessionBoundary;
+  project: IngestSessionBoundary["projectIdentity"];
   canonicalProjectIdentityKey: string;
-  events: Record<string, unknown>[];
+  events: SessionEventBoundary[];
   declaredIds: string[];
   sessionId: string;
-  providerValue: string;
+  providerValue: IngestSessionBoundary["provider"];
   agentName: string;
 }): SessionPatch => ({
   sessionId: input.sessionId,
-  nativeSessionId: String(input.sessionValue.nativeSessionId ?? ""),
-  provider: input.providerValue as never,
+  nativeSessionId: input.sessionValue.nativeSessionId,
+  provider: input.providerValue,
   agentName: input.agentName,
-  machineId: String(input.sessionValue.machineId ?? input.batch.machine.machineId ?? ""),
-  projectIdentityKey: String(input.project.projectIdentityKey ?? ""),
+  machineId: input.sessionValue.machineId,
+  projectIdentityKey: input.project.projectIdentityKey,
   canonicalProjectIdentityKey: input.canonicalProjectIdentityKey,
   nativeProjectKey: stringValue(input.sessionValue.nativeProjectKey),
   title: stringValue(input.sessionValue.title),
   startedAt: stringValue(input.sessionValue.startedAt),
   updatedAtNative: stringValue(input.sessionValue.updatedAt),
-  sourceRoot: String(input.sessionValue.sourceRoot ?? ""),
-  sourcePath: String(input.sessionValue.sourcePath ?? ""),
+  sourceRoot: input.sessionValue.sourceRoot,
+  sourcePath: input.sessionValue.sourcePath,
   rawMetadata: redactSensitive(input.sessionValue.rawMetadata),
-  eventCount: numberValue(input.sessionValue.eventCount) ?? input.events.length,
-  toolCallCount:
-    numberValue(input.sessionValue.toolCallCount) ??
-    countToolCallIds(input.sessionId, input.events, input.declaredIds),
+  eventCount: input.events.length,
+  toolCallCount: countToolCallIds(input.sessionId, input.events, input.declaredIds),
   importRunId: input.batch.importRunId,
+  importJobId: input.batch.importJobId,
+  importChunkId: input.batch.importChunkId,
+  ingestState: input.sessionValue.partialSession === true ? "partial" : "complete",
   updatedAt: input.batch.now,
 });
 
 const countToolCallIds = (
   sessionId: string,
-  events: Record<string, unknown>[],
+  events: SessionEventBoundary[],
   declaredIds: string[],
 ) => {
   const counted = new Set<string>(declaredIds);
   const byName = new Map<string, string>();
   for (const event of events) {
-    const eventId = String(event.id ?? "");
-    if (!isToolEventKind(String(event.kind ?? "unknown"))) continue;
+    const eventId = event.id;
+    if (!isToolEventKind(event.kind)) continue;
     counted.add(normalizeToolCallId(sessionId, event, eventId, byName));
   }
   return counted.size;
@@ -312,7 +339,7 @@ const sessionSearchDocument = (state: SessionIngestState): SearchDocumentUpsertI
   projectIdentityKey: state.sessionPatch.projectIdentityKey,
   canonicalProjectIdentityKey: state.canonicalProjectIdentityKey,
   machineId: state.sessionPatch.machineId,
-  provider: state.providerValue as never,
+  provider: state.providerValue,
   agentName: state.agentName,
   title: state.sessionPatch.title ?? `${state.providerValue} session`,
   summary: state.sessionPatch.nativeProjectKey,
@@ -323,6 +350,8 @@ const sessionSearchDocument = (state: SessionIngestState): SearchDocumentUpsertI
   ]),
   sourcePath: state.sessionPatch.sourcePath,
   sourceRef: { sessionId: state.sessionId },
+  importJobId: state.batch.importJobId,
+  importChunkId: state.batch.importChunkId,
   occurredAt:
     dateMillis(state.sessionPatch.updatedAtNative) ??
     dateMillis(state.sessionPatch.startedAt),
@@ -334,6 +363,8 @@ const sessionSearchDocument = (state: SessionIngestState): SearchDocumentUpsertI
 
 const importRunSummary = (batch: ParsedIngestBatch) => ({
   importRunId: batch.importRunId,
+  importJobId: batch.importJobId,
+  importChunkId: batch.importChunkId,
   status: "succeeded",
   sourceRootCount: batch.sourceRoots.length,
   sessionCount: batch.sessions.length,
@@ -348,6 +379,3 @@ const importRunSummary = (batch: ParsedIngestBatch) => ({
 
 const stringValue = (value: unknown) =>
   typeof value === "string" ? value : undefined;
-
-const numberValue = (value: unknown) =>
-  typeof value === "number" && Number.isFinite(value) ? value : undefined;
