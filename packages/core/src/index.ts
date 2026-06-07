@@ -3,5 +3,6 @@ export * from "./hash";
 export * from "./project-normalization";
 export * from "./ingest";
 export * from "./redaction";
+export * from "./api-paths";
 export * from "./adapters/types";
 export * from "./adapters/registry";

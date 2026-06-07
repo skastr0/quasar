@@ -22,6 +22,8 @@ import {
 import { DashboardStyles } from "./quasar-dashboard-styles";
 import type {
   DashboardData,
+  ImportJobDetail,
+  ListEnvelope,
   SearchMode,
   SessionBrowseFilters,
   SessionDetail,
@@ -29,6 +31,15 @@ import type {
 } from "./quasar-dashboard-types";
 
 export type { DashboardData } from "./quasar-dashboard-types";
+
+type SessionDetailPage =
+  | "events"
+  | "contentBlocks"
+  | "sessionEdges"
+  | "toolCalls"
+  | "usageRecords"
+  | "artifacts";
+type ImportJobDetailPage = "chunks" | "failures";
 
 const useConnectionSettings = () => {
   const [apiBase, setApiBase] = useState(defaultApiBase);
@@ -67,6 +78,8 @@ export function Dashboard({ initial }: { initial: DashboardData }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedSession, setSelectedSession] = useState<SessionDetail | null>(null);
+  const [sessionCursor, setSessionCursor] = useState<string>("");
+  const [selectedJob, setSelectedJob] = useState<ImportJobDetail | null>(null);
   const [sessionBusy, setSessionBusy] = useState(false);
   const [sourceAlias, setSourceAlias] = useState("");
   const [targetAlias, setTargetAlias] = useState("");
@@ -79,16 +92,18 @@ export function Dashboard({ initial }: { initial: DashboardData }) {
     setBusy(true);
     setError(null);
     try {
-      const [projects, importRuns, sessions, health] = await Promise.all([
-        client.fetchJson<DashboardData["projects"]>("/api/projects"),
+      const [projectsPage, importRuns, importJobs, sessionsPage, health] = await Promise.all([
+        client.fetchJson<ListEnvelope<DashboardData["projects"][number]>>("/api/projects?limit=100"),
         client.fetchJson<DashboardData["importRuns"]>("/api/import-runs"),
-        client.fetchJson<SessionSummary[]>("/api/sessions?limit=100"),
+        client.fetchJson<DashboardData["importJobs"]>("/api/ingest/jobs?limit=12"),
+        client.fetchJson<ListEnvelope<SessionSummary>>(sessionsPath(filters, "")),
         client.fetchJson<{ embeddingsConfigured?: boolean }>("/api/health"),
       ]);
       setData({
-        projects,
+        projects: projectsPage.items,
         importRuns,
-        sessions,
+        importJobs,
+        sessions: sessionsPage.items,
         searchDiagnostics: {
           embeddingsConfigured: Boolean(health.embeddingsConfigured),
         },
@@ -98,6 +113,31 @@ export function Dashboard({ initial }: { initial: DashboardData }) {
     } finally {
       setBusy(false);
     }
+  };
+
+  const loadSessions = async (nextFilters: SessionBrowseFilters, cursor = "") => {
+    setBusy(true);
+    setError(null);
+    try {
+      const page = await client.fetchJson<ListEnvelope<SessionSummary>>(
+        sessionsPath(nextFilters, cursor),
+      );
+      setSessionCursor(page.isDone ? "" : page.continueCursor);
+      setData((current) => ({
+        ...current,
+        sessions: cursor === "" ? page.items : [...current.sessions, ...page.items],
+      }));
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : String(loadError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const updateFilters = (nextFilters: SessionBrowseFilters) => {
+    setFilters(nextFilters);
+    setSessionCursor("");
+    void loadSessions(nextFilters, "");
   };
 
   const runSearch = async () => {
@@ -126,18 +166,45 @@ export function Dashboard({ initial }: { initial: DashboardData }) {
     }
   };
 
-  const readSession = async (sessionId: string) => {
+  const readSession = async (
+    sessionId: string,
+    page?: SessionDetailPage,
+  ) => {
     setSessionBusy(true);
     setError(null);
     try {
+      const current = selectedSession?.session.sessionId === sessionId ? selectedSession : null;
       const body = await client.fetchJson<SessionDetail>(
-        `/api/sessions/read?sessionId=${encodeURIComponent(sessionId)}`,
+        sessionDetailPath(sessionId, current, page),
       );
-      setSelectedSession(body);
+      setSelectedSession(
+        current === null || page === undefined ? body : mergeSessionDetail(current, body, page),
+      );
     } catch (sessionError) {
       setError(sessionError instanceof Error ? sessionError.message : String(sessionError));
     } finally {
       setSessionBusy(false);
+    }
+  };
+
+  const readImportJob = async (
+    importJobId: string,
+    page?: ImportJobDetailPage,
+  ) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const current = selectedJob?.job.importJobId === importJobId ? selectedJob : null;
+      const job = await client.fetchJson<ImportJobDetail>(
+        importJobPath(importJobId, current, page),
+      );
+      setSelectedJob(
+        current === null || page === undefined ? job : mergeImportJobDetail(current, job, page),
+      );
+    } catch (jobError) {
+      setError(jobError instanceof Error ? jobError.message : String(jobError));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -162,6 +229,16 @@ export function Dashboard({ initial }: { initial: DashboardData }) {
     }
   };
 
+  const loadSessionPage = (page: SessionDetailPage) => {
+    if (selectedSession === null) return;
+    void readSession(selectedSession.session.sessionId, page);
+  };
+
+  const loadImportJobPage = (page: ImportJobDetailPage) => {
+    if (selectedJob === null) return;
+    void readImportJob(selectedJob.job.importJobId, page);
+  };
+
   return (
     <main className="shell">
       <DashboardTop
@@ -184,13 +261,26 @@ export function Dashboard({ initial }: { initial: DashboardData }) {
         results={results}
         filters={filters}
         selectedSession={selectedSession}
+        selectedJob={selectedJob}
+        sessionCursor={sessionCursor}
+        busy={busy}
         sessionBusy={sessionBusy}
         sourceAlias={sourceAlias}
         targetAlias={targetAlias}
         aliasReason={aliasReason}
         aliasResult={aliasResult}
         onReadSession={readSession}
-        onFiltersChange={setFilters}
+        onFiltersChange={updateFilters}
+        onLoadMoreSessions={() => void loadSessions(filters, sessionCursor)}
+        onReadImportJob={readImportJob}
+        onLoadSessionEvents={() => loadSessionPage("events")}
+        onLoadSessionContentBlocks={() => loadSessionPage("contentBlocks")}
+        onLoadSessionEdges={() => loadSessionPage("sessionEdges")}
+        onLoadSessionToolCalls={() => loadSessionPage("toolCalls")}
+        onLoadSessionUsage={() => loadSessionPage("usageRecords")}
+        onLoadSessionArtifacts={() => loadSessionPage("artifacts")}
+        onLoadJobChunks={() => loadImportJobPage("chunks")}
+        onLoadJobFailures={() => loadImportJobPage("failures")}
         onSourceAliasChange={setSourceAlias}
         onTargetAliasChange={setTargetAlias}
         onAliasReasonChange={setAliasReason}
@@ -200,6 +290,112 @@ export function Dashboard({ initial }: { initial: DashboardData }) {
       <DashboardStyles />
     </main>
   );
+}
+
+const sessionsPath = (filters: SessionBrowseFilters, cursor: string) => {
+  const params = new URLSearchParams({ limit: "100" });
+  if (filters.projectIdentityKey !== "") params.set("projectIdentityKey", filters.projectIdentityKey);
+  if (filters.provider !== "") params.set("provider", filters.provider);
+  if (filters.agentName !== "") params.set("agentName", filters.agentName);
+  if (filters.machineId !== "") params.set("machineId", filters.machineId);
+  if (cursor !== "") params.set("cursor", cursor);
+  return `/api/sessions?${params.toString()}`;
+};
+
+const sessionCursorParams: Record<SessionDetailPage, string> = {
+  events: "eventCursor",
+  contentBlocks: "contentBlockCursor",
+  sessionEdges: "edgeCursor",
+  toolCalls: "toolCallCursor",
+  usageRecords: "usageCursor",
+  artifacts: "artifactCursor",
+};
+
+const importJobCursorParams: Record<ImportJobDetailPage, string> = {
+  chunks: "chunkCursor",
+  failures: "failureCursor",
+};
+
+const sessionDetailPath = (
+  sessionId: string,
+  current: SessionDetail | null,
+  page?: SessionDetailPage,
+) => {
+  const params = new URLSearchParams({ sessionId, limit: "50" });
+  const cursor = page === undefined ? "" : (current?.pagination?.[page]?.continueCursor ?? "");
+  if (page !== undefined && cursor !== "") params.set(sessionCursorParams[page], cursor);
+  return `/api/sessions/read?${params.toString()}`;
+};
+
+const importJobPath = (
+  importJobId: string,
+  current: ImportJobDetail | null,
+  page?: ImportJobDetailPage,
+) => {
+  const params = new URLSearchParams({ importJobId, limit: "50" });
+  const cursor = page === undefined ? "" : (current?.pagination?.[page]?.continueCursor ?? "");
+  if (page !== undefined && cursor !== "") params.set(importJobCursorParams[page], cursor);
+  return `/api/ingest/jobs?${params.toString()}`;
+};
+
+const mergeSessionDetail = (
+  current: SessionDetail,
+  next: SessionDetail,
+  page: SessionDetailPage,
+): SessionDetail => ({
+  ...next,
+  events: page === "events" ? [...current.events, ...next.events] : current.events,
+  contentBlocks:
+    page === "contentBlocks"
+      ? appendOptional(current.contentBlocks, next.contentBlocks)
+      : current.contentBlocks,
+  sessionEdges:
+    page === "sessionEdges"
+      ? appendOptional(current.sessionEdges, next.sessionEdges)
+      : current.sessionEdges,
+  toolCalls: page === "toolCalls" ? [...current.toolCalls, ...next.toolCalls] : current.toolCalls,
+  usageRecords:
+    page === "usageRecords"
+      ? appendOptional(current.usageRecords, next.usageRecords)
+      : current.usageRecords,
+  artifacts:
+    page === "artifacts" ? appendOptional(current.artifacts, next.artifacts) : current.artifacts,
+  views: current.views,
+  pagination: mergeSessionPagination(current.pagination, next.pagination, page),
+});
+
+const mergeImportJobDetail = (
+  current: ImportJobDetail,
+  next: ImportJobDetail,
+  page: ImportJobDetailPage,
+): ImportJobDetail => ({
+  ...next,
+  chunks: page === "chunks" ? [...current.chunks, ...next.chunks] : current.chunks,
+  failures: page === "failures" ? [...current.failures, ...next.failures] : current.failures,
+  pagination: mergeImportJobPagination(current.pagination, next.pagination, page),
+});
+
+const mergeSessionPagination = (
+  current: SessionDetail["pagination"],
+  next: SessionDetail["pagination"],
+  page: SessionDetailPage,
+): SessionDetail["pagination"] => ({
+  ...current,
+  [page]: next?.[page] ?? current?.[page],
+});
+
+const mergeImportJobPagination = (
+  current: ImportJobDetail["pagination"],
+  next: ImportJobDetail["pagination"],
+  page: ImportJobDetailPage,
+): ImportJobDetail["pagination"] => ({
+  ...current,
+  [page]: next?.[page] ?? current?.[page],
+});
+
+function appendOptional<T>(left: T[] | undefined, right: T[] | undefined) {
+  const merged = [...(left ?? []), ...(right ?? [])];
+  return merged.length === 0 && left === undefined && right === undefined ? undefined : merged;
 }
 
 type DashboardTopProps = {
@@ -248,12 +444,25 @@ type DashboardPanelsProps = {
   results: unknown;
   filters: SessionBrowseFilters;
   selectedSession: SessionDetail | null;
+  selectedJob: ImportJobDetail | null;
+  sessionCursor: string;
+  busy: boolean;
   sessionBusy: boolean;
   sourceAlias: string;
   targetAlias: string;
   aliasReason: string;
   aliasResult: unknown;
-  onReadSession: (sessionId: string) => void;
+  onReadSession: (sessionId: string, page?: SessionDetailPage) => void;
+  onReadImportJob: (importJobId: string, page?: ImportJobDetailPage) => void;
+  onLoadMoreSessions: () => void;
+  onLoadSessionEvents: () => void;
+  onLoadSessionContentBlocks: () => void;
+  onLoadSessionEdges: () => void;
+  onLoadSessionToolCalls: () => void;
+  onLoadSessionUsage: () => void;
+  onLoadSessionArtifacts: () => void;
+  onLoadJobChunks: () => void;
+  onLoadJobFailures: () => void;
   onFiltersChange: (filters: SessionBrowseFilters) => void;
   onSourceAliasChange: (value: string) => void;
   onTargetAliasChange: (value: string) => void;
@@ -303,13 +512,32 @@ function DashboardPanels(props: DashboardPanelsProps) {
         onAliasProject={props.onAliasProject}
       />
       <ProjectsPanel projects={props.data.projects} />
-      <ImportsPanel runs={recentRuns} />
+      <ImportsPanel
+        jobs={props.data.importJobs}
+        runs={recentRuns}
+        selectedJob={props.selectedJob}
+        busy={props.busy}
+        onSelectJob={props.onReadImportJob}
+        onLoadChunks={props.onLoadJobChunks}
+        onLoadFailures={props.onLoadJobFailures}
+      />
       <RecentSessionsPanel
         sessions={filteredSessions}
         sessionBusy={props.sessionBusy}
         onReadSession={props.onReadSession}
+        onLoadMore={props.onLoadMoreSessions}
+        hasMore={props.sessionCursor !== ""}
       />
-      <SessionDetailPanel selectedSession={props.selectedSession} />
+      <SessionDetailPanel
+        selectedSession={props.selectedSession}
+        sessionBusy={props.sessionBusy}
+        onLoadEvents={props.onLoadSessionEvents}
+        onLoadContentBlocks={props.onLoadSessionContentBlocks}
+        onLoadEdges={props.onLoadSessionEdges}
+        onLoadToolCalls={props.onLoadSessionToolCalls}
+        onLoadUsage={props.onLoadSessionUsage}
+        onLoadArtifacts={props.onLoadSessionArtifacts}
+      />
     </section>
   );
 }

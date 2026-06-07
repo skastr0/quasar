@@ -3,6 +3,13 @@ import { Duration, Effect, Schema } from "effect";
 
 import {
   buildIngestBatch,
+  createSourceSafetyReport,
+  ImportJobStartResponse,
+  ImportJobStatusResponse,
+  manifestFromBatch,
+  QuasarApiPaths,
+  snapshotConfiguredSourceRoots,
+  snapshotIngestSourceManifest,
   type IngestBatch,
   type NormalizedSession,
   sanitizeIngestBatchForTransport,
@@ -10,11 +17,18 @@ import {
 } from "@skastr0/quasar-core";
 
 import { requestJson } from "../api";
-import { loadOptionalJsonInput } from "../json";
+import { loadJsonInput, loadOptionalJsonInput } from "../json";
 import { executeJsonCommand } from "../output";
 import { IngestOptions } from "../protocol";
 
 const inputArg = Args.text({ name: "input" }).pipe(Args.optional);
+const requiredInputArg = Args.text({ name: "input" });
+
+const IngestWaitInput = Schema.Struct({
+  importJobId: Schema.String,
+  pollIntervalMs: Schema.optional(Schema.Number),
+  timeoutMs: Schema.optional(Schema.Number),
+});
 
 const toUndefined = <A>(value: { _tag: "Some"; value: A } | { _tag: "None" }) =>
   value._tag === "Some" ? value.value : undefined;
@@ -37,10 +51,68 @@ const buildBatchEffect = (input: string | undefined) =>
     });
   });
 
+const buildBatchWithSourceSnapshotEffect = (input: string | undefined) =>
+  Effect.gen(function* () {
+    const options = yield* loadOptions(input);
+    const before = snapshotConfiguredSourceRoots({
+      providers: options.providers,
+      includeExperimental: options.includeExperimental,
+      limit: options.limit,
+      roots: options.roots,
+    });
+    const batch = yield* Effect.tryPromise({
+      try: () =>
+        buildIngestBatch({
+          providers: options.providers,
+          includeExperimental: options.includeExperimental,
+          limit: options.limit,
+          roots: options.roots,
+        }),
+      catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+    });
+    return { options, before, batch };
+  });
+
+const readImportJob = (importJobId: string) =>
+  requestJson({
+    method: "GET",
+    path: QuasarApiPaths.ingestJobs,
+    query: { importJobId },
+    responseSchema: ImportJobStatusResponse,
+  }).pipe(
+    Effect.map((status) => ({
+      ...status,
+      importJobId,
+      jobStatus: jobStatusFromPayload(status.job),
+    })),
+  );
+
+const jobStatusFromPayload = (job: unknown) => {
+  if (job !== null && typeof job === "object" && "status" in job) {
+    const status = (job as Record<string, unknown>).status;
+    if (typeof status === "string") return status;
+  }
+  return "unknown";
+};
+
 const validateCommand = Command.make("validate", { input: inputArg }, ({ input }) =>
   executeJsonCommand(
     "ingest validate",
-    buildBatchEffect(toUndefined(input)).pipe(Effect.map(summarizeBatch)),
+    buildBatchWithSourceSnapshotEffect(toUndefined(input)).pipe(
+      Effect.map(({ before, batch: rawBatch }) => {
+        const batch = sanitizeIngestBatchForTransport(rawBatch);
+        const after = snapshotIngestSourceManifest(batch);
+        return {
+          ...summarizeBatch(batch),
+          sourceSafetyReport: createSourceSafetyReport({
+            batch,
+            before,
+            after,
+            quasarStateWrites: false,
+          }),
+        };
+      }),
+    ),
   ),
 );
 
@@ -67,36 +139,74 @@ const runCommand = Command.make("run", { input: inputArg }, ({ input }) =>
   executeJsonCommand(
     "ingest run",
     Effect.gen(function* () {
-      const options = yield* loadOptions(toUndefined(input));
-      const batch = sanitizeIngestBatchForTransport(
-        yield* buildBatchEffect(toUndefined(input)),
+      const { options, before, batch: rawBatch } = yield* buildBatchWithSourceSnapshotEffect(
+        toUndefined(input),
       );
+      const batch = sanitizeIngestBatchForTransport(rawBatch);
       if (options.dryRun === true) {
-        return { dryRun: true, summary: summarizeBatch(batch) };
+        const after = snapshotIngestSourceManifest(batch);
+        return {
+          dryRun: true,
+          summary: summarizeBatch(batch),
+          sourceSafetyReport: createSourceSafetyReport({
+            batch,
+            before,
+            after,
+            quasarStateWrites: false,
+          }),
+        };
       }
       const chunks = chunkIngestBatch(batch, chunkOptionsFromEnv());
+      const job = yield* requestJson({
+        method: "POST",
+        path: QuasarApiPaths.ingestJobs,
+        body: {
+          manifest: manifestFromBatch(batch),
+          expectedChunkCount: chunks.length,
+        },
+        responseSchema: ImportJobStartResponse,
+      });
       const chunkDelayMs = envPositiveInteger(
         "QUASAR_INGEST_CHUNK_DELAY_MS",
         DEFAULT_CHUNK_DELAY_MS,
       );
       const results = [];
-      for (const [index, chunk] of chunks.entries()) {
+      for (const group of chunkGroups(chunks, uploadGroupSizeFromEnv())) {
         results.push(
           yield* requestJson({
             method: "POST",
-            path: "/api/ingest/batches",
-            body: chunk,
+            path: QuasarApiPaths.ingestJobChunksBulk,
+            body: {
+              importJobId: job.importJobId,
+              expectedChunkCount: chunks.length,
+              chunks: group.map(({ chunk, index }) => ({
+                batch: chunk,
+                sequence: index,
+                completeJob: index === chunks.length - 1,
+              })),
+            },
             responseSchema: Schema.Unknown,
           }),
         );
-        if (index < chunks.length - 1 && chunkDelayMs > 0) {
+        if (group.at(-1)?.index !== chunks.length - 1 && chunkDelayMs > 0) {
           yield* Effect.sleep(Duration.millis(chunkDelayMs));
         }
       }
+      const status = yield* readImportJob(job.importJobId);
+      const after = snapshotIngestSourceManifest(batch);
       return {
         ...summarizeBatch(batch),
+        importJobId: job.importJobId,
+        jobStatus: status.jobStatus,
         chunkCount: chunks.length,
         results,
+        status,
+        sourceSafetyReport: createSourceSafetyReport({
+          batch,
+          before,
+          after,
+          quasarStateWrites: true,
+        }),
       };
     }),
   ),
@@ -105,6 +215,7 @@ const runCommand = Command.make("run", { input: inputArg }, ({ input }) =>
 export const MAX_EVENTS_PER_CHUNK = 50;
 export const MAX_OPERATIONS_PER_CHUNK = 120;
 export const DEFAULT_CHUNK_DELAY_MS = 750;
+export const DEFAULT_UPLOAD_GROUP_SIZE = 100;
 
 export interface ChunkOptions {
   readonly maxEventsPerChunk?: number;
@@ -121,6 +232,24 @@ const chunkOptionsFromEnv = (): Required<ChunkOptions> => ({
     MAX_OPERATIONS_PER_CHUNK,
   ),
 });
+
+const uploadGroupSizeFromEnv = () =>
+  Math.max(
+    1,
+    envPositiveInteger("QUASAR_INGEST_UPLOAD_GROUP_SIZE", DEFAULT_UPLOAD_GROUP_SIZE),
+  );
+
+const chunkGroups = <A>(items: readonly A[], size: number) => {
+  const groups: Array<Array<{ chunk: A; index: number }>> = [];
+  for (let start = 0; start < items.length; start += size) {
+    groups.push(
+      items
+        .slice(start, start + size)
+        .map((chunk, offset) => ({ chunk, index: start + offset })),
+    );
+  }
+  return groups;
+};
 
 const envPositiveInteger = (name: string, fallback: number) => {
   const raw = process.env[name];
@@ -296,25 +425,47 @@ const inspectCommand = Command.make("inspect", {}, () =>
   ),
 );
 
-const waitCommand = Command.make("wait", {}, () =>
+const waitCommand = Command.make("wait", { input: requiredInputArg }, ({ input }) =>
   executeJsonCommand(
     "ingest wait",
-    Effect.succeed({
-      status: "unsupported",
-      reason: "Server ingestion is synchronous in v1; inspect import runs instead.",
+    Effect.gen(function* () {
+      const options = yield* loadJsonInput(IngestWaitInput, input);
+      const pollIntervalMs = positiveInteger(options.pollIntervalMs, 2_000);
+      const timeoutMs = positiveInteger(options.timeoutMs, 10 * 60_000);
+      const startedAt = Date.now();
+      while (true) {
+        const status = yield* readImportJob(options.importJobId);
+        if (isFinalJobStatus(status.jobStatus)) return { timedOut: false, ...status };
+        if (Date.now() - startedAt >= timeoutMs) return { timedOut: true, ...status };
+        yield* Effect.sleep(Duration.millis(pollIntervalMs));
+      }
     }),
   ),
 );
 
-const eventsCommand = Command.make("events", {}, () =>
+const eventsCommand = Command.make("events", { input: inputArg }, ({ input }) =>
   executeJsonCommand(
     "ingest events",
-    Effect.succeed({
-      status: "unsupported",
-      reason: "Streaming import events are not exposed in v1.",
+    Effect.gen(function* () {
+      const maybeInput = toUndefined(input);
+      if (maybeInput === undefined) {
+        return yield* requestJson({
+          method: "GET",
+          path: QuasarApiPaths.ingestJobs,
+          responseSchema: Schema.Unknown,
+        });
+      }
+      const options = yield* loadJsonInput(
+        Schema.Struct({ importJobId: Schema.String }),
+        maybeInput,
+      );
+      return yield* readImportJob(options.importJobId);
     }),
   ),
 );
+
+const isFinalJobStatus = (status: string) =>
+  status === "succeeded" || status === "partial_failure" || status === "failed";
 
 export const ingestCommand = Command.make("ingest").pipe(
   Command.withSubcommands([

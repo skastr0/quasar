@@ -220,6 +220,53 @@ const graphBatch = (path: string, machineId: string) => ({
   ],
 });
 
+const largeEventBatch = (path: string, machineId: string, count: number) => ({
+  ...testBatch(path, machineId),
+  sessions: [
+    {
+      ...testBatch(path, machineId).sessions[0],
+      events: Array.from({ length: count }, (_, index) => ({
+        ...testBatch(path, machineId).sessions[0].events[0],
+        id: `event:${machineId}:large:${index}`,
+        sequence: index,
+        role: index % 2 === 0 ? "user" : "assistant",
+        contentText: `large synthetic event ${index}`,
+      })),
+      toolCalls: [],
+      sessionEdges: [],
+      usageRecords: [],
+      artifacts: [],
+    },
+  ],
+});
+
+const chunkBatchForTest = (batch: ReturnType<typeof largeEventBatch>, size: number) => {
+  const session = batch.sessions[0]!;
+  const expectedEventIds = session.events.map((event) => event.id);
+  const chunks = [];
+  for (let start = 0; start < session.events.length; start += size) {
+    const events = session.events.slice(start, start + size);
+    chunks.push({
+      ...batch,
+      sessions: [
+        {
+          ...session,
+          events,
+          partialSession: start + size < session.events.length ? true : undefined,
+          eventCount: session.events.length,
+          expectedEventIds,
+          expectedToolCallIds: [],
+          expectedContentBlockIds: [],
+          expectedSessionEdgeIds: [],
+          expectedUsageRecordIds: [],
+          expectedArtifactIds: [],
+        },
+      ],
+    });
+  }
+  return chunks;
+};
+
 const setup = () => {
   const t = convexTest(schema, modules);
   t.registerComponent("rag", ragSchema, ragModules);
@@ -259,7 +306,7 @@ describe("quasar ingestion and search", () => {
     });
 
     const projects = await t.query(internal.quasar.listProjectsInternal, {});
-    const project = (projects as Array<{ projectIdentityKey: string; sessionCount: number }>).find(
+    const project = (projects.items as Array<{ projectIdentityKey: string; sessionCount: number }>).find(
       (item) => item.projectIdentityKey === "git:github.com/skastr0/quasar",
     );
     expect(project?.sessionCount).toBe(2);
@@ -308,6 +355,100 @@ describe("quasar ingestion and search", () => {
     expect(search.matches).toHaveLength(0);
   });
 
+  test("runs ingest through a durable import job and records chunk state", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const job = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { batch, expectedChunkCount: 1 },
+    });
+    expect(job.status).toBe("queued");
+
+    const rerunJob = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: {
+        batch: { ...batch, generatedAt: "2026-06-04T00:00:00.000Z" },
+        expectedChunkCount: 1,
+      },
+    });
+    expect(rerunJob.importJobId).toBe(job.importJobId);
+
+    const chunk = await t.action(internal.quasar.submitImportChunkInternal, {
+      input: {
+        importJobId: job.importJobId,
+        batch,
+        sequence: 0,
+        expectedChunkCount: 1,
+        completeJob: true,
+      },
+    });
+    expect(chunk.status).toBe("pending");
+    expect(chunk.enqueued).toBe(true);
+
+    const processed = await t.action(internal.quasar.processImportJobChunksInternal, {
+      importJobId: job.importJobId,
+      limit: 1,
+    });
+    expect(processed.processed).toBe(1);
+
+    const status = await t.query(internal.quasar.readImportJobInternal, {
+      input: { importJobId: job.importJobId },
+    });
+    expect(status?.job.succeededChunkCount).toBe(1);
+    expect(status?.chunks[0]?.status).toBe("succeeded");
+    expect(status?.readiness.total).toBeGreaterThan(0);
+
+    const session = await t.query(internal.quasar.readSessionInternal, {
+      sessionId: "codex:machine:a:session",
+    });
+    expect(session?.session.importJobId).toBe(job.importJobId);
+    expect(session?.session.ingestState).toBe("complete");
+  });
+
+  test("re-running uploaded chunks converges without duplicate rows", async () => {
+    const t = setup();
+    const batch = largeEventBatch("/Users/a/Projects/quasar", "machine:a", 90);
+    const chunks = chunkBatchForTest(batch, 30);
+    const job = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { batch, expectedChunkCount: chunks.length },
+    });
+
+    await t.action(internal.quasar.submitImportChunksInternal, {
+      input: {
+        importJobId: job.importJobId,
+        expectedChunkCount: chunks.length,
+        chunks: chunks.map((chunk, sequence) => ({
+          batch: chunk,
+          sequence,
+          completeJob: sequence === chunks.length - 1,
+        })),
+      },
+    });
+    await t.action(internal.quasar.processImportJobChunksInternal, {
+      importJobId: job.importJobId,
+      limit: chunks.length,
+    });
+    await t.action(internal.quasar.submitImportChunkInternal, {
+      input: {
+        importJobId: job.importJobId,
+        batch: chunks[0],
+        sequence: 0,
+        expectedChunkCount: chunks.length,
+      },
+    });
+
+    const status = await t.query(internal.quasar.readImportJobInternal, {
+      input: { importJobId: job.importJobId },
+    });
+    expect(status?.job.status).toBe("succeeded");
+    expect(status?.job.succeededChunkCount).toBe(chunks.length);
+
+    const session = await t.query(internal.quasar.readSessionInternal, {
+      sessionId: "codex:machine:a:session",
+      limit: 100,
+    });
+    expect(session?.events).toHaveLength(90);
+    expect(session?.pagination.events.isDone).toBe(true);
+  }, 20_000);
+
   test("redacts string contentText before session storage and search indexing", async () => {
     const t = setup();
     const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
@@ -355,25 +496,39 @@ describe("quasar ingestion and search", () => {
       sessionId: "codex:machine:a:session",
       limit: 10,
     });
-    expect(tools).toHaveLength(1);
-    expect(tools[0]?.toolName).toBe("read_file");
-    expect(tools[0]?.status).toBe("completed");
-    expect(tools[0]?.input).toEqual({ name: "read_file", path: "src/index.ts" });
-    expect(tools[0]?.output).toEqual({ name: "read_file", output: "done" });
+    expect(tools.items).toHaveLength(1);
+    expect(tools.items[0]?.toolName).toBe("read_file");
+    expect(tools.items[0]?.status).toBe("completed");
+    expect(tools.items[0]?.input).toEqual({ name: "read_file", path: "src/index.ts" });
+    expect(tools.items[0]?.output).toEqual({ name: "read_file", output: "done" });
+    const toolSearchDocs = await t.query(internal.quasar.fetchSearchDocumentsInternal, {
+      searchDocumentIds: [`tool:${tools.items[0]?.toolCallId}`],
+    });
+    expect(toolSearchDocs[0]?.embeddingEligible).toBe(false);
+    expect(toolSearchDocs[0]?.embeddingSkipReason).toBe("tool_metadata_only");
 
     const filtered = await t.query(internal.quasar.listToolCallsInternal, {
       provider: "codex",
       toolName: "read_file",
       limit: 10,
     });
-    expect(filtered).toHaveLength(1);
+    expect(filtered.items).toHaveLength(1);
 
     const missing = await t.query(internal.quasar.listToolCallsInternal, {
       provider: "opencode",
       toolName: "read_file",
       limit: 10,
     });
-    expect(missing).toHaveLength(0);
+    expect(missing.items).toHaveLength(0);
+
+    const outputSearch = await t.query(internal.quasar.textSearchInternal, {
+      query: "done",
+      limit: 10,
+    });
+    expect(outputSearch.matches).toHaveLength(0);
+
+    expect(toolSearchDocs[0]?.searchText).toContain("read_file");
+    expect(toolSearchDocs[0]?.searchText).not.toContain("done");
   });
 
   test("ingests graph rows and returns materialized session views", async () => {
@@ -403,11 +558,17 @@ describe("quasar ingestion and search", () => {
     });
     expect(blockSearch.matches.some((match) => match.family === "contentBlocks")).toBe(true);
 
-    const artifactSearch = await t.query(internal.quasar.textSearchInternal, {
+    const rawArtifactSearch = await t.query(internal.quasar.textSearchInternal, {
       query: "artifact diff searchable",
       limit: 10,
     });
-    expect(artifactSearch.matches.some((match) => match.family === "artifacts")).toBe(true);
+    expect(rawArtifactSearch.matches.some((match) => match.family === "artifacts")).toBe(false);
+
+    const artifactDocs = await t.query(internal.quasar.fetchSearchDocumentsInternal, {
+      searchDocumentIds: ["artifact:artifact:machine:a:1"],
+    });
+    expect(artifactDocs[0]?.searchText).toContain("diff");
+    expect(artifactDocs[0]?.searchText).not.toContain("artifact diff searchable");
   });
 
   test("fusion search returns text graph matches when semantic search is unavailable", async () => {
@@ -471,7 +632,7 @@ describe("quasar ingestion and search", () => {
     });
 
     const before = await t.query(internal.quasar.listProjectsInternal, {});
-    expect(before).toHaveLength(2);
+    expect(before.items).toHaveLength(2);
 
     await t.mutation(internal.quasar.aliasProjectInternal, {
       sourceProjectIdentityKey: "path:machine:b:/home/b/work/quasar",
@@ -480,7 +641,7 @@ describe("quasar ingestion and search", () => {
     });
 
     const after = await t.query(internal.quasar.listProjectsInternal, {});
-    const canonical = after.find(
+    const canonical = after.items.find(
       (item: { projectIdentityKey: string; sessionCount: number }) =>
         item.projectIdentityKey === "path:machine:a:/Users/a/Projects/quasar",
     );

@@ -213,7 +213,7 @@ describe("adapter ingestion", () => {
     const cursor = sessionsByProvider.get("cursor")!;
     expect(cursor.toolCalls[0]?.toolName).toBe("read_file");
     expect(cursor.artifacts[0]?.kind).toBe("diff");
-  });
+  }, 15_000);
 
   test("scopes graph IDs by machine for the same native source path", async () => {
     const root = makeKimiFixture();

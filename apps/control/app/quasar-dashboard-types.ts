@@ -19,6 +19,34 @@ export type ImportRunSummary = {
   createdAt: number;
 };
 
+export type ImportJobSummary = {
+  job: {
+    importJobId: string;
+    status: string;
+    sourceRootCount: number;
+    sessionCount: number;
+    eventCount: number;
+    toolCallCount: number;
+    chunkCount: number;
+    expectedChunkCount?: number;
+    uploadedChunkCount?: number;
+    succeededChunkCount: number;
+    failedChunkCount: number;
+    createdAt: number;
+    updatedAt: number;
+    completedAt?: number;
+  };
+  readiness: {
+    total: number;
+    pending: number;
+    syncing: number;
+    ready: number;
+    skipped: number;
+    failed: number;
+    deadLetter?: number;
+  };
+};
+
 export type SessionSummary = {
   id: string;
   nativeSessionId?: string;
@@ -29,6 +57,19 @@ export type SessionSummary = {
   projectIdentityKey: string;
   eventCount: number;
   updatedAt: number;
+  ingestState?: string;
+  importJobId?: string;
+};
+
+export type ListEnvelope<T> = {
+  items: T[];
+  isDone: boolean;
+  continueCursor: string;
+};
+
+export type PageInfo = {
+  isDone: boolean;
+  continueCursor: string;
 };
 
 export type SessionBrowseFilters = {
@@ -41,9 +82,28 @@ export type SessionBrowseFilters = {
 export type DashboardData = {
   projects: ProjectSummary[];
   importRuns: ImportRunSummary[];
+  importJobs: ImportJobSummary[];
   sessions: SessionSummary[];
   searchDiagnostics: {
     embeddingsConfigured: boolean;
+  };
+};
+
+export type ImportJobDetail = {
+  job: ImportJobSummary["job"];
+  chunks: Array<{
+    chunkId: string;
+    sequence: number;
+    status: string;
+    attempts: number;
+    eventCount: number;
+    error?: string;
+  }>;
+  failures: Array<{ failureId: string; chunkId?: string; error: string; retryable: boolean }>;
+  readiness: ImportJobSummary["readiness"];
+  pagination?: {
+    chunks?: PageInfo;
+    failures?: PageInfo;
   };
 };
 
@@ -78,6 +138,14 @@ export type SessionDetail = {
   }>;
   usageRecords?: unknown[];
   artifacts?: Array<{ artifactId: string; kind: string; path?: string; sourcePath?: string }>;
+  pagination?: {
+    events?: PageInfo;
+    contentBlocks?: PageInfo;
+    sessionEdges?: PageInfo;
+    toolCalls?: PageInfo;
+    usageRecords?: PageInfo;
+    artifacts?: PageInfo;
+  };
   views?: {
     chronological?: unknown[];
     branch?: Array<{ eventId: string }>;
