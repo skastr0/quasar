@@ -1,0 +1,64 @@
+{
+  "version": "v2",
+  "id": "quasar-architecture-diagrams",
+  "meta": {
+    "name": "Quasar Architecture Diagrams",
+    "tags": ["quasar", "architecture", "diagrams", "ingest", "embeddings"]
+  },
+  "defaults": {
+    "timeout_ms": 600000,
+    "retry": {
+      "max_attempts": 2,
+      "backoff_ms": 5000
+    }
+  },
+  "steps": [
+    {
+      "id": "system_overview",
+      "uses": "codex.text-to-image.v1",
+      "with": {
+        "model_ref": "gpt-5.4",
+        "aspect_ratio": "16:9",
+        "quality": "high",
+        "style": "clean technical architecture diagram, vector-like, precise, modern systems design",
+        "prompt": "Create a polished technical architecture diagram titled 'Quasar session repository: corpus-scale path'. Use a light neutral background, crisp dark text, restrained accents in teal, blue, amber, and red. Make labels large and legible. Show left-to-right flow: 1) Agent history sources: Codex, OpenCode, Claude Code, Hermes, Cursor, JSONL, SQLite snapshots. 2) Quasar CLI plus core adapters: source safety snapshots, SQLite copy-before-read, JSONL read-only. 3) Bulk ingest API: start import job, submit bounded chunks. 4) Convex durable state: importJobs, importChunks, importShards, importCheckpoints, importFailures. 5) Worker lane: lease-token claim, bounded mutation, retry, dead letter, completion proof. 6) Repository graph: sessions, events, tool calls, content blocks, edges, usage, artifacts. 7) Search layer: lexical documents, embedding outbox, readiness aggregates. 8) Dashboard: job progress, failures, paginated session explorer, search diagnostics. Include a bottom guardrail strip: 'source histories read-only', 'Effect Schema boundaries', 'no raw tool-output embeddings', 'cursor pagination'. Use simple boxes and arrows, no decorative 3D objects, no tiny paragraphs."
+      }
+    },
+    {
+      "id": "bulk_ingest_lifecycle",
+      "uses": "codex.text-to-image.v1",
+      "with": {
+        "model_ref": "gpt-5.4",
+        "aspect_ratio": "16:9",
+        "quality": "high",
+        "style": "clean technical flowchart, vector-like, operational infrastructure diagram",
+        "prompt": "Create a technical flowchart titled 'Quasar bulk ingest lifecycle'. Use large readable labels and a sober operations palette: charcoal text, white cards, teal success, amber retry, red dead-letter, blue queue arrows. Show a numbered sequence: 1 Start job with Effect Schema decoded input. 2 Store importJob with stable idempotency key and immutable expectedChunkCount. 3 Enqueue chunks with non-negative integer sequence and positive integer expectedChunkCount. 4 Claim next due chunk with leaseToken and leaseExpiresAt. 5 Process chunk through bounded Convex mutation: sessions, events, tool calls, graph rows, search docs, checkpoints. 6 Mark success only if lease token matches; stale completions no-op. 7 On failure, retry with backoff until terminal dead_letter. 8 Finalize only when uploaded count, terminal count, and terminal sequence sum prove contiguous 0..N-1 completion. 9 Dashboard shows partial state, succeeded chunks, failed chunks, readiness. Add side callouts: 'CLI can exit after upload', 'reruns converge without duplicate terminal accounting', 'source safety report before/after'. No small text blocks; keep the diagram inspectable."
+      }
+    },
+    {
+      "id": "embedding_readiness_policy",
+      "uses": "codex.text-to-image.v1",
+      "with": {
+        "model_ref": "gpt-5.4",
+        "aspect_ratio": "16:9",
+        "quality": "high",
+        "style": "clean data policy architecture diagram, vector-like, clear pipeline with decision gates",
+        "prompt": "Create a technical architecture diagram titled 'Quasar embedding policy and readiness'. Make labels large and legible. Show source rows entering 'search document builder', then split into two lanes. Lane A: lexical search text stores searchable metadata and summaries for sessions, events, tool calls, content blocks, artifacts. Lane B: embedding text gate. Decision gate: eligible only for narrative session summaries, user messages, and final assistant responses. Explicit red stop signs for tool calls, tool results, raw content blocks, artifacts, code/file read outputs: captured in storage but skipped for embeddings. Then show embeddingOutbox with pause/resume/retry, lease-controlled drain, provider call, scoped cache key, embeddingCache, RAG entry, readiness aggregates by job/project/provider/family/state, search diagnostics for text/semantic/fusion. Include status chips: pending, syncing, ready, skipped, failed, dead_letter. Add bottom warning: 'do not accidentally embed repeated codebase/tool outputs'. Use clean arrows, concise labels, and no dense prose."
+      }
+    }
+  ],
+  "outputs": {
+    "system_overview_diagram": {
+      "from_step": "system_overview",
+      "output": "image"
+    },
+    "bulk_ingest_lifecycle_diagram": {
+      "from_step": "bulk_ingest_lifecycle",
+      "output": "image"
+    },
+    "embedding_readiness_policy_diagram": {
+      "from_step": "embedding_readiness_policy",
+      "output": "image"
+    }
+  }
+}
