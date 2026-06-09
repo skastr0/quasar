@@ -103,7 +103,8 @@ const hermesDbPath = (root: string | undefined) => {
   }
 };
 
-const sessionWindowLimit = (limit: number | undefined) => Math.max(1, Math.floor(limit ?? 500));
+export const hermesSessionWindowLimit = (limit: number | undefined) =>
+  limit === undefined ? -1 : Math.max(1, Math.floor(limit));
 const sessionWindowSkip = (skip: number | undefined) => Math.max(0, Math.floor(skip ?? 0));
 const omittedTextSql = (column: string, label: string) =>
   `case when length(${column}) > ${HERMES_MAX_TEXT_FIELD_BYTES} then '[omitted:large_hermes_${label} bytes=' || length(${column}) || ']' else ${column} end as ${column}`;
@@ -154,7 +155,7 @@ const readSessionRows = (
 ) =>
   db
     .query(`select ${HERMES_SESSION_COLUMNS} from sessions order by started_at desc, id desc limit ? offset ?`)
-    .all(sessionWindowLimit(limit), sessionWindowSkip(skip)) as HermesSessionRow[];
+    .all(hermesSessionWindowLimit(limit), sessionWindowSkip(skip)) as HermesSessionRow[];
 
 const readMessageRows = (db: HermesDatabase, sessionId: string) =>
   db
@@ -168,8 +169,14 @@ const readSessionRowsCli = (
 ) =>
   sqliteJson<HermesSessionRow>(
     dbPath,
-    `select ${HERMES_SESSION_COLUMNS} from sessions order by started_at desc, id desc limit ${sessionWindowLimit(limit)} offset ${sessionWindowSkip(skip)}`,
+    `select ${HERMES_SESSION_COLUMNS} from sessions order by started_at desc, id desc limit ${hermesSessionWindowLimit(limit)} offset ${sessionWindowSkip(skip)}`,
   );
+
+export const readHermesSessionRowsForWindow = (
+  dbPath: string,
+  limit?: number,
+  skip?: number,
+) => readSessionRowsCli(dbPath, limit, skip);
 
 const readMessageRowsCli = (dbPath: string, sessionId: string) =>
   sqliteJson<HermesMessageRow>(

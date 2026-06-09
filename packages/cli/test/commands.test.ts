@@ -1579,6 +1579,56 @@ describe("CLI command graph", () => {
     expect(first?.ingestGeneration?.path === undefined ? false : existsSync(first.ingestGeneration.path)).toBe(true);
   }, 20_000);
 
+  test("rejects stale durable ingest generation identity versions", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-cli-codex-"));
+    const quasarHome = mkdtempSync(join(tmpdir(), "quasar-cli-home-"));
+    const generationId = "generation:stale";
+    const generationDirectory = join(
+      quasarHome,
+      "ingest-generations",
+      "by-id",
+      generationId,
+    );
+    writeMachineIdentity(quasarHome);
+    mkdirSync(generationDirectory, { recursive: true });
+    writeFileSync(
+      join(generationDirectory, "generation.json"),
+      JSON.stringify({
+        schemaVersion: "quasar.ingest-generation/v1",
+        generationId,
+        intent: { identityVersion: "quasar.ingest-generation-identity/v3" },
+      }),
+    );
+    const previousQuasarHome = process.env.QUASAR_HOME;
+    process.env.QUASAR_HOME = quasarHome;
+    const requests: Array<{ method: string; path: string; body?: unknown }> = [];
+    const requestClient = ((spec: { method: string; path: string; body?: unknown }) => {
+      requests.push({ method: spec.method, path: spec.path, body: spec.body });
+      return Effect.fail(new Error(`Unexpected request ${spec.method} ${spec.path}`));
+    }) as NonNullable<Parameters<typeof runIngestEffect>[1]>;
+
+    try {
+      await expect(
+        Effect.runPromise(
+          runIngestEffect(
+            JSON.stringify({
+              providers: ["codex"],
+              roots: { codex: root },
+              ingestGeneration: generationId,
+            }),
+            requestClient,
+          ) as Effect.Effect<unknown, unknown, never>,
+        ),
+      ).rejects.toThrow(
+        /created for quasar\.ingest-generation-identity\/v3.*fresh ingest generation/,
+      );
+    } finally {
+      restoreEnv("QUASAR_HOME", previousQuasarHome);
+    }
+
+    expect(requests).toEqual([]);
+  }, 20_000);
+
   test("bounded default ingest only persists snapshot-supported selected sources", async () => {
     const codexRoot = mkdtempSync(join(tmpdir(), "quasar-cli-codex-"));
     const homeRoot = mkdtempSync(join(tmpdir(), "quasar-cli-home-root-"));
