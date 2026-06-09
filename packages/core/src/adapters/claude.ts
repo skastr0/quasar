@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import type { SessionAdapter } from "./types";
+import { collectAdapterStream, type SessionAdapter } from "./types";
 import type { SessionEdge, ToolCall, UsageRecord } from "../schemas";
 import {
   buildSession,
@@ -26,6 +26,7 @@ import {
 const projectPathFromClaudeKey = (key: string) =>
   key.startsWith("-") ? key.replace(/^-/, "/").replaceAll("-", "/") : key;
 
+type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
 type ClaudeToolCallDraft = Omit<
   ToolCall,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
@@ -253,137 +254,150 @@ const sumNumbers = (values: readonly (number | undefined)[]) => {
     : present.reduce((sum, value) => sum + value, 0);
 };
 
+const buildClaudeSessionFromFile = (
+  path: string,
+  projectsRoot: string,
+  options: AdapterOptions,
+) => {
+  const lines = readJsonLines(path);
+  const projectKey = parentDirectoryName(path);
+  const firstRecord = lines[0]?.value as Record<string, unknown> | undefined;
+  const projectPath =
+    typeof firstRecord?.cwd === "string"
+      ? firstRecord.cwd
+      : projectPathFromClaudeKey(projectKey);
+  const toolCallsById = new Map<string, ClaudeToolCallDraft>();
+  const usageRecords: ClaudeUsageDraft[] = [];
+  const nativeUuidToEventId = new Map<string, string>();
+  const parentEdges: ClaudeEdgeDraft[] = [];
+  const events = lines.map(({ value, lineNumber }, index) => {
+    const record =
+      typeof value === "object" && value !== null
+        ? (value as Record<string, unknown>)
+        : {};
+    const type = typeof record.type === "string" ? record.type : "unknown";
+    const message =
+      record.message !== null && typeof record.message === "object"
+        ? (record.message as Record<string, unknown>)
+        : undefined;
+    const content = claudeContentProjection(message, record);
+    const nativeEventId = typeof record.uuid === "string" ? record.uuid : undefined;
+    const eventId = eventIdFor("claude", options.machine.machineId, path, index, nativeEventId ?? lineNumber);
+    if (nativeEventId !== undefined) nativeUuidToEventId.set(nativeEventId, eventId);
+    const parentUuid = typeof record.parentUuid === "string" ? record.parentUuid : undefined;
+    if (parentUuid !== undefined) {
+      const parentEventId = nativeUuidToEventId.get(parentUuid);
+      parentEdges.push({
+        id: edgeIdFor("claude", options.machine.machineId, path, "parent", parentUuid, nativeEventId ?? eventId),
+        kind: "parent",
+        ...(parentEventId !== undefined ? { fromEventId: parentEventId } : { fromId: parentUuid }),
+        toEventId: eventId,
+        rawReference: { sourcePath: path, line: lineNumber, nativeType: "parentUuid" },
+      });
+    }
+    const timestamp =
+      typeof record.timestamp === "string" ? record.timestamp : undefined;
+    const blocks = contentArray(message);
+    const toolCallId = upsertClaudeToolCalls(
+      toolCallsById,
+      options.machine.machineId,
+      path,
+      eventId,
+      timestamp,
+      blocks,
+    );
+    const usageRecord = claudeUsageRecord(
+      options.machine.machineId,
+      path,
+      nativeSessionIdFromPath(path),
+      eventId,
+      index,
+      timestamp,
+      message,
+    );
+    if (usageRecord !== undefined) usageRecords.push(usageRecord);
+    return {
+      id: eventId,
+      nativeEventId,
+      parentEventId:
+        parentUuid === undefined ? undefined : nativeUuidToEventId.get(parentUuid) ?? parentUuid,
+      sequence: index,
+      timestamp,
+      role: roleFrom(
+        typeof message?.role === "string" ? message.role : type,
+      ),
+      kind: claudeKindFrom(type, blocks),
+      contentText: compactText(content),
+      contentSource: content,
+      ...(toolCallId !== undefined ? { toolCallId } : {}),
+      rawReference: { sourcePath: path, line: lineNumber, nativeType: type },
+    };
+  });
+  return buildSession({
+    provider: "claude",
+    agentName: "claude-code",
+    machine: options.machine,
+    nativeSessionId: nativeSessionIdFromPath(path),
+    nativeProjectKey: projectKey,
+    sourceRoot: projectsRoot,
+    sourcePath: path,
+    projectPath,
+    events,
+    toolCalls: [...toolCallsById.values()],
+    sessionEdges: parentEdges,
+    usageRecords,
+  });
+};
+
+async function* streamClaude(options: AdapterOptions) {
+  const root = options.roots?.claude ?? claudeAdapter.defaultRoot();
+  if (root === undefined || !existsSync(root)) {
+    yield {
+      type: "diagnostic" as const,
+      diagnostic: {
+        adapterId: claudeAdapter.id,
+        provider: "claude" as const,
+        status: "no_data_found" as const,
+        parserConfidence: "observed" as const,
+        message: "Claude root was not found.",
+        ...(root !== undefined ? { rootPath: root } : {}),
+      },
+    };
+    return;
+  }
+  const projectsRoot = join(root, "projects");
+  const files = collectFiles(projectsRoot, (path) => path.endsWith(".jsonl"), options.limit);
+  yield {
+    type: "sourceRoot" as const,
+    sourceRoot: sourceRoot("claude", claudeAdapter.id, projectsRoot, options.machine, options.now),
+  };
+  let sessionCount = 0;
+  for (const path of files) {
+    sessionCount += 1;
+    yield {
+      type: "session" as const,
+      session: buildClaudeSessionFromFile(path, projectsRoot, options),
+    };
+  }
+  yield {
+    type: "diagnostic" as const,
+    diagnostic: {
+      adapterId: claudeAdapter.id,
+      provider: "claude" as const,
+      status: sessionCount > 0 ? ("available" as const) : ("no_data_found" as const),
+      parserConfidence: "observed" as const,
+      rootPath: projectsRoot,
+      message: `Discovered ${sessionCount} Claude session(s).`,
+    },
+  };
+}
+
 export const claudeAdapter: SessionAdapter = {
   id: "claude-code-project-jsonl",
   provider: "claude",
   displayName: "Claude Code project JSONL",
   stable: true,
   defaultRoot: () => process.env.CLAUDE_CONFIG_DIR ?? homePath(".claude"),
-  read: async (options) => {
-    const root = options.roots?.claude ?? claudeAdapter.defaultRoot();
-    if (root === undefined || !existsSync(root)) {
-      return {
-        sourceRoots: [],
-        sessions: [],
-        diagnostics: [
-          {
-            adapterId: claudeAdapter.id,
-            provider: "claude",
-            status: "no_data_found",
-            parserConfidence: "observed",
-            message: "Claude root was not found.",
-            ...(root !== undefined ? { rootPath: root } : {}),
-          },
-        ],
-      };
-    }
-    const projectsRoot = join(root, "projects");
-    const files = collectFiles(projectsRoot, (path) => path.endsWith(".jsonl"), options.limit);
-    const rootRecord = sourceRoot("claude", claudeAdapter.id, projectsRoot, options.machine, options.now);
-    const sessions = files.map((path) => {
-      const lines = readJsonLines(path);
-      const projectKey = parentDirectoryName(path);
-      const firstRecord = lines[0]?.value as Record<string, unknown> | undefined;
-      const projectPath =
-        typeof firstRecord?.cwd === "string"
-          ? firstRecord.cwd
-          : projectPathFromClaudeKey(projectKey);
-      const toolCallsById = new Map<string, ClaudeToolCallDraft>();
-      const usageRecords: ClaudeUsageDraft[] = [];
-      const nativeUuidToEventId = new Map<string, string>();
-      const parentEdges: ClaudeEdgeDraft[] = [];
-      const events = lines.map(({ value, lineNumber }, index) => {
-        const record =
-          typeof value === "object" && value !== null
-            ? (value as Record<string, unknown>)
-            : {};
-        const type = typeof record.type === "string" ? record.type : "unknown";
-        const message =
-          record.message !== null && typeof record.message === "object"
-            ? (record.message as Record<string, unknown>)
-            : undefined;
-        const content = claudeContentProjection(message, record);
-        const nativeEventId = typeof record.uuid === "string" ? record.uuid : undefined;
-        const eventId = eventIdFor("claude", options.machine.machineId, path, index, nativeEventId ?? lineNumber);
-        if (nativeEventId !== undefined) nativeUuidToEventId.set(nativeEventId, eventId);
-        const parentUuid = typeof record.parentUuid === "string" ? record.parentUuid : undefined;
-        if (parentUuid !== undefined) {
-          const parentEventId = nativeUuidToEventId.get(parentUuid);
-            parentEdges.push({
-            id: edgeIdFor("claude", options.machine.machineId, path, "parent", parentUuid, nativeEventId ?? eventId),
-            kind: "parent",
-            ...(parentEventId !== undefined ? { fromEventId: parentEventId } : { fromId: parentUuid }),
-            toEventId: eventId,
-            rawReference: { sourcePath: path, line: lineNumber, nativeType: "parentUuid" },
-          });
-        }
-        const timestamp =
-          typeof record.timestamp === "string" ? record.timestamp : undefined;
-        const blocks = contentArray(message);
-        const toolCallId = upsertClaudeToolCalls(
-          toolCallsById,
-          options.machine.machineId,
-          path,
-          eventId,
-          timestamp,
-          blocks,
-        );
-        const usageRecord = claudeUsageRecord(
-          options.machine.machineId,
-          path,
-          nativeSessionIdFromPath(path),
-          eventId,
-          index,
-          timestamp,
-          message,
-        );
-        if (usageRecord !== undefined) usageRecords.push(usageRecord);
-        return {
-          id: eventId,
-          nativeEventId,
-          parentEventId:
-            parentUuid === undefined ? undefined : nativeUuidToEventId.get(parentUuid) ?? parentUuid,
-          sequence: index,
-          timestamp,
-          role: roleFrom(
-            typeof message?.role === "string" ? message.role : type,
-          ),
-          kind: claudeKindFrom(type, blocks),
-          contentText: compactText(content),
-          contentSource: content,
-          ...(toolCallId !== undefined ? { toolCallId } : {}),
-          rawReference: { sourcePath: path, line: lineNumber, nativeType: type },
-        };
-      });
-      return buildSession({
-        provider: "claude",
-        agentName: "claude-code",
-        machine: options.machine,
-        nativeSessionId: nativeSessionIdFromPath(path),
-        nativeProjectKey: projectKey,
-        sourceRoot: projectsRoot,
-        sourcePath: path,
-        projectPath,
-        events,
-        toolCalls: [...toolCallsById.values()],
-        sessionEdges: parentEdges,
-        usageRecords,
-      });
-    });
-
-    return {
-      sourceRoots: [rootRecord],
-      sessions,
-      diagnostics: [
-        {
-          adapterId: claudeAdapter.id,
-          provider: "claude",
-          status: sessions.length > 0 ? "available" : "no_data_found",
-          parserConfidence: "observed",
-          rootPath: projectsRoot,
-          message: `Discovered ${sessions.length} Claude session(s).`,
-        },
-      ],
-    };
-  },
+  read: async (options) => collectAdapterStream(streamClaude(options)),
+  stream: streamClaude,
 };

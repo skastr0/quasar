@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import type { SessionAdapter } from "./types";
+import { collectAdapterStream, type SessionAdapter } from "./types";
 import type { SessionEventKind, SessionRole, ToolCall, UsageRecord } from "../schemas";
 import { stableWideHash } from "../hash";
 import {
@@ -22,6 +22,7 @@ import {
 } from "./common";
 
 type CodexRecord = Record<string, unknown>;
+type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
 type CodexToolCallDraft = Omit<
   ToolCall,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
@@ -241,144 +242,157 @@ const sumNumbers = (values: readonly (number | undefined)[]) => {
     : present.reduce((sum, value) => sum + value, 0);
 };
 
+const buildCodexSessionFromFile = (
+  path: string,
+  sessionsRoot: string,
+  options: AdapterOptions,
+) => {
+  const lines = readJsonLines(path);
+  const nativeSessionId = nativeSessionIdFromPath(path);
+  const sessionMeta = lines.find(
+    ({ value }) =>
+      typeof value === "object" &&
+      value !== null &&
+      (value as Record<string, unknown>).type === "session_meta",
+  )?.value as Record<string, unknown> | undefined;
+  const payload =
+    sessionMeta?.payload !== null && typeof sessionMeta?.payload === "object"
+      ? (sessionMeta.payload as Record<string, unknown>)
+      : undefined;
+  const projectPath =
+    typeof payload?.cwd === "string"
+      ? payload.cwd
+      : typeof payload?.working_dir === "string"
+        ? payload.working_dir
+        : undefined;
+
+  const toolCallsById = new Map<string, CodexToolCallDraft>();
+  const usageRecords: CodexUsageDraft[] = [];
+  const events = lines.map(({ value, lineNumber }, index) => {
+    const record =
+      typeof value === "object" && value !== null
+        ? (value as Record<string, unknown>)
+        : {};
+    const nativeType = typeof record.type === "string" ? record.type : "unknown";
+    const payloadValue = record.payload;
+    const payloadRecord = payloadRecordFrom(payloadValue);
+    const payloadType = payloadTypeFrom(payloadRecord);
+    const role = codexRoleFrom(nativeType, payloadType, payloadRecord);
+    const kind = codexKindFrom(nativeType, payloadType, payloadRecord);
+    const payloadCallId = callIdFromPayload(payloadRecord);
+    const nativeEventId =
+      typeof payloadRecord.id === "string"
+        ? payloadRecord.id
+        : payloadCallId ?? (typeof record.id === "string" ? record.id : undefined);
+    const eventId = eventIdFor("codex", options.machine.machineId, path, index, nativeEventId ?? lineNumber);
+    const timestamp =
+      typeof record.timestamp === "string" ? record.timestamp : undefined;
+    const toolCallId = upsertCodexToolCall(
+      toolCallsById,
+      options.machine.machineId,
+      nativeSessionId,
+      path,
+      eventId,
+      timestamp,
+      payloadRecord,
+    );
+    const usageRecord = codexUsageRecord(
+      options.machine.machineId,
+      path,
+      nativeSessionId,
+      eventId,
+      index,
+      timestamp,
+      payloadRecord,
+    );
+    if (usageRecord !== undefined) usageRecords.push(usageRecord);
+    return {
+      id: eventId,
+      nativeEventId,
+      sequence: index,
+      timestamp,
+      role,
+      kind,
+      contentText: compactText(payloadValue as NativeValue | undefined),
+      contentSource: payloadValue as NativeValue | undefined,
+      ...(toolCallId !== undefined ? { toolCallId } : {}),
+      rawReference: {
+        sourcePath: path,
+        line: lineNumber,
+        nativeType: codexNativeType(nativeType, payloadType),
+      },
+    };
+  });
+
+  return buildSession({
+    provider: "codex",
+    agentName: "codex",
+    machine: options.machine,
+    nativeSessionId,
+    nativeProjectKey: projectPath,
+    sourceRoot: sessionsRoot,
+    sourcePath: path,
+    projectPath,
+    events,
+    toolCalls: [...toolCallsById.values()],
+    usageRecords,
+  });
+};
+
+async function* streamCodex(options: AdapterOptions) {
+  const root = options.roots?.codex ?? codexAdapter.defaultRoot();
+  if (root === undefined || !existsSync(root)) {
+    yield {
+      type: "diagnostic" as const,
+      diagnostic: {
+        adapterId: codexAdapter.id,
+        provider: "codex" as const,
+        status: "no_data_found" as const,
+        parserConfidence: "documented" as const,
+        message: "Codex root was not found.",
+        ...(root !== undefined ? { rootPath: root } : {}),
+      },
+    };
+    return;
+  }
+
+  const sessionsRoot = join(root, "sessions");
+  const files = collectFiles(
+    sessionsRoot,
+    (path) => /rollout-.*\.jsonl$/.test(path),
+    options.limit,
+  );
+  yield {
+    type: "sourceRoot" as const,
+    sourceRoot: sourceRoot("codex", codexAdapter.id, sessionsRoot, options.machine, options.now),
+  };
+  let sessionCount = 0;
+  for (const path of files) {
+    sessionCount += 1;
+    yield {
+      type: "session" as const,
+      session: buildCodexSessionFromFile(path, sessionsRoot, options),
+    };
+  }
+  yield {
+    type: "diagnostic" as const,
+    diagnostic: {
+      adapterId: codexAdapter.id,
+      provider: "codex" as const,
+      status: sessionCount > 0 ? ("available" as const) : ("no_data_found" as const),
+      parserConfidence: "documented" as const,
+      rootPath: sessionsRoot,
+      message: `Discovered ${sessionCount} Codex session(s).`,
+    },
+  };
+}
+
 export const codexAdapter: SessionAdapter = {
   id: "codex-local-jsonl",
   provider: "codex",
   displayName: "Codex local JSONL",
   stable: true,
   defaultRoot: () => process.env.CODEX_HOME ?? homePath(".codex"),
-  read: async (options) => {
-    const root = options.roots?.codex ?? codexAdapter.defaultRoot();
-    if (root === undefined || !existsSync(root)) {
-      return {
-        sourceRoots: [],
-        sessions: [],
-        diagnostics: [
-          {
-          adapterId: codexAdapter.id,
-          provider: "codex",
-          status: "no_data_found",
-          parserConfidence: "documented",
-          message: "Codex root was not found.",
-            ...(root !== undefined ? { rootPath: root } : {}),
-          },
-        ],
-      };
-    }
-
-    const sessionsRoot = join(root, "sessions");
-    const files = collectFiles(
-      sessionsRoot,
-      (path) => /rollout-.*\.jsonl$/.test(path),
-      options.limit,
-    );
-    const rootRecord = sourceRoot("codex", codexAdapter.id, sessionsRoot, options.machine, options.now);
-    const sessions = files.map((path) => {
-      const lines = readJsonLines(path);
-      const nativeSessionId = nativeSessionIdFromPath(path);
-      const sessionMeta = lines.find(
-        ({ value }) =>
-          typeof value === "object" &&
-          value !== null &&
-          (value as Record<string, unknown>).type === "session_meta",
-      )?.value as Record<string, unknown> | undefined;
-      const payload =
-        sessionMeta?.payload !== null && typeof sessionMeta?.payload === "object"
-          ? (sessionMeta.payload as Record<string, unknown>)
-          : undefined;
-      const projectPath =
-        typeof payload?.cwd === "string"
-          ? payload.cwd
-            : typeof payload?.working_dir === "string"
-              ? payload.working_dir
-              : undefined;
-
-      const toolCallsById = new Map<string, CodexToolCallDraft>();
-      const usageRecords: CodexUsageDraft[] = [];
-      const events = lines.map(({ value, lineNumber }, index) => {
-        const record =
-          typeof value === "object" && value !== null
-            ? (value as Record<string, unknown>)
-            : {};
-        const nativeType = typeof record.type === "string" ? record.type : "unknown";
-        const payloadValue = record.payload;
-        const payloadRecord = payloadRecordFrom(payloadValue);
-        const payloadType = payloadTypeFrom(payloadRecord);
-        const role = codexRoleFrom(nativeType, payloadType, payloadRecord);
-        const kind = codexKindFrom(nativeType, payloadType, payloadRecord);
-        const payloadCallId = callIdFromPayload(payloadRecord);
-        const nativeEventId =
-          typeof payloadRecord.id === "string"
-            ? payloadRecord.id
-            : payloadCallId ?? (typeof record.id === "string" ? record.id : undefined);
-        const eventId = eventIdFor("codex", options.machine.machineId, path, index, nativeEventId ?? lineNumber);
-        const timestamp =
-          typeof record.timestamp === "string" ? record.timestamp : undefined;
-        const toolCallId = upsertCodexToolCall(
-          toolCallsById,
-          options.machine.machineId,
-          nativeSessionId,
-          path,
-          eventId,
-          timestamp,
-          payloadRecord,
-        );
-        const usageRecord = codexUsageRecord(
-          options.machine.machineId,
-          path,
-          nativeSessionId,
-          eventId,
-          index,
-          timestamp,
-          payloadRecord,
-        );
-        if (usageRecord !== undefined) usageRecords.push(usageRecord);
-        return {
-          id: eventId,
-          nativeEventId,
-          sequence: index,
-          timestamp,
-          role,
-          kind,
-          contentText: compactText(payloadValue as NativeValue | undefined),
-          contentSource: payloadValue as NativeValue | undefined,
-          ...(toolCallId !== undefined ? { toolCallId } : {}),
-          rawReference: {
-            sourcePath: path,
-            line: lineNumber,
-            nativeType: codexNativeType(nativeType, payloadType),
-          },
-        };
-      });
-
-      return buildSession({
-        provider: "codex",
-        agentName: "codex",
-        machine: options.machine,
-        nativeSessionId,
-        nativeProjectKey: projectPath,
-        sourceRoot: sessionsRoot,
-        sourcePath: path,
-        projectPath,
-        events,
-        toolCalls: [...toolCallsById.values()],
-        usageRecords,
-      });
-    });
-
-    return {
-      sourceRoots: [rootRecord],
-      sessions,
-      diagnostics: [
-        {
-          adapterId: codexAdapter.id,
-          provider: "codex",
-          status: sessions.length > 0 ? "available" : "no_data_found",
-          parserConfidence: "documented",
-          rootPath: sessionsRoot,
-          message: `Discovered ${sessions.length} Codex session(s).`,
-        },
-      ],
-    };
-  },
+  read: async (options) => collectAdapterStream(streamCodex(options)),
+  stream: streamCodex,
 };

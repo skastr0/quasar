@@ -3,7 +3,7 @@ import { copyFileSync, existsSync, mkdtempSync, rmSync, statSync } from "node:fs
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
-import type { Artifact, NormalizedSession, SessionEdge, SessionEventKind, ToolCall, UsageRecord } from "../schemas";
+import type { Artifact, SessionEdge, SessionEventKind, ToolCall, UsageRecord } from "../schemas";
 import {
   buildSession,
   compactText,
@@ -21,7 +21,7 @@ import {
   type NativeValue,
   usageIdFor,
 } from "./common";
-import type { SessionAdapter } from "./types";
+import { collectAdapterStream, type AdapterStreamItem, type SessionAdapter } from "./types";
 
 type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
 type HermesDatabase = NonNullable<Awaited<ReturnType<typeof maybeDatabase>>>;
@@ -416,40 +416,6 @@ const buildHermesSessionFromRows = (
   });
 };
 
-const readHermesWithBun = (
-  db: HermesDatabase,
-  dbPath: string,
-  root: string,
-  options: AdapterOptions,
-) => {
-  return readSessionRows(db, options.limit).map((session) =>
-    buildHermesSessionFromRows(
-      dbPath,
-      root,
-      options,
-      session,
-      readMessageRows(db, String(session.id ?? "")),
-    ),
-  );
-};
-
-const readHermesWithCli = (
-  queryDbPath: string,
-  sourceDbPath: string,
-  root: string,
-  options: AdapterOptions,
-) => {
-  return readSessionRowsCli(queryDbPath, options.limit).map((session) =>
-    buildHermesSessionFromRows(
-      sourceDbPath,
-      root,
-      options,
-      session,
-      readMessageRowsCli(queryDbPath, String(session.id ?? "")),
-    ),
-  );
-};
-
 const missingDatabaseResult = (root: string | undefined) => ({
   sourceRoots: [],
   sessions: [],
@@ -465,59 +431,83 @@ const missingDatabaseResult = (root: string | undefined) => ({
   ],
 });
 
-const readHermes = async (options: AdapterOptions) => {
+async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStreamItem> {
   const root = options.roots?.hermes ?? hermesAdapter.defaultRoot();
   const dbPath = hermesDbPath(root);
   if (root === undefined || dbPath === undefined || !existsSync(dbPath)) {
-    return missingDatabaseResult(root);
+    for (const diagnostic of missingDatabaseResult(root).diagnostics) {
+      yield { type: "diagnostic", diagnostic };
+    }
+    return;
   }
   const tempDb = copyDatabaseForRead(dbPath);
   const db = await maybeDatabase(tempDb.path);
-  let sessions: NormalizedSession[] = [];
   let usedFallback = false;
+  let sessionCount = 0;
   try {
+    yield {
+      type: "sourceRoot",
+      sourceRoot: sourceRoot("hermes", hermesAdapter.id, root, options.machine, options.now),
+    };
     if (db === undefined) {
       usedFallback = true;
-      sessions = readHermesWithCli(tempDb.path, dbPath, root, options);
+      for (const session of readSessionRowsCli(tempDb.path, options.limit)) {
+        yield {
+          type: "session",
+          session: buildHermesSessionFromRows(
+            dbPath,
+            root,
+            options,
+            session,
+            readMessageRowsCli(tempDb.path, String(session.id ?? "")),
+          ),
+        };
+        sessionCount += 1;
+      }
     } else {
-      sessions = readHermesWithBun(db, dbPath, root, options);
+      for (const session of readSessionRows(db, options.limit)) {
+        yield {
+          type: "session",
+          session: buildHermesSessionFromRows(
+            dbPath,
+            root,
+            options,
+            session,
+            readMessageRows(db, String(session.id ?? "")),
+          ),
+        };
+        sessionCount += 1;
+      }
     }
+    yield {
+      type: "diagnostic",
+      diagnostic: {
+        adapterId: hermesAdapter.id,
+        provider: "hermes" as const,
+        status: sessionCount > 0 ? ("available" as const) : ("no_data_found" as const),
+        parserConfidence: "documented" as const,
+        rootPath: dbPath,
+        message: `Discovered ${sessionCount} Hermes session(s)${usedFallback ? " via sqlite3 fallback" : ""}.`,
+      },
+    };
   } catch (error) {
-    sessions = [];
-    return {
-      sourceRoots: [sourceRoot("hermes", hermesAdapter.id, root, options.machine, options.now)],
-      sessions,
-      diagnostics: [
-        {
-          adapterId: hermesAdapter.id,
-          provider: "hermes" as const,
-          status: "unsupported" as const,
-          parserConfidence: "documented" as const,
-          rootPath: dbPath,
-          message: "Hermes state.db did not match the documented sessions/messages schema.",
-          details: { error: error instanceof Error ? error.message : String(error) },
-        },
-      ],
+    yield {
+      type: "diagnostic",
+      diagnostic: {
+        adapterId: hermesAdapter.id,
+        provider: "hermes" as const,
+        status: "unsupported" as const,
+        parserConfidence: "documented" as const,
+        rootPath: dbPath,
+        message: "Hermes state.db did not match the documented sessions/messages schema.",
+        details: { error: error instanceof Error ? error.message : String(error) },
+      },
     };
   } finally {
     db?.close();
     tempDb.cleanup();
   }
-  return {
-    sourceRoots: [sourceRoot("hermes", hermesAdapter.id, root, options.machine, options.now)],
-    sessions,
-    diagnostics: [
-      {
-        adapterId: hermesAdapter.id,
-        provider: "hermes" as const,
-        status: sessions.length > 0 ? ("available" as const) : ("no_data_found" as const),
-        parserConfidence: "documented" as const,
-        rootPath: dbPath,
-        message: `Discovered ${sessions.length} Hermes session(s)${usedFallback ? " via sqlite3 fallback" : ""}.`,
-      },
-    ],
-  };
-};
+}
 
 export const hermesAdapter: SessionAdapter = {
   id: "hermes-state-sqlite",
@@ -525,5 +515,6 @@ export const hermesAdapter: SessionAdapter = {
   displayName: "Hermes state.db SQLite",
   stable: true,
   defaultRoot: () => process.env.HERMES_HOME ?? homePath(".hermes"),
-  read: readHermes,
+  read: async (options) => collectAdapterStream(streamHermes(options)),
+  stream: streamHermes,
 };
