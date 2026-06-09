@@ -16,6 +16,8 @@ import {
 import {
   DEFAULT_UPLOAD_GROUP_SIZE,
   MAX_BULK_UPLOAD_BODY_BYTES,
+  MAX_EVENTS_PER_CHUNK,
+  MAX_OPERATIONS_PER_CHUNK,
   MAX_UPLOAD_CHUNK_BATCH_BYTES,
   chunkIngestBatch,
   ingestBatchPayloadHash,
@@ -197,6 +199,11 @@ describe("CLI command graph", () => {
 
   test("keeps default bulk upload groups below local Convex isolate limits", () => {
     expect(DEFAULT_UPLOAD_GROUP_SIZE).toBeLessThanOrEqual(10);
+  });
+
+  test("keeps default ingest chunks below Convex mutation row budgets", () => {
+    expect(MAX_EVENTS_PER_CHUNK).toBeLessThanOrEqual(10);
+    expect(MAX_OPERATIONS_PER_CHUNK).toBeLessThanOrEqual(40);
   });
 
   test("runs non-dry-run ingest through job creation and bulk upload", async () => {

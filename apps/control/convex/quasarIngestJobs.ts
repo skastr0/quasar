@@ -72,7 +72,7 @@ type IngestManifestSession = {
 const IMPORT_CHUNK_LEASE_MS = 5 * 60_000;
 const IMPORT_JOB_WORKER_LEASE_MS = 2 * 60_000;
 const IMPORT_CHUNK_MAX_ATTEMPTS = 5;
-const IMPORT_WORKER_BATCH_LIMIT = 3;
+const IMPORT_WORKER_BATCH_LIMIT = 8;
 const IMPORT_WORKER_SCHEDULE_DELAY_MS = 1_000;
 const SESSION_INTELLIGENCE_CONTRACT_VERSION = "session-intelligence/v2";
 const MAX_IMPORT_JOB_INPUT_BYTES = 3_500_000;
@@ -649,7 +649,7 @@ export const readImportJobHandler = async (
       };
   const readiness = await embeddingReadiness(ctx, input.importJobId);
   return {
-    job,
+    job: statusJob(job),
     chunks: chunks.page.map(statusChunk),
     failures: failures.page,
     readiness,
@@ -1126,6 +1126,11 @@ const statusChunk = (chunk: Doc<"importChunks">) => {
     payloadStored: chunk.payloadStoredAt !== undefined || batch !== undefined,
     payloadBytes: chunk.payloadBytes,
   };
+};
+
+const statusJob = (job: Doc<"importJobs">) => {
+  const { workerLeaseExpiresAt: _workerLeaseExpiresAt, workerLeaseToken: _workerLeaseToken, ...rest } = job;
+  return rest;
 };
 
 const scheduleImportWorker = async (
