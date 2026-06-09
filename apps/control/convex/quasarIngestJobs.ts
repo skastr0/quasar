@@ -124,6 +124,7 @@ const IMPORT_CHUNK_MAX_ATTEMPTS = 5;
 const IMPORT_WORKER_BATCH_LIMIT = 24;
 const IMPORT_WORKER_SCHEDULE_DELAY_MS = 1_000;
 const IMPORT_CANCEL_CLEANUP_BATCH_LIMIT = 100;
+const IMPORT_JOB_STALE_ATTEMPT_MS = IMPORT_JOB_WORKER_LEASE_MS * 2;
 const MAX_IMPORT_JOB_INPUT_BYTES = 3_500_000;
 const MAX_IMPORT_CHUNK_BATCH_BYTES = 768 * 1024;
 const MAX_IMPORT_BULK_INPUT_BYTES = 3_500_000;
@@ -146,7 +147,11 @@ export const startImportJobHandler = async (
   const planIdentity = planIdentityForStart(input, manifest);
   const planIdentityKey = planIdentity.planIdentityKey;
   const sourceIdentityKey = input.sourceIdentityKey ?? planIdentityKey;
-  const existing = await findLatestImportJobAttempt(ctx, sourceIdentityKey);
+  const now = Date.now();
+  const latestAttempt = await findLatestImportJobAttempt(ctx, sourceIdentityKey);
+  const existing = latestAttempt === null
+    ? null
+    : await failStaleImportJobAttempt(ctx, latestAttempt, now);
   if (existing !== null) {
     assertImportJobPlanCompatible(existing, planIdentityKey);
     if (!isUnsuccessfulImportJob(existing)) {
@@ -166,7 +171,6 @@ export const startImportJobHandler = async (
     }
   }
 
-  const now = Date.now();
   const attemptNumber = existing === null ? 0 : (existing.attemptNumber ?? 0) + 1;
   const idempotencyKey = importJobAttemptIdempotencyKey(sourceIdentityKey, attemptNumber);
   const importJobId = `job:${wideHash(idempotencyKey)}`;
@@ -245,6 +249,30 @@ const assertStartIdempotencyKey = (
   if (supplied !== undefined && supplied !== expected) {
     throw new Error("Import job idempotencyKey does not match its derived plan identity.");
   }
+};
+
+const failStaleImportJobAttempt = async (
+  ctx: MutationCtx,
+  job: Doc<"importJobs">,
+  now: number,
+) => {
+  if (isClosedImportJob(job) || isUnsuccessfulImportJob(job)) return job;
+  if (now - job.updatedAt < IMPORT_JOB_STALE_ATTEMPT_MS) return job;
+  await ctx.db.patch(job._id, {
+    status: "failed",
+    error: "Import job attempt became stale before completion.",
+    completedAt: now,
+    updatedAt: now,
+  });
+  const lease = await findImportWorkerLease(ctx, job.importJobId);
+  if (lease !== null) await ctx.db.delete(lease._id);
+  return {
+    ...job,
+    status: "failed" as const,
+    error: "Import job attempt became stale before completion.",
+    completedAt: now,
+    updatedAt: now,
+  };
 };
 
 export const submitImportChunkHandler = async (
