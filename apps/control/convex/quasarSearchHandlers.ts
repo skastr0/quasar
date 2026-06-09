@@ -125,28 +125,32 @@ export const semanticSearchHandler = async (
   if (!serverEmbeddingsConfigured()) {
     return semanticUnavailable(queryText, limit, readiness);
   }
-  const embedding = await Effect.runPromise(embedQueryEffect(queryText));
-  const result = await quasarRag.search(ctx, {
-    namespace: QUASAR_RAG_NAMESPACE,
-    query: embedding,
-    filters: ragFilters(args),
-    limit: Math.min(200, limit * 5),
-    searchType: "vector",
-  });
-  const docs = await searchDocumentsForRagEntries(ctx, result.entries);
-  const scores = new Map(
-    result.results.map((item, index) => [
-      String(item.entryId),
-      1 / (RRF_K + index + 1),
-    ]),
-  );
-  const matches = docs
-    .filter((doc) => matchesFilters(doc, args))
-    .slice(0, limit)
-    .map((doc, index) =>
-      baseMatch(doc, scores.get(doc.ragEntryId ?? "") ?? 1 / (RRF_K + index + 1)),
+  try {
+    const embedding = await Effect.runPromise(embedQueryEffect(queryText));
+    const result = await quasarRag.search(ctx, {
+      namespace: QUASAR_RAG_NAMESPACE,
+      query: embedding,
+      filters: ragFilters(args),
+      limit: Math.min(200, limit * 5),
+      searchType: "vector",
+    });
+    const docs = await searchDocumentsForRagEntries(ctx, result.entries);
+    const scores = new Map(
+      result.results.map((item, index) => [
+        String(item.entryId),
+        1 / (RRF_K + index + 1),
+      ]),
     );
-  return semanticReady(queryText, limit, matches, readiness);
+    const matches = docs
+      .filter((doc) => matchesFilters(doc, args))
+      .slice(0, limit)
+      .map((doc, index) =>
+        baseMatch(doc, scores.get(doc.ragEntryId ?? "") ?? 1 / (RRF_K + index + 1)),
+      );
+    return semanticReady(queryText, limit, matches, readiness);
+  } catch (error) {
+    return semanticProviderError(queryText, limit, readiness, error);
+  }
 };
 
 const semanticUnavailable = (
@@ -185,6 +189,37 @@ const semanticReady = (
     readiness,
   },
 });
+
+const semanticProviderError = (
+  queryText: string,
+  limit: number,
+  readiness: SearchResult["diagnostics"]["readiness"],
+  error: unknown,
+): SearchResult => ({
+  mode: "semantic",
+  query: queryText,
+  limit,
+  matches: [],
+  diagnostics: {
+    textSearched: false,
+    semanticSearched: false,
+    semanticStatus: "embedding_provider_error",
+    semanticError: semanticErrorSummary(error),
+    embeddingDimensions: QUASAR_EMBEDDING_DIMENSIONS,
+    readiness,
+  },
+});
+
+const semanticErrorSummary = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/prepayment credits are depleted/i.test(message)) {
+    return "embedding provider credits depleted";
+  }
+  if (/api key|permission|unauthorized|forbidden/i.test(message)) {
+    return "embedding provider authentication failed";
+  }
+  return "embedding provider request failed";
+};
 
 const searchDocumentsForRagEntries = async (
   ctx: ActionCtx,
@@ -240,6 +275,7 @@ export const fusionSearchHandler = async (
       textSearched: true,
       semanticSearched: semantic.diagnostics.semanticSearched,
       semanticStatus: semantic.diagnostics.semanticStatus,
+      semanticError: semantic.diagnostics.semanticError,
       embeddingDimensions: semantic.diagnostics.embeddingDimensions,
       readiness: semantic.diagnostics.readiness ?? text.diagnostics.readiness,
     },

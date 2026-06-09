@@ -18,7 +18,7 @@ export type ParsedIngestBatch = {
   sessions: readonly IngestSessionBoundary[];
   sourceRoots: readonly SourceRootBoundary[];
   diagnostics: readonly AdapterDiagnosticBoundary[];
-  sanitizedDiagnostics: unknown[];
+  sanitizedDiagnostics: AdapterDiagnosticBoundary[];
   now: number;
   importRunId: string;
   eventCount: number;
@@ -68,10 +68,9 @@ export type EventPatch = {
   role: SessionRoleSchema;
   kind: SessionEventKindSchema;
   contentText?: string;
-  contentBlocks?: unknown[];
   toolCallId?: string;
   parentEventId?: string;
-  rawReference: unknown;
+  rawReference: SessionEventBoundary["rawReference"];
   importRunId: string;
   importJobId?: string;
   importChunkId?: string;

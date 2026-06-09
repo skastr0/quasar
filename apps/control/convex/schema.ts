@@ -17,6 +17,20 @@ const provider = v.union(
   v.literal("unknown"),
 );
 
+const adapterStatus = v.union(
+  v.literal("available"),
+  v.literal("no_data_found"),
+  v.literal("unsupported"),
+  v.literal("error"),
+);
+
+const parserConfidence = v.union(
+  v.literal("documented"),
+  v.literal("observed"),
+  v.literal("brittle"),
+  v.literal("capture-file"),
+);
+
 const confidence = v.union(
   v.literal("explicit"),
   v.literal("high"),
@@ -57,6 +71,24 @@ const contentBlockKind = v.union(
   v.literal("file"),
   v.literal("json"),
 );
+
+const rawReference = v.object({
+  sourcePath: v.string(),
+  line: v.optional(v.number()),
+  table: v.optional(v.string()),
+  rowId: v.optional(v.string()),
+  nativeType: v.optional(v.string()),
+});
+
+const adapterDiagnostic = v.object({
+  adapterId: v.string(),
+  provider,
+  status: adapterStatus,
+  parserConfidence: v.optional(parserConfidence),
+  rootPath: v.optional(v.string()),
+  message: v.string(),
+  details: v.optional(v.any()),
+});
 
 const sessionEdgeKind = v.union(
   v.literal("next"),
@@ -187,7 +219,6 @@ export default defineSchema({
     updatedAtNative: v.optional(v.string()),
     sourceRoot: v.string(),
     sourcePath: v.string(),
-    rawMetadata: v.optional(v.any()),
     eventCount: v.number(),
     toolCallCount: v.number(),
     importRunId: v.string(),
@@ -229,12 +260,9 @@ export default defineSchema({
     role,
     kind: eventKind,
     contentText: v.optional(v.string()),
-    content: v.optional(v.any()),
-    contentBlocks: v.optional(v.array(v.any())),
     toolCallId: v.optional(v.string()),
     parentEventId: v.optional(v.string()),
-    rawReference: v.any(),
-    raw: v.optional(v.any()),
+    rawReference,
     importRunId: v.string(),
     importJobId: v.optional(v.string()),
     importChunkId: v.optional(v.string()),
@@ -322,7 +350,6 @@ export default defineSchema({
     totalTokens: v.optional(v.number()),
     cost: v.optional(v.number()),
     currency: v.optional(v.string()),
-    raw: v.optional(v.any()),
     importRunId: v.string(),
     importJobId: v.optional(v.string()),
     importChunkId: v.optional(v.string()),
@@ -348,7 +375,6 @@ export default defineSchema({
     output: v.optional(v.any()),
     startedAt: v.optional(v.string()),
     completedAt: v.optional(v.string()),
-    raw: v.optional(v.any()),
     importRunId: v.string(),
     importJobId: v.optional(v.string()),
     importChunkId: v.optional(v.string()),
@@ -392,7 +418,6 @@ export default defineSchema({
     sourcePath: v.optional(v.string()),
     sourceRef: v.optional(v.any()),
     metadata: v.optional(v.any()),
-    raw: v.optional(v.any()),
     importRunId: v.optional(v.string()),
     importJobId: v.optional(v.string()),
     importChunkId: v.optional(v.string()),
@@ -415,7 +440,7 @@ export default defineSchema({
     sessionEdgeCount: v.optional(v.number()),
     usageRecordCount: v.optional(v.number()),
     artifactCount: v.optional(v.number()),
-    diagnostics: v.array(v.any()),
+    diagnostics: v.array(adapterDiagnostic),
     error: v.optional(v.string()),
     importJobId: v.optional(v.string()),
     createdAt: v.number(),
@@ -448,7 +473,7 @@ export default defineSchema({
     succeededPrefixCount: v.optional(v.number()),
     failedChunkCount: v.number(),
     terminalChunkSequenceSum: v.optional(v.number()),
-    diagnostics: v.array(v.any()),
+    diagnostics: v.array(adapterDiagnostic),
     error: v.optional(v.string()),
     workerLeaseExpiresAt: v.optional(v.number()),
     workerLeaseToken: v.optional(v.string()),

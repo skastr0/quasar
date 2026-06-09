@@ -584,6 +584,70 @@ describe("quasar ingestion and search", () => {
     expect(status?.chunks[0]?.status).toBe("pending");
   });
 
+  test("sanitizes manifest-only import job diagnostics", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const session = batch.sessions[0]!;
+    const job = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: {
+        manifest: {
+          protocolVersion: "quasar.ingest-manifest/v1",
+          machine: batch.machine,
+          sourceRoots: batch.sourceRoots,
+          sessions: [
+            {
+              id: session.id,
+              nativeSessionId: session.nativeSessionId,
+              provider: session.provider,
+              machineId: session.machineId,
+              projectIdentityKey: session.projectIdentity.projectIdentityKey,
+              sourceRoot: session.sourceRoot,
+              sourcePath: session.sourcePath,
+              eventCount: session.events.length,
+              toolCallCount: session.toolCalls.length,
+              contentBlockCount: 0,
+              sessionEdgeCount: 0,
+              usageRecordCount: 0,
+              artifactCount: 0,
+            },
+          ],
+          diagnostics: [
+            {
+              adapterId: "codex-local-jsonl",
+              provider: "codex",
+              status: "available",
+              parserConfidence: "documented",
+              rootPath: "/Users/a/.codex/sessions",
+              message: "Manifest diagnostic",
+              details: {
+                filesScanned: 9,
+                workspaceSnapshot: "manifest-diagnostic-workspace-trash",
+                providerCache: "manifest-diagnostic-provider-cache-trash",
+              },
+            },
+          ],
+          generatedAt: batch.generatedAt,
+          sessionCount: 1,
+          eventCount: session.events.length,
+          toolCallCount: session.toolCalls.length,
+          contentBlockCount: 0,
+          sessionEdgeCount: 0,
+          usageRecordCount: 0,
+          artifactCount: 0,
+        },
+        expectedChunkCount: 1,
+      },
+    });
+    const status = await t.query(internal.quasar.readImportJobInternal, {
+      input: { importJobId: job.importJobId },
+    });
+    const encoded = JSON.stringify(status?.job.diagnostics);
+
+    expect(encoded).toContain("filesScanned");
+    expect(encoded).not.toContain("manifest-diagnostic-workspace-trash");
+    expect(encoded).not.toContain("manifest-diagnostic-provider-cache-trash");
+  });
+
   test("closed unsuccessful import jobs allocate a fresh attempt", async () => {
     const t = setup();
     const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
@@ -724,6 +788,23 @@ describe("quasar ingestion and search", () => {
     const session = batch.sessions[0]! as Record<string, unknown>;
     const event = batch.sessions[0]!.events[0]! as Record<string, unknown>;
     const base64 = "a".repeat(8_192);
+    (batch as { diagnostics: unknown[] }).diagnostics = [
+      {
+        adapterId: "codex-local-jsonl",
+        provider: "codex",
+        status: "available",
+        parserConfidence: "documented",
+        rootPath: "/Users/a/.codex/sessions",
+        message: "Scanned sessions",
+        details: {
+          filesScanned: 3,
+          providerCache: "direct-diagnostic-provider-cache-trash",
+          displayOnly: "direct-diagnostic-display-trash",
+          workspaceSnapshot: "direct-diagnostic-workspace-trash",
+          token: `ghp_${"1234567890abcdef".repeat(2)}1234`,
+        },
+      },
+    ];
     session.rawMetadata = {
       summary: { diffs: ["direct-ingest-diff-trash"] },
       providerCache: "keep only if bounded",
@@ -736,6 +817,15 @@ describe("quasar ingestion and search", () => {
     event.content = {
       encrypted_content: "direct-ingest-encrypted-trash",
       payload: `data:image/png;base64,${base64}`,
+    };
+    event.rawReference = {
+      sourcePath: `data:text/plain;base64,${base64}`,
+      line: 1,
+      table: "message",
+      rowId: "row".repeat(1_000),
+      nativeType: "message",
+      workspaceSnapshot: "direct-raw-reference-workspace-trash",
+      providerCache: "direct-raw-reference-provider-cache-trash",
     };
     event.contentBlocks = [
       {
@@ -756,13 +846,51 @@ describe("quasar ingestion and search", () => {
     });
     const encoded = JSON.stringify(stored);
     expect(encoded).toContain("native_non_session_intelligence");
-    expect(encoded).toContain("uri_omitted");
+    expect(encoded).toContain("binary_or_base64");
+    expect(encoded).toContain("[truncated for Convex ingest]");
+    expect(stored?.events[0]?.rawReference.sourcePath).toContain("omitted:binary_or_base64");
+    expect(stored?.contentBlocks[0]?.valueHash).toMatch(/^hash:/);
+    expect(stored?.contentBlocks[0]?.metadataHash).toMatch(/^hash:/);
+    expect(encoded).not.toContain("rawMetadata");
+    expect(encoded).not.toContain("\"raw\"");
+    expect(encoded).not.toContain("\"content\":");
     expect(encoded).not.toContain("direct-ingest-diff-trash");
     expect(encoded).not.toContain("direct-ingest-text-trash");
     expect(encoded).not.toContain("direct-ingest-encrypted-trash");
     expect(encoded).not.toContain("direct-ingest-raw-trash");
+    expect(encoded).not.toContain("direct-raw-reference-workspace-trash");
+    expect(encoded).not.toContain("direct-raw-reference-provider-cache-trash");
     expect(encoded).not.toContain("data:image/png;base64");
+    expect(encoded).not.toContain("data:text/plain;base64");
     expect(encoded).not.toContain(base64);
+
+    const rawRows = await t.run(async (ctx) => ({
+      session: await ctx.db
+        .query("sessions")
+        .withIndex("by_sessionId", (q) => q.eq("sessionId", "codex:machine:a:session"))
+        .unique(),
+      event: await ctx.db
+        .query("sessionEvents")
+        .withIndex("by_eventId", (q) => q.eq("eventId", "event:machine:a:1"))
+        .unique(),
+      block: await ctx.db
+        .query("contentBlocks")
+        .withIndex("by_blockId", (q) => q.eq("blockId", "block:direct:trash"))
+        .unique(),
+    }));
+    expect(rawRows.session).not.toHaveProperty("rawMetadata");
+    expect(rawRows.event).not.toHaveProperty("raw");
+    expect(rawRows.event).not.toHaveProperty("content");
+    expect(rawRows.event).not.toHaveProperty("contentBlocks");
+    expect(JSON.stringify(rawRows.block)).not.toContain(base64);
+
+    const runs = await t.query(internal.quasar.listImportRunsInternal, {});
+    const runEncoded = JSON.stringify(runs[0]?.diagnostics);
+    expect(runEncoded).toContain("filesScanned");
+    expect(runEncoded).not.toContain("direct-diagnostic-provider-cache-trash");
+    expect(runEncoded).not.toContain("direct-diagnostic-display-trash");
+    expect(runEncoded).not.toContain("direct-diagnostic-workspace-trash");
+    expect(runEncoded).not.toContain("ghp_");
   });
 
   test("keeps provider-control metadata out of compacted search text", () => {
@@ -1266,6 +1394,8 @@ describe("quasar ingestion and search", () => {
     expect(tools.items[0]?.status).toBe("completed");
     expect(tools.items[0]?.input).toEqual({ path: "src/index.ts" });
     expect(tools.items[0]?.output).toBe("done");
+    expect(tools.items[0]?.inputHash).toMatch(/^hash:/);
+    expect(tools.items[0]?.outputHash).toMatch(/^hash:/);
     const toolSearchDocs = await t.query(internal.quasar.fetchSearchDocumentsInternal, {
       searchDocumentIds: [`tool:${tools.items[0]?.toolCallId}`],
     });

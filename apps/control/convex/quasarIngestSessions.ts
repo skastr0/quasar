@@ -15,6 +15,7 @@ import {
 } from "./quasarIngestGraph";
 import {
   decodeBoundarySync,
+  type AdapterDiagnosticBoundary,
   IngestBatchBoundary,
   type IngestSessionBoundary,
   type SessionEventBoundary,
@@ -65,7 +66,7 @@ const parseIngestBatch = (
     sessions,
     sourceRoots,
     diagnostics,
-    sanitizedDiagnostics: redactSensitive(diagnostics) as unknown[],
+    sanitizedDiagnostics: redactSensitive(diagnostics) as AdapterDiagnosticBoundary[],
     now,
     importRunId: importRunId(machine, batch.generatedAt, sessions),
     eventCount: sumNestedArrayLengths(sessions, "events"),

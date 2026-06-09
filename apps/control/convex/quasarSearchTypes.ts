@@ -75,6 +75,7 @@ export type SearchDiagnostics = {
   readonly textSearched: boolean;
   readonly semanticSearched: boolean;
   readonly semanticStatus?: string;
+  readonly semanticError?: string;
   readonly embeddingDimensions?: number;
   readonly readiness?: {
     readonly total: number;

@@ -75,10 +75,9 @@ const buildEventPatch = (
     typeof event.contentText === "string"
       ? (redactSensitive(event.contentText) as string)
       : undefined,
-  contentBlocks: undefined,
   toolCallId: normalizedToolCallId,
   parentEventId: typeof event.parentEventId === "string" ? event.parentEventId : undefined,
-  rawReference: event.rawReference ?? {},
+  rawReference: event.rawReference,
   importRunId: state.batch.importRunId,
   importJobId: state.batch.importJobId,
   importChunkId: state.batch.importChunkId,
