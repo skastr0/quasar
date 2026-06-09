@@ -15,6 +15,7 @@ import {
   readOpenCodeSessionRowsForWindow,
 } from "../src/adapters/opencode";
 import {
+  contentBlocksFromNative,
   projectSessionNativeValue,
   projectToolPayloadNativeValue,
 } from "../src/adapters/common";
@@ -202,6 +203,26 @@ describe("adapter ingestion", () => {
     expect(toolEncoded).not.toContain("provider tool summary diff trash");
     expect(toolEncoded).not.toContain("provider tool view trash");
     expect(toolEncoded).not.toContain("provider tool ui trash");
+  });
+
+  test("does not turn path-only provider metadata into file content blocks", () => {
+    const blocks = contentBlocksFromNative(
+      "codex",
+      machine.machineId,
+      "/Users/a/.provider/state.json",
+      "event:path-only",
+      {
+        filePath: "/Users/a/Projects/quasar/.cache/provider-state.json",
+        displayOnly: "path-only provider display trash",
+        providerUi: "path-only provider ui trash",
+      },
+    );
+    const encoded = JSON.stringify(blocks);
+
+    expect(blocks).toHaveLength(0);
+    expect(encoded).not.toContain("provider-state.json");
+    expect(encoded).not.toContain("path-only provider display trash");
+    expect(encoded).not.toContain("path-only provider ui trash");
   });
 
   test("reads a Codex rollout fixture", async () => {
@@ -861,6 +882,8 @@ describe("adapter ingestion", () => {
           ],
         }))});`,
         `insert into ItemTable values ('cursor.diffCache', ${sql(JSON.stringify({
+          type: "diff",
+          path: "/Users/a/Projects/quasar/src/cache.ts",
           diff: "@@ cursor provider diff trash",
           patch: "@@ cursor provider patch trash",
           cache_state: "cursor provider cache state trash",
@@ -1062,6 +1085,15 @@ describe("adapter ingestion", () => {
         path: "/Users/a/Projects/quasar/src/index.ts",
         content: { patch: "@@ real droid patch", providerUi: "droid-diff-ui-trash" },
       },
+      {
+        id: "d4",
+        type: "artifact_cache",
+        content: {
+          path: "/Users/a/Projects/quasar/.cache/provider.ts",
+          patch: "@@ droid cached artifact trash",
+          providerUi: "droid artifact cache ui trash",
+        },
+      },
     ]);
 
     const batch = await buildIngestBatch({
@@ -1076,6 +1108,8 @@ describe("adapter ingestion", () => {
     expect(batch.sessions[0]?.artifacts[0]?.kind).toBe("diff");
     expect(encoded).toContain("@@ real droid patch");
     expect(encoded).not.toContain("droid-diff-ui-trash");
+    expect(encoded).not.toContain("@@ droid cached artifact trash");
+    expect(encoded).not.toContain("droid artifact cache ui trash");
   });
 
   test("skips Antigravity hook logs while ingesting transcript records", async () => {
@@ -1101,6 +1135,35 @@ describe("adapter ingestion", () => {
     expect(encoded).toContain("real antigravity transcript");
     expect(encoded).not.toContain("antigravity hook trash");
     expect(encoded).not.toContain("antigravity-hook-ui-trash");
+  });
+
+  test("skips Antigravity generated cache artifacts", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-antigravity-artifacts-"));
+    const sessionDir = join(root, "s1");
+    const artifacts = join(sessionDir, "artifacts");
+    const nodeModules = join(artifacts, "node_modules");
+    const outputCache = join(sessionDir, "outputs", "cache");
+    mkdirSync(nodeModules, { recursive: true });
+    mkdirSync(outputCache, { recursive: true });
+    writeJsonl(join(sessionDir, "transcript.jsonl"), [
+      { id: "ag1", role: "user", content: "real antigravity transcript", cwd: "/Users/a/Projects/quasar" },
+    ]);
+    writeFileSync(join(artifacts, "out.txt"), "real artifact");
+    writeFileSync(join(nodeModules, "bundle.js"), "antigravity node_modules artifact trash");
+    writeFileSync(join(outputCache, "provider-state.bin"), "antigravity provider state trash");
+
+    const batch = await buildIngestBatch({
+      providers: ["antigravity"],
+      roots: { antigravity: root },
+      machine,
+    });
+    const encoded = JSON.stringify(batch);
+
+    assertAdapterContract(batch, "antigravity");
+    expect(batch.sessions[0]?.artifacts).toHaveLength(1);
+    expect(batch.sessions[0]?.artifacts[0]?.path).toBe(join(artifacts, "out.txt"));
+    expect(encoded).not.toContain("provider-state.bin");
+    expect(encoded).not.toContain("node_modules");
   });
 
   test("flushes streamed sessions before later adapter failures", async () => {

@@ -68,7 +68,14 @@ const recordsFromFile = (path: string) => {
     }
     return Object.keys(record).length === 0 ? [] : [record];
   })();
-  return raw.map(recordFrom).filter(bestEffortEventRecordLike);
+  return raw
+    .map(recordFrom)
+    .filter((record) => bestEffortEventRecordLike(record) && !providerArtifactTrashRecord(record));
+};
+
+const providerArtifactTrashRecord = (record: Record<string, unknown>) => {
+  const type = String(record.type ?? record.kind ?? "").toLowerCase();
+  return type.includes("artifact") && /(cache|state|display|provider[_-]?ui|ui)/i.test(type);
 };
 
 const artifactFromRecord = (
@@ -81,6 +88,7 @@ const artifactFromRecord = (
 ): DroidArtifactDraft[] => {
   const type = String(record.type ?? record.kind ?? "").toLowerCase();
   const path = typeof record.path === "string" ? record.path : typeof record.filePath === "string" ? record.filePath : undefined;
+  if (providerArtifactTrashRecord(record)) return [];
   const isPatchLike = type.includes("diff") || type.includes("patch");
   if (!type.includes("artifact") && (!isPatchLike || path === undefined)) return [];
   const metadata = projectSessionPatchNativeValue(record.content ?? record.patch ?? record.diff);
