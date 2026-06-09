@@ -356,6 +356,7 @@ export class ImportJobStartRequest extends Schema.Class<ImportJobStartRequest>(
 )({
   batch: Schema.optional(IngestBatch),
   manifest: Schema.optional(IngestManifest),
+  sourceIdentityKey: Schema.optional(Schema.String),
   idempotencyKey: Schema.optional(Schema.String),
   expectedChunkCount: Schema.optional(Schema.Number),
 }) {}
@@ -367,6 +368,8 @@ export class ImportJobStartResponse extends Schema.Class<ImportJobStartResponse>
   status: ImportJobStatus,
   chunkCount: Schema.Number,
   expectedChunkCount: Schema.optional(Schema.Number),
+  sourceIdentityKey: Schema.optional(Schema.String),
+  attemptNumber: Schema.optional(Schema.Number),
 }) {}
 
 export class ImportJobChunkRequest extends Schema.Class<ImportJobChunkRequest>(

@@ -428,6 +428,8 @@ export default defineSchema({
   importJobs: defineTable({
     importJobId: v.string(),
     idempotencyKey: v.string(),
+    sourceIdentityKey: v.optional(v.string()),
+    attemptNumber: v.optional(v.number()),
     machineId: v.string(),
     status: importJobStatus,
     generatedAt: v.optional(v.string()),
@@ -457,6 +459,7 @@ export default defineSchema({
   })
     .index("by_importJobId", ["importJobId"])
     .index("by_idempotencyKey", ["idempotencyKey"])
+    .index("by_sourceIdentity_attempt", ["sourceIdentityKey", "attemptNumber"])
     .index("by_status", ["status", "updatedAt"])
     .index("by_createdAt", ["createdAt"]),
 

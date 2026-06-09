@@ -492,6 +492,24 @@ describe("quasar ingestion and search", () => {
     expect(status?.chunks[0]?.status).toBe("pending");
   });
 
+  test("closed import jobs cannot be reused by idempotency key", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const job = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { batch, expectedChunkCount: 1 },
+    });
+    await t.mutation(internal.quasar.cancelImportJobInternal, {
+      importJobId: job.importJobId,
+      reason: "test closed job",
+    });
+
+    await expect(
+      t.mutation(internal.quasar.startImportJobInternal, {
+        input: { batch, expectedChunkCount: 1 },
+      }),
+    ).rejects.toThrow(/Import job is closed/);
+  });
+
   test("durable import worker drains uploaded chunks before complete upload", async () => {
     const t = setup();
     const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
