@@ -233,6 +233,7 @@ export const submitImportChunksHandler = async (
     assertJsonByteBudget(chunk.batch, MAX_IMPORT_CHUNK_BATCH_BYTES, "bulk import chunk batch");
     results.push(
       (await ctx.runMutation(internal.quasar.enqueueImportChunkInternal, {
+        scheduleWorker: false,
         input: {
           importJobId: input.importJobId,
           batch: chunk.batch,
@@ -245,12 +246,18 @@ export const submitImportChunksHandler = async (
       })) as SubmitImportChunkResult,
     );
   }
+  if (input.chunks.length > 0) {
+    await ctx.runMutation(internal.quasar.scheduleImportWorkerInternal, {
+      importJobId: input.importJobId,
+      delayMs: 0,
+    });
+  }
   return { importJobId: input.importJobId, enqueuedCount: results.length, results };
 };
 
 export const enqueueImportChunkHandler = async (
   ctx: MutationCtx,
-  args: { input: unknown },
+  args: { input: unknown; scheduleWorker?: boolean },
 ): Promise<SubmitImportChunkResult> => {
   const decoded = decodeBoundarySync(SubmitImportChunkInput, args.input, "submit import chunk input");
   const input = {
@@ -361,7 +368,7 @@ export const enqueueImportChunkHandler = async (
     batch: input.batch,
     now,
   });
-  await scheduleImportWorker(ctx, input.importJobId, 0);
+  if (args.scheduleWorker !== false) await scheduleImportWorker(ctx, input.importJobId, 0);
   return {
     importJobId: input.importJobId,
     chunkId,
@@ -369,6 +376,14 @@ export const enqueueImportChunkHandler = async (
     jobStatus: "running",
     enqueued: true,
   };
+};
+
+export const scheduleImportWorkerMutationHandler = async (
+  ctx: MutationCtx,
+  args: { importJobId: string; delayMs?: number },
+): Promise<{ readonly scheduled: true }> => {
+  await scheduleImportWorker(ctx, args.importJobId, args.delayMs ?? 0);
+  return { scheduled: true as const };
 };
 
 export const processImportJobChunksHandler = async (

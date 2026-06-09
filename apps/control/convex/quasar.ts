@@ -20,6 +20,7 @@ import {
   markImportChunkSucceededHandler,
   processImportJobChunksHandler,
   readImportJobHandler,
+  scheduleImportWorkerMutationHandler,
   startImportJobHandler,
   submitImportChunkHandler,
   submitImportChunksHandler,
@@ -92,8 +93,13 @@ export const submitImportChunksInternal = internalAction({
 });
 
 export const enqueueImportChunkInternal = internalMutation({
-  args: { input: v.any() },
+  args: { input: v.any(), scheduleWorker: v.optional(v.boolean()) },
   handler: enqueueImportChunkHandler,
+});
+
+export const scheduleImportWorkerInternal = internalMutation({
+  args: { importJobId: v.string(), delayMs: v.optional(v.number()) },
+  handler: scheduleImportWorkerMutationHandler,
 });
 
 export const processImportJobChunksInternal = internalAction({
