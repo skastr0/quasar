@@ -149,6 +149,12 @@ describe("CLI command graph", () => {
   test("runs non-dry-run ingest through job creation and bulk upload", async () => {
     const root = mkdtempSync(join(tmpdir(), "quasar-cli-pi-"));
     writePiFixture(root, 12);
+    const previousChunkDelay = process.env.QUASAR_INGEST_CHUNK_DELAY_MS;
+    const previousMaxEvents = process.env.QUASAR_INGEST_MAX_EVENTS_PER_CHUNK;
+    const previousUploadGroupSize = process.env.QUASAR_INGEST_UPLOAD_GROUP_SIZE;
+    process.env.QUASAR_INGEST_CHUNK_DELAY_MS = "0";
+    process.env.QUASAR_INGEST_MAX_EVENTS_PER_CHUNK = "5";
+    process.env.QUASAR_INGEST_UPLOAD_GROUP_SIZE = "2";
     const requests: Array<{ method: string; path: string; body?: unknown }> = [];
     const requestClient = ((spec: { method: string; path: string; body?: unknown }) => {
       requests.push({ method: spec.method, path: spec.path, body: spec.body });
@@ -198,27 +204,86 @@ describe("CLI command graph", () => {
       providers: ["pi"],
       roots: { pi: root },
     });
-    await Effect.runPromise(
-      runIngestEffect(input, requestClient) as Effect.Effect<unknown, unknown, never>,
-    );
+    type RunResult = {
+      chunkCount: number;
+      uploadedChunkCount: number;
+      uploadGroupCount: number;
+      results?: unknown;
+    };
+    let runResult: RunResult | undefined;
+    try {
+      runResult = await Effect.runPromise(
+        runIngestEffect(input, requestClient) as Effect.Effect<unknown, unknown, never>,
+      ) as RunResult;
+    } finally {
+      restoreEnv("QUASAR_INGEST_CHUNK_DELAY_MS", previousChunkDelay);
+      restoreEnv("QUASAR_INGEST_MAX_EVENTS_PER_CHUNK", previousMaxEvents);
+      restoreEnv("QUASAR_INGEST_UPLOAD_GROUP_SIZE", previousUploadGroupSize);
+    }
     const jobRequest = requests.find(
       (request) => request.method === "POST" && request.path === "/api/ingest/jobs",
     );
-    const bulkRequest = requests.find(
+    const bulkRequests = requests.filter(
       (request) => request.method === "POST" && request.path === "/api/ingest/job-chunks-bulk",
     );
+    const bulkBodies = bulkRequests.map((request) => request.body as {
+      expectedChunkCount: number;
+      chunks: Array<{ sequence: number; completeJob?: boolean }>;
+    });
+    const uploadedChunks = bulkBodies.flatMap((body) => body.chunks);
     expect(jobRequest?.body).toMatchObject({
       idempotencyKey: expect.stringMatching(/^import-job:/),
-      expectedChunkCount: expect.any(Number),
+      expectedChunkCount: 3,
     });
-    expect(bulkRequest?.body).toMatchObject({
-      importJobId: "job:test",
-      expectedChunkCount: expect.any(Number),
-    });
-    expect(jsonByteLength(bulkRequest?.body)).toBeLessThanOrEqual(MAX_BULK_UPLOAD_BODY_BYTES);
+    expect(bulkRequests).toHaveLength(2);
+    expect(new Set(bulkBodies.map((body) => body.expectedChunkCount))).toEqual(new Set([3]));
+    expect(uploadedChunks.map((chunk) => chunk.sequence)).toEqual([0, 1, 2]);
+    expect(uploadedChunks.map((chunk) => chunk.completeJob === true)).toEqual([false, false, true]);
+    expect(bulkBodies.every((body) => jsonByteLength(body) <= MAX_BULK_UPLOAD_BODY_BYTES)).toBe(true);
     expect(
       requests.some((request) => request.method === "GET" && request.path === "/api/ingest/jobs"),
     ).toBe(true);
+    expect(runResult?.chunkCount).toBe(3);
+    expect(runResult?.uploadedChunkCount).toBe(3);
+    expect(runResult?.uploadGroupCount).toBe(2);
+    expect(runResult?.results).toBeUndefined();
+  }, 20_000);
+
+  test("aborts non-dry-run ingest when sources change between planning and upload", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-cli-pi-"));
+    writePiFixture(root, 2);
+    const requests: Array<{ method: string; path: string; body?: unknown }> = [];
+    const requestClient = ((spec: { method: string; path: string; body?: unknown }) => {
+      requests.push({ method: spec.method, path: spec.path, body: spec.body });
+      if (spec.method === "POST" && spec.path === "/api/ingest/jobs") {
+        writePiFixture(root, 3);
+        return Effect.succeed({
+          importJobId: "job:changed",
+          status: "queued",
+          chunkCount: 0,
+          expectedChunkCount: 1,
+        });
+      }
+      if (spec.method === "POST" && spec.path === "/api/ingest/job-chunks-bulk") {
+        return Effect.fail(new Error("bulk upload should not run after source mutation"));
+      }
+      return Effect.fail(new Error(`Unexpected request ${spec.method} ${spec.path}`));
+    }) as NonNullable<Parameters<typeof runIngestEffect>[1]>;
+
+    const input = JSON.stringify({
+      providers: ["pi"],
+      roots: { pi: root },
+    });
+    await expect(
+      Effect.runPromise(
+        runIngestEffect(input, requestClient) as Effect.Effect<unknown, unknown, never>,
+      ),
+    ).rejects.toThrow(/source changed between planning and upload/);
+    expect(
+      requests.some(
+        (request) => request.method === "POST" && request.path === "/api/ingest/job-chunks-bulk",
+      ),
+    ).toBe(false);
   }, 20_000);
 });
 
@@ -238,6 +303,11 @@ const writePiFixture = (root: string, count: number) =>
       cwd: "/Users/a/Projects/quasar",
     })),
   );
+
+const restoreEnv = (name: string, value: string | undefined) => {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+};
 
 const runCli = (
   args: readonly string[],
