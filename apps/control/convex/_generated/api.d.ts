@@ -11,8 +11,12 @@
 import type * as http from "../http.js";
 import type * as httpAuth from "../httpAuth.js";
 import type * as quasar from "../quasar.js";
+import type * as quasarApiPaths from "../quasarApiPaths.js";
+import type * as quasarDomainSchemas from "../quasarDomainSchemas.js";
+import type * as quasarEmbeddingReadiness from "../quasarEmbeddingReadiness.js";
 import type * as quasarIngestEvents from "../quasarIngestEvents.js";
 import type * as quasarIngestGraph from "../quasarIngestGraph.js";
+import type * as quasarIngestJobs from "../quasarIngestJobs.js";
 import type * as quasarIngestSessions from "../quasarIngestSessions.js";
 import type * as quasarIngestToolCalls from "../quasarIngestToolCalls.js";
 import type * as quasarIngestTypes from "../quasarIngestTypes.js";
@@ -37,8 +41,12 @@ declare const fullApi: ApiFromModules<{
   http: typeof http;
   httpAuth: typeof httpAuth;
   quasar: typeof quasar;
+  quasarApiPaths: typeof quasarApiPaths;
+  quasarDomainSchemas: typeof quasarDomainSchemas;
+  quasarEmbeddingReadiness: typeof quasarEmbeddingReadiness;
   quasarIngestEvents: typeof quasarIngestEvents;
   quasarIngestGraph: typeof quasarIngestGraph;
+  quasarIngestJobs: typeof quasarIngestJobs;
   quasarIngestSessions: typeof quasarIngestSessions;
   quasarIngestToolCalls: typeof quasarIngestToolCalls;
   quasarIngestTypes: typeof quasarIngestTypes;
@@ -83,4 +91,5 @@ export declare const internal: FilterApi<
 export declare const components: {
   migrations: import("@convex-dev/migrations/_generated/component.js").ComponentApi<"migrations">;
   rag: import("@convex-dev/rag/_generated/component.js").ComponentApi<"rag">;
+  workpool: import("@convex-dev/workpool/_generated/component.js").ComponentApi<"workpool">;
 };

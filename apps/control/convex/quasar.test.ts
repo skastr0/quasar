@@ -394,6 +394,8 @@ describe("quasar ingestion and search", () => {
     });
     expect(status?.job.succeededChunkCount).toBe(1);
     expect(status?.chunks[0]?.status).toBe("succeeded");
+    expect(status?.chunks[0]?.payloadStored).toBe(true);
+    expect(status?.chunks[0]).not.toHaveProperty("batch");
     expect(status?.readiness.total).toBeGreaterThan(0);
 
     const session = await t.query(internal.quasar.readSessionInternal, {
@@ -401,6 +403,35 @@ describe("quasar ingestion and search", () => {
     });
     expect(session?.session.importJobId).toBe(job.importJobId);
     expect(session?.session.ingestState).toBe("complete");
+  });
+
+  test("rejects oversized import chunk payloads before enqueue", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const oversizedBatch = {
+      ...batch,
+      sessions: batch.sessions.map((session) => ({
+        ...session,
+        events: session.events.map((event) => ({
+          ...event,
+          contentText: "oversized chunk payload\n".repeat(40_000),
+        })),
+      })),
+    };
+    const job = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { batch, expectedChunkCount: 1 },
+    });
+
+    await expect(
+      t.action(internal.quasar.submitImportChunkInternal, {
+        input: {
+          importJobId: job.importJobId,
+          batch: oversizedBatch,
+          sequence: 0,
+          expectedChunkCount: 1,
+        },
+      }),
+    ).rejects.toThrow(/import chunk batch is .* maximum is/);
   });
 
   test("re-running uploaded chunks converges without duplicate rows", async () => {

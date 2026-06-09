@@ -6,8 +6,16 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, test } from "vitest";
 
-import { buildIngestBatch, sanitizeIngestBatchForTransport } from "@skastr0/quasar-core";
-import { chunkIngestBatch } from "../src/commands/ingest";
+import {
+  buildIngestBatch,
+  jsonByteLength,
+  sanitizeIngestBatchForTransport,
+} from "@skastr0/quasar-core";
+import {
+  DEFAULT_UPLOAD_GROUP_SIZE,
+  MAX_UPLOAD_CHUNK_BATCH_BYTES,
+  chunkIngestBatch,
+} from "../src/commands/ingest";
 
 const testDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(testDir, "../../..");
@@ -128,7 +136,12 @@ describe("CLI command graph", () => {
     expect(
       chunks.every((chunk) => (chunk.sessions[0]?.events.length ?? 0) <= 50),
     ).toBe(true);
+    expect(chunks.every((chunk) => jsonByteLength(chunk) <= MAX_UPLOAD_CHUNK_BATCH_BYTES)).toBe(true);
   }, 20_000);
+
+  test("keeps default bulk upload groups below local Convex isolate limits", () => {
+    expect(DEFAULT_UPLOAD_GROUP_SIZE).toBeLessThanOrEqual(10);
+  });
 });
 
 type ChunkMetadata = {
