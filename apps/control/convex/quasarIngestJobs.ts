@@ -574,14 +574,33 @@ export const readImportJobHandler = async (
     .unique();
   if (job === null) return null;
   const limit = boundedStatusLimit(input.limit);
-  const chunks = await ctx.db
-    .query("importChunks")
-    .withIndex("by_job_sequence", (q) => q.eq("importJobId", input.importJobId))
-    .paginate({ cursor: input.chunkCursor ?? null, numItems: limit });
-  const failures = await ctx.db
-    .query("importFailures")
-    .withIndex("by_importJobId", (q) => q.eq("importJobId", input.importJobId))
-    .paginate({ cursor: input.failureCursor ?? null, numItems: Math.min(100, limit) });
+  const pageFailures = input.failureCursor !== undefined && input.failureCursor !== null;
+  const chunks = pageFailures
+    ? {
+        page: await ctx.db
+          .query("importChunks")
+          .withIndex("by_job_sequence", (q) => q.eq("importJobId", input.importJobId))
+          .take(limit),
+        isDone: true,
+        continueCursor: "",
+      }
+    : await ctx.db
+        .query("importChunks")
+        .withIndex("by_job_sequence", (q) => q.eq("importJobId", input.importJobId))
+        .paginate({ cursor: input.chunkCursor ?? null, numItems: limit });
+  const failures = pageFailures
+    ? await ctx.db
+        .query("importFailures")
+        .withIndex("by_importJobId", (q) => q.eq("importJobId", input.importJobId))
+        .paginate({ cursor: input.failureCursor ?? null, numItems: Math.min(100, limit) })
+    : {
+        page: await ctx.db
+          .query("importFailures")
+          .withIndex("by_importJobId", (q) => q.eq("importJobId", input.importJobId))
+          .take(Math.min(100, limit)),
+        isDone: true,
+        continueCursor: "",
+      };
   const readiness = await embeddingReadiness(ctx, input.importJobId);
   return {
     job,
@@ -601,7 +620,10 @@ export const readImportJobHandler = async (
   };
 };
 
-export const listImportJobsHandler = async (ctx: QueryCtx, args: { limit?: number }) => {
+export const listImportJobsHandler = async (
+  ctx: QueryCtx,
+  args: { limit?: number },
+): Promise<readonly { readonly job: unknown; readonly readiness: unknown }[]> => {
   const jobs = await ctx.db
     .query("importJobs")
     .withIndex("by_createdAt")
