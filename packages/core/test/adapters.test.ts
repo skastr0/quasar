@@ -54,6 +54,11 @@ describe("adapter ingestion", () => {
         diffs: ["provider summary diff trash"],
         cache: { state: "provider summary cache trash" },
       },
+      workspace: {
+        diff: "provider workspace diff trash",
+        patch: "provider workspace patch trash",
+        patches: ["provider workspace patches trash"],
+      },
       providerUi: "provider event ui trash",
     });
     const toolProjection = projectToolPayloadNativeValue({
@@ -71,6 +76,9 @@ describe("adapter ingestion", () => {
     expect(sessionEncoded).toContain("@@ real event diff");
     expect(sessionEncoded).not.toContain("provider summary diff trash");
     expect(sessionEncoded).not.toContain("provider summary cache trash");
+    expect(sessionEncoded).not.toContain("provider workspace diff trash");
+    expect(sessionEncoded).not.toContain("provider workspace patch trash");
+    expect(sessionEncoded).not.toContain("provider workspace patches trash");
     expect(sessionEncoded).not.toContain("provider event ui trash");
     expect(toolEncoded).toContain("@@ real tool patch");
     expect(toolEncoded).toContain("@@ real tool diff");

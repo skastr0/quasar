@@ -36,6 +36,24 @@ export type NativeValue =
   | readonly NativeValue[]
   | { readonly [key: string]: NativeValue | undefined };
 
+type NativeProjectionInput =
+  | NativeValue
+  | undefined
+  | readonly NativeProjectionInput[]
+  | { readonly [key: string]: NativeProjectionInput };
+
+const NativeProjectionInputSchema: Schema.Schema<NativeProjectionInput> = Schema.suspend(
+  () =>
+    Schema.Union(
+      Schema.String,
+      Schema.Number,
+      Schema.Boolean,
+      Schema.Null,
+      Schema.Undefined,
+      Schema.Array(NativeProjectionInputSchema),
+      Schema.Record({ key: Schema.String, value: NativeProjectionInputSchema }),
+    ),
+);
 const UnknownRecordSchema = Schema.Record({ key: Schema.String, value: Schema.Unknown });
 
 type BuildSessionArgs = {
@@ -119,12 +137,20 @@ const compactString = (value: string) => {
 };
 
 export const projectSessionNativeValue = (value: unknown): NativeValue | undefined => {
-  const projected = projectSessionIntelligenceNativeValue(value);
+  const decoded = Option.getOrElse(
+    Schema.decodeUnknownOption(NativeProjectionInputSchema)(value),
+    () => value,
+  );
+  const projected = projectSessionIntelligenceNativeValue(decoded);
   return projected === undefined ? undefined : (projected as NativeValue);
 };
 
 export const projectToolPayloadNativeValue = (value: unknown): unknown => {
-  return projectSessionIntelligenceToolPayloadValue(value);
+  const decoded = Option.getOrElse(
+    Schema.decodeUnknownOption(NativeProjectionInputSchema)(value),
+    () => value,
+  );
+  return projectSessionIntelligenceToolPayloadValue(decoded);
 };
 
 export const collectFiles = (

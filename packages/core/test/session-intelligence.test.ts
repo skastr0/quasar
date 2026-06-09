@@ -237,6 +237,11 @@ describe("session intelligence contract", () => {
                 diff: "@@ real event diff",
                 providerUi: "provider event ui trash",
                 summary: { diffs: ["provider event summary diff trash"] },
+                workspace: {
+                  diff: "provider event workspace diff trash",
+                  patch: "provider event workspace patch trash",
+                  patches: ["provider event workspace patches trash"],
+                },
               },
             },
           ],
@@ -252,6 +257,9 @@ describe("session intelligence contract", () => {
     expect(encoded).toContain("@@ real event diff");
     expect(encoded).not.toContain("provider event ui trash");
     expect(encoded).not.toContain("provider event summary diff trash");
+    expect(encoded).not.toContain("provider event workspace diff trash");
+    expect(encoded).not.toContain("provider event workspace patch trash");
+    expect(encoded).not.toContain("provider event workspace patches trash");
     assertConvexSafeSessionIntelligenceBatch(sanitized);
   });
 
