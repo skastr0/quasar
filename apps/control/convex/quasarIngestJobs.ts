@@ -958,16 +958,10 @@ const upsertCheckpoint = async (
 };
 
 const embeddingReadiness = async (ctx: QueryCtx, importJobId: string) => {
-  const rows = [];
-  let cursor: string | null = null;
-  do {
-    const page = await ctx.db
-      .query("embeddingReadiness")
-      .withIndex("by_job", (q) => q.eq("importJobId", importJobId))
-      .paginate({ cursor, numItems: 1000 });
-    rows.push(...page.page);
-    cursor = page.isDone ? null : page.continueCursor;
-  } while (cursor !== null);
+  const rows = await ctx.db
+    .query("embeddingReadiness")
+    .withIndex("by_job", (q) => q.eq("importJobId", importJobId))
+    .take(1000);
   return readinessCounts(rows);
 };
 
