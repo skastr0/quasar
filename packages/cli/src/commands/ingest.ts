@@ -5,8 +5,11 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
+  renameSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -20,13 +23,19 @@ import {
   createSourceSafetyReport,
   ImportJobStartResponse,
   ImportJobStatusResponse,
+  IngestManifest as IngestManifestSchema,
+  MachineIdentity as MachineIdentitySchema,
   SESSION_INTELLIGENCE_CONTRACT_VERSION,
+  SourceManifestEntry as SourceManifestEntrySchema,
   jsonByteLength,
   loadMachineIdentity,
   manifestFromBatch,
+  Provider as ProviderSchema,
+  quasarHome,
   QuasarApiPaths,
   resnapshotSourceManifestEntries,
   snapshotIngestSourceManifest,
+  stableCanonicalJsonHash,
   stableJsonHash,
   stableWideHash,
   stableAdapters,
@@ -64,12 +73,24 @@ const loadOptions = (input: string | undefined) =>
   loadOptionalJsonInput(IngestOptions, input, {});
 
 type PreparedSourceSnapshot = {
+  readonly machine?: MachineIdentity;
   readonly roots?: Partial<Record<Provider, string>>;
   readonly logicalRoots?: Partial<Record<Provider, string>>;
+  readonly providers?: readonly Provider[];
+  readonly includeExperimental?: boolean;
+  readonly limit?: number;
+  readonly generatedAt?: string;
+  readonly plan?: StreamIngestPlan;
+  readonly generation?: {
+    readonly generationId: string;
+    readonly path: string;
+  };
   readonly sourceSnapshot: {
     readonly enabled: boolean;
     readonly rootPath?: string;
     readonly copiedProviders: readonly Provider[];
+    readonly persistent?: boolean;
+    readonly generationId?: string;
   };
 };
 
@@ -94,6 +115,7 @@ const prepareSourceSnapshot = (options: IngestOptions) =>
 
 const cleanupSourceSnapshot = (prepared: PreparedSourceSnapshot) =>
   Effect.sync(() => {
+    if (prepared.sourceSnapshot.persistent === true) return;
     const rootPath = prepared.sourceSnapshot.rootPath;
     if (rootPath === undefined) return;
     try {
@@ -103,7 +125,402 @@ const cleanupSourceSnapshot = (prepared: PreparedSourceSnapshot) =>
     }
   });
 
-const prepareSourceSnapshotSync = (options: IngestOptions): PreparedSourceSnapshot => {
+const INGEST_GENERATION_SCHEMA_VERSION = "quasar.ingest-generation/v1";
+const INGEST_GENERATION_IDENTITY_VERSION = "quasar.ingest-generation-identity/v2";
+const STREAM_INGEST_UPLOAD_IDENTITY_VERSION = "quasar.stream-ingest/v3";
+const DURABLE_SNAPSHOT_PROVIDERS = new Set<Provider>([
+  "codex",
+  "claude",
+  "hermes",
+  "opencode",
+]);
+
+const PersistedPositiveInteger = Schema.Number.pipe(
+  Schema.filter((value) => Number.isInteger(value) && value > 0, {
+    message: () => "Expected a positive integer",
+  }),
+);
+
+const IngestGenerationChunkOptions = Schema.Struct({
+  maxEventsPerChunk: PersistedPositiveInteger,
+  maxOperationsPerChunk: PersistedPositiveInteger,
+});
+
+const IngestGenerationIntent = Schema.Struct({
+  identityVersion: Schema.Literal(INGEST_GENERATION_IDENTITY_VERSION),
+  sessionIntelligenceContractVersion: Schema.Literal(SESSION_INTELLIGENCE_CONTRACT_VERSION),
+  streamIngestUploadIdentityVersion: Schema.Literal(STREAM_INGEST_UPLOAD_IDENTITY_VERSION),
+  providers: Schema.Array(ProviderSchema),
+  includeExperimental: Schema.Boolean,
+  limit: Schema.optional(PersistedPositiveInteger),
+  roots: Schema.partial(Schema.Record({ key: ProviderSchema, value: Schema.String })),
+  logicalRoots: Schema.partial(Schema.Record({ key: ProviderSchema, value: Schema.String })),
+  chunkOptions: IngestGenerationChunkOptions,
+});
+type IngestGenerationIntent = typeof IngestGenerationIntent.Type;
+
+const PersistedIngestGeneration = Schema.Struct({
+  schemaVersion: Schema.Literal(INGEST_GENERATION_SCHEMA_VERSION),
+  generationId: Schema.String,
+  intentHash: Schema.String,
+  sourceIdentityKey: Schema.String,
+  createdAt: Schema.String,
+  updatedAt: Schema.String,
+  generatedAt: Schema.String,
+  machine: MachineIdentitySchema,
+  intent: IngestGenerationIntent,
+  roots: Schema.partial(Schema.Record({ key: ProviderSchema, value: Schema.String })),
+  logicalRoots: Schema.partial(Schema.Record({ key: ProviderSchema, value: Schema.String })),
+  sourceSnapshot: Schema.Struct({
+    enabled: Schema.Literal(true),
+    rootPath: Schema.String,
+    copiedProviders: Schema.Array(ProviderSchema),
+  }),
+  plan: Schema.Struct({
+    manifest: IngestManifestSchema,
+    expectedChunkCount: PersistedPositiveInteger,
+    chunkPayloadHashes: Schema.Array(Schema.String),
+    idempotencyKey: Schema.String,
+    sourceBefore: Schema.Array(SourceManifestEntrySchema),
+  }),
+});
+type PersistedIngestGeneration = typeof PersistedIngestGeneration.Type;
+
+const prepareRunSource = (
+  options: IngestOptions,
+  machine: MachineIdentity,
+  generatedAt: string,
+  chunkOptions: Required<ChunkOptions>,
+) =>
+  prepareIngestGeneration(options, machine, generatedAt, chunkOptions).pipe(
+    Effect.flatMap((generation) =>
+      generation === undefined
+        ? prepareSourceSnapshot(options)
+        : Effect.succeed(generation),
+    ),
+  );
+
+const prepareIngestGeneration = (
+  options: IngestOptions,
+  machine: MachineIdentity,
+  generatedAt: string,
+  chunkOptions: Required<ChunkOptions>,
+) =>
+  Effect.gen(function* () {
+    if (!shouldUseDurableIngestGeneration(options)) return undefined;
+    const intent = ingestGenerationIntent(options, chunkOptions);
+    const intentHash = stableJsonHash(intent);
+    const generationId = options.ingestGeneration ?? `generation:${intentHash}`;
+    assertSafeIngestGenerationId(generationId);
+    const directory = ingestGenerationDirectory(generationId);
+    const path = ingestGenerationFilePath(generationId);
+    if (existsSync(path)) {
+      const persisted = readPersistedIngestGeneration(path, generationId);
+      if (persisted.intentHash !== intentHash) {
+        return yield* new CommandInputError({
+          field: "ingestGeneration",
+          message: `Ingest generation ${generationId} was created for a different ingest identity; create a new generation or use matching providers, roots, limit, and chunk settings.`,
+        });
+      }
+      return preparedSourceFromGeneration(persisted, path);
+    }
+    if (options.snapshotSources !== true) {
+      return yield* new CommandInputError({
+        field: "snapshotSources",
+        message: "Creating a durable ingest generation requires snapshotSources: true.",
+      });
+    }
+    const unsupportedProviders = unsupportedDurableSnapshotProviders(intent);
+    if (unsupportedProviders.length > 0) {
+      return yield* new CommandInputError({
+        field: "providers",
+        message: `Durable ingest generations require snapshot support for every selected provider with a root; unsupported provider(s): ${unsupportedProviders.join(", ")}.`,
+      });
+    }
+    const created = yield* createPersistedIngestGeneration({
+      options,
+      machine,
+      generatedAt,
+      chunkOptions,
+      intent,
+      intentHash,
+      generationId,
+      directory,
+      path,
+    });
+    return preparedSourceFromGeneration(created, path);
+  });
+
+const shouldUseDurableIngestGeneration = (options: IngestOptions) =>
+  options.ingestGeneration !== undefined ||
+  (options.snapshotSources === true && maxUploadChunksFromOptions(options) !== undefined);
+
+const unsupportedDurableSnapshotProviders = (intent: IngestGenerationIntent) =>
+  intent.providers.filter(
+    (provider) =>
+      intent.roots[provider] !== undefined &&
+      !DURABLE_SNAPSHOT_PROVIDERS.has(provider),
+  );
+
+const ingestGenerationIntent = (
+  options: IngestOptions,
+  chunkOptions: Required<ChunkOptions>,
+): IngestGenerationIntent => {
+  const adapters = selectedIngestGenerationAdapters(options);
+  const roots: Partial<Record<Provider, string>> = {};
+  const logicalRoots: Partial<Record<Provider, string>> = {};
+  for (const adapter of adapters) {
+    const provider = adapter.provider;
+    const root = options.roots?.[provider] ?? adapter.defaultRoot();
+    if (root !== undefined) roots[provider] = root;
+    const logicalRoot = options.logicalRoots?.[provider] ?? root;
+    if (logicalRoot !== undefined) logicalRoots[provider] = logicalRoot;
+  }
+  return {
+    identityVersion: INGEST_GENERATION_IDENTITY_VERSION,
+    sessionIntelligenceContractVersion: SESSION_INTELLIGENCE_CONTRACT_VERSION,
+    streamIngestUploadIdentityVersion: STREAM_INGEST_UPLOAD_IDENTITY_VERSION,
+    providers: adapters.map((adapter) => adapter.provider),
+    includeExperimental: options.includeExperimental === true,
+    ...(options.limit !== undefined ? { limit: options.limit } : {}),
+    roots,
+    logicalRoots,
+    chunkOptions,
+  };
+};
+
+const selectedIngestGenerationAdapters = (options: IngestOptions) => {
+  const candidates = (options.includeExperimental === true ? allAdapters : stableAdapters).filter(
+    (adapter) =>
+      options.providers === undefined || options.providers.includes(adapter.provider),
+  );
+  if (options.providers !== undefined) return candidates;
+  return candidates.filter(
+    (adapter) => {
+      const provider = adapter.provider;
+      const root = options.roots?.[provider] ?? adapter.defaultRoot();
+      if (root === undefined) return false;
+      if (options.roots?.[provider] !== undefined) return true;
+      return DURABLE_SNAPSHOT_PROVIDERS.has(provider) &&
+        canSnapshotDurableProviderSource(provider, root);
+    },
+  );
+};
+
+const canSnapshotDurableProviderSource = (provider: Provider, root: string) => {
+  switch (provider) {
+    case "codex":
+      return isDirectory(join(root, "sessions"));
+    case "claude":
+      return isDirectory(join(root, "projects"));
+    case "hermes":
+      return sqliteDbPathForRoot(root, "state.db") !== undefined;
+    case "opencode":
+      return existsSync(join(root, "opencode.db"));
+    default:
+      return false;
+  }
+};
+
+const assertSafeIngestGenerationId = (generationId: string) => {
+  if (!/^[A-Za-z0-9:_-]+$/.test(generationId)) {
+    throw new CommandInputError({
+      field: "ingestGeneration",
+      message: "Ingest generation ids may only contain letters, numbers, ':', '_' and '-'.",
+    });
+  }
+};
+
+const ingestGenerationsRoot = () => join(quasarHome(), "ingest-generations", "by-id");
+const ingestGenerationDirectory = (generationId: string) =>
+  join(ingestGenerationsRoot(), generationId);
+const ingestGenerationFilePath = (generationId: string) =>
+  join(ingestGenerationDirectory(generationId), "generation.json");
+
+const readPersistedIngestGeneration = (path: string, expectedGenerationId?: string) => {
+  try {
+    const generation = Schema.decodeUnknownSync(PersistedIngestGeneration)(
+      JSON.parse(readFileSync(path, "utf8")),
+    );
+    assertPersistedIngestGeneration(generation, expectedGenerationId);
+    return generation;
+  } catch (error) {
+    throw new CommandInputError({
+      field: "ingestGeneration",
+      message: `Failed to read ingest generation ${path}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    });
+  }
+};
+
+const assertPersistedIngestGeneration = (
+  generation: PersistedIngestGeneration,
+  expectedGenerationId: string | undefined,
+) => {
+  if (
+    expectedGenerationId !== undefined &&
+    generation.generationId !== expectedGenerationId
+  ) {
+    throw new Error(
+      `generation id ${generation.generationId} does not match requested id ${expectedGenerationId}`,
+    );
+  }
+  if (generation.sourceIdentityKey !== generation.plan.idempotencyKey) {
+    throw new Error("sourceIdentityKey does not match the persisted plan idempotencyKey");
+  }
+  if (generation.plan.expectedChunkCount !== generation.plan.chunkPayloadHashes.length) {
+    throw new Error(
+      "expectedChunkCount does not match the persisted chunkPayloadHashes length",
+    );
+  }
+};
+
+const createPersistedIngestGeneration = (input: {
+  readonly options: IngestOptions;
+  readonly machine: MachineIdentity;
+  readonly generatedAt: string;
+  readonly chunkOptions: Required<ChunkOptions>;
+  readonly intent: IngestGenerationIntent;
+  readonly intentHash: string;
+  readonly generationId: string;
+  readonly directory: string;
+  readonly path: string;
+}) =>
+  Effect.gen(function* () {
+    const parent = dirname(input.directory);
+    mkdirSync(parent, { recursive: true, mode: 0o700 });
+    const tempDirectory = mkdtempSync(join(parent, `${input.generationId.replaceAll(":", "_")}-tmp-`));
+    try {
+      const tempSourceRoot = join(tempDirectory, "sources");
+      const tempSnapshot = prepareSourceSnapshotSync({
+        ...input.options,
+        snapshotSources: true,
+        roots: input.intent.roots,
+        logicalRoots: input.intent.logicalRoots,
+      }, tempSourceRoot);
+      const uncopiedProviders = input.intent.providers.filter(
+        (provider) =>
+          input.intent.roots[provider] !== undefined &&
+          !tempSnapshot.sourceSnapshot.copiedProviders.includes(provider),
+      );
+      if (uncopiedProviders.length > 0) {
+        throw new CommandInputError({
+          field: "providers",
+          message: `Durable ingest generation could not snapshot selected provider source(s): ${uncopiedProviders.join(", ")}.`,
+        });
+      }
+      const finalSourceRoot = join(input.directory, "sources");
+      const finalRoots = rebaseSnapshotRoots(tempSnapshot.roots, tempSourceRoot, finalSourceRoot);
+      const streamOptions = {
+        providers: input.intent.providers,
+        includeExperimental: input.intent.includeExperimental,
+        limit: input.intent.limit,
+        roots: tempSnapshot.roots,
+        logicalRoots: tempSnapshot.logicalRoots,
+        machine: input.machine,
+        generatedAt: input.generatedAt,
+      };
+      const plan = yield* planStreamedIngest(streamOptions, input.chunkOptions);
+      const persisted: PersistedIngestGeneration = {
+        schemaVersion: INGEST_GENERATION_SCHEMA_VERSION,
+        generationId: input.generationId,
+        intentHash: input.intentHash,
+        sourceIdentityKey: plan.idempotencyKey,
+        createdAt: input.generatedAt,
+        updatedAt: input.generatedAt,
+        generatedAt: input.generatedAt,
+        machine: input.machine,
+        intent: input.intent,
+        roots: finalRoots,
+        logicalRoots: tempSnapshot.logicalRoots ?? {},
+        sourceSnapshot: {
+          enabled: true,
+          rootPath: finalSourceRoot,
+          copiedProviders: [...tempSnapshot.sourceSnapshot.copiedProviders],
+        },
+        plan: {
+          manifest: plan.manifest,
+          expectedChunkCount: plan.expectedChunkCount,
+          chunkPayloadHashes: [...plan.chunkPayloadHashes],
+          idempotencyKey: plan.idempotencyKey,
+          sourceBefore: [...plan.sourceBefore],
+        },
+      };
+      writeFileSync(
+        join(tempDirectory, "generation.json"),
+        `${JSON.stringify(persisted, null, 2)}\n`,
+        { encoding: "utf8", mode: 0o600 },
+      );
+      if (existsSync(input.directory)) {
+        rmSync(tempDirectory, { recursive: true, force: true });
+        return readPersistedIngestGeneration(input.path, input.generationId);
+      }
+      renameSync(tempDirectory, input.directory);
+      return persisted;
+    } catch (error) {
+      rmSync(tempDirectory, { recursive: true, force: true });
+      throw error;
+    }
+  });
+
+const rebaseSnapshotRoots = (
+  roots: Partial<Record<Provider, string>> | undefined,
+  fromRoot: string,
+  toRoot: string,
+) => {
+  const rebased: Partial<Record<Provider, string>> = {};
+  for (const [provider, root] of Object.entries(roots ?? {}) as Array<[Provider, string]>) {
+    rebased[provider] = root.startsWith(fromRoot)
+      ? `${toRoot}${root.slice(fromRoot.length)}`
+      : root;
+  }
+  return rebased;
+};
+
+const preparedSourceFromGeneration = (
+  generation: PersistedIngestGeneration,
+  path: string,
+): PreparedSourceSnapshot => {
+  if (!existsSync(generation.sourceSnapshot.rootPath)) {
+    throw new CommandInputError({
+      field: "ingestGeneration",
+      message: `Ingest generation ${generation.generationId} is missing its source snapshot at ${generation.sourceSnapshot.rootPath}.`,
+    });
+  }
+  return {
+    machine: generation.machine,
+    roots: generation.roots,
+    logicalRoots: generation.logicalRoots,
+    providers: generation.intent.providers,
+    includeExperimental: generation.intent.includeExperimental,
+    limit: generation.intent.limit,
+    generatedAt: generation.generatedAt,
+    plan: {
+      manifest: generation.plan.manifest,
+      expectedChunkCount: generation.plan.expectedChunkCount,
+      chunkPayloadHashes: generation.plan.chunkPayloadHashes,
+      idempotencyKey: generation.plan.idempotencyKey,
+      sourceBefore: generation.plan.sourceBefore,
+    },
+    generation: {
+      generationId: generation.generationId,
+      path,
+    },
+    sourceSnapshot: {
+      enabled: true,
+      rootPath: generation.sourceSnapshot.rootPath,
+      copiedProviders: generation.sourceSnapshot.copiedProviders,
+      persistent: true,
+      generationId: generation.generationId,
+    },
+  };
+};
+
+const prepareSourceSnapshotSync = (
+  options: IngestOptions,
+  targetSnapshotRoot?: string,
+): PreparedSourceSnapshot => {
   if (options.snapshotSources !== true) {
     return {
       roots: options.roots,
@@ -112,7 +529,8 @@ const prepareSourceSnapshotSync = (options: IngestOptions): PreparedSourceSnapsh
     };
   }
 
-  const snapshotRoot = mkdtempSync(join(tmpdir(), "qis-"));
+  const snapshotRoot = targetSnapshotRoot ?? mkdtempSync(join(tmpdir(), "qis-"));
+  if (targetSnapshotRoot !== undefined) mkdirSync(snapshotRoot, { recursive: true, mode: 0o700 });
   const roots: Partial<Record<Provider, string>> = { ...(options.roots ?? {}) };
   const logicalRoots: Partial<Record<Provider, string>> = { ...(options.logicalRoots ?? {}) };
   const copiedProviders: Provider[] = [];
@@ -565,6 +983,113 @@ const planCommand = Command.make("plan", { input: inputArg }, ({ input }) =>
 type IngestRequestClient = typeof requestJson;
 const IngestRequestClientSchema = Schema.instanceOf(Function);
 
+const runPreparedIngest = (input: {
+  readonly options: IngestOptions;
+  readonly client: IngestRequestClient;
+  readonly machine: MachineIdentity;
+  readonly generatedAt: string;
+  readonly chunkOptions: Required<ChunkOptions>;
+  readonly prepared: PreparedSourceSnapshot;
+}) =>
+  Effect.gen(function* () {
+    const streamGeneratedAt = input.prepared.generatedAt ?? input.generatedAt;
+    const streamMachine = input.prepared.machine ?? input.machine;
+    const streamOptions = {
+      providers: input.prepared.providers ?? input.options.providers,
+      includeExperimental: input.prepared.includeExperimental ?? input.options.includeExperimental,
+      limit: input.prepared.limit ?? input.options.limit,
+      roots: input.prepared.roots,
+      logicalRoots: input.prepared.logicalRoots,
+      machine: streamMachine,
+      generatedAt: streamGeneratedAt,
+    };
+    const plan = input.prepared.plan ??
+      (yield* planStreamedIngest(streamOptions, input.chunkOptions));
+    const job = yield* input.client({
+      method: "POST",
+      path: QuasarApiPaths.ingestJobs,
+      body: {
+        manifest: plan.manifest,
+        sourceIdentityKey: plan.idempotencyKey,
+        expectedChunkCount: plan.expectedChunkCount,
+      },
+      responseSchema: ImportJobStartResponse,
+    });
+    if (isClosedImportJobStatus(job.status)) {
+      return yield* new CommandInputError({
+        field: "importJobId",
+        message: `Import job ${job.importJobId} is ${job.status}; create a fresh ingest attempt.`,
+      });
+    }
+    const drainOptions = drainOptionsFromOptions(input.options);
+    const preUploadDrain = job.chunkCount <= 0
+      ? undefined
+      : yield* waitForImportJobDrain(job.importJobId, input.client, drainOptions, {
+          scheduleWorker: true,
+          alreadyScheduled: false,
+        });
+    if (preUploadDrain?.timedOut === true) {
+      return yield* new CommandInputError({
+        field: "importJobId",
+        message: `Import job ${job.importJobId} still has ${preUploadDrain.inFlightChunkCount} in-flight chunk(s); retry after the worker drains them.`,
+      });
+    }
+    const chunkDelayMs = envPositiveInteger(
+      "QUASAR_INGEST_CHUNK_DELAY_MS",
+      DEFAULT_CHUNK_DELAY_MS,
+    );
+    const upload = yield* uploadStreamedIngest({
+      streamOptions,
+      chunkOptions: input.chunkOptions,
+      plan,
+      client: input.client,
+      importJobId: job.importJobId,
+      resumeUploadedChunkCount: job.chunkCount <= 0
+        ? 0
+        : yield* safeResumeUploadedChunkCount(job.importJobId, plan, input.client),
+      uploadGroupSize: uploadGroupSizeFromEnv(),
+      maxUploadChunksPerRun: maxUploadChunksFromOptions(input.options),
+      chunkDelayMs,
+      progress: progressOptionsFromEnv(),
+    });
+    if (upload.uploadedThisRunCount > 0 || upload.uploadComplete) {
+      yield* ensureImportWorkerScheduled(job.importJobId, input.client);
+    }
+    const postUploadDrain = upload.uploadedThisRunCount > 0 || upload.uploadComplete
+      ? yield* waitForImportJobDrain(job.importJobId, input.client, drainOptions, {
+          scheduleWorker: true,
+          alreadyScheduled: true,
+        })
+      : undefined;
+    const status = postUploadDrain?.status ??
+      (yield* readImportJob(job.importJobId, input.client, { limit: 0 }));
+    const after = resnapshotSourceManifestEntries(plan.sourceBefore);
+    return {
+      ...summaryFromManifest(plan.manifest),
+      importJobId: job.importJobId,
+      jobStatus: status.jobStatus,
+      chunkCount: plan.expectedChunkCount,
+      uploadedChunkCount: upload.uploadedChunkCount,
+      uploadedThisRunCount: upload.uploadedThisRunCount,
+      skippedUploadedChunkCount: upload.skippedUploadedChunkCount,
+      uploadGroupCount: upload.uploadGroupCount,
+      uploadComplete: upload.uploadComplete,
+      uploadStoppedEarly: upload.uploadStoppedEarly,
+      drain: {
+        ...(preUploadDrain !== undefined ? { beforeUpload: drainPublicResult(preUploadDrain) } : {}),
+        ...(postUploadDrain !== undefined ? { afterUpload: drainPublicResult(postUploadDrain) } : {}),
+      },
+      status,
+      ingestGeneration: input.prepared.generation,
+      sourceSnapshot: input.prepared.sourceSnapshot,
+      sourceSafetyReport: createSourceSafetyReport({
+        before: plan.sourceBefore,
+        after,
+        quasarStateWrites: true,
+      }),
+    };
+  });
+
 export const runIngestEffect = (
   input: string | undefined,
   requestClient: IngestRequestClient = requestJson,
@@ -591,107 +1116,20 @@ export const runIngestEffect = (
     }
     const machine = loadMachineIdentity();
     const generatedAt = new Date().toISOString();
-    return yield* withPreparedSourceSnapshot(options, (prepared) =>
-      Effect.gen(function* () {
-        const streamOptions = {
-          providers: options.providers,
-          includeExperimental: options.includeExperimental,
-          limit: options.limit,
-          roots: prepared.roots,
-          logicalRoots: prepared.logicalRoots,
-          machine,
-          generatedAt,
-        };
-        const chunkOptions = chunkOptionsFromEnv();
-        const plan = yield* planStreamedIngest(streamOptions, chunkOptions);
-        const job = yield* client({
-          method: "POST",
-          path: QuasarApiPaths.ingestJobs,
-          body: {
-            manifest: plan.manifest,
-            sourceIdentityKey: plan.idempotencyKey,
-            expectedChunkCount: plan.expectedChunkCount,
-          },
-          responseSchema: ImportJobStartResponse,
-        });
-        if (isClosedImportJobStatus(job.status)) {
-          return yield* new CommandInputError({
-            field: "importJobId",
-            message: `Import job ${job.importJobId} is ${job.status}; create a fresh ingest attempt.`,
-          });
-        }
-        const drainOptions = drainOptionsFromOptions(options);
-        const preUploadDrain = job.chunkCount <= 0
-          ? undefined
-          : yield* waitForImportJobDrain(job.importJobId, client, drainOptions, {
-              scheduleWorker: true,
-              alreadyScheduled: false,
-            });
-        if (preUploadDrain?.timedOut === true) {
-          return yield* new CommandInputError({
-            field: "importJobId",
-            message: `Import job ${job.importJobId} still has ${preUploadDrain.inFlightChunkCount} in-flight chunk(s); retry after the worker drains them.`,
-          });
-        }
-        const chunkDelayMs = envPositiveInteger(
-          "QUASAR_INGEST_CHUNK_DELAY_MS",
-          DEFAULT_CHUNK_DELAY_MS,
-        );
-        const upload = yield* uploadStreamedIngest({
-          streamOptions,
-          chunkOptions,
-          plan,
-          client,
-          importJobId: job.importJobId,
-          resumeUploadedChunkCount: job.chunkCount <= 0
-            ? 0
-            : yield* safeResumeUploadedChunkCount(
-                job.importJobId,
-                plan,
-                client,
-              ),
-          uploadGroupSize: uploadGroupSizeFromEnv(),
-          maxUploadChunksPerRun: maxUploadChunksFromOptions(options),
-          chunkDelayMs,
-          progress: progressOptionsFromEnv(),
-        });
-        if (upload.uploadedThisRunCount > 0 || upload.uploadComplete) {
-          yield* ensureImportWorkerScheduled(job.importJobId, client);
-        }
-        const postUploadDrain = upload.uploadedThisRunCount > 0 || upload.uploadComplete
-          ? yield* waitForImportJobDrain(job.importJobId, client, drainOptions, {
-              scheduleWorker: true,
-              alreadyScheduled: true,
-            })
-          : undefined;
-        const status = postUploadDrain?.status ??
-          (yield* readImportJob(job.importJobId, client, { limit: 0 }));
-        const after = resnapshotSourceManifestEntries(plan.sourceBefore);
-        return {
-          ...summaryFromManifest(plan.manifest),
-          importJobId: job.importJobId,
-          jobStatus: status.jobStatus,
-          chunkCount: plan.expectedChunkCount,
-          uploadedChunkCount: upload.uploadedChunkCount,
-          uploadedThisRunCount: upload.uploadedThisRunCount,
-          skippedUploadedChunkCount: upload.skippedUploadedChunkCount,
-          uploadGroupCount: upload.uploadGroupCount,
-          uploadComplete: upload.uploadComplete,
-          uploadStoppedEarly: upload.uploadStoppedEarly,
-          drain: {
-            ...(preUploadDrain !== undefined ? { beforeUpload: drainPublicResult(preUploadDrain) } : {}),
-            ...(postUploadDrain !== undefined ? { afterUpload: drainPublicResult(postUploadDrain) } : {}),
-          },
-          status,
-          sourceSnapshot: prepared.sourceSnapshot,
-          sourceSafetyReport: createSourceSafetyReport({
-            before: plan.sourceBefore,
-            after,
-            quasarStateWrites: true,
-          }),
-        };
-      }),
-    );
+    const chunkOptions = chunkOptionsFromEnv();
+    const prepared = yield* prepareRunSource(options, machine, generatedAt, chunkOptions);
+    try {
+      return yield* runPreparedIngest({
+        options,
+        client,
+        machine,
+        generatedAt,
+        chunkOptions,
+        prepared,
+      });
+    } finally {
+      yield* cleanupSourceSnapshot(prepared);
+    }
   });
 
 const runCommand = Command.make("run", { input: inputArg }, ({ input }) =>
@@ -704,7 +1142,6 @@ export const DEFAULT_CHUNK_DELAY_MS = 750;
 export const DEFAULT_UPLOAD_GROUP_SIZE = 10;
 export const MAX_UPLOAD_CHUNK_BATCH_BYTES = 768 * 1024;
 export const MAX_BULK_UPLOAD_BODY_BYTES = 3_500_000;
-const STREAM_INGEST_UPLOAD_IDENTITY_VERSION = "quasar.stream-ingest/v3";
 
 export interface ChunkOptions {
   readonly maxEventsPerChunk?: number;
@@ -842,15 +1279,15 @@ const uploadStreamedIngest = (input: {
       });
       if (next.done === true) break;
       const chunk = next.value;
+      if (index < skippedUploadedChunkCount) {
+        index += 1;
+        continue;
+      }
       assertJsonBudget(chunk, MAX_UPLOAD_CHUNK_BATCH_BYTES, `chunk ${index}`);
       const expectedHash = input.plan.chunkPayloadHashes[index];
       const actualHash = ingestBatchPayloadHash(chunk);
       if (expectedHash !== actualHash) {
         throw new Error(`ingest source changed between planning and upload at chunk ${index}`);
-      }
-      if (index < skippedUploadedChunkCount) {
-        index += 1;
-        continue;
       }
       const item = { chunk, index };
       const candidate = [...group, item];
@@ -1100,9 +1537,7 @@ export const ingestJobIdempotencyKey = (
   );
 
 export const ingestBatchPayloadHash = (batch: IngestBatch) =>
-  stableWideHash(
-    JSON.stringify([SESSION_INTELLIGENCE_CONTRACT_VERSION, batchPayloadIdentity(batch)]),
-  );
+  stableCanonicalJsonHash([SESSION_INTELLIGENCE_CONTRACT_VERSION, batchPayloadIdentity(batch)]);
 
 export const ingestChunkIdempotencyKey = (
   importJobId: string,

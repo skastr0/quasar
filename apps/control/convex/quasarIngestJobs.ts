@@ -16,6 +16,7 @@ import {
 import { sanitizeIngestBoundaryBatch } from "./quasarIngestContract";
 import { readinessCounts } from "./quasarEmbeddingReadiness";
 import { redactSensitive, wideHash } from "./quasarText";
+import { stableCanonicalJsonHash } from "@skastr0/quasar-core";
 
 type ImportJobStatus = "queued" | "running" | "succeeded" | "partial_failure" | "failed";
 type ImportChunkStatus = "pending" | "running" | "succeeded" | "failed" | "dead_letter";
@@ -36,6 +37,16 @@ type SubmitImportChunkResult = {
   readonly jobStatus: ImportJobStatus;
   readonly enqueued?: boolean;
   readonly stale?: boolean;
+};
+
+type SanitizedSubmitImportChunkInput = {
+  readonly importJobId: string;
+  readonly batch: IngestBatchBoundaryValue;
+  readonly chunkId?: string;
+  readonly idempotencyKey?: string;
+  readonly sequence?: number;
+  readonly expectedChunkCount?: number;
+  readonly completeJob?: boolean;
 };
 
 type ReadImportJobResult = {
@@ -92,6 +103,7 @@ const IMPORT_CHUNK_MAX_ATTEMPTS = 5;
 const IMPORT_WORKER_BATCH_LIMIT = 24;
 const IMPORT_WORKER_SCHEDULE_DELAY_MS = 1_000;
 const SESSION_INTELLIGENCE_CONTRACT_VERSION = "session-intelligence/v2";
+const STREAM_INGEST_UPLOAD_IDENTITY_VERSION = "quasar.stream-ingest/v3";
 const MAX_IMPORT_JOB_INPUT_BYTES = 3_500_000;
 const MAX_IMPORT_CHUNK_BATCH_BYTES = 768 * 1024;
 const MAX_IMPORT_BULK_INPUT_BYTES = 3_500_000;
@@ -253,6 +265,95 @@ export const enqueueImportChunkHandler = async (
   };
   assertJsonByteBudget(input.batch, MAX_IMPORT_CHUNK_BATCH_BYTES, "import chunk batch");
   const now = Date.now();
+  const request = await resolveImportChunkRequest(ctx, input);
+  if (isClosedImportJob(request.job) && request.existing?.status !== "succeeded") {
+    throw new Error("Import job is no longer accepting chunks.");
+  }
+  if (request.existing?.status === "succeeded") {
+    await maybeFinalizeImportJob(ctx, input.importJobId, now);
+    return {
+      importJobId: input.importJobId,
+      chunkId: request.existing.chunkId,
+      status: request.existing.status,
+      jobStatus: (await findImportJob(ctx, input.importJobId))?.status ?? "running",
+    };
+  }
+  await patchExpectedChunkCount(ctx, request.job, request.expectedChunkCount, now);
+
+  const chunkPatch = {
+    chunkId: request.chunkId,
+    importJobId: input.importJobId,
+    idempotencyKey: request.idempotencyKey,
+    sequence: request.sequence,
+    status: "pending" as const,
+    sessionCount: request.summary.sessionCount,
+    eventCount: request.summary.eventCount,
+    toolCallCount: request.summary.toolCallCount,
+    contentBlockCount: request.summary.contentBlockCount,
+    sessionEdgeCount: request.summary.sessionEdgeCount,
+    usageRecordCount: request.summary.usageRecordCount,
+    artifactCount: request.summary.artifactCount,
+    maxAttempts: IMPORT_CHUNK_MAX_ATTEMPTS,
+    payloadHash: request.payloadHash,
+    payloadBytes: request.payloadBytes,
+    error: undefined,
+    nextAttemptAt: now,
+    leaseExpiresAt: undefined,
+    leaseToken: undefined,
+    payloadStoredAt: now,
+    updatedAt: now,
+  };
+  if (request.existing === null) {
+    await ctx.db.insert("importChunks", {
+      ...chunkPatch,
+      attempts: 0,
+      createdAt: now,
+    });
+    await patchImportJobCounters(ctx, input.importJobId, {
+      chunkCount: 1,
+      uploadedChunkCount: 1,
+      status: "running",
+      now,
+    });
+  } else {
+    await ctx.db.patch(request.existing._id, {
+      ...chunkPatch,
+      attempts: request.existing.attempts,
+      completedAt: undefined,
+    });
+    if (isTerminalFailed(request.existing.status)) {
+      await patchImportJobCounters(ctx, input.importJobId, {
+        failedChunkCount: -1,
+        terminalChunkSequenceSum: -request.existing.sequence,
+        status: "running",
+        now,
+      });
+    } else {
+      await patchImportJobStatus(ctx, input.importJobId, "running", now);
+    }
+  }
+  await upsertChunkPayload(ctx, {
+    chunkId: request.chunkId,
+    importJobId: input.importJobId,
+    payloadHash: request.payloadHash,
+    payloadBytes: request.payloadBytes,
+    batch: input.batch,
+    now,
+  });
+  if (args.scheduleWorker !== false) await scheduleImportWorker(ctx, input.importJobId, 0);
+  return {
+    importJobId: input.importJobId,
+    chunkId: request.chunkId,
+    status: "pending",
+    jobStatus: "running",
+    enqueued: true,
+  };
+};
+
+const resolveImportChunkRequest = async (
+  ctx: MutationCtx,
+  input: SanitizedSubmitImportChunkInput,
+) => {
   const job = await findImportJob(ctx, input.importJobId);
   if (job === null) throw new Error("Import job was not found.");
   const summary = summarizeBatch(input.batch);
@@ -266,11 +367,18 @@ export const enqueueImportChunkHandler = async (
   if (expectedChunkCount !== undefined && sequence >= expectedChunkCount) {
     throw new Error("Import chunk sequence must be less than expectedChunkCount.");
   }
-  const idempotencyKey =
-    input.idempotencyKey ?? importChunkIdempotencyKey(input.importJobId, sequence, input.batch);
-  const chunkId = input.chunkId ?? `chunk:${wideHash(idempotencyKey)}`;
   const payloadBytes = jsonByteLength(input.batch);
   const payloadHash = payloadHashForBatch(input.batch);
+  const expectedIdempotencyKey = importChunkIdempotencyKey(
+    input.importJobId,
+    sequence,
+    payloadHash,
+  );
+  if (input.idempotencyKey !== undefined && input.idempotencyKey !== expectedIdempotencyKey) {
+    throw new Error("Import chunk idempotencyKey does not match its job, sequence, and payload.");
+  }
+  const idempotencyKey = expectedIdempotencyKey;
+  const chunkId = input.chunkId ?? `chunk:${wideHash(idempotencyKey)}`;
   const existingBySequence = await ctx.db
     .query("importChunks")
     .withIndex("by_job_sequence", (q) =>
@@ -284,87 +392,19 @@ export const enqueueImportChunkHandler = async (
   if (existingBySequence !== null && existingBySequence.idempotencyKey !== idempotencyKey) {
     throw new Error("Import chunk sequence is already occupied by a different chunk.");
   }
-  if (isClosedImportJob(job) && existing?.status !== "succeeded") {
-    throw new Error("Import job is no longer accepting chunks.");
+  if (existing !== null) {
+    assertExistingChunkMatchesRequest(existing, input.importJobId, sequence, payloadHash);
   }
-  if (existing?.status === "succeeded") {
-    await maybeFinalizeImportJob(ctx, input.importJobId, now);
-    return {
-      importJobId: input.importJobId,
-      chunkId: existing.chunkId,
-      status: existing.status,
-      jobStatus: (await findImportJob(ctx, input.importJobId))?.status ?? "running",
-    };
-  }
-  await patchExpectedChunkCount(ctx, job, expectedChunkCount, now);
-
-  const chunkPatch = {
-    chunkId,
-    importJobId: input.importJobId,
-    idempotencyKey,
-    sequence,
-    status: "pending" as const,
-    sessionCount: summary.sessionCount,
-    eventCount: summary.eventCount,
-    toolCallCount: summary.toolCallCount,
-    contentBlockCount: summary.contentBlockCount,
-    sessionEdgeCount: summary.sessionEdgeCount,
-    usageRecordCount: summary.usageRecordCount,
-    artifactCount: summary.artifactCount,
-    maxAttempts: IMPORT_CHUNK_MAX_ATTEMPTS,
-    payloadHash,
-    payloadBytes,
-    error: undefined,
-    nextAttemptAt: now,
-    leaseExpiresAt: undefined,
-    leaseToken: undefined,
-    payloadStoredAt: now,
-    updatedAt: now,
-  };
-  if (existing === null) {
-    await ctx.db.insert("importChunks", {
-      ...chunkPatch,
-      attempts: 0,
-      createdAt: now,
-    });
-    await patchImportJobCounters(ctx, input.importJobId, {
-      chunkCount: 1,
-      uploadedChunkCount: 1,
-      status: "running",
-      now,
-    });
-  } else {
-    await ctx.db.patch(existing._id, {
-      ...chunkPatch,
-      attempts: existing.attempts,
-      completedAt: undefined,
-    });
-    if (isTerminalFailed(existing.status)) {
-      await patchImportJobCounters(ctx, input.importJobId, {
-        failedChunkCount: -1,
-        terminalChunkSequenceSum: -existing.sequence,
-        status: "running",
-        now,
-      });
-    } else {
-      await patchImportJobStatus(ctx, input.importJobId, "running", now);
-    }
-  }
-  await upsertChunkPayload(ctx, {
-    chunkId,
-    importJobId: input.importJobId,
-    payloadHash,
-    payloadBytes,
-    batch: input.batch,
-    now,
-  });
-  if (args.scheduleWorker !== false) await scheduleImportWorker(ctx, input.importJobId, 0);
   return {
-    importJobId: input.importJobId,
+    job,
+    summary,
+    sequence,
+    expectedChunkCount,
+    payloadBytes,
+    payloadHash,
+    idempotencyKey,
     chunkId,
-    status: "pending",
-    jobStatus: "running",
-    enqueued: true,
+    existing,
   };
 };
 
@@ -1184,26 +1224,20 @@ const importJobIdempotencyKey = (
 const importChunkIdempotencyKey = (
   importJobId: string,
   sequence: number,
-  batch: IngestBatchBoundaryValue,
+  payloadHash: string,
 ) =>
   `import-chunk:${wideHash(
     JSON.stringify([
+      STREAM_INGEST_UPLOAD_IDENTITY_VERSION,
       SESSION_INTELLIGENCE_CONTRACT_VERSION,
       importJobId,
       sequence,
-      payloadHashForBatch(batch),
-      batch.machine.machineId,
-      batch.sessions.map((session) => [
-        session.provider,
-        session.machineId,
-        session.id,
-        session.events.map((event) => [event.id, event.nativeEventId]),
-      ]),
+      payloadHash,
     ]),
   )}`;
 
 const payloadHashForBatch = (batch: IngestBatchBoundaryValue) =>
-  wideHash(JSON.stringify([SESSION_INTELLIGENCE_CONTRACT_VERSION, batchPayloadIdentity(batch)]));
+  stableCanonicalJsonHash([SESSION_INTELLIGENCE_CONTRACT_VERSION, batchPayloadIdentity(batch)]);
 
 const batchPayloadIdentity = (batch: IngestBatchBoundaryValue) => ({
   ...batch,
@@ -1286,6 +1320,21 @@ const staleChunkClaim = (
     jobStatus: "running",
     stale: true,
   };
+};
+
+const assertExistingChunkMatchesRequest = (
+  chunk: Doc<"importChunks">,
+  importJobId: string,
+  sequence: number,
+  payloadHash: string,
+) => {
+  if (
+    chunk.importJobId !== importJobId ||
+    chunk.sequence !== sequence ||
+    chunk.payloadHash !== payloadHash
+  ) {
+    throw new Error("Import chunk idempotencyKey is already bound to a different chunk.");
+  }
 };
 
 const retryDelayMs = (attempts: number) =>
