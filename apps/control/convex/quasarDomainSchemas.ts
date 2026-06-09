@@ -417,6 +417,7 @@ export class SubmitImportChunksInput extends Schema.Class<SubmitImportChunksInpu
 )({
   importJobId: Schema.String,
   expectedChunkCount: Schema.optional(PositiveInteger),
+  scheduleWorker: Schema.optional(Schema.Boolean),
   chunks: Schema.Array(SubmitImportChunkItemInput),
 }) {}
 
