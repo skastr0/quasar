@@ -534,6 +534,10 @@ export const releaseImportJobWorkerHandler = async (
   return { released: true };
 };
 
+const isImportJobUploadComplete = (job: Doc<"importJobs">) =>
+  job.expectedChunkCount === undefined ||
+  (job.uploadedChunkCount ?? job.chunkCount) >= job.expectedChunkCount;
+
 export const claimImportChunkHandler = async (
   ctx: MutationCtx,
   args: { importJobId?: string; now: number },
@@ -547,6 +551,7 @@ export const claimImportChunkHandler = async (
   if (args.importJobId !== undefined) {
     const job = await findImportJob(ctx, args.importJobId);
     if (job === null || isClosedImportJob(job)) return null;
+    if (!isImportJobUploadComplete(job)) return null;
   }
   const candidate =
     (await findDuePendingChunk(ctx, args.importJobId, args.now)) ??
