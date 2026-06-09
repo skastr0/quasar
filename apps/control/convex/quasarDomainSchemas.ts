@@ -383,7 +383,7 @@ export const IngestManifestBoundary = Schema.Struct({
   sourceRoots: Schema.Array(SourceRootBoundary),
   sessions: Schema.Array(IngestSessionManifestBoundary),
   diagnostics: Schema.Array(AdapterDiagnosticBoundary),
-  generatedAt: Schema.optional(Schema.String),
+  generatedAt: Schema.String,
   sessionCount: NonNegativeInteger,
   eventCount: NonNegativeInteger,
   toolCallCount: NonNegativeInteger,
@@ -399,18 +399,18 @@ export class StartImportJobInput extends Schema.Class<StartImportJobInput>(
 )({
   batch: Schema.optional(IngestBatchBoundary),
   manifest: Schema.optional(IngestManifestBoundary),
-  sourceIdentityKey: Schema.optional(Schema.String),
-  idempotencyKey: Schema.optional(Schema.String),
+  sourceIdentityKey: Schema.optional(BoundedIdString),
+  idempotencyKey: Schema.optional(BoundedIdString),
   expectedChunkCount: Schema.optional(PositiveInteger),
 }) {}
 
 export class SubmitImportChunkInput extends Schema.Class<SubmitImportChunkInput>(
   "SubmitImportChunkInput",
 )({
-  importJobId: Schema.String,
+  importJobId: BoundedIdString,
   batch: IngestBatchBoundary,
-  chunkId: Schema.optional(Schema.String),
-  idempotencyKey: Schema.optional(Schema.String),
+  chunkId: Schema.optional(BoundedIdString),
+  idempotencyKey: Schema.optional(BoundedIdString),
   sequence: Schema.optional(NonNegativeInteger),
   expectedChunkCount: Schema.optional(PositiveInteger),
   completeJob: Schema.optional(Schema.Boolean),
@@ -418,8 +418,8 @@ export class SubmitImportChunkInput extends Schema.Class<SubmitImportChunkInput>
 
 export const SubmitImportChunkItemInput = Schema.Struct({
   batch: IngestBatchBoundary,
-  chunkId: Schema.optional(Schema.String),
-  idempotencyKey: Schema.optional(Schema.String),
+  chunkId: Schema.optional(BoundedIdString),
+  idempotencyKey: Schema.optional(BoundedIdString),
   sequence: Schema.optional(NonNegativeInteger),
   completeJob: Schema.optional(Schema.Boolean),
 });
@@ -428,7 +428,7 @@ export type SubmitImportChunkItemInput = typeof SubmitImportChunkItemInput.Type;
 export class SubmitImportChunksInput extends Schema.Class<SubmitImportChunksInput>(
   "SubmitImportChunksInput",
 )({
-  importJobId: Schema.String,
+  importJobId: BoundedIdString,
   expectedChunkCount: Schema.optional(PositiveInteger),
   scheduleWorker: Schema.optional(Schema.Boolean),
   chunks: Schema.Array(SubmitImportChunkItemInput),
@@ -437,7 +437,7 @@ export class SubmitImportChunksInput extends Schema.Class<SubmitImportChunksInpu
 export class ReadImportJobInput extends Schema.Class<ReadImportJobInput>(
   "ReadImportJobInput",
 )({
-  importJobId: Schema.String,
+  importJobId: BoundedIdString,
   chunkCursor: Schema.optional(Schema.Union(Schema.String, Schema.Null)),
   failureCursor: Schema.optional(Schema.Union(Schema.String, Schema.Null)),
   limit: Schema.optional(NonNegativeInteger),

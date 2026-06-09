@@ -73,7 +73,7 @@ type ReadImportJobResult = {
 
 type IngestManifest = {
   readonly machineId: string;
-  readonly generatedAt?: string;
+  readonly generatedAt: string;
   readonly sourceRoots: readonly SourceRootBoundary[];
   readonly sessions: readonly IngestManifestSession[];
   readonly diagnostics: readonly AdapterDiagnosticBoundary[];
