@@ -921,7 +921,14 @@ const canClaimCleanupChunk = async (
 ) => {
   if (chunk.sequence <= 0) return true;
   if (job.failedChunkCount > 0) return false;
-  const prefix = job.succeededPrefixCount ?? (await computeSucceededPrefixCount(ctx, chunk.importJobId, 0));
+  const current = job.succeededPrefixCount ?? 0;
+  const prefix = await computeSucceededPrefixCount(ctx, chunk.importJobId, current);
+  if (prefix > current) {
+    await ctx.db.patch(job._id, {
+      succeededPrefixCount: prefix,
+      updatedAt: Date.now(),
+    });
+  }
   return prefix >= chunk.sequence;
 };
 
@@ -991,11 +998,10 @@ const patchImportJobCounters = async (
   const job = await findImportJob(ctx, importJobId);
   if (job === null) throw new Error("Import job was not found.");
   const closed = isClosedImportJob(job);
-  await ctx.db.patch(job._id, {
+  const patch = {
     chunkCount: Math.max(0, job.chunkCount + (delta.chunkCount ?? 0)),
     uploadedChunkCount: Math.max(0, (job.uploadedChunkCount ?? job.chunkCount) + (delta.uploadedChunkCount ?? 0)),
     succeededChunkCount: Math.max(0, job.succeededChunkCount + (delta.succeededChunkCount ?? 0)),
-    succeededPrefixCount: Math.max(job.succeededPrefixCount ?? 0, delta.succeededPrefixCount ?? 0),
     failedChunkCount: Math.max(0, job.failedChunkCount + (delta.failedChunkCount ?? 0)),
     terminalChunkSequenceSum: Math.max(
       0,
@@ -1004,6 +1010,17 @@ const patchImportJobCounters = async (
     status: closed ? job.status : delta.status ?? job.status,
     completedAt: closed ? job.completedAt : undefined,
     updatedAt: delta.now,
+  };
+  await ctx.db.patch(job._id, {
+    ...patch,
+    ...(delta.succeededPrefixCount !== undefined || job.succeededPrefixCount !== undefined
+      ? {
+          succeededPrefixCount: Math.max(
+            job.succeededPrefixCount ?? 0,
+            delta.succeededPrefixCount ?? 0,
+          ),
+        }
+      : {}),
   });
 };
 
