@@ -701,6 +701,70 @@ describe("quasar ingestion and search", () => {
     expect(status?.chunks[0]?.status).toBe("pending");
   });
 
+  test("cancelled import jobs fence already claimed chunks before ingest writes", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const job = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { batch, expectedChunkCount: 1 },
+    });
+    await t.action(internal.quasar.submitImportChunkInternal, {
+      input: {
+        importJobId: job.importJobId,
+        batch,
+        sequence: 0,
+        expectedChunkCount: 1,
+        completeJob: true,
+      },
+    });
+    const claim = await t.mutation(internal.quasar.claimImportChunkInternal, {
+      importJobId: job.importJobId,
+      now: Date.now(),
+    });
+    if (claim === null) throw new Error("Expected an import chunk claim.");
+
+    await t.mutation(internal.quasar.cancelImportJobInternal, {
+      importJobId: job.importJobId,
+      reason: "cancelled after claim",
+    });
+
+    await expect(
+      t.mutation(internal.quasar.ingestBatchInternal, {
+        batch: claim.batch,
+        importJobId: claim.importJobId,
+        importChunkId: claim.chunkId,
+        leaseToken: claim.leaseToken,
+      }),
+    ).rejects.toThrow(/closed|no longer active/);
+
+    const staleSuccess = await t.mutation(internal.quasar.markImportChunkSucceededInternal, {
+      importJobId: claim.importJobId,
+      chunkId: claim.chunkId,
+      leaseToken: claim.leaseToken,
+    });
+    const status = await t.query(internal.quasar.readImportJobInternal, {
+      input: { importJobId: job.importJobId },
+    });
+    const payloads = await t.run(async (ctx) =>
+      await ctx.db
+        .query("importChunkPayloads")
+        .withIndex("by_importJobId", (q) => q.eq("importJobId", job.importJobId))
+        .collect(),
+    );
+    const session = await t.query(internal.quasar.readSessionInternal, {
+      sessionId: "codex:machine:a:session",
+    });
+
+    expect(staleSuccess).toMatchObject({
+      stale: true,
+      jobStatus: "failed",
+      status: "dead_letter",
+    });
+    expect(status?.job.status).toBe("failed");
+    expect(status?.chunks[0]?.status).toBe("dead_letter");
+    expect(payloads).toHaveLength(0);
+    expect(session).toBeNull();
+  });
+
   test("sanitizes manifest-only import job diagnostics", async () => {
     const t = setup();
     const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
