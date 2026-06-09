@@ -25,11 +25,15 @@ import { sanitizeIngestBoundaryBatch } from "./quasarIngestContract";
 import { ensureAgent, ensureMachine, upsertProjectIdentity } from "./quasarProjectHandlers";
 import { upsertSearchDocument } from "./quasarSearchDocuments";
 import type { SearchDocumentUpsertInput } from "./quasarSearchTypes";
-import { compactSearchText, redactSensitive, wideHash } from "./quasarText";
+import { byteLength, compactSearchText, redactSensitive, wideHash } from "./quasarText";
 import { isToolEventKind, normalizeToolCallId } from "./quasarToolExtraction";
 import { dateMillis } from "./quasarValues";
 
 type IngestBatchResult = ReturnType<typeof importRunSummary>;
+
+const MAX_DIRECT_INGEST_BATCH_BYTES = 768 * 1024;
+const MAX_DIRECT_INGEST_EVENTS = 10;
+const MAX_DIRECT_INGEST_OPERATIONS = 35;
 
 export const ingestBatchHandler = async (
   ctx: MutationCtx,
@@ -39,6 +43,9 @@ export const ingestBatchHandler = async (
     importJobId: args.importJobId,
     importChunkId: args.importChunkId,
   });
+  if (args.importJobId === undefined && args.importChunkId === undefined) {
+    assertDirectBatchAdmission(batch);
+  }
   await ensureMachine(ctx, batch.machine);
   await upsertImportRun(ctx, batch);
   await upsertSourceRoots(ctx, batch);
@@ -98,6 +105,34 @@ const sumEventContentBlocks = (sessions: readonly IngestSessionBoundary[]) =>
       session.events.reduce((eventSum, event) => eventSum + event.contentBlocks.length, 0),
     0,
   );
+
+const directBatchOperationCount = (batch: ParsedIngestBatch) =>
+  batch.eventCount +
+  batch.contentBlockCount +
+  batch.toolCallCount +
+  batch.sessionEdgeCount +
+  batch.usageRecordCount +
+  batch.artifactCount;
+
+const assertDirectBatchAdmission = (batch: ParsedIngestBatch) => {
+  const bytes = byteLength(JSON.stringify(batch));
+  if (bytes > MAX_DIRECT_INGEST_BATCH_BYTES) {
+    throw new Error(
+      `direct ingest batch is ${bytes} bytes; maximum is ${MAX_DIRECT_INGEST_BATCH_BYTES} bytes. Use import jobs for larger ingests.`,
+    );
+  }
+  if (batch.eventCount > MAX_DIRECT_INGEST_EVENTS) {
+    throw new Error(
+      `direct ingest batch has ${batch.eventCount} events; maximum is ${MAX_DIRECT_INGEST_EVENTS}. Use import jobs for larger ingests.`,
+    );
+  }
+  const operations = directBatchOperationCount(batch);
+  if (operations > MAX_DIRECT_INGEST_OPERATIONS) {
+    throw new Error(
+      `direct ingest batch has ${operations} graph operations; maximum is ${MAX_DIRECT_INGEST_OPERATIONS}. Use import jobs for larger ingests.`,
+    );
+  }
+};
 
 const upsertImportRun = async (ctx: MutationCtx, batch: ParsedIngestBatch) => {
   const existing = await ctx.db

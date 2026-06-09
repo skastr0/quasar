@@ -1110,6 +1110,15 @@ describe("quasar ingestion and search", () => {
     ).rejects.toThrow(/quasar\.ingest\/v1|protocolVersion/);
   });
 
+  test("rejects direct ingest batches that exceed synchronous operation limits", async () => {
+    const t = setup();
+    await expect(
+      t.mutation(internal.quasar.ingestBatchInternal, {
+        batch: largeEventBatch("/Users/a/Projects/quasar", "machine:a", 11),
+      }),
+    ).rejects.toThrow(/direct ingest batch has 11 events; maximum is 10|Use import jobs/);
+  });
+
   test("rejects oversized import chunk payloads before enqueue", async () => {
     const t = setup();
     const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
