@@ -23,6 +23,7 @@ import {
   eventIdFor,
   homePath,
   parseJsonString,
+  projectToolPayloadNativeValue,
   recordFrom,
   sourceRoot,
   stringValue,
@@ -198,11 +199,13 @@ const cursorContentFromRecord = (record: Record<string, unknown>): NativeValue |
 
   const toolName = toolNameFromRecord(record);
   if (toolName !== undefined || record.input !== undefined || record.output !== undefined) {
+    const input = projectToolPayloadNativeValue(record.input) as NativeValue | undefined;
+    const output = projectToolPayloadNativeValue(record.output) as NativeValue | undefined;
     return {
       type: "tool",
       ...(toolName !== undefined ? { toolName } : {}),
-      ...(record.input !== undefined ? { input: record.input as NativeValue } : {}),
-      ...(record.output !== undefined ? { output: record.output as NativeValue } : {}),
+      ...(input !== undefined ? { input } : {}),
+      ...(output !== undefined ? { output } : {}),
     };
   }
 

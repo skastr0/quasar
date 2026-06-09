@@ -158,10 +158,12 @@ describe("session intelligence contract", () => {
           input: {
             patch: "@@ real tool input patch",
             summary: { diffs: ["provider input diff trash"] },
+            providerUi: "provider input ui trash",
           },
           output: {
             diff: "@@ real tool result diff",
             patches: ["@@ real tool result patch list"],
+            viewState: "provider result view trash",
             log: JSON.stringify({
               result: "visible structured tool result",
               summary: { cache: { state: "stringified provider state trash" } },
@@ -180,8 +182,52 @@ describe("session intelligence contract", () => {
     expect(encoded).toContain("@@ real tool result patch list");
     expect(encoded).toContain("visible structured tool result");
     expect(encoded).not.toContain("provider input diff trash");
+    expect(encoded).not.toContain("provider input ui trash");
+    expect(encoded).not.toContain("provider result view trash");
     expect(encoded).not.toContain("provider workspace diff trash");
     expect(encoded).not.toContain("stringified provider state trash");
+  });
+
+  test("preserves real event patch content while removing provider metadata", () => {
+    const batch = baseBatch({
+      events: [
+        {
+          id: "event:patch",
+          sessionId: "session:test",
+          sequence: 0,
+          machineId: "machine:test",
+          provider: "opencode",
+          agentName: "opencode",
+          projectIdentityKey: "project:test",
+          role: "assistant",
+          kind: "edit",
+          contentBlocks: [
+            {
+              id: "block:patch",
+              sequence: 0,
+              kind: "json",
+              value: {
+                type: "diff",
+                patch: "@@ real event patch",
+                diff: "@@ real event diff",
+                providerUi: "provider event ui trash",
+                summary: { diffs: ["provider event summary diff trash"] },
+              },
+            },
+          ],
+          rawReference: { sourcePath: "/tmp/session.jsonl", line: 1 },
+        },
+      ],
+    });
+
+    const sanitized = toConvexSafeSessionIntelligenceBatch(batch);
+    const encoded = JSON.stringify(sanitized.sessions[0]!.events[0]);
+
+    expect(encoded).toContain("@@ real event patch");
+    expect(encoded).toContain("@@ real event diff");
+    expect(encoded).not.toContain("provider event ui trash");
+    expect(encoded).not.toContain("provider event summary diff trash");
+    assertConvexSafeSessionIntelligenceBatch(sanitized);
   });
 
   test("replaces binary and base64 payloads with bounded refs", () => {

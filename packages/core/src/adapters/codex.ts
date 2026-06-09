@@ -15,11 +15,12 @@ import {
   logicalRootFor,
   nativeSessionIdFromPath,
   numberValue,
+  projectSessionNativeValue,
+  projectToolPayloadNativeValue,
   readJsonLines,
   recordFrom,
   roleFrom,
   sourceRoot,
-  type NativeValue,
   usageIdFor,
 } from "./common";
 
@@ -115,11 +116,11 @@ const toolCallIdFor = (
 ) => `codex:tool:${machineId}:${stableWideHash(`${nativeSessionId}:${sourcePath}`)}:${callId}`;
 
 const parseToolInput = (value: unknown): unknown => {
-  if (typeof value !== "string") return value;
+  if (typeof value !== "string") return projectToolPayloadNativeValue(value);
   try {
-    return JSON.parse(value) as unknown;
+    return projectToolPayloadNativeValue(JSON.parse(value) as unknown);
   } catch {
-    return value;
+    return projectToolPayloadNativeValue(value);
   }
 };
 
@@ -142,13 +143,14 @@ const upsertCodexToolCall = (
         ? payload.name
         : "codex_tool";
     const existing = toolCallsById.get(id);
+    const input = parseToolInput(payload.arguments);
     toolCallsById.set(id, {
       ...existing,
       id,
       eventId: existing?.eventId ?? eventId,
       toolName,
       status: existing?.status === "completed" ? "completed" : "started",
-      input: parseToolInput(payload.arguments),
+      ...(input !== undefined ? { input } : {}),
       ...(existing?.output !== undefined ? { output: existing.output } : {}),
       ...(timestamp !== undefined ? { startedAt: timestamp } : {}),
       ...(existing?.completedAt !== undefined ? { completedAt: existing.completedAt } : {}),
@@ -157,13 +159,14 @@ const upsertCodexToolCall = (
   }
   if (payloadType === "function_call_output") {
     const existing = toolCallsById.get(id);
+    const output = projectToolPayloadNativeValue(payload.output);
     toolCallsById.set(id, {
       id,
       eventId: existing?.eventId ?? eventId,
       toolName: existing?.toolName ?? "codex_tool",
       status: "completed",
       ...(existing?.input !== undefined ? { input: existing.input } : {}),
-      output: payload.output,
+      ...(output !== undefined ? { output } : {}),
       ...(existing?.startedAt !== undefined ? { startedAt: existing.startedAt } : {}),
       ...(timestamp !== undefined ? { completedAt: timestamp } : {}),
     });
@@ -279,6 +282,7 @@ const buildCodexSessionFromFile = (
     const nativeType = typeof record.type === "string" ? record.type : "unknown";
     const payloadValue = record.payload;
     const payloadRecord = payloadRecordFrom(payloadValue);
+    const content = projectSessionNativeValue(payloadValue);
     const payloadType = payloadTypeFrom(payloadRecord);
     const role = codexRoleFrom(nativeType, payloadType, payloadRecord);
     const kind = codexKindFrom(nativeType, payloadType, payloadRecord);
@@ -316,8 +320,8 @@ const buildCodexSessionFromFile = (
       timestamp,
       role,
       kind,
-      contentText: compactText(payloadValue as NativeValue | undefined),
-      contentSource: payloadValue as NativeValue | undefined,
+      contentText: compactText(content),
+      contentSource: content,
       ...(toolCallId !== undefined ? { toolCallId } : {}),
       rawReference: {
         sourcePath,

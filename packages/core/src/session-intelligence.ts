@@ -77,17 +77,15 @@ const SESSION_TRASH_PATHS = [
   ["checkpoints"],
   ["snapshot"],
   ["snapshots"],
-  ["diffs"],
-  ["patches"],
 ] as const;
 
 const GENERATED_PATH_SEGMENTS = /(^|\/)(node_modules|\.git|\.next|\.turbo|dist|build|out|coverage|target|vendor)(\/|$)/i;
 const GENERATED_FILE = /(^|\/)(bun\.lockb?|package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$/i;
 const BINARY_KEY = /(^|_)(base64|data|bytes|blob|binary|image|source)(_|$)/i;
 const NON_INTELLIGENCE_KEY =
-  /(encrypted[_-]?content|cipher[_-]?text|provider[_-]?(cache|state)|diffs?|patches?|snapshots?|checkpoint|workspaceSnapshot|workspaceDiff)/i;
+  /(encrypted[_-]?content|cipher[_-]?text|provider[_-]?(cache|state|ui)|cacheState|viewState|uiState|displayOnly|displayState|snapshots?|checkpoint|workspaceSnapshot|workspaceDiff)/i;
 const PROVIDER_CONTROL_KEY =
-  /(encrypted[_-]?content|cipher[_-]?text|provider[_-]?(cache|state)|workspaceSnapshot|workspaceDiff|checkpoint|snapshots?)/i;
+  /(encrypted[_-]?content|cipher[_-]?text|provider[_-]?(cache|state|ui)|cacheState|viewState|uiState|displayOnly|displayState|workspaceSnapshot|workspaceDiff|checkpoint|snapshots?)/i;
 const BASE64ISH = /^[A-Za-z0-9+/=\s]+$/;
 const DATA_URI = /^data:[^,]{0,512},/i;
 const DATA_URI_INLINE = /data:[^,\s"'<>]{0,512},[A-Za-z0-9+/=_-]{64,}/gi;
@@ -96,7 +94,7 @@ const ESCAPED_CONTROL_CHARS = /\\u00(?:0[0-9a-f]|1[0-9a-f]|7f)/gi;
 const REPLACEMENT_CHAR = /\ufffd/g;
 const CONTENT_BLOCK_LOCATOR_BYTES = 2 * 1024;
 const CONTENT_BLOCK_MEDIA_TYPE_BYTES = 256;
-const TOOL_RESULT_PATCH_KEY = /^(diffs?|patches?)$/i;
+const TOOL_RESULT_PATCH_KEY = /^(diff|diffs|patch|patches)$/i;
 
 type BoundedValueOptions = {
   readonly preserveToolPatchFields?: boolean;

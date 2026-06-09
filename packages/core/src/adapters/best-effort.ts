@@ -2,6 +2,8 @@ import type { Provider, SessionEventKind, SessionRole, ToolCall, UsageRecord } f
 import {
   kindFromNative,
   numberValue,
+  projectSessionNativeValue,
+  projectToolPayloadNativeValue,
   recordFrom,
   roleFrom,
   scopedId,
@@ -69,11 +71,13 @@ export const kindFromRecord = (record: Record<string, unknown>): SessionEventKin
 };
 
 export const contentFromRecord = (record: Record<string, unknown>) =>
-  record.content ??
-  record.text ??
-  record.message ??
-  record.parts ??
-  record.delta;
+  projectSessionNativeValue(
+    record.content ??
+      record.text ??
+      record.message ??
+      record.parts ??
+      record.delta,
+  );
 
 export const toolNameFromRecord = (record: Record<string, unknown>) => {
   if (stringValue(record.toolName) !== undefined) return stringValue(record.toolName);
@@ -115,13 +119,19 @@ export const bestEffortToolCall = (
     stringValue(record.status) ??
     (kindFromRecord(record) === "tool_result" ? "completed" : undefined);
   const timestamp = timestampFromRecord(record);
+  const input = projectToolPayloadNativeValue(
+    state.input ?? record.input ?? record.args ?? record.arguments ?? record.params,
+  );
+  const output = projectToolPayloadNativeValue(
+    state.output ?? record.output ?? record.result ?? record.response,
+  );
   return {
     id: scopedId(provider, machineId, sourcePath, "tool", nativeSessionId, nativeToolId),
     eventId,
     toolName,
     status,
-    input: state.input ?? record.input ?? record.args ?? record.arguments ?? record.params,
-    output: state.output ?? record.output ?? record.result ?? record.response,
+    ...(input !== undefined ? { input } : {}),
+    ...(output !== undefined ? { output } : {}),
     ...(timestamp !== undefined ? { startedAt: timestamp } : {}),
     ...(status === "completed" && timestamp !== undefined ? { completedAt: timestamp } : {}),
   };

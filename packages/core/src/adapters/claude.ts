@@ -16,6 +16,8 @@ import {
   nativeSessionIdFromPath,
   numberValue,
   parentDirectoryName,
+  projectSessionNativeValue,
+  projectToolPayloadNativeValue,
   readJsonLines,
   recordFrom,
   roleFrom,
@@ -45,7 +47,7 @@ type ClaudeEdgeDraft = Omit<
 const contentArray = (message: Record<string, unknown> | undefined) =>
   Array.isArray(message?.content) ? (message.content as unknown[]) : [];
 
-const claudeStructuredContentProjection = (value: unknown): NativeValue => {
+const claudeStructuredContentProjection = (value: unknown): NativeValue | undefined => {
   if (typeof value === "string") return value;
   if (Array.isArray(value)) {
     return value.flatMap((item) => {
@@ -58,14 +60,16 @@ const claudeStructuredContentProjection = (value: unknown): NativeValue => {
         return [{ type, thinking: block.thinking } as NativeValue];
       }
       if (type === "document") {
+        const content =
+          block.content === undefined
+            ? undefined
+            : projectSessionNativeValue(claudeStructuredContentProjection(block.content));
         return [
           {
             type,
             ...(typeof block.title === "string" ? { title: block.title } : {}),
             ...(typeof block.media_type === "string" ? { media_type: block.media_type } : {}),
-            ...(block.content !== undefined
-              ? { content: claudeStructuredContentProjection(block.content) }
-              : {}),
+            ...(content !== undefined ? { content } : {}),
           } as NativeValue,
         ];
       }
@@ -87,19 +91,20 @@ const claudeStructuredContentProjection = (value: unknown): NativeValue => {
         ];
       }
       if (Object.keys(block).length > 0) {
-        return [{ type: type ?? "json", value: block } as NativeValue];
+        const value = projectSessionNativeValue(block);
+        return value === undefined ? [] : [{ type: type ?? "json", value } as NativeValue];
       }
       return [];
     });
   }
-  if (value !== undefined && value !== null) return value as NativeValue;
-  return {};
+  if (value !== undefined && value !== null) return projectSessionNativeValue(value);
+  return undefined;
 };
 
 const claudeContentProjection = (
   message: Record<string, unknown> | undefined,
   record: Record<string, unknown>,
-): NativeValue => {
+): NativeValue | undefined => {
   if (typeof message?.content === "string") return message.content;
   const blocks = contentArray(message);
   if (blocks.length > 0) {
@@ -113,23 +118,28 @@ const claudeContentProjection = (
         return [{ type, thinking: block.thinking } as NativeValue];
       }
       if (type === "tool_use") {
+        const input = projectToolPayloadNativeValue(block.input) as NativeValue | undefined;
         return [
           {
             type,
             ...(typeof block.id === "string" ? { id: block.id } : {}),
             ...(typeof block.name === "string" ? { name: block.name } : {}),
-            ...(block.input !== undefined ? { input: block.input as NativeValue } : {}),
+            ...(input !== undefined ? { input } : {}),
           } as NativeValue,
         ];
       }
       if (type === "tool_result") {
+        const content =
+          block.content === undefined
+            ? undefined
+            : (projectToolPayloadNativeValue(
+                claudeStructuredContentProjection(block.content),
+              ) as NativeValue | undefined);
         return [
           {
             type,
             ...(typeof block.tool_use_id === "string" ? { tool_use_id: block.tool_use_id } : {}),
-            ...(block.content !== undefined
-              ? { content: claudeStructuredContentProjection(block.content) }
-              : {}),
+            ...(content !== undefined ? { content } : {}),
           } as NativeValue,
         ];
       }
@@ -153,7 +163,7 @@ const claudeContentProjection = (
       return [];
     });
   }
-  return record.content as NativeValue | undefined ?? {};
+  return projectSessionNativeValue(record.content);
 };
 
 const toolCallIdFor = (machineId: string, sourcePath: string, nativeToolId: string) =>
@@ -174,13 +184,14 @@ const upsertClaudeToolCalls = (
     if (type === "tool_use" && typeof block.id === "string") {
       const id = toolCallIdFor(machineId, sourcePath, block.id);
       const existing = toolCallsById.get(id);
+      const input = projectToolPayloadNativeValue(block.input);
       toolCallsById.set(id, {
         ...existing,
         id,
         eventId: existing?.eventId ?? eventId,
         toolName: typeof block.name === "string" ? block.name : existing?.toolName ?? "claude_tool",
         status: existing?.status === "completed" ? "completed" : "started",
-        input: block.input,
+        ...(input !== undefined ? { input } : {}),
         ...(existing?.output !== undefined ? { output: existing.output } : {}),
         ...(timestamp !== undefined ? { startedAt: timestamp } : {}),
         ...(existing?.completedAt !== undefined ? { completedAt: existing.completedAt } : {}),
@@ -191,13 +202,14 @@ const upsertClaudeToolCalls = (
     if (type === "tool_result" && typeof block.tool_use_id === "string") {
       const id = toolCallIdFor(machineId, sourcePath, block.tool_use_id);
       const existing = toolCallsById.get(id);
+      const output = projectToolPayloadNativeValue(block.content);
       toolCallsById.set(id, {
         id,
         eventId: existing?.eventId ?? eventId,
         toolName: existing?.toolName ?? "claude_tool",
         status: "completed",
         ...(existing?.input !== undefined ? { input: existing.input } : {}),
-        output: block.content,
+        ...(output !== undefined ? { output } : {}),
         ...(existing?.startedAt !== undefined ? { startedAt: existing.startedAt } : {}),
         ...(timestamp !== undefined ? { completedAt: timestamp } : {}),
       });
