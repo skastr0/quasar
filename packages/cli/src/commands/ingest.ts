@@ -8,12 +8,19 @@ import {
   ImportJobStatusResponse,
   SESSION_INTELLIGENCE_CONTRACT_VERSION,
   jsonByteLength,
+  loadMachineIdentity,
   manifestFromBatch,
   QuasarApiPaths,
+  resnapshotSourceManifestEntries,
   snapshotIngestSourceManifest,
   stableJsonHash,
+  streamIngestBatches,
   type IngestBatch,
+  type IngestManifest,
+  type MachineIdentity,
   type NormalizedSession,
+  type SourceManifestEntry,
+  type StreamIngestBatchOptions,
   sanitizeIngestBatchForTransport,
   summarizeBatch,
 } from "@skastr0/quasar-core";
@@ -146,9 +153,10 @@ export const runIngestEffect = (
     const client = (yield* Schema.decodeUnknown(IngestRequestClientSchema)(
       requestClient,
     )) as IngestRequestClient;
-    const { options, before, batch: rawBatch } = yield* buildBatchWithSourceSnapshotEffect(input);
-    const batch = sanitizeIngestBatchForTransport(rawBatch);
+    const options = yield* loadOptions(input);
     if (options.dryRun === true) {
+      const { before, batch: rawBatch } = yield* buildBatchWithSourceSnapshotEffect(input);
+      const batch = sanitizeIngestBatchForTransport(rawBatch);
       const after = snapshotIngestSourceManifest(batch);
       return {
         dryRun: true,
@@ -161,15 +169,25 @@ export const runIngestEffect = (
         }),
       };
     }
-    const chunks = chunkIngestBatch(batch, chunkOptionsFromEnv());
-    validateChunkPayloads(chunks);
+    const machine = loadMachineIdentity();
+    const generatedAt = new Date().toISOString();
+    const streamOptions = {
+      providers: options.providers,
+      includeExperimental: options.includeExperimental,
+      limit: options.limit,
+      roots: options.roots,
+      machine,
+      generatedAt,
+    };
+    const chunkOptions = chunkOptionsFromEnv();
+    const plan = yield* planStreamedIngest(streamOptions, chunkOptions);
     const job = yield* client({
       method: "POST",
       path: QuasarApiPaths.ingestJobs,
       body: {
-        manifest: manifestFromBatch(batch),
-        idempotencyKey: ingestJobIdempotencyKey(batch, chunks),
-        expectedChunkCount: chunks.length,
+        manifest: plan.manifest,
+        idempotencyKey: plan.idempotencyKey,
+        expectedChunkCount: plan.expectedChunkCount,
       },
       responseSchema: ImportJobStartResponse,
     });
@@ -177,43 +195,27 @@ export const runIngestEffect = (
       "QUASAR_INGEST_CHUNK_DELAY_MS",
       DEFAULT_CHUNK_DELAY_MS,
     );
-    const results = [];
-    for (const group of chunkUploadGroups({
-      chunks,
-      size: uploadGroupSizeFromEnv(),
+    const upload = yield* uploadStreamedIngest({
+      streamOptions,
+      chunkOptions,
+      plan,
+      client,
       importJobId: job.importJobId,
-      expectedChunkCount: chunks.length,
-    })) {
-      const requestBody = bulkUploadRequestBody(job.importJobId, chunks.length, group);
-      assertJsonBudget(
-        requestBody,
-        MAX_BULK_UPLOAD_BODY_BYTES,
-        `bulk upload group ending at chunk ${group.at(-1)?.index ?? 0}`,
-      );
-      results.push(
-        yield* client({
-          method: "POST",
-          path: QuasarApiPaths.ingestJobChunksBulk,
-          body: requestBody,
-          responseSchema: Schema.Unknown,
-        }),
-      );
-      if (group.at(-1)?.index !== chunks.length - 1 && chunkDelayMs > 0) {
-        yield* Effect.sleep(Duration.millis(chunkDelayMs));
-      }
-    }
+      uploadGroupSize: uploadGroupSizeFromEnv(),
+      chunkDelayMs,
+    });
     const status = yield* readImportJob(job.importJobId, client);
-    const after = snapshotIngestSourceManifest(batch);
+    const after = resnapshotSourceManifestEntries(plan.sourceBefore);
     return {
-      ...summarizeBatch(batch),
+      ...summaryFromManifest(plan.manifest),
       importJobId: job.importJobId,
       jobStatus: status.jobStatus,
-      chunkCount: chunks.length,
-      results,
+      chunkCount: plan.expectedChunkCount,
+      uploadedChunkCount: upload.uploadedChunkCount,
+      uploadGroupCount: upload.uploadGroupCount,
       status,
       sourceSafetyReport: createSourceSafetyReport({
-        batch,
-        before,
+        before: plan.sourceBefore,
         after,
         quasarStateWrites: true,
       }),
@@ -253,33 +255,235 @@ const uploadGroupSizeFromEnv = () =>
     envPositiveInteger("QUASAR_INGEST_UPLOAD_GROUP_SIZE", DEFAULT_UPLOAD_GROUP_SIZE),
   );
 
-const chunkUploadGroups = (input: {
-  readonly chunks: readonly IngestBatch[];
-  readonly size: number;
-  readonly importJobId: string;
-  readonly expectedChunkCount: number;
-}) => {
-  const groups: Array<Array<{ chunk: IngestBatch; index: number }>> = [];
-  let current: Array<{ chunk: IngestBatch; index: number }> = [];
-  for (let index = 0; index < input.chunks.length; index += 1) {
-    const item = { chunk: input.chunks[index]!, index };
-    const next = [...current, item];
-    const nextBytes = jsonByteLength(
-      bulkUploadRequestBody(input.importJobId, input.expectedChunkCount, next),
-    );
-    if (
-      current.length > 0 &&
-      (current.length >= input.size || nextBytes > MAX_BULK_UPLOAD_BODY_BYTES)
-    ) {
-      groups.push(current);
-      current = [item];
-      continue;
-    }
-    current = next;
-  }
-  if (current.length > 0) groups.push(current);
-  return groups;
+type StreamIngestOptions = StreamIngestBatchOptions & {
+  readonly machine: MachineIdentity;
+  readonly generatedAt: string;
 };
+
+type StreamIngestPlan = {
+  readonly manifest: IngestManifest;
+  readonly expectedChunkCount: number;
+  readonly chunkPayloadHashes: readonly string[];
+  readonly idempotencyKey: string;
+  readonly sourceBefore: readonly SourceManifestEntry[];
+};
+
+type IngestManifestDraft = {
+  protocolVersion: "quasar.ingest-manifest/v1";
+  machine: IngestManifest["machine"];
+  sourceRoots: IngestManifest["sourceRoots"][number][];
+  sessions: IngestManifest["sessions"][number][];
+  diagnostics: IngestManifest["diagnostics"][number][];
+  generatedAt: string;
+  sessionCount: number;
+  eventCount: number;
+  toolCallCount: number;
+  contentBlockCount: number;
+  sessionEdgeCount: number;
+  usageRecordCount: number;
+  artifactCount: number;
+};
+
+const planStreamedIngest = (
+  streamOptions: StreamIngestOptions,
+  chunkOptions: Required<ChunkOptions>,
+) =>
+  Effect.tryPromise({
+    try: async () => {
+      const manifest = emptyIngestManifest(streamOptions.machine, streamOptions.generatedAt);
+      const sourceBefore = new Map<string, SourceManifestEntry>();
+      const chunkPayloadHashes: string[] = [];
+      for await (const batch of streamIngestBatches(streamOptions)) {
+        mergeManifest(manifest, manifestFromBatch(batch));
+        for (const entry of snapshotIngestSourceManifest(batch)) {
+          sourceBefore.set(sourceManifestKey(entry), entry);
+        }
+        const chunks = chunkIngestBatch(batch, chunkOptions);
+        validateChunkPayloads(chunks);
+        for (const chunk of chunks) {
+          chunkPayloadHashes.push(stableJsonHash(batchPayloadIdentity(chunk)));
+        }
+      }
+      const plannedManifest: IngestManifest = manifest;
+      return {
+        manifest: plannedManifest,
+        expectedChunkCount: chunkPayloadHashes.length,
+        chunkPayloadHashes,
+        idempotencyKey: streamedIngestJobIdempotencyKey(plannedManifest, chunkPayloadHashes),
+        sourceBefore: sortedSourceManifestEntries(sourceBefore.values()),
+      };
+    },
+    catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+  });
+
+const uploadStreamedIngest = (input: {
+  readonly streamOptions: StreamIngestOptions;
+  readonly chunkOptions: Required<ChunkOptions>;
+  readonly plan: StreamIngestPlan;
+  readonly client: IngestRequestClient;
+  readonly importJobId: string;
+  readonly uploadGroupSize: number;
+  readonly chunkDelayMs: number;
+}) =>
+  Effect.gen(function* () {
+    const iterator = streamChunkBatches(input.streamOptions, input.chunkOptions)[Symbol.asyncIterator]();
+    let group: Array<{ chunk: IngestBatch; index: number }> = [];
+    let uploadedChunkCount = 0;
+    let uploadGroupCount = 0;
+    let index = 0;
+    while (true) {
+      const next = yield* Effect.tryPromise({
+        try: () => iterator.next(),
+        catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+      });
+      if (next.done === true) break;
+      const chunk = next.value;
+      assertJsonBudget(chunk, MAX_UPLOAD_CHUNK_BATCH_BYTES, `chunk ${index}`);
+      const expectedHash = input.plan.chunkPayloadHashes[index];
+      const actualHash = stableJsonHash(batchPayloadIdentity(chunk));
+      if (expectedHash !== actualHash) {
+        throw new Error(`ingest source changed between planning and upload at chunk ${index}`);
+      }
+      const item = { chunk, index };
+      const candidate = [...group, item];
+      const nextBytes = jsonByteLength(
+        bulkUploadRequestBody(input.importJobId, input.plan.expectedChunkCount, candidate),
+      );
+      if (
+        group.length > 0 &&
+        (group.length >= input.uploadGroupSize || nextBytes > MAX_BULK_UPLOAD_BODY_BYTES)
+      ) {
+        yield* uploadChunkGroup(input, group);
+        uploadedChunkCount += group.length;
+        uploadGroupCount += 1;
+        group = [item];
+      } else {
+        group = candidate;
+      }
+      index += 1;
+    }
+    if (group.length > 0) {
+      yield* uploadChunkGroup(input, group);
+      uploadedChunkCount += group.length;
+      uploadGroupCount += 1;
+    }
+    if (index !== input.plan.expectedChunkCount) {
+      throw new Error(
+        `ingest planned ${input.plan.expectedChunkCount} chunks but uploaded ${index}`,
+      );
+    }
+    return { uploadedChunkCount, uploadGroupCount };
+  });
+
+const uploadChunkGroup = (
+  input: {
+    readonly client: IngestRequestClient;
+    readonly importJobId: string;
+    readonly plan: StreamIngestPlan;
+    readonly chunkDelayMs: number;
+  },
+  group: readonly { chunk: IngestBatch; index: number }[],
+) =>
+  Effect.gen(function* () {
+    const requestBody = bulkUploadRequestBody(
+      input.importJobId,
+      input.plan.expectedChunkCount,
+      group,
+    );
+    assertJsonBudget(
+      requestBody,
+      MAX_BULK_UPLOAD_BODY_BYTES,
+      `bulk upload group ending at chunk ${group.at(-1)?.index ?? 0}`,
+    );
+    yield* input.client({
+      method: "POST",
+      path: QuasarApiPaths.ingestJobChunksBulk,
+      body: requestBody,
+      responseSchema: Schema.Unknown,
+    });
+    if (group.at(-1)?.index !== input.plan.expectedChunkCount - 1 && input.chunkDelayMs > 0) {
+      yield* Effect.sleep(Duration.millis(input.chunkDelayMs));
+    }
+  });
+
+async function* streamChunkBatches(
+  streamOptions: StreamIngestOptions,
+  chunkOptions: Required<ChunkOptions>,
+): AsyncGenerator<IngestBatch> {
+  for await (const batch of streamIngestBatches(streamOptions)) {
+    for (const chunk of chunkIngestBatch(batch, chunkOptions)) {
+      yield chunk;
+    }
+  }
+}
+
+const emptyIngestManifest = (
+  machine: StreamIngestOptions["machine"],
+  generatedAt: string,
+): IngestManifestDraft => ({
+  protocolVersion: "quasar.ingest-manifest/v1",
+  machine,
+  sourceRoots: [],
+  sessions: [],
+  diagnostics: [],
+  generatedAt,
+  sessionCount: 0,
+  eventCount: 0,
+  toolCallCount: 0,
+  contentBlockCount: 0,
+  sessionEdgeCount: 0,
+  usageRecordCount: 0,
+  artifactCount: 0,
+});
+
+const mergeManifest = (target: IngestManifestDraft, batch: IngestManifest) => {
+  target.sourceRoots.push(...batch.sourceRoots);
+  target.sessions.push(...batch.sessions);
+  target.diagnostics.push(...batch.diagnostics);
+  target.sessionCount += batch.sessionCount;
+  target.eventCount += batch.eventCount;
+  target.toolCallCount += batch.toolCallCount;
+  target.contentBlockCount += batch.contentBlockCount;
+  target.sessionEdgeCount += batch.sessionEdgeCount;
+  target.usageRecordCount += batch.usageRecordCount;
+  target.artifactCount += batch.artifactCount;
+};
+
+const summaryFromManifest = (manifest: IngestManifest) => ({
+  machine: manifest.machine,
+  generatedAt: manifest.generatedAt,
+  sourceRootCount: manifest.sourceRoots.length,
+  sessionCount: manifest.sessionCount,
+  eventCount: manifest.eventCount,
+  toolCallCount: manifest.toolCallCount,
+  contentBlockCount: manifest.contentBlockCount,
+  sessionEdgeCount: manifest.sessionEdgeCount,
+  usageRecordCount: manifest.usageRecordCount,
+  artifactCount: manifest.artifactCount,
+  diagnostics: manifest.diagnostics,
+});
+
+const streamedIngestJobIdempotencyKey = (
+  manifest: IngestManifest,
+  chunkPayloadHashes: readonly string[],
+) =>
+  `import-job:${stableJsonHash([
+    SESSION_INTELLIGENCE_CONTRACT_VERSION,
+    manifestIdentityFromManifest(manifest),
+    chunkPayloadHashes.map((hash, sequence) => [sequence, hash]),
+  ])}`;
+
+const manifestIdentityFromManifest = (manifest: IngestManifest) => ({
+  ...manifest,
+  generatedAt: undefined,
+});
+
+const sourceManifestKey = (entry: SourceManifestEntry) => `${entry.role}:${entry.path}`;
+
+const sortedSourceManifestEntries = (entries: Iterable<SourceManifestEntry>) =>
+  [...entries].sort((left, right) =>
+    `${left.role}:${left.path}`.localeCompare(`${right.role}:${right.path}`),
+  );
 
 const bulkUploadRequestBody = (
   importJobId: string,
@@ -316,16 +520,10 @@ export const ingestJobIdempotencyKey = (
   batch: IngestBatch,
   chunks: readonly IngestBatch[],
 ) =>
-  `import-job:${stableJsonHash([
-    SESSION_INTELLIGENCE_CONTRACT_VERSION,
-    manifestIdentity(batch),
-    chunks.map((chunk, sequence) => [sequence, stableJsonHash(batchPayloadIdentity(chunk))]),
-  ])}`;
-
-const manifestIdentity = (batch: IngestBatch) => ({
-  ...manifestFromBatch(batch),
-  generatedAt: undefined,
-});
+  streamedIngestJobIdempotencyKey(
+    manifestFromBatch(batch),
+    chunks.map((chunk) => stableJsonHash(batchPayloadIdentity(chunk))),
+  );
 
 const batchPayloadIdentity = (batch: IngestBatch) => ({
   ...batch,

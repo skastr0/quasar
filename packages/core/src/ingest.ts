@@ -55,14 +55,15 @@ export interface BuildIngestBatchOptions {
   readonly machine?: MachineIdentity;
 }
 
+export interface StreamIngestBatchOptions extends BuildIngestBatchOptions {
+  readonly generatedAt?: string;
+}
+
 export const buildIngestBatch = async (
   options: BuildIngestBatchOptions = {},
 ): Promise<IngestBatch> => {
   const machine = options.machine ?? loadMachineIdentity();
-  const adapters = (options.includeExperimental ? allAdapters : stableAdapters).filter(
-    (adapter) =>
-      options.providers === undefined || options.providers.includes(adapter.provider),
-  );
+  const adapters = selectedAdapters(options);
   const now = new Date().toISOString();
   const result: AdapterReadResult = await readAdapters(adapters, {
     machine,
@@ -79,6 +80,41 @@ export const buildIngestBatch = async (
     generatedAt: now,
   });
 };
+
+export async function* streamIngestBatches(
+  options: StreamIngestBatchOptions = {},
+): AsyncGenerator<IngestBatch> {
+  const machine = options.machine ?? loadMachineIdentity();
+  const adapters = selectedAdapters(options);
+  const now = options.generatedAt ?? new Date().toISOString();
+  if (adapters.length === 0) {
+    yield toConvexSafeSessionIntelligenceBatch({
+      protocolVersion: "quasar.ingest/v1",
+      machine,
+      sourceRoots: [],
+      sessions: [],
+      diagnostics: [],
+      generatedAt: now,
+    });
+    return;
+  }
+  for (const adapter of adapters) {
+    const result = await adapter.read({
+      machine,
+      now,
+      roots: options.roots,
+      limit: options.limit,
+    });
+    yield toConvexSafeSessionIntelligenceBatch({
+      protocolVersion: "quasar.ingest/v1",
+      machine,
+      sourceRoots: result.sourceRoots,
+      sessions: result.sessions,
+      diagnostics: result.diagnostics,
+      generatedAt: now,
+    });
+  }
+}
 
 export const summarizeBatch = (batch: IngestBatch) => ({
   machine: batch.machine,
@@ -181,7 +217,7 @@ export const snapshotConfiguredSourceRoots = (
 };
 
 export const createSourceSafetyReport = (args: {
-  readonly batch: IngestBatch;
+  readonly batch?: IngestBatch;
   readonly before: readonly SourceManifestEntry[];
   readonly after: readonly SourceManifestEntry[];
   readonly quasarStateWrites: boolean;
@@ -194,6 +230,16 @@ export const createSourceSafetyReport = (args: {
   sourceMutations: compareSourceManifests(args.before, args.after),
   checkedAt: args.checkedAt ?? new Date().toISOString(),
 });
+
+export const resnapshotSourceManifestEntries = (
+  entries: readonly SourceManifestEntry[],
+): SourceManifestEntry[] => {
+  const next = new Map<string, SourceManifestEntry>();
+  for (const entry of entries) addSourceManifestEntry(next, entry.path, entry.role);
+  return [...next.values()].sort((left, right) =>
+    `${left.role}:${left.path}`.localeCompare(`${right.role}:${right.path}`),
+  );
+};
 
 export const compareSourceManifests = (
   before: readonly SourceManifestEntry[],
@@ -247,6 +293,12 @@ const addSourceManifestEntry = (
   const entry = statSource(path, role);
   entries.set(manifestKey(entry), entry);
 };
+
+const selectedAdapters = (options: BuildIngestBatchOptions) =>
+  (options.includeExperimental ? allAdapters : stableAdapters).filter(
+    (adapter) =>
+      options.providers === undefined || options.providers.includes(adapter.provider),
+  );
 
 const snapshotSourceRootChildren = (
   entries: Map<string, SourceManifestEntry>,
