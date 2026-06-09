@@ -71,15 +71,10 @@ export const kindFromRecord = (record: Record<string, unknown>): SessionEventKin
 };
 
 export const contentFromRecord = (record: Record<string, unknown>) =>
-  projectSessionNativeValue(
-    record.content ??
-      record.text ??
-      record.message ??
-      record.parts ??
-      record.delta,
-  );
+  projectSessionNativeValue(contentCandidateFromRecord(record));
 
-export const toolNameFromRecord = (record: Record<string, unknown>) => {
+export const toolNameFromRecord = (value: unknown) => {
+  const record = recordFrom(value);
   if (stringValue(record.toolName) !== undefined) return stringValue(record.toolName);
   if (stringValue(record.tool) !== undefined) return stringValue(record.tool);
   if (stringValue(record.name) !== undefined && recordLooksToolLike(record)) {
@@ -100,9 +95,10 @@ export const bestEffortToolCall = (
   sourcePath: string,
   nativeSessionId: string,
   eventId: string,
-  record: Record<string, unknown>,
+  value: unknown,
   fallbackKey: unknown,
 ): ToolCallDraft | undefined => {
+  const record = recordFrom(value);
   const toolName = toolNameFromRecord(record);
   if (toolName === undefined) return undefined;
   const state = recordFrom(record.state);
@@ -144,10 +140,12 @@ export const usageFromRecord = (
   nativeSessionId: string,
   eventId: string,
   sequence: number,
-  record: Record<string, unknown>,
+  value: unknown,
   modelProvider: string | undefined,
 ): UsageRecordDraft | undefined => {
-  const usage = firstRecord(record.usage, record.tokens, record.metrics, record);
+  const record = recordFrom(value);
+  const usage = usagePayloadFromRecord(record);
+  const usageIsWholeRecord = usage === record;
   const inputTokens =
     numberValue(usage.input_tokens) ??
     numberValue(usage.inputTokens) ??
@@ -180,7 +178,7 @@ export const usageFromRecord = (
       cacheCreationInputTokens,
       cacheReadInputTokens,
     ]);
-  const cost = numberValue(usage.cost) ?? numberValue(record.cost);
+  const cost = numberValue(usage.cost) ?? (usageIsWholeRecord ? numberValue(record.cost) : undefined);
   if (totalTokens === undefined && cost === undefined) return undefined;
   return {
     id: usageIdFor(provider, machineId, sourcePath, nativeSessionId, eventId, sequence),
@@ -215,16 +213,114 @@ const firstRecord = (...values: unknown[]) => {
   return {};
 };
 
+const usagePayloadFromRecord = (record: Record<string, unknown>) => {
+  if (
+    record.usage !== undefined ||
+    record.tokens !== undefined ||
+    record.metrics !== undefined
+  ) {
+    return firstRecord(record.usage, record.tokens, record.metrics);
+  }
+  const type = String(record.type ?? record.kind ?? record.event ?? "").toLowerCase();
+  if (/(^|[_:-])(usage|token|cost|metrics?)([_:-]|$)/i.test(type)) return record;
+  return {};
+};
+
+export const bestEffortEventRecordLike = (value: unknown) => {
+  const record = recordFrom(value);
+  return (
+    recordHasContentSignal(record) ||
+    recordHasToolSignal(record) ||
+    recordHasUsageSignal(record) ||
+    recordHasKnownEventType(record)
+  );
+};
+
 const recordLooksToolLike = (record: Record<string, unknown>) => {
   const type = String(record.type ?? record.kind ?? record.event ?? "").toLowerCase();
+  const state = recordFrom(record.state);
   return (
     type.includes("tool") ||
     type.includes("bash") ||
     type.includes("command") ||
-    record.input !== undefined ||
-    record.output !== undefined ||
-    record.arguments !== undefined
+    stringValue(record.toolName) !== undefined ||
+    stringValue(record.tool_call_id) !== undefined ||
+    stringValue(record.toolCallId) !== undefined ||
+    stringValue(record.tool_use_id) !== undefined ||
+    stringValue(record.callId) !== undefined ||
+    stringValue(record.callID) !== undefined ||
+    stringValue(record.command) !== undefined ||
+    stringValue(recordFrom(record.function).name) !== undefined ||
+    stringValue(state.tool) !== undefined ||
+    stringValue(state.name) !== undefined
   );
+};
+
+const contentCandidateFromRecord = (record: Record<string, unknown>) => {
+  const message = recordFrom(record.message);
+  return (
+    record.content ??
+    record.text ??
+    (typeof record.message === "string" ? record.message : undefined) ??
+    message.content ??
+    message.text ??
+    message.parts ??
+    message.delta ??
+    record.parts ??
+    record.delta
+  );
+};
+
+const recordHasContentSignal = (record: Record<string, unknown>) =>
+  contentValueLike(contentCandidateFromRecord(record));
+
+const contentValueLike = (value: unknown): boolean => {
+  if (typeof value === "string") return value.trim().length > 0;
+  if (Array.isArray(value)) return value.some(contentValueLike);
+  if (value === null || typeof value !== "object") return false;
+  const record = recordFrom(value);
+  return (
+    contentValueLike(record.text) ||
+    contentValueLike(record.content) ||
+    contentValueLike(record.message) ||
+    contentValueLike(record.parts) ||
+    contentValueLike(record.delta) ||
+    contentValueLike(record.patch) ||
+    contentValueLike(record.diff)
+  );
+};
+
+const recordHasToolSignal = (record: Record<string, unknown>) =>
+  toolNameFromRecord(record) !== undefined;
+
+const recordHasUsageSignal = (record: Record<string, unknown>) => {
+  const usage = usagePayloadFromRecord(record);
+  return [
+    usage.input_tokens,
+    usage.inputTokens,
+    usage.prompt_tokens,
+    usage.output_tokens,
+    usage.outputTokens,
+    usage.completion_tokens,
+    usage.reasoning_tokens,
+    usage.reasoningTokens,
+    usage.total_tokens,
+    usage.totalTokens,
+    usage.total,
+    usage.cost,
+    record.cost,
+  ].some((value) => numberValue(value) !== undefined);
+};
+
+const recordHasKnownEventType = (record: Record<string, unknown>) => {
+  const type = String(record.type ?? record.kind ?? record.event ?? "").toLowerCase();
+  if (/(^|[_:-])delta([_:-]|$)/i.test(type)) {
+    return contentValueLike(record.delta) || contentValueLike(record.content) || contentValueLike(record.text);
+  }
+  if (/(^|[_:-])(usage|token|cost|metrics?)([_:-]|$)/i.test(type)) {
+    return recordHasUsageSignal(record);
+  }
+  return /(^|[_:-])(user|assistant|system|developer|message|reasoning|thinking|tool|bash|command)([_:-]|$)/i.test(type);
 };
 
 const sumNumbers = (values: readonly (number | undefined)[]) => {

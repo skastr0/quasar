@@ -70,10 +70,20 @@ const SESSION_TRASH_PATHS = [
   ["summary", "state"],
   ["summary", "providerCache"],
   ["summary", "providerState"],
+  ["summary", "viewState"],
+  ["summary", "uiState"],
+  ["summary", "providerUi"],
   ["workspace", "diff"],
   ["workspace", "diffs"],
   ["workspace", "patch"],
   ["workspace", "patches"],
+  ["workspace", "cache"],
+  ["workspace", "state"],
+  ["workspace", "providerCache"],
+  ["workspace", "providerState"],
+  ["workspace", "viewState"],
+  ["workspace", "uiState"],
+  ["workspace", "providerUi"],
   ["workspace", "snapshot"],
   ["workspace", "snapshots"],
   ["workspaceDiff"],
@@ -88,9 +98,9 @@ const GENERATED_PATH_SEGMENTS = /(^|\/)(node_modules|\.git|\.next|\.turbo|dist|b
 const GENERATED_FILE = /(^|\/)(bun\.lockb?|package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$/i;
 const BINARY_KEY = /(^|_)(base64|data|bytes|blob|binary|image|source)(_|$)/i;
 const NON_INTELLIGENCE_KEY =
-  /(encrypted[_-]?content|cipher[_-]?text|provider[_-]?(cache|state|ui)|cacheState|viewState|uiState|displayOnly|displayState|snapshots?|checkpoint|workspaceSnapshot|workspaceDiff)/i;
+  /(encrypted[_-]?content|cipher[_-]?text|provider[_-]?(cache|state|ui)|cacheState|viewState|uiState|displayOnly|displayState|snapshots?|checkpoint|workspaceSnapshot|workspaceDiff|summary[_-]?(diffs?|patch(?:es)?|snapshots?|cache|state)|workspace[_-]?(diffs?|patch(?:es)?|snapshots?|cache|state))/i;
 const PROVIDER_CONTROL_KEY =
-  /(encrypted[_-]?content|cipher[_-]?text|provider[_-]?(cache|state|ui)|cacheState|viewState|uiState|displayOnly|displayState|workspaceSnapshot|workspaceDiff|checkpoint|snapshots?)/i;
+  /(encrypted[_-]?content|cipher[_-]?text|provider[_-]?(cache|state|ui)|cacheState|viewState|uiState|displayOnly|displayState|workspaceSnapshot|workspaceDiff|checkpoint|snapshots?|summary[_-]?(diffs?|patch(?:es)?|snapshots?|cache|state)|workspace[_-]?(diffs?|patch(?:es)?|snapshots?|cache|state))/i;
 const BASE64ISH = /^[A-Za-z0-9+/=\s]+$/;
 const DATA_URI = /^data:[^,]{0,512},/i;
 const DATA_URI_INLINE = /data:[^,\s"'<>]{0,512},[A-Za-z0-9+/=_-]{64,}/gi;
@@ -274,6 +284,9 @@ const omittedFieldValue = (_key: string, value: unknown, reason: string) => ({
   hash: stableWideHash(JSON.stringify(value)),
 });
 
+const isOmissionRecord = (record: Record<string, unknown>) =>
+  record.omitted === true && typeof record.reason === "string";
+
 const addOmittedField = (
   output: Record<string, unknown>,
   field: ReturnType<typeof omittedFieldValue>,
@@ -344,6 +357,7 @@ const boundedValue = (
   }
   if (typeof value !== "object") return String(value);
   const record = value as Record<string, unknown>;
+  if (isOmissionRecord(record)) return sortedObject(record);
   const nativePath = nativePathFromRecord(record);
   const binaryPayloadRecord = declaresBinaryPayload(record);
   if (isGeneratedPath(nativePath)) {

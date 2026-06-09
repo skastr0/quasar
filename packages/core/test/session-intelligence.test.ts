@@ -182,12 +182,17 @@ describe("session intelligence contract", () => {
           status: "completed",
           input: {
             patch: "@@ real tool input patch",
+            summaryDiffs: ["flat provider input diff trash"],
+            summaryCache: { state: "flat provider input cache trash" },
+            workspacePatch: "flat provider input workspace patch trash",
             summary: { diffs: ["provider input diff trash"] },
             providerUi: "provider input ui trash",
           },
           output: {
             diff: "@@ real tool result diff",
             patches: ["@@ real tool result patch list"],
+            summaryState: { view: "flat provider result state trash" },
+            workspaceDiffs: ["flat provider result workspace diff trash"],
             viewState: "provider result view trash",
             log: JSON.stringify({
               result: "visible structured tool result",
@@ -206,6 +211,11 @@ describe("session intelligence contract", () => {
     expect(encoded).toContain("@@ real tool result diff");
     expect(encoded).toContain("@@ real tool result patch list");
     expect(encoded).toContain("visible structured tool result");
+    expect(encoded).not.toContain("flat provider input diff trash");
+    expect(encoded).not.toContain("flat provider input cache trash");
+    expect(encoded).not.toContain("flat provider input workspace patch trash");
+    expect(encoded).not.toContain("flat provider result state trash");
+    expect(encoded).not.toContain("flat provider result workspace diff trash");
     expect(encoded).not.toContain("provider input diff trash");
     expect(encoded).not.toContain("provider input ui trash");
     expect(encoded).not.toContain("provider result view trash");
@@ -235,12 +245,17 @@ describe("session intelligence contract", () => {
                 type: "diff",
                 patch: "@@ real event patch",
                 diff: "@@ real event diff",
+                summaryPatches: ["flat provider event summary patch trash"],
+                workspaceState: { view: "flat provider event workspace state trash" },
                 providerUi: "provider event ui trash",
                 summary: { diffs: ["provider event summary diff trash"] },
                 workspace: {
                   diff: "provider event workspace diff trash",
                   patch: "provider event workspace patch trash",
                   patches: ["provider event workspace patches trash"],
+                  cache: "provider event workspace cache trash",
+                  state: "provider event workspace state trash",
+                  providerUi: "provider event workspace ui trash",
                 },
               },
             },
@@ -255,11 +270,16 @@ describe("session intelligence contract", () => {
 
     expect(encoded).toContain("@@ real event patch");
     expect(encoded).toContain("@@ real event diff");
+    expect(encoded).not.toContain("flat provider event summary patch trash");
+    expect(encoded).not.toContain("flat provider event workspace state trash");
     expect(encoded).not.toContain("provider event ui trash");
     expect(encoded).not.toContain("provider event summary diff trash");
     expect(encoded).not.toContain("provider event workspace diff trash");
     expect(encoded).not.toContain("provider event workspace patch trash");
     expect(encoded).not.toContain("provider event workspace patches trash");
+    expect(encoded).not.toContain("provider event workspace cache trash");
+    expect(encoded).not.toContain("provider event workspace state trash");
+    expect(encoded).not.toContain("provider event workspace ui trash");
     assertConvexSafeSessionIntelligenceBatch(sanitized);
   });
 

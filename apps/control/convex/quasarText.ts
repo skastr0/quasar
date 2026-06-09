@@ -16,20 +16,29 @@ const SESSION_TRASH_PATHS = [
   ["summary", "state"],
   ["summary", "providerCache"],
   ["summary", "providerState"],
-  ["workspace", "diffs"],
-  ["workspace", "snapshot"],
-  ["workspace", "snapshots"],
+  ["summary", "viewState"],
+  ["summary", "uiState"],
+  ["summary", "providerUi"],
   ["workspace", "diff"],
   ["workspace", "diffs"],
   ["workspace", "patch"],
   ["workspace", "patches"],
+  ["workspace", "cache"],
+  ["workspace", "state"],
+  ["workspace", "providerCache"],
+  ["workspace", "providerState"],
+  ["workspace", "viewState"],
+  ["workspace", "uiState"],
+  ["workspace", "providerUi"],
+  ["workspace", "snapshot"],
+  ["workspace", "snapshots"],
   ["workspaceDiff"],
   ["workspaceSnapshot"],
   ["checkpoint"],
   ["checkpoints"],
 ] as const;
 const NON_INDEXABLE_KEY =
-  /(encrypted[_-]?content|cipher[_-]?text|provider[_-]?(cache|state)|workspaceSnapshot|workspaceDiff)/i;
+  /(encrypted[_-]?content|cipher[_-]?text|provider[_-]?(cache|state|ui)|cacheState|viewState|uiState|displayOnly|displayState|snapshots?|checkpoint|workspaceSnapshot|workspaceDiff|summary[_-]?(diffs?|patch(?:es)?|snapshots?|cache|state)|workspace[_-]?(diffs?|patch(?:es)?|snapshots?|cache|state))/i;
 const SENSITIVE_KEY =
   /(authorization|password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|bearer|cookie|credential|private[_-]?key|encrypted[_-]?content|cipher[_-]?text)/i;
 const DATA_URI = /^data:[^,]{0,512},/i;

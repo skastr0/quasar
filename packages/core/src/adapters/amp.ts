@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { SessionAdapter } from "./types";
 import type { SessionEdge, ToolCall, UsageRecord } from "../schemas";
 import {
+  bestEffortEventRecordLike,
   bestEffortToolCall,
   contentFromRecord,
   kindFromRecord,
@@ -190,7 +191,7 @@ export const ampAdapter: SessionAdapter = {
     const threadSessions = threadFiles.flatMap((path) => {
       if (/secrets|auth|token|credential/i.test(path)) return [];
       const thread = recordFrom(readJsonFile(path));
-      const messages = threadMessages(thread);
+      const messages = threadMessages(thread).map(recordFrom).filter(bestEffortEventRecordLike);
       if (messages.length === 0) return [];
       const nativeSessionId = String(thread.id ?? thread.threadId ?? path);
       return [
@@ -207,7 +208,9 @@ export const ampAdapter: SessionAdapter = {
     });
 
     const historyPath = join(root, "history.jsonl");
-    const historyLines = existsSync(historyPath) ? readJsonLines(historyPath) : [];
+    const historyLines = existsSync(historyPath)
+      ? readJsonLines(historyPath).map((line) => recordFrom(line.value)).filter(bestEffortEventRecordLike)
+      : [];
     const historySession =
       historyLines.length === 0
         ? []
@@ -219,7 +222,7 @@ export const ampAdapter: SessionAdapter = {
               "history",
               undefined,
               "Amp history",
-              historyLines.map((line) => line.value),
+              historyLines,
             ),
           ];
     const sessions = [...threadSessions, ...historySession];

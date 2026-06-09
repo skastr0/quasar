@@ -1,8 +1,10 @@
 import { existsSync } from "node:fs";
+import { basename } from "node:path";
 
 import type { SessionAdapter } from "./types";
 import type { SessionEdge, ToolCall, UsageRecord } from "../schemas";
 import {
+  bestEffortEventRecordLike,
   bestEffortToolCall,
   contentFromRecord,
   kindFromRecord,
@@ -39,15 +41,30 @@ type PiEdgeDraft = Omit<
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
 >;
 
+const piSessionLikeFile = (path: string) => {
+  const name = basename(path).toLowerCase();
+  if (!/\.(jsonl|json)$/.test(name)) return false;
+  if (/^(state|cache|config|settings|index|metadata)\.json$/i.test(name)) return false;
+  if (/[\\/](cache|state|config|settings|metadata)([\\/]|$)/i.test(path)) return false;
+  if (name.endsWith(".jsonl")) return true;
+  return (
+    /^(session|transcript|history|messages|events|turns)[\w.-]*\.(jsonl|json)$/i.test(name) ||
+    /[\\/](sessions|session|transcripts|history|histories|messages|events|turns|conversations)([\\/]|$)/i.test(path)
+  );
+};
+
 const recordsFromFile = (path: string) => {
-  if (path.endsWith(".jsonl")) return readJsonLines(path).map((line) => line.value);
-  const value = readJsonFile(path);
-  if (Array.isArray(value)) return value;
-  const record = recordFrom(value);
-  for (const key of ["events", "messages", "nodes", "turns", "items"]) {
-    if (Array.isArray(record[key])) return record[key] as unknown[];
-  }
-  return Object.keys(record).length === 0 ? [] : [record];
+  const raw = (() => {
+    if (path.endsWith(".jsonl")) return readJsonLines(path).map((line) => line.value);
+    const value = readJsonFile(path);
+    if (Array.isArray(value)) return value;
+    const record = recordFrom(value);
+    for (const key of ["events", "messages", "nodes", "turns", "items"]) {
+      if (Array.isArray(record[key])) return record[key] as unknown[];
+    }
+    return Object.keys(record).length === 0 ? [] : [record];
+  })();
+  return raw.map(recordFrom).filter(bestEffortEventRecordLike);
 };
 
 const buildPiSession = (
@@ -176,12 +193,7 @@ export const piAdapter: SessionAdapter = {
         ],
       };
     }
-    const files = collectFiles(
-      root,
-      (path) => /\.(jsonl|json)$/.test(path),
-      options.limit,
-      options.skip,
-    );
+    const files = collectFiles(root, piSessionLikeFile, options.limit, options.skip);
     const sessions = files.flatMap((path) => (recordsFromFile(path).length === 0 ? [] : [buildPiSession(path, root, options)]));
     return {
       sourceRoots: [sourceRoot("pi", piAdapter.id, root, options.machine, options.now)],
