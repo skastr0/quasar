@@ -13,6 +13,7 @@ import {
   updateEmbeddingReadinessAggregates,
 } from "./quasarEmbeddingReadiness";
 import {
+  cancelImportJobHandler,
   claimImportChunkHandler,
   claimImportJobWorkerHandler,
   enqueueImportChunkHandler,
@@ -102,6 +103,11 @@ export const enqueueImportChunkInternal = internalMutation({
 export const scheduleImportWorkerInternal = internalMutation({
   args: { importJobId: v.string(), delayMs: v.optional(v.number()) },
   handler: scheduleImportWorkerMutationHandler,
+});
+
+export const cancelImportJobInternal = internalMutation({
+  args: { importJobId: v.string(), reason: v.optional(v.string()) },
+  handler: cancelImportJobHandler,
 });
 
 export const processImportJobChunksInternal = internalAction({
