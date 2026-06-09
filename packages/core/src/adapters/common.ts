@@ -1,6 +1,8 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 
+import { Option, Schema } from "effect";
+
 import { stableJsonHash, stableWideHash } from "../hash";
 import { resolveProjectIdentity } from "../project-normalization";
 import { redactSensitive } from "../redaction";
@@ -31,6 +33,26 @@ export type NativeValue =
   | null
   | readonly NativeValue[]
   | { readonly [key: string]: NativeValue | undefined };
+
+type NativeProjectionInput =
+  | NativeValue
+  | undefined
+  | readonly NativeProjectionInput[]
+  | { readonly [key: string]: NativeProjectionInput };
+
+const NativeProjectionInputSchema: Schema.Schema<NativeProjectionInput> = Schema.suspend(
+  () =>
+    Schema.Union(
+      Schema.String,
+      Schema.Number,
+      Schema.Boolean,
+      Schema.Null,
+      Schema.Undefined,
+      Schema.Array(NativeProjectionInputSchema),
+      Schema.Record({ key: Schema.String, value: NativeProjectionInputSchema }),
+    ),
+);
+const UnknownRecordSchema = Schema.Record({ key: Schema.String, value: Schema.Unknown });
 
 type BuildSessionArgs = {
   readonly provider: Provider;
@@ -191,12 +213,21 @@ const stripNonIndexable = (
 };
 
 export const projectSessionNativeValue = (value: unknown): NativeValue | undefined => {
-  const projected = stripNonIndexable(value);
+  const decoded = Option.getOrElse(
+    Schema.decodeUnknownOption(NativeProjectionInputSchema)(value),
+    () => value,
+  );
+  const projected = stripNonIndexable(decoded);
   return projected === undefined ? undefined : (projected as NativeValue);
 };
 
-export const projectToolPayloadNativeValue = (value: unknown): unknown =>
-  stripNonIndexable(value, 0, [], { preserveToolPatchFields: true });
+export const projectToolPayloadNativeValue = (value: unknown): unknown => {
+  const decoded = Option.getOrElse(
+    Schema.decodeUnknownOption(NativeProjectionInputSchema)(value),
+    () => value,
+  );
+  return stripNonIndexable(decoded, 0, [], { preserveToolPatchFields: true });
+};
 
 export const collectFiles = (
   root: string,
@@ -252,13 +283,18 @@ export const compactText = (value: NativeValue | undefined): string | undefined 
   return String(value);
 };
 
-export const recordFrom = (value: unknown): Record<string, unknown> =>
-  value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
+export const recordFrom = (value: unknown): Record<string, unknown> => {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return {};
+  return Option.getOrElse(Schema.decodeUnknownOption(UnknownRecordSchema)(value), () => ({}));
+};
 
-export const stringValue = (value: unknown) =>
-  typeof value === "string" && value.length > 0 ? value : undefined;
+export const stringValue = (value: unknown) => {
+  const decoded = Option.getOrElse(
+    Schema.decodeUnknownOption(Schema.String)(value),
+    () => undefined as string | undefined,
+  );
+  return decoded !== undefined && decoded.length > 0 ? decoded : undefined;
+};
 
 export const numberValue = (value: unknown) =>
   typeof value === "number" && Number.isFinite(value) ? value : undefined;
