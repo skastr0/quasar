@@ -1720,7 +1720,21 @@ const statusChunk = (chunk: Doc<"importChunks">) => {
 
 const statusJob = (job: Doc<"importJobs">) => {
   const { workerLeaseExpiresAt: _workerLeaseExpiresAt, workerLeaseToken: _workerLeaseToken, ...rest } = job;
-  return rest;
+  const uploadedChunkCount = job.uploadedChunkCount ?? job.chunkCount;
+  const terminalChunkCount = job.succeededChunkCount + job.failedChunkCount;
+  const missingUploadChunkCount = job.expectedChunkCount === undefined
+    ? undefined
+    : Math.max(0, job.expectedChunkCount - uploadedChunkCount);
+  return {
+    ...rest,
+    uploadedChunkCount,
+    terminalChunkCount,
+    inFlightChunkCount: Math.max(0, uploadedChunkCount - terminalChunkCount),
+    uploadComplete:
+      job.expectedChunkCount !== undefined &&
+      uploadedChunkCount >= job.expectedChunkCount,
+    ...(missingUploadChunkCount !== undefined ? { missingUploadChunkCount } : {}),
+  };
 };
 
 const scheduleImportWorker = async (
