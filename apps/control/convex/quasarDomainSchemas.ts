@@ -387,6 +387,7 @@ export class StartImportJobInput extends Schema.Class<StartImportJobInput>(
 )({
   batch: Schema.optional(IngestBatchBoundary),
   manifest: Schema.optional(IngestManifestBoundary),
+  sourceIdentityKey: Schema.optional(Schema.String),
   idempotencyKey: Schema.optional(Schema.String),
   expectedChunkCount: Schema.optional(PositiveInteger),
 }) {}

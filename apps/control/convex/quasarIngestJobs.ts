@@ -27,6 +27,8 @@ type StartImportJobResult = {
   readonly status: ImportJobStatus;
   readonly chunkCount: number;
   readonly expectedChunkCount?: number;
+  readonly sourceIdentityKey?: string;
+  readonly attemptNumber?: number;
 };
 
 type SubmitImportChunkResult = {
@@ -148,33 +150,38 @@ export const startImportJobHandler = async (
       : {
           ...decoded,
           batch: sanitizeBoundaryBatch(decoded.batch, "start import job batch"),
-        };
+  };
   assertJsonByteBudget(input, MAX_IMPORT_JOB_INPUT_BYTES, "start import job input");
   const manifest = manifestForStart(input);
-  const idempotencyKey = input.idempotencyKey ?? importJobIdempotencyKey(manifest, input.batch);
-  const existing = await ctx.db
-    .query("importJobs")
-    .withIndex("by_idempotencyKey", (q) => q.eq("idempotencyKey", idempotencyKey))
-    .unique();
+  const sourceIdentityKey = input.sourceIdentityKey ?? importJobIdempotencyKey(manifest, input.batch);
+  const existing = await findLatestImportJobAttempt(ctx, sourceIdentityKey);
   if (existing !== null) {
-    const expectedChunkCount = await expectedChunkCountForExistingJob(
-      ctx,
-      existing,
-      input.expectedChunkCount,
-    );
-    return {
-      importJobId: existing.importJobId,
-      status: existing.status,
-      chunkCount: existing.chunkCount,
-      expectedChunkCount,
-    };
+    if (!isUnsuccessfulImportJob(existing)) {
+      const expectedChunkCount = await expectedChunkCountForExistingJob(
+        ctx,
+        existing,
+        input.expectedChunkCount,
+      );
+      return {
+        importJobId: existing.importJobId,
+        status: existing.status,
+        chunkCount: existing.chunkCount,
+        expectedChunkCount,
+        sourceIdentityKey,
+        attemptNumber: existing.attemptNumber,
+      };
+    }
   }
 
   const now = Date.now();
+  const attemptNumber = existing === null ? 0 : (existing.attemptNumber ?? 0) + 1;
+  const idempotencyKey = importJobAttemptIdempotencyKey(sourceIdentityKey, attemptNumber);
   const importJobId = `job:${wideHash(idempotencyKey)}`;
   await ctx.db.insert("importJobs", {
     importJobId,
     idempotencyKey,
+    sourceIdentityKey,
+    attemptNumber,
     machineId: manifest.machineId,
     status: "queued",
     generatedAt: manifest.generatedAt,
@@ -204,6 +211,8 @@ export const startImportJobHandler = async (
     status: "queued" as const,
     chunkCount: 0,
     expectedChunkCount: input.expectedChunkCount,
+    sourceIdentityKey,
+    attemptNumber,
   };
 };
 
@@ -740,6 +749,20 @@ const findImportJob = async (ctx: MutationCtx, importJobId: string) =>
     .query("importJobs")
     .withIndex("by_importJobId", (q) => q.eq("importJobId", importJobId))
     .unique();
+
+const findLatestImportJobAttempt = async (
+  ctx: MutationCtx,
+  sourceIdentityKey: string,
+) => {
+  const attempts = await ctx.db
+    .query("importJobs")
+    .withIndex("by_sourceIdentity_attempt", (q) => q.eq("sourceIdentityKey", sourceIdentityKey))
+    .collect();
+  return attempts.reduce<Doc<"importJobs"> | null>((latest, job) => {
+    if (latest === null) return job;
+    return (job.attemptNumber ?? 0) > (latest.attemptNumber ?? 0) ? job : latest;
+  }, null);
+};
 
 const findImportChunk = async (ctx: MutationCtx, chunkId: string) =>
   await ctx.db

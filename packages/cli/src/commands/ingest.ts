@@ -43,6 +43,7 @@ import {
 } from "@skastr0/quasar-core";
 
 import { requestJson } from "../api";
+import { CommandInputError } from "../errors";
 import { loadJsonInput, loadOptionalJsonInput } from "../json";
 import { executeJsonCommand } from "../output";
 import { IngestOptions } from "../protocol";
@@ -406,6 +407,9 @@ const jobStatusFromPayload = (job: unknown) => {
   return "unknown";
 };
 
+const isClosedImportJobStatus = (status: string) =>
+  status === "failed" || status === "partial_failure" || status === "succeeded";
+
 const validateCommand = Command.make("validate", { input: inputArg }, ({ input }) =>
   executeJsonCommand(
     "ingest validate",
@@ -498,6 +502,12 @@ export const runIngestEffect = (
           },
           responseSchema: ImportJobStartResponse,
         });
+        if (isClosedImportJobStatus(job.status)) {
+          return yield* new CommandInputError({
+            field: "importJobId",
+            message: `Import job ${job.importJobId} is ${job.status}; create a fresh ingest attempt.`,
+          });
+        }
         const chunkDelayMs = envPositiveInteger(
           "QUASAR_INGEST_CHUNK_DELAY_MS",
           DEFAULT_CHUNK_DELAY_MS,
@@ -508,11 +518,13 @@ export const runIngestEffect = (
           plan,
           client,
           importJobId: job.importJobId,
-          resumeUploadedChunkCount: yield* safeResumeUploadedChunkCount(
-            job.importJobId,
-            plan,
-            client,
-          ),
+          resumeUploadedChunkCount: job.chunkCount <= 0
+            ? 0
+            : yield* safeResumeUploadedChunkCount(
+                job.importJobId,
+                plan,
+                client,
+              ),
           uploadGroupSize: uploadGroupSizeFromEnv(),
           maxUploadChunksPerRun: maxUploadChunksFromOptions(options),
           chunkDelayMs,
