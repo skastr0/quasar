@@ -263,15 +263,11 @@ const messageKind = (
   return "message";
 };
 
-const messageContent = (
-  message: HermesMessageRow,
-  calls: readonly Record<string, unknown>[],
-): NativeValue => {
+const messageContent = (message: HermesMessageRow): NativeValue => {
   const reasoning = projectedReasoningFields(message);
   const reasoningDetails = projectSessionNativeValue(reasoning.reasoningDetails);
   const codexReasoningItems = projectSessionNativeValue(reasoning.codexReasoningItems);
   const codexMessageItems = projectSessionNativeValue(reasoning.codexMessageItems);
-  const projectedCalls = projectSessionNativeValue(calls);
   return {
     content: stringValue(message.content),
     reasoning: stringValue(message.reasoning),
@@ -279,7 +275,6 @@ const messageContent = (
     ...(reasoningDetails !== undefined ? { reasoning_details: reasoningDetails } : {}),
     ...(codexReasoningItems !== undefined ? { codex_reasoning_items: codexReasoningItems } : {}),
     ...(codexMessageItems !== undefined ? { codex_message_items: codexMessageItems } : {}),
-    ...(projectedCalls !== undefined ? { tool_calls: projectedCalls } : {}),
     finish_reason: stringValue(message.finish_reason),
     platform_message_id: stringValue(message.platform_message_id),
   };
@@ -290,7 +285,6 @@ const messageBlocks = (
   dbPath: string,
   eventId: string,
   message: HermesMessageRow,
-  calls: readonly Record<string, unknown>[],
 ) => {
   const reasoning = projectedReasoningFields(message);
   const blockInputs: NativeValue[] = [];
@@ -310,8 +304,6 @@ const messageBlocks = (
   if (codexMessageItems !== undefined) {
     blockInputs.push({ type: "json", value: codexMessageItems, label: "codex_message_items" });
   }
-  const projectedCalls = projectSessionNativeValue(calls);
-  if (projectedCalls !== undefined) blockInputs.push({ type: "json", value: projectedCalls, label: "tool_calls" });
   return contentBlocksFromNative("hermes", machineId, dbPath, eventId, blockInputs);
 };
 
@@ -459,7 +451,7 @@ const buildHermesSessionFromRows = (
 
     const usage = messageUsage(dbPath, machineId, nativeSessionId, eventId, message, index, session);
     if (usage !== undefined) usageRecords.push(usage);
-    const content = messageContent(message, calls);
+    const content = messageContent(message);
     return {
       id: eventId,
       nativeEventId,
@@ -469,7 +461,7 @@ const buildHermesSessionFromRows = (
       kind: messageKind(message, calls),
       contentText: compactText(content),
       contentSource: content,
-      contentBlocks: messageBlocks(machineId, dbPath, eventId, message, calls),
+      contentBlocks: messageBlocks(machineId, dbPath, eventId, message),
       ...(eventToolCallId !== undefined ? { toolCallId: eventToolCallId } : {}),
       rawReference: { sourcePath: dbPath, table: "messages", rowId: nativeEventId, nativeType: "message" },
     };

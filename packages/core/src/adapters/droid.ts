@@ -21,7 +21,7 @@ import {
   eventIdFor,
   homePath,
   nativeSessionIdFromPath,
-  projectSessionNativeValue,
+  projectSessionPatchNativeValue,
   readJsonFile,
   readJsonLines,
   recordFrom,
@@ -82,7 +82,7 @@ const artifactFromRecord = (
   const type = String(record.type ?? record.kind ?? "").toLowerCase();
   const path = typeof record.path === "string" ? record.path : typeof record.filePath === "string" ? record.filePath : undefined;
   if (!type.includes("artifact") && !type.includes("diff") && !type.includes("patch")) return [];
-  const metadata = projectSessionNativeValue(record.content ?? record.patch ?? record.diff);
+  const metadata = projectSessionPatchNativeValue(record.content ?? record.patch ?? record.diff);
   return [
     {
       id: artifactIdFor("droid", machineId, sourcePath, nativeSessionId, [eventId, index, type, path]),

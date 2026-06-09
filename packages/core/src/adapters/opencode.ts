@@ -90,7 +90,9 @@ const OPENCODE_PRUNED_MESSAGE_DATA_SQL = [
   "'$.checkpoints',",
   "'$.snapshot',",
   "'$.snapshots',",
+  "'$.diff',",
   "'$.diffs',",
+  "'$.patch',",
   "'$.patches'",
   ")",
   "else data end",
@@ -132,7 +134,9 @@ const OPENCODE_PRUNED_PART_DATA_SQL = [
   "'$.checkpoints',",
   "'$.snapshot',",
   "'$.snapshots',",
+  "'$.diff',",
   "'$.diffs',",
+  "'$.patch',",
   "'$.patches'",
   ")",
   "else data end",
@@ -346,6 +350,8 @@ const partContentProjection = (part: NativeValue): NativeValue | undefined => {
   const record = recordFrom(part);
   if (Object.keys(record).length === 0) return typeof part === "string" ? part : undefined;
   const type = typeof record.type === "string" ? record.type : undefined;
+  const lowerType = type?.toLowerCase() ?? "";
+  if (lowerType.includes("diff") || lowerType.includes("patch")) return undefined;
   const text =
     typeof record.text === "string"
       ? record.text

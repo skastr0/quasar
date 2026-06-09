@@ -97,10 +97,6 @@ const SESSION_TRASH_PATHS = [
 const GENERATED_PATH_SEGMENTS = /(^|\/)(node_modules|\.git|\.next|\.turbo|dist|build|out|coverage|target|vendor)(\/|$)/i;
 const GENERATED_FILE = /(^|\/)(bun\.lockb?|package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$/i;
 const BINARY_KEY = /(^|_)(base64|data|bytes|blob|binary|image|source)(_|$)/i;
-const NON_INTELLIGENCE_KEY =
-  /(encrypted[_-]?content|cipher[_-]?text|provider[_-]?(cache|state|ui)|cacheState|viewState|uiState|displayOnly|displayState|snapshots?|checkpoint|workspaceSnapshot|workspaceDiff|summary[_-]?(diffs?|patch(?:es)?|snapshots?|cache|state)|workspace[_-]?(diffs?|patch(?:es)?|snapshots?|cache|state))/i;
-const PROVIDER_CONTROL_KEY =
-  /(encrypted[_-]?content|cipher[_-]?text|provider[_-]?(cache|state|ui)|cacheState|viewState|uiState|displayOnly|displayState|workspaceSnapshot|workspaceDiff|checkpoint|snapshots?|summary[_-]?(diffs?|patch(?:es)?|snapshots?|cache|state)|workspace[_-]?(diffs?|patch(?:es)?|snapshots?|cache|state))/i;
 const BASE64ISH = /^[A-Za-z0-9+/=\s]+$/;
 const DATA_URI = /^data:[^,]{0,512},/i;
 const DATA_URI_INLINE = /data:[^,\s"'<>]{0,512},[A-Za-z0-9+/=_-]{64,}/gi;
@@ -113,9 +109,54 @@ const DIAGNOSTIC_MESSAGE_BYTES = 4 * 1024;
 const RAW_REFERENCE_SOURCE_PATH_BYTES = 2 * 1024;
 const RAW_REFERENCE_FIELD_BYTES = 512;
 const TOOL_RESULT_PATCH_KEY = /^(diff|diffs|patch|patches)$/i;
+const SESSION_PATCH_RECORD_TYPE = /(^|[_:-])(diff|patch|edit|hunk|artifact)([_:-]|$)/i;
+const PROVIDER_CONTROL_KEYS = new Set([
+  "cache",
+  "cachestate",
+  "checkpoint",
+  "checkpoints",
+  "ciphertext",
+  "diff",
+  "diffs",
+  "display",
+  "displayonly",
+  "displaystate",
+  "encryptedcontent",
+  "patch",
+  "patches",
+  "providercache",
+  "providerstate",
+  "providerui",
+  "snapshot",
+  "snapshots",
+  "state",
+  "ui",
+  "uistate",
+  "viewstate",
+  "workspacediff",
+  "workspacepatch",
+  "workspacesnapshot",
+]);
+const PROVIDER_SCOPED_KEY_PREFIXES = ["summary", "workspace"] as const;
+const PROVIDER_SCOPED_KEY_SUFFIXES = [
+  "cache",
+  "diff",
+  "diffs",
+  "patch",
+  "patches",
+  "providercache",
+  "providerstate",
+  "providerui",
+  "snapshot",
+  "snapshots",
+  "state",
+  "uistate",
+  "viewstate",
+] as const;
 
 type BoundedValueOptions = {
   readonly preserveToolPatchFields?: boolean;
+  readonly preserveSessionPatchFields?: boolean;
 };
 
 export const byteLength = (value: string) => textEncoder.encode(value).length;
@@ -205,6 +246,11 @@ export const compactSessionIntelligenceText = (
 export const projectSessionIntelligenceNativeValue = (value: unknown): unknown =>
   boundedValue(value, CONVEX_SAFE_INGEST_BUDGETS.metadataBytes);
 
+export const projectSessionIntelligencePatchPayloadValue = (value: unknown): unknown =>
+  boundedValue(value, CONVEX_SAFE_INGEST_BUDGETS.metadataBytes, [], 0, {
+    preserveSessionPatchFields: true,
+  });
+
 export const projectSessionIntelligenceToolPayloadValue = (value: unknown): unknown =>
   boundedValue(value, CONVEX_SAFE_INGEST_BUDGETS.toolOutputBytes, [], 0, {
     preserveToolPatchFields: true,
@@ -219,8 +265,37 @@ const nativePathMatches = (path: NativePath, candidate: readonly string[]) => {
 const matchesNativeTrashPath = (path: NativePath) =>
   SESSION_TRASH_PATHS.some((candidate) => nativePathMatches(path, candidate));
 
+const normalizedNativeKey = (key: string) => key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+
+const isProviderScopedKey = (key: string) =>
+  PROVIDER_SCOPED_KEY_PREFIXES.some((prefix) =>
+    PROVIDER_SCOPED_KEY_SUFFIXES.some((suffix) => key === `${prefix}${suffix}`),
+  );
+
+const isProviderControlKey = (key: string) => {
+  const normalized = normalizedNativeKey(key);
+  return PROVIDER_CONTROL_KEYS.has(normalized) || isProviderScopedKey(normalized);
+};
+
 const isProviderMetadataPath = (path: NativePath) =>
-  path.some((part) => /^(summary|workspace|workspaceDiff|workspaceSnapshot|checkpoint|checkpoints|snapshots?)$/i.test(part));
+  path.some((part) =>
+    /^(summary|workspace|workspacediff|workspacepatch|workspacesnapshot|checkpoint|checkpoints|delta|snapshots?)$/i.test(
+      normalizedNativeKey(part),
+    ),
+  );
+
+const recordDeclaresSessionPatch = (record: Record<string, unknown>) => {
+  const type = String(
+    record.type ??
+      record.nativeType ??
+      record.kind ??
+      record.event ??
+      record.action ??
+      record.artifactKind ??
+      "",
+  ).toLowerCase();
+  return SESSION_PATCH_RECORD_TYPE.test(type);
+};
 
 const shouldOmitNativeField = (
   key: string,
@@ -230,7 +305,11 @@ const shouldOmitNativeField = (
   if (options.preserveToolPatchFields === true && TOOL_RESULT_PATCH_KEY.test(key) && !isProviderMetadataPath(path)) {
     return false;
   }
-  return matchesNativeTrashPath(path) || NON_INTELLIGENCE_KEY.test(key);
+  if (options.preserveSessionPatchFields === true && TOOL_RESULT_PATCH_KEY.test(key) && !isProviderMetadataPath(path)) {
+    return false;
+  }
+  if (TOOL_RESULT_PATCH_KEY.test(key)) return true;
+  return matchesNativeTrashPath(path) || isProviderControlKey(key);
 };
 
 const hasProviderControlEnvelope = (
@@ -247,7 +326,7 @@ const hasProviderControlEnvelope = (
   if (typeof value !== "object") return false;
   for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
     const childPath = [...path, key];
-    if (matchesNativeTrashPath(childPath) || PROVIDER_CONTROL_KEY.test(key)) return true;
+    if (matchesNativeTrashPath(childPath) || isProviderControlKey(key)) return true;
     if (hasProviderControlEnvelope(item, childPath, depth + 1)) return true;
   }
   return false;
@@ -358,6 +437,9 @@ const boundedValue = (
   if (typeof value !== "object") return String(value);
   const record = value as Record<string, unknown>;
   if (isOmissionRecord(record)) return sortedObject(record);
+  const nextOptions = recordDeclaresSessionPatch(record)
+    ? { ...options, preserveSessionPatchFields: true }
+    : options;
   const nativePath = nativePathFromRecord(record);
   const binaryPayloadRecord = declaresBinaryPayload(record);
   if (isGeneratedPath(nativePath)) {
@@ -372,7 +454,7 @@ const boundedValue = (
   const output: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(record)) {
     const childPath = [...path, key];
-    if (shouldOmitNativeField(key, childPath, options)) {
+    if (shouldOmitNativeField(key, childPath, nextOptions)) {
       addOmittedField(output, omittedFieldValue(key, item, "native_non_session_intelligence"));
       continue;
     }
@@ -388,7 +470,7 @@ const boundedValue = (
       });
       continue;
     }
-    const next = boundedValue(item, maxBytes, childPath, depth + 1, options);
+    const next = boundedValue(item, maxBytes, childPath, depth + 1, nextOptions);
     if (next !== undefined) output[key] = next;
     if (jsonByteLength(output) > maxBytes) {
       output.__quasarOmitted = {
@@ -636,8 +718,11 @@ const sanitizeArtifact = (artifact: Artifact): Artifact => {
   const locatorOmissions = [path.omitted, uri.omitted, sourcePath.omitted].filter(
     (item): item is ReturnType<typeof omittedStringValue> => item !== undefined,
   );
+  const metadataOptions = SESSION_PATCH_RECORD_TYPE.test(artifact.kind)
+    ? { preserveSessionPatchFields: true }
+    : {};
   const metadata = mergeArtifactMetadata(
-    boundedValue(artifact.metadata, CONVEX_SAFE_INGEST_BUDGETS.metadataBytes),
+    boundedValue(artifact.metadata, CONVEX_SAFE_INGEST_BUDGETS.metadataBytes, [], 0, metadataOptions),
     locatorOmissions,
   );
   return compactUndefined({
