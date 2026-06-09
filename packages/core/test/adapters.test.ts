@@ -7,6 +7,14 @@ import { describe, expect, test } from "vitest";
 
 import { codexAdapter } from "../src/adapters/codex";
 import {
+  hermesSessionWindowLimit,
+  readHermesSessionRowsForWindow,
+} from "../src/adapters/hermes";
+import {
+  opencodeSessionWindowLimit,
+  readOpenCodeSessionRowsForWindow,
+} from "../src/adapters/opencode";
+import {
   projectSessionNativeValue,
   projectToolPayloadNativeValue,
 } from "../src/adapters/common";
@@ -75,6 +83,42 @@ const writeOpenCodeLocalSchemaDb = (
         `insert into session values (${sql(session.sessionId)}, ${sql(session.title)}, '/Users/a/Projects/quasar', ${index + 1}, ${session.timeUpdated});`,
         `insert into message values (${sql(`m-${index}`)}, ${sql(session.sessionId)}, ${index + 1}, ${sql(JSON.stringify({ role: "user", content: session.content }))});`,
       ]),
+    ].join("\n"),
+  ]);
+};
+
+const writeOpenCodeSessionRows = (dbPath: string, count: number) => {
+  execFileSync("sqlite3", [
+    dbPath,
+    [
+      "create table session (id text, title text, directory text, time_created integer, time_updated integer);",
+      ...Array.from({ length: count }, (_, index) =>
+        `insert into session values (${sql(`s-${index}`)}, ${sql(`Session ${index}`)}, '/Users/a/Projects/quasar', ${index + 1}, ${index + 1});`
+      ),
+    ].join("\n"),
+  ]);
+};
+
+const writeHermesSessionRows = (dbPath: string, count: number) => {
+  execFileSync("sqlite3", [
+    dbPath,
+    [
+      [
+        "create table sessions (",
+        "id text, model text, parent_session_id text, started_at integer, ended_at integer,",
+        "input_tokens integer, output_tokens integer, cache_read_tokens integer,",
+        "cache_write_tokens integer, reasoning_tokens integer, billing_provider text,",
+        "estimated_cost_usd real, actual_cost_usd real, title text, cwd text",
+        ");",
+      ].join(" "),
+      ...Array.from({ length: count }, (_, index) =>
+        [
+          "insert into sessions values (",
+          `${sql(`h-${index}`)}, 'test-model', null, ${index + 1}, ${index + 1},`,
+          "null, null, null, null, null, 'test-provider', null, null,",
+          `${sql(`Session ${index}`)}, '/Users/a/Projects/quasar');`,
+        ].join(" ")
+      ),
     ].join("\n"),
   ]);
 };
@@ -312,6 +356,24 @@ describe("adapter ingestion", () => {
     expect(summary.eventCount).toBe(4);
     expect(summary.contentBlockCount).toBeGreaterThanOrEqual(2);
     expect(summary.diagnostics[0]?.message).toBe("Discovered 2 Codex session(s).");
+  });
+
+  test("does not implicitly cap sqlite-backed adapters when limit is omitted", () => {
+    const opencodeRoot = mkdtempSync(join(tmpdir(), "quasar-opencode-window-large-"));
+    const opencodeDbPath = join(opencodeRoot, "opencode-local.db");
+    writeOpenCodeSessionRows(opencodeDbPath, 501);
+    const hermesRoot = mkdtempSync(join(tmpdir(), "quasar-hermes-window-large-"));
+    const hermesDbPath = join(hermesRoot, "state.db");
+    writeHermesSessionRows(hermesDbPath, 501);
+
+    expect(opencodeSessionWindowLimit(undefined)).toBe(-1);
+    expect(hermesSessionWindowLimit(undefined)).toBe(-1);
+    expect(readOpenCodeSessionRowsForWindow(opencodeDbPath)).toHaveLength(501);
+    expect(readHermesSessionRowsForWindow(hermesDbPath)).toHaveLength(501);
+    expect(readOpenCodeSessionRowsForWindow(opencodeDbPath, 25)).toHaveLength(25);
+    expect(readHermesSessionRowsForWindow(hermesDbPath, 25)).toHaveLength(25);
+    expect(readOpenCodeSessionRowsForWindow(opencodeDbPath, undefined, 500)[0]?.id).toBe("s-0");
+    expect(readHermesSessionRowsForWindow(hermesDbPath, undefined, 500)[0]?.id).toBe("h-0");
   });
 
   test("reads graph fixtures for all local adapters", async () => {

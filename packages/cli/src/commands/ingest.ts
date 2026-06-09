@@ -128,7 +128,7 @@ const cleanupSourceSnapshot = (prepared: PreparedSourceSnapshot) =>
   });
 
 const INGEST_GENERATION_SCHEMA_VERSION = "quasar.ingest-generation/v1";
-const INGEST_GENERATION_IDENTITY_VERSION = "quasar.ingest-generation-identity/v3";
+const INGEST_GENERATION_IDENTITY_VERSION = "quasar.ingest-generation-identity/v4";
 const STREAM_INGEST_UPLOAD_IDENTITY_VERSION = "quasar.stream-ingest/v4";
 const DURABLE_SNAPSHOT_PROVIDERS = new Set<Provider>([
   "codex",
@@ -350,12 +350,14 @@ const ingestGenerationFilePath = (generationId: string) =>
 
 const readPersistedIngestGeneration = (path: string, expectedGenerationId?: string) => {
   try {
-    const generation = Schema.decodeUnknownSync(PersistedIngestGeneration)(
-      JSON.parse(readFileSync(path, "utf8")),
-    );
+    const raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    const staleIdentityError = staleIngestGenerationIdentityError(raw);
+    if (staleIdentityError !== undefined) throw staleIdentityError;
+    const generation = Schema.decodeUnknownSync(PersistedIngestGeneration)(raw);
     assertPersistedIngestGeneration(generation, expectedGenerationId);
     return generation;
   } catch (error) {
+    if (error instanceof CommandInputError) throw error;
     throw new CommandInputError({
       field: "ingestGeneration",
       message: `Failed to read ingest generation ${path}: ${
@@ -363,6 +365,28 @@ const readPersistedIngestGeneration = (path: string, expectedGenerationId?: stri
       }`,
     });
   }
+};
+
+const staleIngestGenerationIdentityError = (value: unknown) => {
+  if (value === null || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  if (record.schemaVersion !== INGEST_GENERATION_SCHEMA_VERSION) return undefined;
+  const intent = record.intent;
+  if (intent === null || typeof intent !== "object") return undefined;
+  const identityVersion = (intent as Record<string, unknown>).identityVersion;
+  if (
+    typeof identityVersion !== "string" ||
+    identityVersion === INGEST_GENERATION_IDENTITY_VERSION
+  ) {
+    return undefined;
+  }
+  const generationId = typeof record.generationId === "string"
+    ? record.generationId
+    : "unknown";
+  return new CommandInputError({
+    field: "ingestGeneration",
+    message: `Ingest generation ${generationId} was created for ${identityVersion}; current CLI requires ${INGEST_GENERATION_IDENTITY_VERSION}. Create a fresh ingest generation.`,
+  });
 };
 
 const assertPersistedIngestGeneration = (
@@ -1254,7 +1278,7 @@ const planStreamedIngest = (
         for (const entry of snapshotIngestSourceManifest(batch)) {
           sourceBefore.set(sourceManifestKey(entry), entry);
         }
-        const chunks = chunkIngestBatch(batch, chunkOptions).map(sanitizeUploadChunk);
+        const chunks = chunkIngestBatch(batch, chunkOptions);
         validateChunkPayloads(chunks);
         for (const chunk of chunks) {
           chunkPayloadHashes.push(ingestBatchPayloadHash(chunk));
@@ -1452,7 +1476,7 @@ async function* streamChunkBatches(
 ): AsyncGenerator<IngestBatch> {
   for await (const batch of streamIngestBatches(streamOptions)) {
     for (const chunk of chunkIngestBatch(batch, chunkOptions)) {
-      yield sanitizeUploadChunk(chunk);
+      yield chunk;
     }
   }
 }
@@ -1631,17 +1655,39 @@ export const chunkIngestBatch = (
   const chunks: IngestBatch[] = [];
   const chunkOptions = normalizeChunkOptions(options);
   for (const session of batch.sessions) {
-    const sessionChunks = chunkSession(session, chunkOptions);
-    for (const sessionChunk of sessionChunks) {
-      const chunk = { ...batch, sessions: [sessionChunk] };
-      chunks.push(
-        jsonByteLength(chunk) > MAX_UPLOAD_CHUNK_BATCH_BYTES
-          ? { ...batch, sessions: [sessionWithDeferredCleanup(sessionChunk)] }
-          : chunk,
-      );
+    for (const range of chunkSessionRanges(session, chunkOptions)) {
+      pushUploadSizedSessionChunks(chunks, batch, session, range.start, range.end);
     }
   }
-  return chunks.length === 0 ? [{ ...batch, sessions: [] }] : chunks;
+  return chunks.length === 0 ? [sanitizeUploadChunk({ ...batch, sessions: [] })] : chunks;
+};
+
+const pushUploadSizedSessionChunks = (
+  target: IngestBatch[],
+  batch: IngestBatch,
+  session: NormalizedSession,
+  start: number,
+  end: number,
+) => {
+  const sessionPiece = sessionChunk(session, start, end);
+  const chunk = sanitizeUploadChunk({ ...batch, sessions: [sessionPiece] });
+  if (jsonByteLength(chunk) <= MAX_UPLOAD_CHUNK_BATCH_BYTES) {
+    target.push(chunk);
+    return;
+  }
+
+  const deferredChunk = sanitizeUploadChunk({
+    ...batch,
+    sessions: [sessionWithDeferredCleanup(sessionPiece)],
+  });
+  if (jsonByteLength(deferredChunk) <= MAX_UPLOAD_CHUNK_BATCH_BYTES || end - start <= 1) {
+    target.push(deferredChunk);
+    return;
+  }
+
+  const midpoint = start + Math.max(1, Math.floor((end - start) / 2));
+  pushUploadSizedSessionChunks(target, batch, session, start, midpoint);
+  pushUploadSizedSessionChunks(target, batch, session, midpoint, end);
 };
 
 const MAX_UPLOAD_SANITIZE_PASSES = 4;
@@ -1720,15 +1766,28 @@ const positiveIntegerOrUndefined = (value: number | undefined) =>
 const chunkSession = (
   session: NormalizedSession,
   options: Required<ChunkOptions>,
-): NormalizedSession[] => {
+): NormalizedSession[] =>
+  chunkSessionRanges(session, options).map((range) =>
+    sessionChunk(session, range.start, range.end),
+  );
+
+type SessionChunkRange = {
+  readonly start: number;
+  readonly end: number;
+};
+
+const chunkSessionRanges = (
+  session: NormalizedSession,
+  options: Required<ChunkOptions>,
+): SessionChunkRange[] => {
   if (
     session.events.length <= options.maxEventsPerChunk &&
     estimatedChunkOperations(session, session.events, 0) <=
       options.maxOperationsPerChunk
   ) {
-    return [sessionWithExpectedIds(session)];
+    return [{ start: 0, end: session.events.length }];
   }
-  const chunks: NormalizedSession[] = [];
+  const ranges: SessionChunkRange[] = [];
   let start = 0;
   let operations = 0;
 
@@ -1740,7 +1799,7 @@ const chunkSession = (
       index > start && operations + eventOperations > options.maxOperationsPerChunk;
 
     if (eventLimitReached || operationLimitReached) {
-      chunks.push(sessionChunk(session, start, index));
+      ranges.push({ start, end: index });
       start = index;
       operations = 0;
     }
@@ -1749,9 +1808,9 @@ const chunkSession = (
   }
 
   if (start < session.events.length) {
-    chunks.push(sessionChunk(session, start, session.events.length));
+    ranges.push({ start, end: session.events.length });
   }
-  return chunks.length === 0 ? [sessionWithExpectedIds(session)] : chunks;
+  return ranges.length === 0 ? [{ start: 0, end: session.events.length }] : ranges;
 };
 
 const sessionChunk = (

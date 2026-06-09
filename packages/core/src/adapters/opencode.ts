@@ -205,7 +205,8 @@ const unsupportedRuntimeResult = (dbPath: string) => ({
   ],
 });
 
-const sessionWindowLimit = (limit: number | undefined) => Math.max(1, Math.floor(limit ?? 500));
+export const opencodeSessionWindowLimit = (limit: number | undefined) =>
+  limit === undefined ? -1 : Math.max(1, Math.floor(limit));
 const sessionWindowSkip = (skip: number | undefined) => Math.max(0, Math.floor(skip ?? 0));
 
 const readSessionRows = (
@@ -217,7 +218,7 @@ const readSessionRows = (
     .query(
       `select id, title, directory, ${sessionPathProjection(db)} as path, time_created, time_updated from session order by time_updated desc, id desc limit ? offset ?`,
     )
-    .all(sessionWindowLimit(limit), sessionWindowSkip(skip)) as OpenCodeSessionRow[];
+    .all(opencodeSessionWindowLimit(limit), sessionWindowSkip(skip)) as OpenCodeSessionRow[];
 
 const readMessages = (db: OpenCodeDatabase, sessionId: string) =>
   db
@@ -248,8 +249,14 @@ const readSessionRowsCli = (
 ) =>
   sqliteJson<OpenCodeSessionRow>(
     dbPath,
-    `select id, title, directory, ${sessionPathProjectionCli(dbPath)} as path, time_created, time_updated from session order by time_updated desc, id desc limit ${sessionWindowLimit(limit)} offset ${sessionWindowSkip(skip)}`,
+    `select id, title, directory, ${sessionPathProjectionCli(dbPath)} as path, time_created, time_updated from session order by time_updated desc, id desc limit ${opencodeSessionWindowLimit(limit)} offset ${sessionWindowSkip(skip)}`,
   );
+
+export const readOpenCodeSessionRowsForWindow = (
+  dbPath: string,
+  limit?: number,
+  skip?: number,
+) => readSessionRowsCli(dbPath, limit, skip);
 
 const readMessagesCli = (dbPath: string, sessionId: string) =>
   sqliteJson<OpenCodeMessageRow>(
