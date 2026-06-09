@@ -259,6 +259,13 @@ const boundedValue = (
 const boundedText = (value: string | undefined, maxBytes: number) =>
   value === undefined ? undefined : truncateUtf8(value, maxBytes);
 
+const omittedRecordValue = (value: unknown, reason: string) => ({
+  omitted: true,
+  reason,
+  byteLength: jsonByteLength(value),
+  hash: stableWideHash(JSON.stringify(value)),
+});
+
 const sanitizeContentBlock = (block: ContentBlock): ContentBlock | undefined => {
   const next: ContentBlock = {
     ...block,
@@ -271,7 +278,29 @@ const sanitizeContentBlock = (block: ContentBlock): ContentBlock | undefined => 
   if (next.kind === "json" && next.value === undefined && next.metadata === undefined) {
     return undefined;
   }
-  return compactUndefined(next);
+  return fitContentBlockRecord(compactUndefined(next));
+};
+
+const fitContentBlockRecord = (block: ContentBlock): ContentBlock => {
+  if (jsonByteLength(block) <= CONVEX_SAFE_INGEST_BUDGETS.contentBlockRecordBytes) return block;
+  const compact = compactUndefined({
+    ...block,
+    text: boundedText(block.text, 16 * 1024),
+    markdown: boundedText(block.markdown, 16 * 1024),
+    thinking: boundedText(block.thinking, 16 * 1024),
+    value: block.value === undefined ? undefined : omittedRecordValue(block.value, "content_block_value_budget"),
+    metadata:
+      block.metadata === undefined
+        ? undefined
+        : omittedRecordValue(block.metadata, "content_block_metadata_budget"),
+  });
+  if (jsonByteLength(compact) <= CONVEX_SAFE_INGEST_BUDGETS.contentBlockRecordBytes) return compact;
+  return compactUndefined({
+    ...compact,
+    text: boundedText(compact.text, 8 * 1024),
+    markdown: boundedText(compact.markdown, 8 * 1024),
+    thinking: boundedText(compact.thinking, 8 * 1024),
+  });
 };
 
 const sanitizeEvent = (event: SessionEvent): SessionEvent =>
