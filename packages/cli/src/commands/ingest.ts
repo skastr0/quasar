@@ -410,6 +410,118 @@ const jobStatusFromPayload = (job: unknown) => {
 const isClosedImportJobStatus = (status: string) =>
   status === "failed" || status === "partial_failure";
 
+const DEFAULT_DRAIN_POLL_INTERVAL_MS = 1_000;
+const DEFAULT_DRAIN_TIMEOUT_MS = 15 * 60_000;
+const DEFAULT_DRAIN_RESCHEDULE_INTERVAL_MS = 30_000;
+const DEFAULT_IN_FLIGHT_HIGH_WATERMARK = 0;
+
+type ImportJobStatusSnapshot = {
+  readonly job: unknown;
+  readonly chunks?: readonly unknown[];
+  readonly failures?: readonly unknown[];
+  readonly readiness: unknown;
+  readonly pagination?: unknown;
+  readonly importJobId: string;
+  readonly jobStatus: string;
+};
+
+type DrainOptions = {
+  readonly pollIntervalMs: number;
+  readonly timeoutMs: number;
+  readonly rescheduleIntervalMs: number;
+  readonly inFlightHighWatermark: number;
+};
+
+type DrainResult = {
+  readonly timedOut: boolean;
+  readonly inFlightChunkCount: number;
+  readonly uploadedChunkCount?: number;
+  readonly terminalChunkCount?: number;
+  readonly status: ImportJobStatusSnapshot;
+};
+
+const drainOptionsFromOptions = (options: IngestOptions): DrainOptions => ({
+  pollIntervalMs: positiveInteger(
+    options.drainPollIntervalMs ??
+      envPositiveInteger("QUASAR_INGEST_DRAIN_POLL_MS", DEFAULT_DRAIN_POLL_INTERVAL_MS),
+    DEFAULT_DRAIN_POLL_INTERVAL_MS,
+  ),
+  timeoutMs: nonNegativeInteger(
+    options.drainTimeoutMs ??
+      envPositiveInteger("QUASAR_INGEST_DRAIN_TIMEOUT_MS", DEFAULT_DRAIN_TIMEOUT_MS),
+    DEFAULT_DRAIN_TIMEOUT_MS,
+  ),
+  rescheduleIntervalMs: positiveInteger(
+    options.drainRescheduleIntervalMs ??
+      envPositiveInteger("QUASAR_INGEST_DRAIN_RESCHEDULE_MS", DEFAULT_DRAIN_RESCHEDULE_INTERVAL_MS),
+    DEFAULT_DRAIN_RESCHEDULE_INTERVAL_MS,
+  ),
+  inFlightHighWatermark: nonNegativeInteger(
+    options.inFlightHighWatermark ??
+      envPositiveInteger("QUASAR_INGEST_IN_FLIGHT_HIGH_WATERMARK", DEFAULT_IN_FLIGHT_HIGH_WATERMARK),
+    DEFAULT_IN_FLIGHT_HIGH_WATERMARK,
+  ),
+});
+
+const waitForImportJobDrain = (
+  importJobId: string,
+  requestClient: IngestRequestClient,
+  options: DrainOptions,
+  scheduling: { readonly scheduleWorker: boolean; readonly alreadyScheduled: boolean },
+) =>
+  Effect.gen(function* () {
+    const startedAt = Date.now();
+    let lastScheduledAt = scheduling.alreadyScheduled ? startedAt : undefined;
+    while (true) {
+      const status = yield* readImportJob(importJobId, requestClient, { limit: 0 });
+      const summary = importJobDrainSummary(status);
+      if (
+        summary.inFlightChunkCount <= options.inFlightHighWatermark ||
+        isFinalJobStatus(status.jobStatus)
+      ) {
+        return { ...summary, timedOut: false, status };
+      }
+      const now = Date.now();
+      if (
+        scheduling.scheduleWorker &&
+        (lastScheduledAt === undefined || now - lastScheduledAt >= options.rescheduleIntervalMs)
+      ) {
+        yield* ensureImportWorkerScheduled(importJobId, requestClient);
+        lastScheduledAt = now;
+      }
+      if (now - startedAt >= options.timeoutMs) {
+        return { ...summary, timedOut: true, status };
+      }
+      yield* Effect.sleep(Duration.millis(options.pollIntervalMs));
+    }
+  });
+
+const drainPublicResult = (result: DrainResult) => ({
+  timedOut: result.timedOut,
+  inFlightChunkCount: result.inFlightChunkCount,
+  ...(result.uploadedChunkCount !== undefined ? { uploadedChunkCount: result.uploadedChunkCount } : {}),
+  ...(result.terminalChunkCount !== undefined ? { terminalChunkCount: result.terminalChunkCount } : {}),
+});
+
+const importJobDrainSummary = (status: ImportJobStatusSnapshot) => {
+  const job = status.job;
+  const uploaded = jobNumber(job, "uploadedChunkCount") ?? jobNumber(job, "chunkCount") ?? 0;
+  const succeeded = jobNumber(job, "succeededChunkCount") ?? 0;
+  const failed = jobNumber(job, "failedChunkCount") ?? 0;
+  const terminal = succeeded + failed;
+  return {
+    inFlightChunkCount: Math.max(0, uploaded - terminal),
+    uploadedChunkCount: uploaded,
+    terminalChunkCount: terminal,
+  };
+};
+
+const jobNumber = (job: unknown, key: string) => {
+  if (job === null || typeof job !== "object") return undefined;
+  const value = (job as Record<string, unknown>)[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+};
+
 const validateCommand = Command.make("validate", { input: inputArg }, ({ input }) =>
   executeJsonCommand(
     "ingest validate",
@@ -508,6 +620,19 @@ export const runIngestEffect = (
             message: `Import job ${job.importJobId} is ${job.status}; create a fresh ingest attempt.`,
           });
         }
+        const drainOptions = drainOptionsFromOptions(options);
+        const preUploadDrain = job.chunkCount <= 0
+          ? undefined
+          : yield* waitForImportJobDrain(job.importJobId, client, drainOptions, {
+              scheduleWorker: true,
+              alreadyScheduled: false,
+            });
+        if (preUploadDrain?.timedOut === true) {
+          return yield* new CommandInputError({
+            field: "importJobId",
+            message: `Import job ${job.importJobId} still has ${preUploadDrain.inFlightChunkCount} in-flight chunk(s); retry after the worker drains them.`,
+          });
+        }
         const chunkDelayMs = envPositiveInteger(
           "QUASAR_INGEST_CHUNK_DELAY_MS",
           DEFAULT_CHUNK_DELAY_MS,
@@ -533,7 +658,14 @@ export const runIngestEffect = (
         if (upload.uploadedThisRunCount > 0 || upload.uploadComplete) {
           yield* ensureImportWorkerScheduled(job.importJobId, client);
         }
-        const status = yield* readImportJob(job.importJobId, client, { limit: 0 });
+        const postUploadDrain = upload.uploadedThisRunCount > 0 || upload.uploadComplete
+          ? yield* waitForImportJobDrain(job.importJobId, client, drainOptions, {
+              scheduleWorker: true,
+              alreadyScheduled: true,
+            })
+          : undefined;
+        const status = postUploadDrain?.status ??
+          (yield* readImportJob(job.importJobId, client, { limit: 0 }));
         const after = resnapshotSourceManifestEntries(plan.sourceBefore);
         return {
           ...summaryFromManifest(plan.manifest),
@@ -546,6 +678,10 @@ export const runIngestEffect = (
           uploadGroupCount: upload.uploadGroupCount,
           uploadComplete: upload.uploadComplete,
           uploadStoppedEarly: upload.uploadStoppedEarly,
+          drain: {
+            ...(preUploadDrain !== undefined ? { beforeUpload: drainPublicResult(preUploadDrain) } : {}),
+            ...(postUploadDrain !== undefined ? { afterUpload: drainPublicResult(postUploadDrain) } : {}),
+          },
           status,
           sourceSnapshot: prepared.sourceSnapshot,
           sourceSafetyReport: createSourceSafetyReport({
@@ -1046,6 +1182,11 @@ const normalizeChunkOptions = (
 
 const positiveInteger = (value: number | undefined, fallback: number) =>
   value !== undefined && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : fallback;
+
+const nonNegativeInteger = (value: number | undefined, fallback: number) =>
+  value !== undefined && Number.isFinite(value) && value >= 0
     ? Math.floor(value)
     : fallback;
 
