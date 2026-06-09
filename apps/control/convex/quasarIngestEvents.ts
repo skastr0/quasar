@@ -78,7 +78,7 @@ const buildEventPatch = (
       ? (redactSensitive(event.contentText) as string)
       : undefined,
   content: safeContent,
-  contentBlocks: redactSensitive(event.contentBlocks) as unknown[] | undefined,
+  contentBlocks: undefined,
   toolCallId: normalizedToolCallId,
   parentEventId: typeof event.parentEventId === "string" ? event.parentEventId : undefined,
   rawReference: event.rawReference ?? {},

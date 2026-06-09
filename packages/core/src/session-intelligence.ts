@@ -355,7 +355,15 @@ export const assertConvexSafeSessionIntelligenceBatch = (
     };
     assertRecordBudget(`sessions.${session.id}`, sessionDoc, CONVEX_SAFE_INGEST_BUDGETS.eventRecordBytes);
     for (const event of session.events) {
-      assertRecordBudget(`sessionEvents.${event.id}`, event, CONVEX_SAFE_INGEST_BUDGETS.eventRecordBytes);
+      const eventDoc = {
+        ...event,
+        contentBlocks: undefined,
+      };
+      assertRecordBudget(
+        `sessionEvents.${event.id}`,
+        eventDoc,
+        CONVEX_SAFE_INGEST_BUDGETS.eventRecordBytes,
+      );
       for (const block of event.contentBlocks) {
         assertRecordBudget(
           `contentBlocks.${block.id}`,
