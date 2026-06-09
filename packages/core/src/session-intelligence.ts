@@ -19,7 +19,7 @@ import type {
 
 const textEncoder = new TextEncoder();
 
-export const SESSION_INTELLIGENCE_CONTRACT_VERSION = "session-intelligence/v4";
+export const SESSION_INTELLIGENCE_CONTRACT_VERSION = "session-intelligence/v5";
 
 export const SessionIntelligenceBudgets = Schema.Struct({
   contentTextBytes: Schema.Number,
@@ -116,6 +116,8 @@ const REPLACEMENT_CHAR = /\ufffd/g;
 const CONTENT_BLOCK_LOCATOR_BYTES = 2 * 1024;
 const CONTENT_BLOCK_MEDIA_TYPE_BYTES = 256;
 const DIAGNOSTIC_MESSAGE_BYTES = 4 * 1024;
+const INDEXED_ID_BYTES = 256;
+const INDEXED_LOCATOR_BYTES = 512;
 const RAW_REFERENCE_SOURCE_PATH_BYTES = 2 * 1024;
 const RAW_REFERENCE_FIELD_BYTES = 512;
 const PROJECT_IDENTITY_FIELD_BYTES = 1024;
@@ -566,10 +568,64 @@ const boundedRequiredLocatorText = (value: string, key: string, maxBytes: number
   boundedLocatorText(value, maxBytes) ?? `[omitted:${key}]`;
 
 const boundedMachineId = (value: string) =>
-  boundedRequiredIdentityText(value, "machine", RAW_REFERENCE_FIELD_BYTES);
+  boundedRequiredIdentityText(value, "machine", INDEXED_ID_BYTES);
 
 const boundedProjectIdentityKey = (value: string) =>
-  boundedRequiredIdentityText(value, "project", RAW_REFERENCE_FIELD_BYTES);
+  boundedRequiredIdentityText(value, "project", INDEXED_ID_BYTES);
+
+export type SessionIntelligenceGraphIdKind =
+  | "session"
+  | "native_session"
+  | "event"
+  | "content_block"
+  | "tool_call"
+  | "usage_record"
+  | "artifact"
+  | "session_edge"
+  | "reference"
+  | "agent"
+  | "tool_name";
+
+const graphIdPrefix = (kind: SessionIntelligenceGraphIdKind) => {
+  switch (kind) {
+    case "session":
+      return "session";
+    case "native_session":
+      return "native_session";
+    case "event":
+      return "event";
+    case "content_block":
+      return "block";
+    case "tool_call":
+      return "tool";
+    case "usage_record":
+      return "usage";
+    case "session_edge":
+      return "edge";
+    case "reference":
+      return "ref";
+    case "artifact":
+      return "artifact";
+    case "agent":
+      return "agent";
+    case "tool_name":
+      return "tool_name";
+  }
+};
+
+export const projectSessionIntelligenceGraphId = (
+  kind: SessionIntelligenceGraphIdKind,
+  value: string,
+) => boundedRequiredIdentityText(value, graphIdPrefix(kind), INDEXED_ID_BYTES);
+
+const boundedIndexedId = (value: string, kind: SessionIntelligenceGraphIdKind) =>
+  projectSessionIntelligenceGraphId(kind, value);
+
+const boundedAgentName = (value: string) =>
+  projectSessionIntelligenceGraphId("agent", value);
+
+const boundedToolName = (value: string) =>
+  projectSessionIntelligenceGraphId("tool_name", value);
 
 const sanitizeRawReference = (rawReference: SessionEvent["rawReference"]): SessionEvent["rawReference"] =>
   compactUndefined({
@@ -637,7 +693,84 @@ const mergeContentBlockMetadata = (
   );
 };
 
-const sanitizeContentBlock = (block: ContentBlock): ContentBlock | undefined => {
+type SessionIdentityMap = {
+  readonly sessionId: string;
+  readonly nativeSessionId: string;
+  readonly machineId: string;
+  readonly agentName: string;
+  readonly projectIdentityKey: string;
+  readonly sessionIds: ReadonlyMap<string, string>;
+  readonly eventIds: ReadonlyMap<string, string>;
+  readonly blockIds: ReadonlyMap<string, string>;
+  readonly toolCallIds: ReadonlyMap<string, string>;
+  readonly usageRecordIds: ReadonlyMap<string, string>;
+  readonly artifactIds: ReadonlyMap<string, string>;
+  readonly edgeIds: ReadonlyMap<string, string>;
+};
+
+const collectIdMap = <A>(
+  values: readonly A[],
+  valueId: (value: A) => string,
+  kind: SessionIntelligenceGraphIdKind,
+) => new Map(values.map((value) => [valueId(value), boundedIndexedId(valueId(value), kind)]));
+
+const collectContentBlockIdMap = (events: readonly SessionEvent[]) =>
+  new Map(
+    events.flatMap((event) =>
+      event.contentBlocks.map((block) => [block.id, boundedIndexedId(block.id, "content_block")] as const),
+    ),
+  );
+
+const collectToolCallIdMap = (session: NormalizedSession) => {
+  const ids = new Set<string>(session.toolCalls.map((toolCall) => toolCall.id));
+  for (const event of session.events) {
+    if (event.toolCallId !== undefined) ids.add(event.toolCallId);
+  }
+  return new Map([...ids].map((id) => [id, boundedIndexedId(id, "tool_call")]));
+};
+
+const collectSessionIdentityMap = (session: NormalizedSession): SessionIdentityMap => ({
+  sessionId: boundedIndexedId(session.id, "session"),
+  nativeSessionId: boundedIndexedId(session.nativeSessionId, "native_session"),
+  machineId: boundedMachineId(session.machineId),
+  agentName: boundedAgentName(session.agentName),
+  projectIdentityKey: boundedProjectIdentityKey(session.projectIdentity.projectIdentityKey),
+  sessionIds: new Map([[session.id, boundedIndexedId(session.id, "session")]]),
+  eventIds: collectIdMap(session.events, (event) => event.id, "event"),
+  blockIds: collectContentBlockIdMap(session.events),
+  toolCallIds: collectToolCallIdMap(session),
+  usageRecordIds: collectIdMap(session.usageRecords, (usageRecord) => usageRecord.id, "usage_record"),
+  artifactIds: collectIdMap(session.artifacts, (artifact) => artifact.id, "artifact"),
+  edgeIds: collectIdMap(session.sessionEdges, (edge) => edge.id, "session_edge"),
+});
+
+const mappedId = (
+  map: ReadonlyMap<string, string>,
+  value: string | undefined,
+  kind: SessionIntelligenceGraphIdKind,
+) => {
+  if (value === undefined) return undefined;
+  return map.get(value) ?? boundedIndexedId(value, kind);
+};
+
+const mappedKnownReferenceId = (
+  maps: SessionIdentityMap,
+  value: string | undefined,
+) => {
+  if (value === undefined) return undefined;
+  return (
+    maps.sessionIds.get(value) ??
+    maps.eventIds.get(value) ??
+    maps.toolCallIds.get(value) ??
+    maps.blockIds.get(value) ??
+    maps.artifactIds.get(value) ??
+    maps.usageRecordIds.get(value) ??
+    maps.edgeIds.get(value) ??
+    boundedIndexedId(value, "reference")
+  );
+};
+
+const sanitizeContentBlock = (block: ContentBlock, maps: SessionIdentityMap): ContentBlock | undefined => {
   const path = boundedLocator(block.path, "path");
   const uri = boundedLocator(block.uri, "uri");
   const mediaType = boundedMediaType(block.mediaType);
@@ -646,7 +779,7 @@ const sanitizeContentBlock = (block: ContentBlock): ContentBlock | undefined => 
   );
   const metadata = boundedValue(block.metadata, CONVEX_SAFE_INGEST_BUDGETS.metadataBytes);
   const next: ContentBlock = {
-    id: block.id,
+    id: mappedId(maps.blockIds, block.id, "content_block") ?? boundedIndexedId(block.id, "content_block"),
     sequence: block.sequence,
     kind: block.kind,
     path: path.value,
@@ -689,17 +822,17 @@ const fitContentBlockRecord = (block: ContentBlock): ContentBlock => {
   });
 };
 
-const sanitizeEvent = (event: SessionEvent): SessionEvent =>
+const sanitizeEvent = (event: SessionEvent, maps: SessionIdentityMap): SessionEvent =>
   compactUndefined({
-    id: event.id,
-    sessionId: event.sessionId,
-    nativeEventId: event.nativeEventId,
+    id: mappedId(maps.eventIds, event.id, "event") ?? boundedIndexedId(event.id, "event"),
+    sessionId: maps.sessionId,
+    nativeEventId: boundedLocatorText(event.nativeEventId, RAW_REFERENCE_FIELD_BYTES),
     sequence: event.sequence,
     timestamp: event.timestamp,
-    machineId: boundedMachineId(event.machineId),
+    machineId: maps.machineId,
     provider: event.provider,
-    agentName: event.agentName,
-    projectIdentityKey: boundedProjectIdentityKey(event.projectIdentityKey),
+    agentName: maps.agentName,
+    projectIdentityKey: maps.projectIdentityKey,
     role: event.role,
     kind: event.kind,
     contentText: eventCarriesSessionContent(event)
@@ -707,25 +840,25 @@ const sanitizeEvent = (event: SessionEvent): SessionEvent =>
       : undefined,
     contentBlocks: eventCarriesSessionContent(event)
       ? event.contentBlocks.flatMap((block) => {
-          const next = sanitizeContentBlock(block);
+          const next = sanitizeContentBlock(block, maps);
           return next === undefined ? [] : [next];
         })
       : [],
-    toolCallId: event.toolCallId,
-    parentEventId: event.parentEventId,
+    toolCallId: mappedId(maps.toolCallIds, event.toolCallId, "tool_call"),
+    parentEventId: mappedId(maps.eventIds, event.parentEventId, "event"),
     rawReference: sanitizeRawReference(event.rawReference),
   });
 
-const sanitizeToolCall = (toolCall: ToolCall): ToolCall =>
+const sanitizeToolCall = (toolCall: ToolCall, maps: SessionIdentityMap): ToolCall =>
   compactUndefined({
-    id: toolCall.id,
-    sessionId: toolCall.sessionId,
-    eventId: toolCall.eventId,
-    machineId: boundedMachineId(toolCall.machineId),
+    id: mappedId(maps.toolCallIds, toolCall.id, "tool_call") ?? boundedIndexedId(toolCall.id, "tool_call"),
+    sessionId: maps.sessionId,
+    eventId: mappedId(maps.eventIds, toolCall.eventId, "event") ?? boundedIndexedId(toolCall.eventId, "event"),
+    machineId: maps.machineId,
     provider: toolCall.provider,
-    agentName: toolCall.agentName,
-    projectIdentityKey: boundedProjectIdentityKey(toolCall.projectIdentityKey),
-    toolName: toolCall.toolName,
+    agentName: maps.agentName,
+    projectIdentityKey: maps.projectIdentityKey,
+    toolName: boundedToolName(toolCall.toolName),
     status: toolCall.status,
     input: boundedValue(toolCall.input, CONVEX_SAFE_INGEST_BUDGETS.toolInputBytes, [], 0, {
       preserveToolPatchFields: true,
@@ -737,15 +870,15 @@ const sanitizeToolCall = (toolCall: ToolCall): ToolCall =>
     completedAt: toolCall.completedAt,
   });
 
-const sanitizeUsageRecord = (usageRecord: UsageRecord): UsageRecord =>
+const sanitizeUsageRecord = (usageRecord: UsageRecord, maps: SessionIdentityMap): UsageRecord =>
   compactUndefined({
-    id: usageRecord.id,
-    sessionId: usageRecord.sessionId,
-    eventId: usageRecord.eventId,
-    machineId: boundedMachineId(usageRecord.machineId),
+    id: mappedId(maps.usageRecordIds, usageRecord.id, "usage_record") ?? boundedIndexedId(usageRecord.id, "usage_record"),
+    sessionId: maps.sessionId,
+    eventId: mappedId(maps.eventIds, usageRecord.eventId, "event"),
+    machineId: maps.machineId,
     provider: usageRecord.provider,
-    agentName: usageRecord.agentName,
-    projectIdentityKey: boundedProjectIdentityKey(usageRecord.projectIdentityKey),
+    agentName: maps.agentName,
+    projectIdentityKey: maps.projectIdentityKey,
     timestamp: usageRecord.timestamp,
     model: usageRecord.model,
     modelProvider: usageRecord.modelProvider,
@@ -759,7 +892,7 @@ const sanitizeUsageRecord = (usageRecord: UsageRecord): UsageRecord =>
     currency: usageRecord.currency,
   });
 
-const sanitizeArtifact = (artifact: Artifact): Artifact => {
+const sanitizeArtifact = (artifact: Artifact, maps: SessionIdentityMap): Artifact => {
   const path = boundedLocator(artifact.path, "path");
   const uri = boundedLocator(artifact.uri, "uri");
   const sourcePath = boundedLocator(artifact.sourcePath, "sourcePath");
@@ -774,13 +907,13 @@ const sanitizeArtifact = (artifact: Artifact): Artifact => {
     locatorOmissions,
   );
   return compactUndefined({
-    id: artifact.id,
-    sessionId: artifact.sessionId,
-    eventId: artifact.eventId,
-    machineId: boundedMachineId(artifact.machineId),
+    id: mappedId(maps.artifactIds, artifact.id, "artifact") ?? boundedIndexedId(artifact.id, "artifact"),
+    sessionId: maps.sessionId,
+    eventId: mappedId(maps.eventIds, artifact.eventId, "event"),
+    machineId: maps.machineId,
     provider: artifact.provider,
-    agentName: artifact.agentName,
-    projectIdentityKey: boundedProjectIdentityKey(artifact.projectIdentityKey),
+    agentName: maps.agentName,
+    projectIdentityKey: maps.projectIdentityKey,
     kind: artifact.kind,
     path: path.value,
     uri: uri.value,
@@ -814,19 +947,19 @@ const mergeArtifactMetadata = (
   );
 };
 
-const sanitizeEdge = (edge: SessionEdge): SessionEdge =>
+const sanitizeEdge = (edge: SessionEdge, maps: SessionIdentityMap): SessionEdge =>
   compactUndefined({
-    id: edge.id,
-    sessionId: edge.sessionId,
-    machineId: boundedMachineId(edge.machineId),
+    id: mappedId(maps.edgeIds, edge.id, "session_edge") ?? boundedIndexedId(edge.id, "session_edge"),
+    sessionId: maps.sessionId,
+    machineId: maps.machineId,
     provider: edge.provider,
-    agentName: edge.agentName,
-    projectIdentityKey: boundedProjectIdentityKey(edge.projectIdentityKey),
+    agentName: maps.agentName,
+    projectIdentityKey: maps.projectIdentityKey,
     kind: edge.kind,
-    fromEventId: edge.fromEventId,
-    toEventId: edge.toEventId,
-    fromId: edge.fromId,
-    toId: edge.toId,
+    fromEventId: mappedId(maps.eventIds, edge.fromEventId, "event"),
+    toEventId: mappedId(maps.eventIds, edge.toEventId, "event"),
+    fromId: mappedKnownReferenceId(maps, edge.fromId),
+    toId: mappedKnownReferenceId(maps, edge.toId),
     rawReference: boundedValue(edge.rawReference, CONVEX_SAFE_INGEST_BUDGETS.metadataBytes),
     metadata: boundedValue(edge.metadata, CONVEX_SAFE_INGEST_BUDGETS.metadataBytes),
   });
@@ -848,12 +981,15 @@ const sanitizeProjectSignal = (signal: ProjectSignal): ProjectSignal => ({
   confidence: signal.confidence,
 });
 
-const sanitizeProjectIdentity = (project: ProjectResolution): ProjectResolution =>
+const sanitizeProjectIdentity = (
+  project: ProjectResolution,
+  projectIdentityKey = boundedProjectIdentityKey(project.projectIdentityKey),
+): ProjectResolution =>
   compactUndefined({
-    projectIdentityKey: boundedProjectIdentityKey(project.projectIdentityKey),
+    projectIdentityKey,
     displayName:
       boundedLocatorText(project.displayName, RAW_REFERENCE_FIELD_BYTES) ??
-      boundedProjectIdentityKey(project.projectIdentityKey),
+      projectIdentityKey,
     confidence: project.confidence,
     rawPath: boundedLocatorText(project.rawPath, PROJECT_IDENTITY_FIELD_BYTES),
     normalizedPath: boundedLocatorText(project.normalizedPath, PROJECT_IDENTITY_FIELD_BYTES),
@@ -867,32 +1003,33 @@ const sanitizeSourceRoot = (root: SourceRoot): SourceRoot =>
   compactUndefined({
     provider: root.provider,
     adapterId: boundedLocatorText(root.adapterId, RAW_REFERENCE_FIELD_BYTES) ?? root.adapterId,
-    rootPath: boundedLocatorText(root.rootPath, RAW_REFERENCE_SOURCE_PATH_BYTES) ?? "[omitted:rootPath]",
+    rootPath: boundedLocatorText(root.rootPath, INDEXED_LOCATOR_BYTES) ?? "[omitted:rootPath]",
     machineId: boundedMachineId(root.machineId),
     discoveredAt: boundedLocatorText(root.discoveredAt, RAW_REFERENCE_FIELD_BYTES) ?? root.discoveredAt,
   });
 
 export const sanitizeSessionIntelligenceSession = (
   session: NormalizedSession,
-): NormalizedSession =>
-  compactUndefined({
-    id: session.id,
-    nativeSessionId: session.nativeSessionId,
+): NormalizedSession => {
+  const maps = collectSessionIdentityMap(session);
+  return compactUndefined({
+    id: maps.sessionId,
+    nativeSessionId: maps.nativeSessionId,
     provider: session.provider,
-    agentName: session.agentName,
-    machineId: boundedMachineId(session.machineId),
-    projectIdentity: sanitizeProjectIdentity(session.projectIdentity),
+    agentName: maps.agentName,
+    machineId: maps.machineId,
+    projectIdentity: sanitizeProjectIdentity(session.projectIdentity, maps.projectIdentityKey),
     nativeProjectKey: boundedLocatorText(session.nativeProjectKey, RAW_REFERENCE_SOURCE_PATH_BYTES),
     title: boundedText(session.title, SESSION_TITLE_BYTES),
     startedAt: session.startedAt,
     updatedAt: session.updatedAt,
     sourceRoot: boundedLocatorText(session.sourceRoot, RAW_REFERENCE_SOURCE_PATH_BYTES) ?? "[omitted:sourceRoot]",
     sourcePath: boundedLocatorText(session.sourcePath, RAW_REFERENCE_SOURCE_PATH_BYTES) ?? "[omitted:sourcePath]",
-    events: session.events.map(sanitizeEvent),
-    toolCalls: session.toolCalls.map(sanitizeToolCall),
-    sessionEdges: session.sessionEdges.map(sanitizeEdge),
-    usageRecords: session.usageRecords.map(sanitizeUsageRecord),
-    artifacts: session.artifacts.map(sanitizeArtifact),
+    events: session.events.map((event) => sanitizeEvent(event, maps)),
+    toolCalls: session.toolCalls.map((toolCall) => sanitizeToolCall(toolCall, maps)),
+    sessionEdges: session.sessionEdges.map((edge) => sanitizeEdge(edge, maps)),
+    usageRecords: session.usageRecords.map((usageRecord) => sanitizeUsageRecord(usageRecord, maps)),
+    artifacts: session.artifacts.map((artifact) => sanitizeArtifact(artifact, maps)),
     eventCount: session.eventCount,
     toolCallCount: session.toolCallCount,
     contentBlockCount: session.contentBlockCount,
@@ -900,6 +1037,7 @@ export const sanitizeSessionIntelligenceSession = (
     usageRecordCount: session.usageRecordCount,
     artifactCount: session.artifactCount,
   });
+};
 
 export const sanitizeSessionIntelligenceBatch = (batch: IngestBatch): IngestBatch => ({
   ...batch,
@@ -914,11 +1052,26 @@ const assertRecordBudget = (path: string, value: unknown, maxBytes: number) => {
   if (bytes > maxBytes) throw new ConvexShapeViolationError(path, bytes, maxBytes);
 };
 
+const assertIndexedStringBudget = (path: string, value: string | undefined) => {
+  if (value === undefined) return;
+  const bytes = byteLength(value);
+  if (bytes > INDEXED_ID_BYTES) throw new ConvexShapeViolationError(path, bytes, INDEXED_ID_BYTES);
+};
+
+const assertIndexedLocatorBudget = (path: string, value: string | undefined) => {
+  if (value === undefined) return;
+  const bytes = byteLength(value);
+  if (bytes > INDEXED_LOCATOR_BYTES) throw new ConvexShapeViolationError(path, bytes, INDEXED_LOCATOR_BYTES);
+};
+
 export const assertConvexSafeSessionIntelligenceBatch = (
   batch: IngestBatch,
 ): IngestBatch => {
+  assertIndexedStringBudget("machine.machineId", batch.machine.machineId);
   assertRecordBudget("machine", batch.machine, CONVEX_SAFE_INGEST_BUDGETS.machineRecordBytes);
   batch.sourceRoots.forEach((sourceRoot, index) => {
+    assertIndexedStringBudget(`sourceRoots.${index}.machineId`, sourceRoot.machineId);
+    assertIndexedLocatorBudget(`sourceRoots.${index}.rootPath`, sourceRoot.rootPath);
     assertRecordBudget(
       `sourceRoots.${index}`,
       sourceRoot,
@@ -926,6 +1079,14 @@ export const assertConvexSafeSessionIntelligenceBatch = (
     );
   });
   for (const session of batch.sessions) {
+    assertIndexedStringBudget(`sessions.${session.id}.id`, session.id);
+    assertIndexedStringBudget(`sessions.${session.id}.nativeSessionId`, session.nativeSessionId);
+    assertIndexedStringBudget(`sessions.${session.id}.machineId`, session.machineId);
+    assertIndexedStringBudget(`sessions.${session.id}.agentName`, session.agentName);
+    assertIndexedStringBudget(
+      `sessions.${session.id}.projectIdentityKey`,
+      session.projectIdentity.projectIdentityKey,
+    );
     assertRecordBudget(
       `projectIdentities.${session.id}`,
       session.projectIdentity,
@@ -945,12 +1106,21 @@ export const assertConvexSafeSessionIntelligenceBatch = (
         ...event,
         contentBlocks: undefined,
       };
+      assertIndexedStringBudget(`sessionEvents.${event.id}.id`, event.id);
+      assertIndexedStringBudget(`sessionEvents.${event.id}.sessionId`, event.sessionId);
+      assertIndexedStringBudget(`sessionEvents.${event.id}.nativeEventId`, event.nativeEventId);
+      assertIndexedStringBudget(`sessionEvents.${event.id}.machineId`, event.machineId);
+      assertIndexedStringBudget(`sessionEvents.${event.id}.agentName`, event.agentName);
+      assertIndexedStringBudget(`sessionEvents.${event.id}.projectIdentityKey`, event.projectIdentityKey);
+      assertIndexedStringBudget(`sessionEvents.${event.id}.toolCallId`, event.toolCallId);
+      assertIndexedStringBudget(`sessionEvents.${event.id}.parentEventId`, event.parentEventId);
       assertRecordBudget(
         `sessionEvents.${event.id}`,
         eventDoc,
         CONVEX_SAFE_INGEST_BUDGETS.eventRecordBytes,
       );
       for (const block of event.contentBlocks) {
+        assertIndexedStringBudget(`contentBlocks.${block.id}.id`, block.id);
         assertRecordBudget(
           `contentBlocks.${block.id}`,
           block,
@@ -959,6 +1129,13 @@ export const assertConvexSafeSessionIntelligenceBatch = (
       }
     }
     for (const toolCall of session.toolCalls) {
+      assertIndexedStringBudget(`toolCalls.${toolCall.id}.id`, toolCall.id);
+      assertIndexedStringBudget(`toolCalls.${toolCall.id}.sessionId`, toolCall.sessionId);
+      assertIndexedStringBudget(`toolCalls.${toolCall.id}.eventId`, toolCall.eventId);
+      assertIndexedStringBudget(`toolCalls.${toolCall.id}.machineId`, toolCall.machineId);
+      assertIndexedStringBudget(`toolCalls.${toolCall.id}.agentName`, toolCall.agentName);
+      assertIndexedStringBudget(`toolCalls.${toolCall.id}.projectIdentityKey`, toolCall.projectIdentityKey);
+      assertIndexedStringBudget(`toolCalls.${toolCall.id}.toolName`, toolCall.toolName);
       assertRecordBudget(
         `toolCalls.${toolCall.id}`,
         toolCall,
@@ -966,6 +1143,12 @@ export const assertConvexSafeSessionIntelligenceBatch = (
       );
     }
     for (const usageRecord of session.usageRecords) {
+      assertIndexedStringBudget(`usageRecords.${usageRecord.id}.id`, usageRecord.id);
+      assertIndexedStringBudget(`usageRecords.${usageRecord.id}.sessionId`, usageRecord.sessionId);
+      assertIndexedStringBudget(`usageRecords.${usageRecord.id}.eventId`, usageRecord.eventId);
+      assertIndexedStringBudget(`usageRecords.${usageRecord.id}.machineId`, usageRecord.machineId);
+      assertIndexedStringBudget(`usageRecords.${usageRecord.id}.agentName`, usageRecord.agentName);
+      assertIndexedStringBudget(`usageRecords.${usageRecord.id}.projectIdentityKey`, usageRecord.projectIdentityKey);
       assertRecordBudget(
         `usageRecords.${usageRecord.id}`,
         usageRecord,
@@ -973,6 +1156,12 @@ export const assertConvexSafeSessionIntelligenceBatch = (
       );
     }
     for (const artifact of session.artifacts) {
+      assertIndexedStringBudget(`artifacts.${artifact.id}.id`, artifact.id);
+      assertIndexedStringBudget(`artifacts.${artifact.id}.sessionId`, artifact.sessionId);
+      assertIndexedStringBudget(`artifacts.${artifact.id}.eventId`, artifact.eventId);
+      assertIndexedStringBudget(`artifacts.${artifact.id}.machineId`, artifact.machineId);
+      assertIndexedStringBudget(`artifacts.${artifact.id}.agentName`, artifact.agentName);
+      assertIndexedStringBudget(`artifacts.${artifact.id}.projectIdentityKey`, artifact.projectIdentityKey);
       assertRecordBudget(
         `artifacts.${artifact.id}`,
         artifact,
@@ -980,6 +1169,15 @@ export const assertConvexSafeSessionIntelligenceBatch = (
       );
     }
     for (const edge of session.sessionEdges) {
+      assertIndexedStringBudget(`sessionEdges.${edge.id}.id`, edge.id);
+      assertIndexedStringBudget(`sessionEdges.${edge.id}.sessionId`, edge.sessionId);
+      assertIndexedStringBudget(`sessionEdges.${edge.id}.machineId`, edge.machineId);
+      assertIndexedStringBudget(`sessionEdges.${edge.id}.agentName`, edge.agentName);
+      assertIndexedStringBudget(`sessionEdges.${edge.id}.projectIdentityKey`, edge.projectIdentityKey);
+      assertIndexedStringBudget(`sessionEdges.${edge.id}.fromEventId`, edge.fromEventId);
+      assertIndexedStringBudget(`sessionEdges.${edge.id}.toEventId`, edge.toEventId);
+      assertIndexedStringBudget(`sessionEdges.${edge.id}.fromId`, edge.fromId);
+      assertIndexedStringBudget(`sessionEdges.${edge.id}.toId`, edge.toId);
       assertRecordBudget(
         `sessionEdges.${edge.id}`,
         edge,

@@ -11,6 +11,7 @@ import {
   buildIngestBatch,
   CONVEX_SAFE_INGEST_BUDGETS,
   jsonByteLength,
+  projectSessionIntelligenceGraphId,
   sanitizeIngestBatchForTransport,
   streamIngestBatches,
 } from "@skastr0/quasar-core";
@@ -227,6 +228,48 @@ describe("CLI command graph", () => {
     expect(secondSession.expectedEventIds).toHaveLength(55);
   }, 20_000);
 
+  test("projects cleanup expected ids through the graph id contract", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-cli-pi-"));
+    writePiFixture(root, 2);
+    const unsafeSentinel = "CLI_EXPECTED_ID_SENTINEL";
+    const hugeId = (prefix: string) => `${prefix}:${"x".repeat(5_000)}:${unsafeSentinel}`;
+    const rawSessionId = hugeId("session");
+    const rawEventIds = [hugeId("event:0"), hugeId("event:1")];
+
+    const batch = await buildIngestBatch({
+      providers: ["pi"],
+      roots: { pi: root },
+      machine: { machineId: "machine:test", hostname: "test", platform: "test" },
+    });
+    const session = batch.sessions[0]!;
+    const unsafeBatch = {
+      ...batch,
+      sessions: [
+        {
+          ...session,
+          id: rawSessionId,
+          nativeSessionId: hugeId("native"),
+          events: session.events.slice(0, 2).map((event, index) => ({
+            ...event,
+            id: rawEventIds[index]!,
+            sessionId: rawSessionId,
+          })),
+        },
+      ],
+    };
+
+    const chunks = chunkIngestBatch(unsafeBatch, {
+      maxEventsPerChunk: 1,
+      maxOperationsPerChunk: Number.MAX_SAFE_INTEGER,
+    });
+    const finalSession = chunks.at(-1)!.sessions[0]! as (typeof session) & ChunkMetadata;
+
+    expect(finalSession.expectedEventIds).toEqual(
+      rawEventIds.map((id) => projectSessionIntelligenceGraphId("event", id)),
+    );
+    expect(JSON.stringify(finalSession)).not.toContain(unsafeSentinel);
+  }, 20_000);
+
   test("sanitizes validate and dry-run batches through the Convex row contract", async () => {
     const root = mkdtempSync(join(tmpdir(), "quasar-cli-pi-"));
     writePiFixture(root, 1);
@@ -429,9 +472,9 @@ describe("CLI command graph", () => {
     );
     const baseSession = batch.sessions[0]!;
     const baseEvent = baseSession.events[0]!;
-    const largeEvents = Array.from({ length: 2_000 }, (_, index) => ({
+    const largeEvents = Array.from({ length: 4_000 }, (_, index) => ({
       ...baseEvent,
-      id: `event:${index}:${"x".repeat(512)}`,
+      id: `event:${index}:${"x".repeat(200)}`,
       nativeEventId: `native:${index}`,
       sequence: index,
       contentText: `message ${index}`,
@@ -452,7 +495,7 @@ describe("CLI command graph", () => {
         ],
       },
       {
-        maxEventsPerChunk: 1,
+        maxEventsPerChunk: 50,
         maxOperationsPerChunk: Number.MAX_SAFE_INTEGER,
       },
     );
@@ -463,7 +506,7 @@ describe("CLI command graph", () => {
     expect(lastSession?.deferCleanup).toBe(true);
     expect(lastSession?.expectedEventIds).toBeUndefined();
     expect(chunks.every((chunk) => jsonByteLength(chunk) <= MAX_UPLOAD_CHUNK_BATCH_BYTES)).toBe(true);
-  }, 20_000);
+  }, 30_000);
 
   test("keeps default bulk upload groups below local Convex isolate limits", () => {
     expect(DEFAULT_UPLOAD_GROUP_SIZE).toBeLessThanOrEqual(10);
