@@ -322,6 +322,60 @@ describe("CLI command graph", () => {
     expect(chunks.every((chunk) => jsonByteLength(chunk) <= MAX_UPLOAD_CHUNK_BATCH_BYTES)).toBe(true);
   }, 20_000);
 
+  test("splits upload chunks by byte budget after sanitization", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-cli-pi-"));
+    writePiFixture(root, 1);
+
+    const batch = sanitizeIngestBatchForTransport(
+      await buildIngestBatch({
+        providers: ["pi"],
+        roots: { pi: root },
+        machine: { machineId: "machine:test", hostname: "test", platform: "test" },
+      }),
+    );
+    const baseSession = batch.sessions[0]!;
+    const baseEvent = baseSession.events[0]!;
+    const largeEvents = Array.from({ length: 30 }, (_, index) => ({
+      ...baseEvent,
+      id: `event:large:${index}`,
+      nativeEventId: `native:large:${index}`,
+      sequence: index,
+      contentText: `large event ${index}`,
+      contentBlocks: [
+        {
+          id: `block:large:${index}`,
+          sequence: 0,
+          kind: "text" as const,
+          text: `${index}:`.repeat(24 * 1024),
+        },
+      ],
+    }));
+
+    const chunks = chunkIngestBatch(
+      {
+        ...batch,
+        sessions: [
+          {
+            ...baseSession,
+            events: largeEvents,
+            toolCalls: [],
+            sessionEdges: [],
+            usageRecords: [],
+            artifacts: [],
+          },
+        ],
+      },
+      {
+        maxEventsPerChunk: 50,
+        maxOperationsPerChunk: Number.MAX_SAFE_INTEGER,
+      },
+    );
+
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.every((chunk) => jsonByteLength(chunk) <= MAX_UPLOAD_CHUNK_BATCH_BYTES)).toBe(true);
+    expect(chunks.reduce((sum, chunk) => sum + (chunk.sessions[0]?.events.length ?? 0), 0)).toBe(30);
+  }, 20_000);
+
   test("defers cleanup metadata when final reconciliation would exceed upload budget", async () => {
     const root = mkdtempSync(join(tmpdir(), "quasar-cli-pi-"));
     writePiFixture(root, 1);
