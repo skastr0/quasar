@@ -28,6 +28,7 @@ import {
   resnapshotSourceManifestEntries,
   snapshotIngestSourceManifest,
   stableJsonHash,
+  stableWideHash,
   stableAdapters,
   streamIngestBatches,
   type IngestBatch,
@@ -935,7 +936,9 @@ export const ingestJobIdempotencyKey = (
   );
 
 export const ingestBatchPayloadHash = (batch: IngestBatch) =>
-  stableJsonHash(batchPayloadIdentity(batch));
+  stableWideHash(
+    JSON.stringify([SESSION_INTELLIGENCE_CONTRACT_VERSION, batchPayloadIdentity(batch)]),
+  );
 
 const batchPayloadIdentity = (batch: IngestBatch) => ({
   ...batch,

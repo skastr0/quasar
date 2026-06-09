@@ -130,6 +130,8 @@ const handleMutation = (fn: (ctx: ActionCtx, req: Request) => Promise<Response>)
 for (const path of [
   quasarApiPaths.ingestBatches,
   quasarApiPaths.ingestJobs,
+  quasarApiPaths.ingestJobsSchedule,
+  quasarApiPaths.ingestJobsCancel,
   quasarApiPaths.ingestJobChunks,
   quasarApiPaths.ingestJobChunksBulk,
   quasarApiPaths.embeddingControl,
@@ -238,6 +240,24 @@ http.route({
       delayMs: 0,
     });
     return json({ importJobId, scheduled: true });
+  }),
+});
+
+http.route({
+  path: quasarApiPaths.ingestJobsCancel,
+  method: "POST",
+  handler: handleMutation(async (ctx, req) => {
+    const input = await readJson(req, 16 * 1024);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const importJobId = typeof record.importJobId === "string" ? record.importJobId : undefined;
+    const reason = typeof record.reason === "string" ? record.reason : undefined;
+    if (importJobId === undefined) return json({ error: "importJobId is required" }, 400);
+    return json(
+      await ctx.runMutation(internal.quasar.cancelImportJobInternal, {
+        importJobId,
+        reason,
+      }),
+    );
   }),
 });
 

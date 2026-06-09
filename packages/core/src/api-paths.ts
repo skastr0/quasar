@@ -4,6 +4,7 @@ export const QuasarApiPaths = {
   ingestBatches: pathFrom("api", "ingest", "batches"),
   ingestJobs: pathFrom("api", "ingest", "jobs"),
   ingestJobsSchedule: pathFrom("api", "ingest", "jobs", "schedule"),
+  ingestJobsCancel: pathFrom("api", "ingest", "jobs", "cancel"),
   ingestJobChunks: pathFrom("api", "ingest", ["job", "chunks"].join("-")),
   ingestJobChunksBulk: pathFrom("api", "ingest", ["job", "chunks", "bulk"].join("-")),
   embeddingControl: pathFrom("api", "embeddings", "control"),

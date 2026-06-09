@@ -38,6 +38,23 @@ type SubmitImportChunkResult = {
   readonly stale?: boolean;
 };
 
+type ReadImportJobResult = {
+  readonly job: ReturnType<typeof statusJob>;
+  readonly chunks: ReturnType<typeof statusChunk>[];
+  readonly failures: Doc<"importFailures">[];
+  readonly readiness: Awaited<ReturnType<typeof embeddingReadiness>>;
+  readonly pagination: {
+    readonly chunks: {
+      readonly isDone: boolean;
+      readonly continueCursor: string;
+    };
+    readonly failures: {
+      readonly isDone: boolean;
+      readonly continueCursor: string;
+    };
+  };
+} | null;
+
 type IngestManifest = {
   readonly machineId: string;
   readonly generatedAt?: string;
@@ -299,7 +316,9 @@ export const enqueueImportChunkHandler = async (
   if (existingBySequence !== null && existingBySequence.idempotencyKey !== idempotencyKey) {
     throw new Error("Import chunk sequence is already occupied by a different chunk.");
   }
-  await patchExpectedChunkCount(ctx, job, expectedChunkCount, now);
+  if (isClosedImportJob(job) && existing?.status !== "succeeded") {
+    throw new Error("Import job is no longer accepting chunks.");
+  }
   if (existing?.status === "succeeded") {
     await maybeFinalizeImportJob(ctx, input.importJobId, now);
     return {
@@ -309,6 +328,7 @@ export const enqueueImportChunkHandler = async (
       jobStatus: (await findImportJob(ctx, input.importJobId))?.status ?? "running",
     };
   }
+  await patchExpectedChunkCount(ctx, job, expectedChunkCount, now);
 
   const chunkPatch = {
     chunkId,
@@ -386,6 +406,31 @@ export const scheduleImportWorkerMutationHandler = async (
 ): Promise<{ readonly scheduled: true }> => {
   await scheduleImportWorker(ctx, args.importJobId, args.delayMs ?? 0);
   return { scheduled: true as const };
+};
+
+export const cancelImportJobHandler = async (
+  ctx: MutationCtx,
+  args: { importJobId: string; reason?: string },
+): Promise<{
+  readonly importJobId: string;
+  readonly status: ImportJobStatus;
+  readonly cancelled: boolean;
+}> => {
+  const now = Date.now();
+  const job = await findImportJob(ctx, args.importJobId);
+  if (job === null) throw new Error("Import job was not found.");
+  if (isClosedImportJob(job)) {
+    return { importJobId: args.importJobId, status: job.status, cancelled: false };
+  }
+  await ctx.db.patch(job._id, {
+    status: "failed",
+    error: args.reason ?? "Import job cancelled.",
+    completedAt: now,
+    updatedAt: now,
+  });
+  const lease = await findImportWorkerLease(ctx, args.importJobId);
+  if (lease !== null) await ctx.db.delete(lease._id);
+  return { importJobId: args.importJobId, status: "failed", cancelled: true };
 };
 
 export const processImportJobChunksHandler = async (
@@ -499,6 +544,10 @@ export const claimImportChunkHandler = async (
   readonly attempts: number;
   readonly leaseToken: string;
 } | null> => {
+  if (args.importJobId !== undefined) {
+    const job = await findImportJob(ctx, args.importJobId);
+    if (job === null || isClosedImportJob(job)) return null;
+  }
   const candidate =
     (await findDuePendingChunk(ctx, args.importJobId, args.now)) ??
     (await findStaleRunningChunk(ctx, args.importJobId, args.now));
@@ -612,7 +661,7 @@ export const markImportChunkFailedHandler = async (
 export const readImportJobHandler = async (
   ctx: QueryCtx,
   args: { input: unknown },
-) => {
+): Promise<ReadImportJobResult> => {
   const input = decodeBoundarySync(ReadImportJobInput, args.input, "read import job input");
   const job = await ctx.db
     .query("importJobs")
@@ -819,6 +868,7 @@ const patchImportJobCounters = async (
 ) => {
   const job = await findImportJob(ctx, importJobId);
   if (job === null) throw new Error("Import job was not found.");
+  const closed = isClosedImportJob(job);
   await ctx.db.patch(job._id, {
     chunkCount: Math.max(0, job.chunkCount + (delta.chunkCount ?? 0)),
     uploadedChunkCount: Math.max(0, (job.uploadedChunkCount ?? job.chunkCount) + (delta.uploadedChunkCount ?? 0)),
@@ -828,8 +878,8 @@ const patchImportJobCounters = async (
       0,
       (job.terminalChunkSequenceSum ?? 0) + (delta.terminalChunkSequenceSum ?? 0),
     ),
-    status: delta.status ?? job.status,
-    completedAt: undefined,
+    status: closed ? job.status : delta.status ?? job.status,
+    completedAt: closed ? job.completedAt : undefined,
     updatedAt: delta.now,
   });
 };
@@ -841,7 +891,7 @@ const patchImportJobStatus = async (
   now: number,
 ) => {
   const job = await findImportJob(ctx, importJobId);
-  if (job !== null && job.status !== "succeeded" && job.status !== status) {
+  if (job !== null && !isClosedImportJob(job) && job.status !== status) {
     await ctx.db.patch(job._id, { status, updatedAt: now });
   }
 };
@@ -853,6 +903,7 @@ const maybeFinalizeImportJob = async (
 ): Promise<ImportJobStatus> => {
   const job = await findImportJob(ctx, importJobId);
   if (job === null) throw new Error("Import job was not found.");
+  if (isClosedImportJob(job)) return job.status;
   const expected = job.expectedChunkCount;
   const uploaded = job.uploadedChunkCount ?? job.chunkCount;
   const terminalCount = job.succeededChunkCount + job.failedChunkCount;
@@ -1036,6 +1087,12 @@ const payloadHashForBatch = (batch: IngestBatchBoundaryValue) =>
 const batchPayloadIdentity = (batch: IngestBatchBoundaryValue) => ({
   ...batch,
   generatedAt: undefined,
+  sourceRoots: batch.sourceRoots.map(sourceRootPayloadIdentity),
+});
+
+const sourceRootPayloadIdentity = (root: IngestBatchBoundaryValue["sourceRoots"][number]) => ({
+  ...root,
+  discoveredAt: undefined,
 });
 
 const summarizeBatch = (batch: IngestBatchBoundaryValue) => ({
@@ -1064,6 +1121,9 @@ const isTerminalFailed = (status: ImportChunkStatus) =>
 
 const isTerminal = (status: ImportChunkStatus) =>
   status === "succeeded" || isTerminalFailed(status);
+
+const isClosedImportJob = (job: Doc<"importJobs">) =>
+  job.status === "failed" || job.completedAt !== undefined;
 
 const assertNonNegativeInteger = (value: number, label: string) => {
   if (!Number.isInteger(value) || value < 0) {

@@ -391,6 +391,32 @@ describe("quasar ingestion and search", () => {
     });
     expect(chunk.status).toBe("pending");
     expect(chunk.enqueued).toBe(true);
+
+    const rediscoveredBatch = {
+      ...batch,
+      sourceRoots: batch.sourceRoots.map((root) => ({
+        ...root,
+        discoveredAt: "2026-06-05T00:00:00.000Z",
+      })),
+    };
+    const retryChunk = await t.action(internal.quasar.submitImportChunkInternal, {
+      input: {
+        importJobId: job.importJobId,
+        batch: rediscoveredBatch,
+        sequence: 0,
+        expectedChunkCount: 1,
+        completeJob: true,
+      },
+    });
+    expect(retryChunk.chunkId).toBe(chunk.chunkId);
+    expect(
+      await t.run(async (ctx) =>
+        await ctx.db
+          .query("importChunks")
+          .withIndex("by_importJobId", (q) => q.eq("importJobId", job.importJobId))
+          .collect(),
+      ),
+    ).toHaveLength(1);
     expect(
       await t.run(async (ctx) =>
         await ctx.db
@@ -429,6 +455,41 @@ describe("quasar ingestion and search", () => {
     });
     expect(session?.session.importJobId).toBe(job.importJobId);
     expect(session?.session.ingestState).toBe("complete");
+  });
+
+  test("cancelled import jobs stop claiming pending chunks", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const job = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { batch, expectedChunkCount: 1 },
+    });
+    await t.action(internal.quasar.submitImportChunkInternal, {
+      input: {
+        importJobId: job.importJobId,
+        batch,
+        sequence: 0,
+        expectedChunkCount: 1,
+        completeJob: true,
+      },
+    });
+
+    const cancelled = await t.mutation(internal.quasar.cancelImportJobInternal, {
+      importJobId: job.importJobId,
+      reason: "superseded by smaller chunks",
+    });
+    const processed = await t.action(internal.quasar.processImportJobChunksInternal, {
+      importJobId: job.importJobId,
+      limit: 1,
+    });
+    const status = await t.query(internal.quasar.readImportJobInternal, {
+      input: { importJobId: job.importJobId },
+    });
+
+    expect(cancelled).toMatchObject({ status: "failed", cancelled: true });
+    expect(processed.processed).toBe(0);
+    expect(status?.job.status).toBe("failed");
+    expect(status?.job.error).toBe("superseded by smaller chunks");
+    expect(status?.chunks[0]?.status).toBe("pending");
   });
 
   test("sanitizes direct Convex ingest batches at the write boundary", async () => {
