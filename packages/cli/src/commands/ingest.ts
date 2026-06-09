@@ -33,6 +33,7 @@ import {
   jsonByteLength,
   loadMachineIdentity,
   manifestFromBatch,
+  providerSummariesForManifest,
   Provider as ProviderSchema,
   projectSessionIntelligenceGraphId,
   quasarHome,
@@ -43,6 +44,9 @@ import {
   stableJsonHash,
   stableWideHash,
   stableAdapters,
+  sourceRootIdentity,
+  streamedIngestJobIdempotencyKey,
+  STREAM_INGEST_UPLOAD_IDENTITY_VERSION,
   streamIngestBatches,
   toConvexSafeSessionIntelligenceBatch,
   type IngestBatch,
@@ -141,7 +145,6 @@ const INGEST_GENERATION_SCHEMA_VERSION = "quasar.ingest-generation/v2";
 const INGEST_GENERATION_IDENTITY_VERSION = "quasar.ingest-generation-identity/v5";
 const INGEST_CHUNK_LEDGER_FORMAT = "quasar.ingest-chunks-jsonl/v1";
 const INGEST_CHUNK_LEDGER_FILENAME = "chunks.ndjson";
-const STREAM_INGEST_UPLOAD_IDENTITY_VERSION = "quasar.stream-ingest/v4";
 const MAX_INGEST_MANIFEST_SESSION_SAMPLES = 25;
 const DURABLE_SNAPSHOT_PROVIDERS = new Set<Provider>([
   "codex",
@@ -1269,6 +1272,8 @@ const runPreparedIngest = (input: {
       body: {
         manifest: plan.manifest,
         sourceIdentityKey: plan.idempotencyKey,
+        idempotencyKey: plan.idempotencyKey,
+        chunkPayloadFingerprint: plan.chunkPayloadFingerprint,
         expectedChunkCount: plan.expectedChunkCount,
       },
       responseSchema: ImportJobStartResponse,
@@ -1539,9 +1544,12 @@ const planStreamedIngest = (
         for (const entry of snapshotIngestSourceManifest(rawBatch)) {
           sourceBefore.set(sourceManifestKey(entry), entry);
         }
-        const chunks = chunkIngestBatch(batch, chunkOptions);
-        validateChunkPayloads(chunks);
-        for (const chunk of chunks) {
+        for (const chunk of streamChunkedIngestBatch(batch, chunkOptions)) {
+          assertJsonBudget(
+            chunk,
+            MAX_UPLOAD_CHUNK_BATCH_BYTES,
+            `chunk ${chunkPayloadHashes.length}`,
+          );
           const payloadHash = ingestBatchPayloadHash(chunk);
           chunkPayloadHashes.push(payloadHash);
           chunkPayloadFingerprint = updateChunkPayloadFingerprint(
@@ -1583,7 +1591,7 @@ const writeStreamedIngestLedger = (
         for (const entry of snapshotIngestSourceManifest(rawBatch)) {
           sourceBefore.set(sourceManifestKey(entry), entry);
         }
-        for (const chunk of chunkIngestBatch(batch, chunkOptions)) {
+        for (const chunk of streamChunkedIngestBatch(batch, chunkOptions)) {
           assertJsonBudget(chunk, MAX_UPLOAD_CHUNK_BATCH_BYTES, `chunk ${chunkCount}`);
           const payloadHash = ingestBatchPayloadHash(chunk);
           const payloadBytes = jsonByteLength(chunk);
@@ -1862,7 +1870,7 @@ async function* streamChunkItems(
   let index = 0;
   for await (const rawBatch of streamIngestBatches(streamOptions)) {
     const batch = toConvexSafeSessionIntelligenceBatch(rawBatch);
-    for (const chunk of chunkIngestBatch(batch, chunkOptions)) {
+    for (const chunk of streamChunkedIngestBatch(batch, chunkOptions)) {
       yield { chunk, index, payloadHash: ingestBatchPayloadHash(chunk) };
       index += 1;
     }
@@ -1985,40 +1993,6 @@ const mergeProviderSummaries = (
   );
 };
 
-const providerSummariesForManifest = (manifest: IngestManifest) =>
-  manifest.providerSummaries ?? providerSummariesFromManifestSessions(manifest.sessions);
-
-const providerSummariesFromManifestSessions = (
-  sessions: readonly IngestManifest["sessions"][number][],
-): IngestProviderSummary[] => {
-  const summaries = new Map<Provider, IngestProviderSummary>();
-  for (const session of sessions) {
-    const current = summaries.get(session.provider) ?? {
-      provider: session.provider,
-      sessionCount: 0,
-      eventCount: 0,
-      toolCallCount: 0,
-      contentBlockCount: 0,
-      sessionEdgeCount: 0,
-      usageRecordCount: 0,
-      artifactCount: 0,
-    };
-    summaries.set(session.provider, {
-      provider: session.provider,
-      sessionCount: current.sessionCount + 1,
-      eventCount: current.eventCount + session.eventCount,
-      toolCallCount: current.toolCallCount + session.toolCallCount,
-      contentBlockCount: current.contentBlockCount + session.contentBlockCount,
-      sessionEdgeCount: current.sessionEdgeCount + session.sessionEdgeCount,
-      usageRecordCount: current.usageRecordCount + session.usageRecordCount,
-      artifactCount: current.artifactCount + session.artifactCount,
-    });
-  }
-  return [...summaries.values()].sort((left, right) =>
-    left.provider.localeCompare(right.provider),
-  );
-};
-
 const summaryFromManifest = (manifest: IngestManifest) => ({
   machine: manifest.machine,
   generatedAt: manifest.generatedAt,
@@ -2033,17 +2007,6 @@ const summaryFromManifest = (manifest: IngestManifest) => ({
   artifactCount: manifest.artifactCount,
   diagnostics: manifest.diagnostics,
 });
-
-const streamedIngestJobIdempotencyKey = (
-  manifest: IngestManifest,
-  chunkPayloadFingerprint: string,
-) =>
-  `import-job:${stableJsonHash([
-    STREAM_INGEST_UPLOAD_IDENTITY_VERSION,
-    SESSION_INTELLIGENCE_CONTRACT_VERSION,
-    manifestIdentityFromManifest(manifest),
-    chunkPayloadFingerprint,
-  ])}`;
 
 const emptyChunkPayloadFingerprint = () =>
   stableWideHash(JSON.stringify([
@@ -2064,19 +2027,6 @@ const updateChunkPayloadFingerprint = (
     sequence,
     payloadHash,
   ]));
-
-const manifestIdentityFromManifest = (manifest: IngestManifest) => ({
-  ...manifest,
-  generatedAt: undefined,
-  sourceRoots: manifest.sourceRoots.map(sourceRootIdentity),
-  sessions: undefined,
-  providerSummaries: providerSummariesForManifest(manifest),
-});
-
-const sourceRootIdentity = (root: IngestManifest["sourceRoots"][number]) => ({
-  ...root,
-  discoveredAt: undefined,
-});
 
 const sourceManifestKey = (entry: SourceManifestEntry) => `${entry.role}:${entry.path}`;
 
@@ -2139,16 +2089,6 @@ const bulkResponseStatusChunks = (
       payloadStored: true,
     }];
   });
-};
-
-const validateChunkPayloads = (chunks: readonly IngestBatch[]) => {
-  for (let index = 0; index < chunks.length; index += 1) {
-    assertJsonBudget(
-      chunks[index],
-      MAX_UPLOAD_CHUNK_BATCH_BYTES,
-      `chunk ${index}`,
-    );
-  }
 };
 
 const assertJsonBudget = (value: unknown, maxBytes: number, label: string) => {
@@ -2230,28 +2170,35 @@ const envOptionalPositiveInteger = (name: string) => {
 export const chunkIngestBatch = (
   batch: IngestBatch,
   options: ChunkOptions = {},
-): IngestBatch[] => {
-  const chunks: IngestBatch[] = [];
+): IngestBatch[] => [...streamChunkedIngestBatch(batch, options)];
+
+const streamChunkedIngestBatch = function* (
+  batch: IngestBatch,
+  options: ChunkOptions = {},
+): Generator<IngestBatch> {
   const chunkOptions = normalizeChunkOptions(options);
+  let yielded = false;
   for (const session of batch.sessions) {
     for (const range of chunkSessionRanges(session, chunkOptions)) {
-      pushUploadSizedSessionChunks(chunks, batch, session, range.start, range.end);
+      for (const chunk of uploadSizedSessionChunks(batch, session, range.start, range.end)) {
+        yielded = true;
+        yield chunk;
+      }
     }
   }
-  return chunks.length === 0 ? [sanitizeUploadChunk({ ...batch, sessions: [] })] : chunks;
+  if (!yielded) yield sanitizeUploadChunk({ ...batch, sessions: [] });
 };
 
-const pushUploadSizedSessionChunks = (
-  target: IngestBatch[],
+const uploadSizedSessionChunks = function* (
   batch: IngestBatch,
   session: NormalizedSession,
   start: number,
   end: number,
-) => {
+): Generator<IngestBatch> {
   const sessionPiece = sessionChunk(session, start, end);
   const chunk = sanitizeUploadChunk({ ...batch, sessions: [sessionPiece] });
   if (jsonByteLength(chunk) <= MAX_UPLOAD_CHUNK_BATCH_BYTES) {
-    target.push(chunk);
+    yield chunk;
     return;
   }
 
@@ -2260,13 +2207,13 @@ const pushUploadSizedSessionChunks = (
     sessions: [sessionWithDeferredCleanup(sessionPiece)],
   });
   if (jsonByteLength(deferredChunk) <= MAX_UPLOAD_CHUNK_BATCH_BYTES || end - start <= 1) {
-    target.push(deferredChunk);
+    yield deferredChunk;
     return;
   }
 
   const midpoint = start + Math.max(1, Math.floor((end - start) / 2));
-  pushUploadSizedSessionChunks(target, batch, session, start, midpoint);
-  pushUploadSizedSessionChunks(target, batch, session, midpoint, end);
+  yield* uploadSizedSessionChunks(batch, session, start, midpoint);
+  yield* uploadSizedSessionChunks(batch, session, midpoint, end);
 };
 
 const MAX_UPLOAD_SANITIZE_PASSES = 4;
@@ -2419,7 +2366,7 @@ const sessionChunk = (
       events,
       toolCalls: session.toolCalls.filter((toolCall) => eventIds.has(toolCall.eventId)),
       sessionEdges: session.sessionEdges.filter((edge) =>
-        edgeBelongsToChunk(edge.fromEventId, edge.toEventId, eventIds),
+        edgeBelongsToChunk(edge, eventIds, isLast),
       ),
       usageRecords: session.usageRecords.filter((usageRecord) =>
         usageRecord.eventId === undefined || eventIds.has(usageRecord.eventId),
@@ -2444,7 +2391,7 @@ const estimatedChunkOperations = (
     events.reduce((sum, event) => sum + event.contentBlocks.length, 0) +
     session.toolCalls.filter((toolCall) => eventIds.has(toolCall.eventId)).length +
     session.sessionEdges.filter((edge) =>
-      edgeBelongsToChunk(edge.fromEventId, edge.toEventId, eventIds),
+      edgeBelongsToChunk(edge, eventIds, false),
     ).length +
     session.usageRecords.filter((usageRecord) =>
       usageRecord.eventId === undefined || eventIds.has(usageRecord.eventId),
@@ -2464,13 +2411,16 @@ const estimatedEventOperations = (
 };
 
 const edgeBelongsToChunk = (
-  fromEventId: string | undefined,
-  toEventId: string | undefined,
+  edge: NormalizedSession["sessionEdges"][number],
   eventIds: Set<string>,
-) =>
-  (fromEventId !== undefined && eventIds.has(fromEventId)) ||
-  (toEventId !== undefined && eventIds.has(toEventId)) ||
-  (fromEventId === undefined && toEventId === undefined);
+  includeUnresolvedEdges: boolean,
+) => {
+  if (edge.toEventId !== undefined) return eventIds.has(edge.toEventId);
+  if (edge.fromEventId !== undefined) return eventIds.has(edge.fromEventId);
+  return includeUnresolvedEdges &&
+    edge.fromEventId === undefined &&
+    edge.toEventId === undefined;
+};
 
 const sessionWithExpectedIds = (
   session: NormalizedSession & { partialSession?: boolean },

@@ -389,6 +389,7 @@ export class ImportJobStartRequest extends Schema.Class<ImportJobStartRequest>(
   manifest: Schema.optional(IngestManifest),
   sourceIdentityKey: Schema.optional(Schema.String),
   idempotencyKey: Schema.optional(Schema.String),
+  chunkPayloadFingerprint: Schema.optional(Schema.String),
   expectedChunkCount: Schema.optional(PositiveInteger),
 }) {}
 

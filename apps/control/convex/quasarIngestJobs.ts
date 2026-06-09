@@ -19,6 +19,10 @@ import { readinessCounts } from "./quasarEmbeddingReadiness";
 import { redactSensitive, wideHash } from "./quasarText";
 import { stableCanonicalJsonHash } from "@skastr0/quasar-core/hash";
 import {
+  streamedIngestJobIdempotencyKey,
+  STREAM_INGEST_UPLOAD_IDENTITY_VERSION,
+} from "@skastr0/quasar-core/ingest-identity";
+import {
   sanitizeSessionIntelligenceDiagnostics,
   SESSION_INTELLIGENCE_CONTRACT_VERSION,
 } from "@skastr0/quasar-core/session-intelligence";
@@ -120,7 +124,6 @@ const IMPORT_CHUNK_MAX_ATTEMPTS = 5;
 const IMPORT_WORKER_BATCH_LIMIT = 24;
 const IMPORT_WORKER_SCHEDULE_DELAY_MS = 1_000;
 const IMPORT_CANCEL_CLEANUP_BATCH_LIMIT = 100;
-const STREAM_INGEST_UPLOAD_IDENTITY_VERSION = "quasar.stream-ingest/v4";
 const MAX_IMPORT_JOB_INPUT_BYTES = 3_500_000;
 const MAX_IMPORT_CHUNK_BATCH_BYTES = 768 * 1024;
 const MAX_IMPORT_BULK_INPUT_BYTES = 3_500_000;
@@ -140,9 +143,12 @@ export const startImportJobHandler = async (
   };
   assertJsonByteBudget(input, MAX_IMPORT_JOB_INPUT_BYTES, "start import job input");
   const manifest = manifestForStart(input);
-  const sourceIdentityKey = input.sourceIdentityKey ?? importJobIdempotencyKey(manifest, input.batch);
+  const planIdentity = planIdentityForStart(input, manifest);
+  const planIdentityKey = planIdentity.planIdentityKey;
+  const sourceIdentityKey = input.sourceIdentityKey ?? planIdentityKey;
   const existing = await findLatestImportJobAttempt(ctx, sourceIdentityKey);
   if (existing !== null) {
+    assertImportJobPlanCompatible(existing, planIdentityKey);
     if (!isUnsuccessfulImportJob(existing)) {
       const expectedChunkCount = await expectedChunkCountForExistingJob(
         ctx,
@@ -167,6 +173,8 @@ export const startImportJobHandler = async (
   await ctx.db.insert("importJobs", {
     importJobId,
     idempotencyKey,
+    planIdentityKey,
+    chunkPayloadFingerprint: planIdentity.chunkPayloadFingerprint,
     sourceIdentityKey,
     attemptNumber,
     machineId: manifest.machineId,
@@ -201,6 +209,42 @@ export const startImportJobHandler = async (
     sourceIdentityKey,
     attemptNumber,
   };
+};
+
+const planIdentityForStart = (
+  input: StartImportJobInputValue,
+  manifest: IngestManifest,
+) => {
+  if (input.batch !== undefined) {
+    if (input.chunkPayloadFingerprint !== undefined) {
+      throw new Error("Import job chunkPayloadFingerprint is only accepted for manifest imports.");
+    }
+    const planIdentityKey = importJobIdempotencyKey(manifest, input.batch);
+    assertStartIdempotencyKey(input.idempotencyKey, planIdentityKey);
+    return { planIdentityKey };
+  }
+
+  if (input.manifest !== undefined && input.chunkPayloadFingerprint !== undefined) {
+    const planIdentityKey = streamedIngestJobIdempotencyKey(
+      input.manifest,
+      input.chunkPayloadFingerprint,
+    );
+    assertStartIdempotencyKey(input.idempotencyKey, planIdentityKey);
+    return { planIdentityKey, chunkPayloadFingerprint: input.chunkPayloadFingerprint };
+  }
+
+  const planIdentityKey = importJobIdempotencyKey(manifest, undefined);
+  assertStartIdempotencyKey(input.idempotencyKey, planIdentityKey);
+  return { planIdentityKey };
+};
+
+const assertStartIdempotencyKey = (
+  supplied: string | undefined,
+  expected: string,
+) => {
+  if (supplied !== undefined && supplied !== expected) {
+    throw new Error("Import job idempotencyKey does not match its derived plan identity.");
+  }
 };
 
 export const submitImportChunkHandler = async (
@@ -834,6 +878,16 @@ const findLatestImportJobAttempt = async (
     if (latest === null) return job;
     return (job.attemptNumber ?? 0) > (latest.attemptNumber ?? 0) ? job : latest;
   }, null);
+};
+
+const assertImportJobPlanCompatible = (
+  job: Doc<"importJobs">,
+  planIdentityKey: string,
+) => {
+  const existingPlanIdentityKey = job.planIdentityKey ?? job.sourceIdentityKey;
+  if (existingPlanIdentityKey !== planIdentityKey) {
+    throw new Error("Import sourceIdentityKey is already bound to a different ingest plan.");
+  }
 };
 
 const findImportChunk = async (ctx: MutationCtx, chunkId: string) =>

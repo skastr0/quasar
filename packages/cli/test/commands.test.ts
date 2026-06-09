@@ -427,6 +427,50 @@ describe("CLI command graph", () => {
     expect((chunks.at(-1)?.sessions[0] as ChunkMetadata | undefined)?.expectedEventIds).toHaveLength(55);
   }, 20_000);
 
+  test("does not duplicate fan-out edges into the source event chunk", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-cli-pi-"));
+    writePiFixture(root, 5);
+
+    const batch = sanitizeIngestBatchForTransport(
+      await buildIngestBatch({
+        providers: ["pi"],
+        roots: { pi: root },
+        machine: { machineId: "machine:test", hostname: "test", platform: "test" },
+      }),
+    );
+    const session = batch.sessions[0]!;
+    const sourceEvent = session.events[0]!;
+    const fanOutEdges = session.events.slice(1).map((target, index) => ({
+      id: `edge:fanout:${index}`,
+      sessionId: session.id,
+      machineId: session.machineId,
+      provider: session.provider,
+      agentName: session.agentName,
+      projectIdentityKey: session.projectIdentity.projectIdentityKey,
+      kind: "parent" as const,
+      fromEventId: sourceEvent.id,
+      toEventId: target.id,
+    }));
+    const chunks = chunkIngestBatch(
+      {
+        ...batch,
+        sessions: [{ ...session, sessionEdges: fanOutEdges }],
+      },
+      {
+        maxEventsPerChunk: 1,
+        maxOperationsPerChunk: Number.MAX_SAFE_INTEGER,
+      },
+    );
+
+    expect(chunks[0]?.sessions[0]?.sessionEdges).toHaveLength(0);
+    expect(
+      chunks.flatMap((chunk) => chunk.sessions[0]?.sessionEdges ?? []),
+    ).toHaveLength(fanOutEdges.length);
+    for (const chunk of chunks) {
+      expect(jsonByteLength(chunk)).toBeLessThanOrEqual(MAX_UPLOAD_CHUNK_BATCH_BYTES);
+    }
+  }, 20_000);
+
   test("chunks a synthetic large corpus without dropping expected ids", async () => {
     const root = mkdtempSync(join(tmpdir(), "quasar-cli-pi-"));
     writePiFixture(root, 1_000);
@@ -657,8 +701,15 @@ describe("CLI command graph", () => {
     const uploadedChunks = bulkBodies.flatMap((body) => body.chunks);
     expect(jobRequest?.body).toMatchObject({
       sourceIdentityKey: expect.stringMatching(/^import-job:/),
+      idempotencyKey: expect.stringMatching(/^import-job:/),
+      chunkPayloadFingerprint: expect.any(String),
       expectedChunkCount: 3,
     });
+    const startBody = jobRequest?.body as {
+      sourceIdentityKey?: string;
+      idempotencyKey?: string;
+    } | undefined;
+    expect(startBody?.idempotencyKey).toBe(startBody?.sourceIdentityKey);
     expect(bulkRequests).toHaveLength(2);
     expect(new Set(bulkBodies.map((body) => body.expectedChunkCount))).toEqual(new Set([3]));
     expect(new Set(bulkBodies.map((body) => body.scheduleWorker))).toEqual(new Set([false]));
@@ -1629,6 +1680,8 @@ describe("CLI command graph", () => {
     const requests: Array<{ method: string; path: string; body?: unknown }> = [];
     const uploadedChunks: Array<{ sequence: number; idempotencyKey: string; completeJob?: boolean }> = [];
     const sourceIdentityKeys: string[] = [];
+    const idempotencyKeys: string[] = [];
+    const chunkPayloadFingerprints: string[] = [];
     const expectedChunkCounts: number[] = [];
     const machineIds: string[] = [];
     let startCount = 0;
@@ -1639,12 +1692,18 @@ describe("CLI command graph", () => {
         const record = spec.body as {
           manifest?: { machine?: { machineId?: string } };
           sourceIdentityKey?: string;
+          idempotencyKey?: string;
+          chunkPayloadFingerprint?: string;
           expectedChunkCount?: number;
         };
         if (record.manifest?.machine?.machineId !== undefined) {
           machineIds.push(record.manifest.machine.machineId);
         }
         if (record.sourceIdentityKey !== undefined) sourceIdentityKeys.push(record.sourceIdentityKey);
+        if (record.idempotencyKey !== undefined) idempotencyKeys.push(record.idempotencyKey);
+        if (record.chunkPayloadFingerprint !== undefined) {
+          chunkPayloadFingerprints.push(record.chunkPayloadFingerprint);
+        }
         if (record.expectedChunkCount !== undefined) expectedChunkCounts.push(record.expectedChunkCount);
         return Effect.succeed({
           importJobId: "job:generation",
@@ -1779,6 +1838,9 @@ describe("CLI command graph", () => {
     expect(second?.uploadComplete).toBe(true);
     expect(sourceIdentityKeys).toHaveLength(2);
     expect(new Set(sourceIdentityKeys).size).toBe(1);
+    expect(idempotencyKeys).toEqual(sourceIdentityKeys);
+    expect(chunkPayloadFingerprints).toHaveLength(2);
+    expect(new Set(chunkPayloadFingerprints).size).toBe(1);
     expect(expectedChunkCounts).toEqual([5, 5]);
     expect(machineIds).toEqual(["machine:test", "machine:test"]);
     expect(uploadedChunks.map((chunk) => chunk.sequence)).toEqual([0, 1, 2, 3, 4]);

@@ -453,6 +453,8 @@ export default defineSchema({
   importJobs: defineTable({
     importJobId: v.string(),
     idempotencyKey: v.string(),
+    planIdentityKey: v.optional(v.string()),
+    chunkPayloadFingerprint: v.optional(v.string()),
     sourceIdentityKey: v.optional(v.string()),
     attemptNumber: v.optional(v.number()),
     machineId: v.string(),
