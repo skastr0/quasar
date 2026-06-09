@@ -53,11 +53,13 @@ const maybeDatabase = async (path: string) => {
 };
 
 type CursorDatabase = NonNullable<Awaited<ReturnType<typeof maybeDatabase>>>;
+type CursorColumnRow = { name: string };
 
 const CURSOR_DENY = /(auth|token|secret|credential|password|api[_-]?key|keychain|oauth|session[_-]?storage)/i;
 const CURSOR_DB_ALLOW = /(state\.vscdb|composer|chat|conversation|bubble|history|workspaceStorage|globalStorage)/i;
 const CURSOR_TABLE_ALLOW = /(ItemTable|composer|chat|conversation|bubble|message|cursor)/i;
 const CURSOR_KEY_ALLOW = /(composer|chat|conversation|bubble|message|ai|aichat|inlinechat|cursor|tool|diff|patch)/i;
+const CURSOR_MAX_SQL_CELL_BYTES = 128 * 1024;
 
 const cursorDbLike = (path: string) =>
   /\.(vscdb|sqlite|sqlite3|db)$/i.test(path) && CURSOR_DB_ALLOW.test(path) && !CURSOR_DENY.test(path);
@@ -81,9 +83,18 @@ const tables = (db: CursorDatabase) =>
     .map((row) => row.name)
     .filter(cursorTableLike);
 
+const tableColumns = (db: CursorDatabase, table: string) =>
+  (db.query(`pragma table_info(${quoteIdent(table)})`).all() as CursorColumnRow[])
+    .map((row) => row.name)
+    .filter((name) => name.length > 0);
+
 const tableRows = (db: CursorDatabase, table: string) => {
   try {
-    return db.query(`select * from ${quoteIdent(table)} limit 1000`).all() as Record<string, unknown>[];
+    const columns = tableColumns(db, table);
+    if (columns.length === 0) return [];
+    return db
+      .query(`select ${cursorColumnProjection(columns)} from ${quoteIdent(table)} limit 1000`)
+      .all() as Record<string, unknown>[];
   } catch {
     return [];
   }
@@ -97,8 +108,19 @@ const tablesCli = (dbPath: string) =>
     .map((row) => row.name)
     .filter(cursorTableLike);
 
-const tableRowsCli = (dbPath: string, table: string) =>
-  sqliteJson<Record<string, unknown>>(dbPath, `select * from ${quoteIdent(table)} limit 1000`);
+const tableColumnsCli = (dbPath: string, table: string) =>
+  sqliteJson<CursorColumnRow>(dbPath, `pragma table_info(${quoteIdent(table)})`)
+    .map((row) => row.name)
+    .filter((name) => name.length > 0);
+
+const tableRowsCli = (dbPath: string, table: string) => {
+  const columns = tableColumnsCli(dbPath, table);
+  if (columns.length === 0) return [];
+  return sqliteJson<Record<string, unknown>>(
+    dbPath,
+    `select ${cursorColumnProjection(columns)} from ${quoteIdent(table)} limit 1000`,
+  );
+};
 
 const sqliteJson = <A>(dbPath: string, query: string): A[] => {
   try {
@@ -110,6 +132,19 @@ const sqliteJson = <A>(dbPath: string, query: string): A[] => {
 };
 
 const quoteIdent = (identifier: string) => `"${identifier.replaceAll('"', '""')}"`;
+
+const cursorColumnProjection = (columns: readonly string[]) =>
+  columns
+    .map((column) => {
+      const quoted = quoteIdent(column);
+      return [
+        "case",
+        `when typeof(${quoted}) = 'text' and length(${quoted}) > ${CURSOR_MAX_SQL_CELL_BYTES} then '[omitted:large_cursor_cell bytes=' || length(${quoted}) || ']'`,
+        `when typeof(${quoted}) = 'blob' then '[omitted:cursor_blob bytes=' || length(${quoted}) || ']'`,
+        `else ${quoted} end as ${quoted}`,
+      ].join(" ");
+    })
+    .join(", ");
 
 const cursorTableLike = (name: string) =>
   !name.startsWith("sqlite_") && CURSOR_TABLE_ALLOW.test(name) && !CURSOR_DENY.test(name);

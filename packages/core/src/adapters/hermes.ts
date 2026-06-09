@@ -57,6 +57,9 @@ type HermesArtifactDraft = Omit<
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
 >;
 
+const HERMES_MAX_TEXT_FIELD_BYTES = 96 * 1024;
+const HERMES_MAX_JSON_FIELD_BYTES = 128 * 1024;
+
 const maybeDatabase = async (path: string) => {
   try {
     const { Database } = await import("bun:sqlite");
@@ -102,6 +105,47 @@ const hermesDbPath = (root: string | undefined) => {
 
 const sessionWindowLimit = (limit: number | undefined) => Math.max(1, Math.floor(limit ?? 500));
 const sessionWindowSkip = (skip: number | undefined) => Math.max(0, Math.floor(skip ?? 0));
+const omittedTextSql = (column: string, label: string) =>
+  `case when length(${column}) > ${HERMES_MAX_TEXT_FIELD_BYTES} then '[omitted:large_hermes_${label} bytes=' || length(${column}) || ']' else ${column} end as ${column}`;
+const omittedJsonSql = (column: string, label: string) =>
+  `case when length(${column}) > ${HERMES_MAX_JSON_FIELD_BYTES} then json_object('omitted', 'large_hermes_${label}', 'bytes', length(${column})) else ${column} end as ${column}`;
+const omittedToolCallsSql = () =>
+  `case when length(tool_calls) > ${HERMES_MAX_JSON_FIELD_BYTES} then json_array(json_object('id', 'omitted', 'name', 'hermes_tool', 'arguments', json_object('omitted', 'large_hermes_tool_calls', 'bytes', length(tool_calls)))) else tool_calls end as tool_calls`;
+const HERMES_SESSION_COLUMNS = [
+  "id",
+  "model",
+  "parent_session_id",
+  "started_at",
+  "ended_at",
+  "input_tokens",
+  "output_tokens",
+  "cache_read_tokens",
+  "cache_write_tokens",
+  "reasoning_tokens",
+  "billing_provider",
+  "estimated_cost_usd",
+  "actual_cost_usd",
+  "title",
+  "cwd",
+].join(", ");
+const HERMES_MESSAGE_COLUMNS = [
+  "id",
+  "session_id",
+  "role",
+  omittedTextSql("content", "content"),
+  "tool_call_id",
+  omittedToolCallsSql(),
+  "tool_name",
+  "timestamp",
+  "token_count",
+  "finish_reason",
+  omittedTextSql("reasoning", "reasoning"),
+  omittedTextSql("reasoning_content", "reasoning_content"),
+  omittedJsonSql("reasoning_details", "reasoning_details"),
+  omittedJsonSql("codex_reasoning_items", "codex_reasoning_items"),
+  omittedJsonSql("codex_message_items", "codex_message_items"),
+  "platform_message_id",
+].join(", ");
 
 const readSessionRows = (
   db: HermesDatabase,
@@ -109,12 +153,12 @@ const readSessionRows = (
   skip: number | undefined,
 ) =>
   db
-    .query("select * from sessions order by started_at desc, id desc limit ? offset ?")
+    .query(`select ${HERMES_SESSION_COLUMNS} from sessions order by started_at desc, id desc limit ? offset ?`)
     .all(sessionWindowLimit(limit), sessionWindowSkip(skip)) as HermesSessionRow[];
 
 const readMessageRows = (db: HermesDatabase, sessionId: string) =>
   db
-    .query("select * from messages where session_id = ? order by timestamp, id")
+    .query(`select ${HERMES_MESSAGE_COLUMNS} from messages where session_id = ? order by timestamp, id`)
     .all(sessionId) as HermesMessageRow[];
 
 const readSessionRowsCli = (
@@ -124,13 +168,13 @@ const readSessionRowsCli = (
 ) =>
   sqliteJson<HermesSessionRow>(
     dbPath,
-    `select * from sessions order by started_at desc, id desc limit ${sessionWindowLimit(limit)} offset ${sessionWindowSkip(skip)}`,
+    `select ${HERMES_SESSION_COLUMNS} from sessions order by started_at desc, id desc limit ${sessionWindowLimit(limit)} offset ${sessionWindowSkip(skip)}`,
   );
 
 const readMessageRowsCli = (dbPath: string, sessionId: string) =>
   sqliteJson<HermesMessageRow>(
     dbPath,
-    `select * from messages where session_id = ${sql(sessionId)} order by timestamp, id`,
+    `select ${HERMES_MESSAGE_COLUMNS} from messages where session_id = ${sql(sessionId)} order by timestamp, id`,
   );
 
 const isoFromEpoch = (value: unknown) => {
@@ -145,7 +189,7 @@ const parsedJsonField = (value: unknown): NativeValue | undefined => {
   return parsed as NativeValue;
 };
 
-const parsedReasoningFields = (message: HermesMessageRow) => ({
+const projectedReasoningFields = (message: HermesMessageRow) => ({
   reasoningDetails: parsedJsonField(message.reasoning_details),
   codexReasoningItems: parsedJsonField(message.codex_reasoning_items),
   codexMessageItems: parsedJsonField(message.codex_message_items),
@@ -216,7 +260,7 @@ const messageContent = (
   message: HermesMessageRow,
   calls: readonly Record<string, unknown>[],
 ): NativeValue => {
-  const reasoning = parsedReasoningFields(message);
+  const reasoning = projectedReasoningFields(message);
   const reasoningDetails = projectSessionNativeValue(reasoning.reasoningDetails);
   const codexReasoningItems = projectSessionNativeValue(reasoning.codexReasoningItems);
   const codexMessageItems = projectSessionNativeValue(reasoning.codexMessageItems);
@@ -241,7 +285,7 @@ const messageBlocks = (
   message: HermesMessageRow,
   calls: readonly Record<string, unknown>[],
 ) => {
-  const reasoning = parsedReasoningFields(message);
+  const reasoning = projectedReasoningFields(message);
   const blockInputs: NativeValue[] = [];
   const content = stringValue(message.content);
   if (content !== undefined) blockInputs.push({ type: "text", text: content });

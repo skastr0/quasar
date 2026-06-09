@@ -20,7 +20,6 @@ import {
   edgeIdFor,
   eventIdFor,
   homePath,
-  readJsonFile,
   readJsonLines,
   recordFrom,
   sourceRoot,
@@ -93,7 +92,6 @@ const buildKimiSession = (
   root: string,
   options: Parameters<SessionAdapter["read"]>[0],
   indexById: Map<string, Record<string, unknown>>,
-  state: unknown,
 ) => {
   const records = readJsonLines(wirePath).map((line) => line.value);
   const nativeSessionId = sessionIdFromWirePath(wirePath);
@@ -211,14 +209,13 @@ export const kimiAdapter: SessionAdapter = {
       };
     }
     const indexById = indexEntries(root);
-    const state = readJsonFile(join(root, "state.json"));
     const wireFiles = collectFiles(
       root,
       (path) => path.endsWith("wire.jsonl"),
       options.limit,
       options.skip,
     );
-    const sessions = wireFiles.map((path) => buildKimiSession(path, root, options, indexById, state));
+    const sessions = wireFiles.map((path) => buildKimiSession(path, root, options, indexById));
     return {
       sourceRoots: [sourceRoot("kimi", kimiAdapter.id, root, options.machine, options.now)],
       sessions,

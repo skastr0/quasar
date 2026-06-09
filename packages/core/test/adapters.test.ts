@@ -572,6 +572,90 @@ describe("adapter ingestion", () => {
     expect(encoded).not.toContain("opencode-huge-part-diff-trash");
   });
 
+  test("does not materialize unused Kimi state provider data", async () => {
+    const root = makeKimiFixture();
+    writeFileSync(
+      join(root, "state.json"),
+      JSON.stringify({
+        workspaceSnapshot: "kimi-state-workspace-trash",
+        providerUi: "kimi-state-provider-trash",
+        summary: { diffs: ["kimi-state-diff-trash"] },
+      }),
+    );
+
+    const batch = await buildIngestBatch({
+      providers: ["kimi"],
+      roots: { kimi: root },
+      machine,
+    });
+    const encoded = JSON.stringify(batch);
+
+    assertAdapterContract(batch, "kimi");
+    expect(encoded).not.toContain("kimi-state-workspace-trash");
+    expect(encoded).not.toContain("kimi-state-provider-trash");
+    expect(encoded).not.toContain("kimi-state-diff-trash");
+  });
+
+  test("caps broad Cursor SQLite cells before parsing allowed rows", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-cursor-huge-"));
+    const storage = join(root, "globalStorage");
+    mkdirSync(storage, { recursive: true });
+    const hugeCursorTrash = "cursor-huge-cell-trash".repeat(8_000);
+    execFileSync("sqlite3", [
+      join(storage, "state.vscdb"),
+      [
+        "create table ItemTable (key text, value text);",
+        `insert into ItemTable values ('cursor.composerData', ${sql(JSON.stringify({
+          messages: [
+            { id: "c1", role: "user", content: "small cursor message", workspacePath: "/Users/a/Projects/quasar" },
+          ],
+        }))});`,
+        `insert into ItemTable values ('cursor.composerHuge', ${sql(JSON.stringify({
+          messages: [
+            {
+              id: "huge",
+              role: "assistant",
+              content: hugeCursorTrash,
+              displayOnly: "cursor-huge-display-trash",
+              providerUi: "cursor-huge-provider-trash",
+            },
+          ],
+        }))});`,
+      ].join("\n"),
+    ]);
+
+    const batch = await buildIngestBatch({
+      providers: ["cursor"],
+      roots: { cursor: root },
+      machine,
+    });
+    const encoded = JSON.stringify(batch);
+
+    assertAdapterContract(batch, "cursor");
+    expect(encoded).toContain("small cursor message");
+    expect(encoded).not.toContain("cursor-huge-cell-trash");
+    expect(encoded).not.toContain("cursor-huge-display-trash");
+    expect(encoded).not.toContain("cursor-huge-provider-trash");
+  });
+
+  test("caps broad Hermes message JSON fields before adapter parsing", async () => {
+    const root = makeHermesHugeFixture();
+    const batch = await buildIngestBatch({
+      providers: ["hermes"],
+      roots: { hermes: root },
+      machine,
+    });
+    const encoded = JSON.stringify(batch);
+
+    assertAdapterContract(batch, "hermes");
+    expect(encoded).toContain("[omitted:large_hermes_content bytes=");
+    expect(encoded).toContain("large_hermes_tool_calls");
+    expect(encoded).toContain("large_hermes_reasoning_details");
+    expect(encoded).not.toContain("hermes-huge-content-trash");
+    expect(encoded).not.toContain("hermes-huge-tool-trash");
+    expect(encoded).not.toContain("hermes-huge-reasoning-trash");
+  });
+
   test("flushes streamed sessions before later adapter failures", async () => {
     const originalStream = codexAdapter.stream;
     const adapter = codexAdapter as {
@@ -1069,6 +1153,66 @@ const makeHermesFixture = async () => {
         ]))}, 1760000102, 3, 'tool_calls', 'Need the working directory.', ${sql(JSON.stringify({ effort: "low", displayOnly: "hermes-reasoning-ui-trash", summary: { cache: { state: "hermes-summary-cache-trash" } } }))});`,
       ].join(" "),
       `insert into messages (session_id, role, content, tool_call_id, tool_name, timestamp, token_count) values ('h1', 'tool', '/Users/a/Projects/quasar', 'call_1', 'terminal', 1760000103, 1);`,
+    ].join("\n"),
+  ]);
+  return root;
+};
+
+const makeHermesHugeFixture = () => {
+  const root = mkdtempSync(join(tmpdir(), "quasar-hermes-huge-"));
+  const dbPath = join(root, "state.db");
+  const hugeContentTrash = "hermes-huge-content-trash".repeat(8_000);
+  const hugeToolTrash = "hermes-huge-tool-trash".repeat(8_000);
+  const hugeReasoningTrash = "hermes-huge-reasoning-trash".repeat(8_000);
+  execFileSync("sqlite3", [
+    dbPath,
+    [
+      [
+        "create table sessions (",
+        "id text primary key,",
+        "model text,",
+        "parent_session_id text,",
+        "started_at real not null,",
+        "ended_at real,",
+        "input_tokens integer default 0,",
+        "output_tokens integer default 0,",
+        "cache_read_tokens integer default 0,",
+        "cache_write_tokens integer default 0,",
+        "reasoning_tokens integer default 0,",
+        "billing_provider text,",
+        "estimated_cost_usd real,",
+        "actual_cost_usd real,",
+        "title text,",
+        "cwd text",
+        ");",
+      ].join(" "),
+      [
+        "create table messages (",
+        "id integer primary key autoincrement,",
+        "session_id text not null references sessions(id),",
+        "role text not null,",
+        "content text,",
+        "tool_call_id text,",
+        "tool_calls text,",
+        "tool_name text,",
+        "timestamp real not null,",
+        "token_count integer,",
+        "finish_reason text,",
+        "reasoning text,",
+        "reasoning_content text,",
+        "reasoning_details text,",
+        "codex_reasoning_items text,",
+        "codex_message_items text,",
+        "platform_message_id text",
+        ");",
+      ].join(" "),
+      `insert into sessions (id, model, started_at, title, cwd) values ('h-huge', 'openai/gpt-test', 1760000200, 'Hermes huge test', '/Users/a/Projects/quasar');`,
+      [
+        "insert into messages (session_id, role, content, tool_calls, timestamp, token_count, reasoning_details) values",
+        `('h-huge', 'assistant', ${sql(hugeContentTrash)}, ${sql(JSON.stringify([
+          { id: "call_huge", function: { name: "terminal", arguments: JSON.stringify({ command: hugeToolTrash }) } },
+        ]))}, 1760000201, 1, ${sql(JSON.stringify({ text: hugeReasoningTrash }))});`,
+      ].join(" "),
     ].join("\n"),
   ]);
   return root;
