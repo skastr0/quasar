@@ -7,8 +7,29 @@ const textEncoder = new TextEncoder();
 const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 const ESCAPED_CONTROL_CHARS = /\\u00(?:0[0-9a-f]|1[0-9a-f]|7f)/gi;
 const REPLACEMENT_CHAR = /\ufffd/g;
+const SESSION_TRASH_PATHS = [
+  ["summary", "diffs"],
+  ["summary", "diff"],
+  ["summary", "patches"],
+  ["summary", "snapshots"],
+  ["summary", "cache"],
+  ["summary", "state"],
+  ["summary", "providerCache"],
+  ["summary", "providerState"],
+  ["workspace", "diffs"],
+  ["workspace", "snapshot"],
+  ["workspace", "snapshots"],
+  ["workspaceDiff"],
+  ["workspaceSnapshot"],
+  ["checkpoint"],
+  ["checkpoints"],
+  ["snapshot"],
+  ["snapshots"],
+  ["diffs"],
+  ["patches"],
+] as const;
 const NON_INDEXABLE_KEY =
-  /(encrypted[_-]?content|cipher[_-]?text|diffs?|patches?|snapshots?|checkpoint|workspaceSnapshot|workspaceDiff)/i;
+  /(encrypted[_-]?content|cipher[_-]?text|provider[_-]?(cache|state)|diffs?|patches?|snapshots?|checkpoint|workspaceSnapshot|workspaceDiff)/i;
 const SENSITIVE_KEY =
   /(authorization|password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|bearer|cookie|credential|private[_-]?key|encrypted[_-]?content|cipher[_-]?text)/i;
 const DATA_URI = /^data:[^,]{0,512},/i;
@@ -95,16 +116,38 @@ export const redactSensitive = (value: unknown, depth = 0): unknown => {
   );
 };
 
-export const stripNonIndexable = (value: unknown, depth = 0): unknown => {
+type NativePath = readonly string[];
+
+const pathKey = (path: NativePath) => path.join("\u0000");
+
+const matchesNonIndexablePath = (path: NativePath) =>
+  SESSION_TRASH_PATHS.some(
+    (candidate) =>
+      candidate.length <= path.length &&
+      pathKey(path.slice(path.length - candidate.length)) === pathKey(candidate),
+  );
+
+export const stripNonIndexable = (
+  value: unknown,
+  depth = 0,
+  path: NativePath = [],
+): unknown => {
   if (depth > 8 || value === null || value === undefined) return value;
   if (typeof value !== "object") return value;
   if (Array.isArray(value)) {
-    return value.map((item) => stripNonIndexable(item, depth + 1));
+    if (matchesNonIndexablePath(path)) return undefined;
+    return value
+      .map((item, index) => stripNonIndexable(item, depth + 1, [...path, String(index)]))
+      .filter((item) => item !== undefined);
   }
   return Object.fromEntries(
     Object.entries(value as Record<string, unknown>)
-      .filter(([key]) => !NON_INDEXABLE_KEY.test(key))
-      .map(([key, item]) => [key, stripNonIndexable(item, depth + 1)]),
+      .flatMap(([key, item]) => {
+        const childPath = [...path, key];
+        if (matchesNonIndexablePath(childPath) || NON_INDEXABLE_KEY.test(key)) return [];
+        const stripped = stripNonIndexable(item, depth + 1, childPath);
+        return stripped === undefined ? [] : [[key, stripped]];
+      }),
   );
 };
 

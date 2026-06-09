@@ -56,6 +56,15 @@ const grokToolName = (record: Record<string, unknown>) => {
   return undefined;
 };
 
+const stringContent = (record: Record<string, unknown>) =>
+  typeof record.content === "string"
+    ? record.content
+    : typeof record.text === "string"
+      ? record.text
+      : typeof record.message === "string"
+        ? record.message
+        : undefined;
+
 const grokToolCall = (
   machineId: string,
   sourcePath: string,
@@ -96,13 +105,40 @@ const grokToolCall = (
 };
 
 const grokKind = (record: Record<string, unknown>) => {
-  const type = typeof record.type === "string" ? record.type : "message";
   if (grokToolName(record) !== undefined) {
     const status = String(recordFrom(record.state).status ?? record.status ?? "");
     return status === "completed" ? ("tool_result" as const) : ("tool_call" as const);
   }
+  const type =
+    typeof record.type === "string"
+      ? record.type
+      : typeof record.method === "string"
+        ? record.method
+        : undefined;
+  if (type === undefined) {
+    return stringContent(record) === undefined ? ("lifecycle" as const) : ("message" as const);
+  }
   if (type === "assistant" || type === "user" || type === "system") return "message" as const;
   return kindFromNative(type);
+};
+
+const grokContentProjection = (record: Record<string, unknown>): NativeValue | undefined => {
+  const text = stringContent(record);
+  if (text !== undefined) return text;
+  const toolName = grokToolName(record);
+  if (toolName === undefined) return undefined;
+  const state = recordFrom(record.state);
+  const status =
+    typeof state.status === "string"
+      ? state.status
+      : typeof record.status === "string"
+        ? record.status
+        : undefined;
+  return {
+    type: "tool",
+    toolName,
+    ...(status !== undefined ? { status } : {}),
+  };
 };
 
 const grokArtifacts = (
@@ -208,14 +244,15 @@ export const grokAdapter: SessionAdapter = {
             typeof record.id === "string" ? record.id : undefined;
           const eventId = eventIdFor("grok", options.machine.machineId, chatPath, index, nativeEventId ?? lineNumber);
           const toolCallId = collectTool(chatPath, eventId, record);
+          const content = grokContentProjection(record);
           return {
             id: eventId,
             nativeEventId,
             sequence: index,
             role: roleFrom(typeof record.type === "string" ? record.type : undefined),
             kind: grokKind(record),
-            contentText: compactText(record.content as NativeValue | undefined),
-            contentSource: record.content as NativeValue | undefined,
+            contentText: compactText(content),
+            contentSource: content,
             ...(toolCallId !== undefined ? { toolCallId } : {}),
             rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: type },
           };
@@ -231,6 +268,7 @@ export const grokAdapter: SessionAdapter = {
             typeof record.id === "string" ? record.id : undefined;
           const eventId = eventIdFor("grok", options.machine.machineId, eventPath, index, nativeEventId ?? lineNumber);
           const toolCallId = collectTool(eventPath, eventId, record);
+          const content = grokContentProjection(record);
           return {
             id: eventId,
             nativeEventId,
@@ -238,8 +276,8 @@ export const grokAdapter: SessionAdapter = {
             timestamp: grokTime(record),
             role: "unknown" as const,
             kind: grokKind(record),
-            contentText: compactText(record as NativeValue),
-            contentSource: record as NativeValue,
+            contentText: compactText(content),
+            contentSource: content,
             ...(toolCallId !== undefined ? { toolCallId } : {}),
             rawReference: {
               sourcePath: eventPath,
@@ -259,14 +297,15 @@ export const grokAdapter: SessionAdapter = {
                 : "update";
           const eventId = eventIdFor("grok", options.machine.machineId, updatePath, index, lineNumber);
           const toolCallId = collectTool(updatePath, eventId, record);
+          const content = grokContentProjection(record);
           return {
             id: eventId,
             sequence: chatLines.length + eventLines.length + index,
             timestamp: grokTime(record),
             role: "system" as const,
             kind: grokKind(record),
-            contentText: compactText(record as NativeValue),
-            contentSource: record as NativeValue,
+            contentText: compactText(content),
+            contentSource: content,
             ...(toolCallId !== undefined ? { toolCallId } : {}),
             rawReference: { sourcePath: updatePath, line: lineNumber, nativeType: type },
           };

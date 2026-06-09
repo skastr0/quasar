@@ -7,6 +7,7 @@ import { describe, expect, test } from "vitest";
 
 import schema from "./schema";
 import { internal } from "./_generated/api";
+import { compactSearchText } from "./quasarText";
 
 const modules = import.meta.glob("./**/*.ts");
 const ragModules = import.meta.glob(
@@ -475,6 +476,30 @@ describe("quasar ingestion and search", () => {
     expect(encoded).not.toContain("direct-ingest-raw-trash");
     expect(encoded).not.toContain("data:image/png;base64");
     expect(encoded).not.toContain(base64);
+  });
+
+  test("keeps provider-control metadata out of compacted search text", () => {
+    const searchText = compactSearchText({
+      visible: "real session intelligence",
+      providerCache: "provider cache trash",
+      summary: {
+        text: "human-readable summary",
+        state: "summary state trash",
+        providerState: "summary provider state trash",
+        diffs: ["summary diff trash"],
+      },
+      workspace: {
+        snapshot: "workspace snapshot trash",
+      },
+    });
+
+    expect(searchText).toContain("real session intelligence");
+    expect(searchText).toContain("human-readable summary");
+    expect(searchText).not.toContain("provider cache trash");
+    expect(searchText).not.toContain("summary state trash");
+    expect(searchText).not.toContain("summary provider state trash");
+    expect(searchText).not.toContain("summary diff trash");
+    expect(searchText).not.toContain("workspace snapshot trash");
   });
 
   test("sanitizes queued import chunks before transient payload storage", async () => {

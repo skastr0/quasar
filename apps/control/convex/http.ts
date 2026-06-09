@@ -226,6 +226,22 @@ http.route({
 });
 
 http.route({
+  path: quasarApiPaths.ingestJobsSchedule,
+  method: "POST",
+  handler: handleMutation(async (ctx, req) => {
+    const input = await readJson(req, 16 * 1024);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const importJobId = typeof record.importJobId === "string" ? record.importJobId : undefined;
+    if (importJobId === undefined) return json({ error: "importJobId is required" }, 400);
+    await ctx.runMutation(internal.quasar.scheduleImportWorkerInternal, {
+      importJobId,
+      delayMs: 0,
+    });
+    return json({ importJobId, scheduled: true });
+  }),
+});
+
+http.route({
   path: quasarApiPaths.ingestJobChunks,
   method: "POST",
   handler: handleMutation(async (ctx, req) =>

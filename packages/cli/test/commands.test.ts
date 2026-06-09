@@ -11,18 +11,21 @@ import {
   buildIngestBatch,
   jsonByteLength,
   sanitizeIngestBatchForTransport,
+  streamIngestBatches,
 } from "@skastr0/quasar-core";
 import {
   DEFAULT_UPLOAD_GROUP_SIZE,
   MAX_BULK_UPLOAD_BODY_BYTES,
   MAX_UPLOAD_CHUNK_BATCH_BYTES,
   chunkIngestBatch,
+  ingestBatchPayloadHash,
   runIngestEffect,
 } from "../src/commands/ingest";
 
 const testDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(testDir, "../../..");
 const cliPath = join(repoRoot, "packages/cli/src/cli.ts");
+const testMachine = { machineId: "machine:test", hostname: "test", platform: "test" };
 
 const writeJsonl = (path: string, records: readonly unknown[]) =>
   writeFileSync(path, records.map((record) => JSON.stringify(record)).join("\n"));
@@ -231,6 +234,9 @@ describe("CLI command graph", () => {
           })),
         });
       }
+      if (spec.method === "POST" && spec.path === "/api/ingest/jobs/schedule") {
+        return Effect.succeed({ importJobId: "job:test", scheduled: true });
+      }
       if (spec.method === "GET" && spec.path === "/api/ingest/jobs") {
         return Effect.succeed({
           job: { importJobId: "job:test", status: "succeeded" },
@@ -293,6 +299,11 @@ describe("CLI command graph", () => {
     expect(
       requests.some((request) => request.method === "GET" && request.path === "/api/ingest/jobs"),
     ).toBe(true);
+    expect(
+      requests.some(
+        (request) => request.method === "POST" && request.path === "/api/ingest/jobs/schedule",
+      ),
+    ).toBe(true);
     expect(runResult?.chunkCount).toBe(3);
     expect(runResult?.uploadedChunkCount).toBe(3);
     expect(runResult?.uploadGroupCount).toBe(2);
@@ -302,12 +313,29 @@ describe("CLI command graph", () => {
   test("resumes non-dry-run ingest after already uploaded chunks", async () => {
     const root = mkdtempSync(join(tmpdir(), "quasar-cli-pi-"));
     writePiFixture(root, 12);
+    const plannedHashes: string[] = [];
+    for await (const plannedBatch of streamIngestBatches({
+      providers: ["pi"],
+      roots: { pi: root },
+      machine: testMachine,
+    })) {
+      plannedHashes.push(
+        ...chunkIngestBatch(plannedBatch, {
+          maxEventsPerChunk: 5,
+          maxOperationsPerChunk: 120,
+        }).map(ingestBatchPayloadHash),
+      );
+    }
     const previousChunkDelay = process.env.QUASAR_INGEST_CHUNK_DELAY_MS;
     const previousMaxEvents = process.env.QUASAR_INGEST_MAX_EVENTS_PER_CHUNK;
     const previousUploadGroupSize = process.env.QUASAR_INGEST_UPLOAD_GROUP_SIZE;
+    const previousQuasarHome = process.env.QUASAR_HOME;
+    const quasarHome = mkdtempSync(join(tmpdir(), "quasar-cli-home-"));
+    writeMachineIdentity(quasarHome);
     process.env.QUASAR_INGEST_CHUNK_DELAY_MS = "0";
     process.env.QUASAR_INGEST_MAX_EVENTS_PER_CHUNK = "5";
     process.env.QUASAR_INGEST_UPLOAD_GROUP_SIZE = "2";
+    process.env.QUASAR_HOME = quasarHome;
     const requests: Array<{ method: string; path: string; body?: unknown }> = [];
     const requestClient = ((spec: { method: string; path: string; body?: unknown }) => {
       requests.push({ method: spec.method, path: spec.path, body: spec.body });
@@ -334,10 +362,20 @@ describe("CLI command graph", () => {
           })),
         });
       }
+      if (spec.method === "POST" && spec.path === "/api/ingest/jobs/schedule") {
+        return Effect.succeed({ importJobId: "job:resume", scheduled: true });
+      }
       if (spec.method === "GET" && spec.path === "/api/ingest/jobs") {
         return Effect.succeed({
           job: { importJobId: "job:resume", status: "succeeded" },
-          chunks: [],
+          chunks: [
+            {
+              sequence: 0,
+              payloadHash: plannedHashes[0],
+              payloadStored: true,
+              status: "pending",
+            },
+          ],
           failures: [],
           readiness: {
             total: 0,
@@ -371,6 +409,7 @@ describe("CLI command graph", () => {
       restoreEnv("QUASAR_INGEST_CHUNK_DELAY_MS", previousChunkDelay);
       restoreEnv("QUASAR_INGEST_MAX_EVENTS_PER_CHUNK", previousMaxEvents);
       restoreEnv("QUASAR_INGEST_UPLOAD_GROUP_SIZE", previousUploadGroupSize);
+      restoreEnv("QUASAR_HOME", previousQuasarHome);
     }
     const bulkBodies = requests
       .filter((request) => request.method === "POST" && request.path === "/api/ingest/job-chunks-bulk")
@@ -384,6 +423,211 @@ describe("CLI command graph", () => {
     expect(runResult?.uploadedChunkCount).toBe(3);
     expect(runResult?.uploadedThisRunCount).toBe(2);
     expect(runResult?.skippedUploadedChunkCount).toBe(1);
+    expect(
+      requests.some(
+        (request) => request.method === "POST" && request.path === "/api/ingest/jobs/schedule",
+      ),
+    ).toBe(true);
+  }, 20_000);
+
+  test("does not resume past a mismatched server chunk", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-cli-pi-"));
+    writePiFixture(root, 12);
+    const previousChunkDelay = process.env.QUASAR_INGEST_CHUNK_DELAY_MS;
+    const previousMaxEvents = process.env.QUASAR_INGEST_MAX_EVENTS_PER_CHUNK;
+    const previousUploadGroupSize = process.env.QUASAR_INGEST_UPLOAD_GROUP_SIZE;
+    const previousQuasarHome = process.env.QUASAR_HOME;
+    const quasarHome = mkdtempSync(join(tmpdir(), "quasar-cli-home-"));
+    writeMachineIdentity(quasarHome);
+    process.env.QUASAR_INGEST_CHUNK_DELAY_MS = "0";
+    process.env.QUASAR_INGEST_MAX_EVENTS_PER_CHUNK = "5";
+    process.env.QUASAR_INGEST_UPLOAD_GROUP_SIZE = "2";
+    process.env.QUASAR_HOME = quasarHome;
+    const requests: Array<{ method: string; path: string; body?: unknown }> = [];
+    const requestClient = ((spec: { method: string; path: string; body?: unknown }) => {
+      requests.push({ method: spec.method, path: spec.path, body: spec.body });
+      if (spec.method === "POST" && spec.path === "/api/ingest/jobs") {
+        const record = spec.body as Record<string, unknown>;
+        return Effect.succeed({
+          importJobId: "job:mismatch",
+          status: "running",
+          chunkCount: 1,
+          expectedChunkCount: record.expectedChunkCount,
+        });
+      }
+      if (spec.method === "POST" && spec.path === "/api/ingest/job-chunks-bulk") {
+        const record = spec.body as { chunks?: Array<{ sequence?: number }> };
+        return Effect.succeed({
+          importJobId: "job:mismatch",
+          enqueuedCount: record.chunks?.length ?? 0,
+          results: (record.chunks ?? []).map((chunk) => ({
+            importJobId: "job:mismatch",
+            chunkId: `chunk:${chunk.sequence ?? 0}`,
+            status: "pending",
+            jobStatus: "running",
+            enqueued: true,
+          })),
+        });
+      }
+      if (spec.method === "POST" && spec.path === "/api/ingest/jobs/schedule") {
+        return Effect.succeed({ importJobId: "job:mismatch", scheduled: true });
+      }
+      if (spec.method === "GET" && spec.path === "/api/ingest/jobs") {
+        return Effect.succeed({
+          job: { importJobId: "job:mismatch", status: "running" },
+          chunks: [
+            {
+              sequence: 0,
+              payloadHash: "mismatched",
+              payloadStored: true,
+              status: "pending",
+            },
+          ],
+          failures: [],
+          readiness: {
+            total: 0,
+            pending: 0,
+            syncing: 0,
+            ready: 0,
+            skipped: 0,
+            failed: 0,
+            deadLetter: 0,
+          },
+        });
+      }
+      return Effect.fail(new Error(`Unexpected request ${spec.method} ${spec.path}`));
+    }) as NonNullable<Parameters<typeof runIngestEffect>[1]>;
+
+    const input = JSON.stringify({
+      providers: ["pi"],
+      roots: { pi: root },
+    });
+    type ResumeResult = {
+      uploadedThisRunCount: number;
+      skippedUploadedChunkCount: number;
+    };
+    let runResult: ResumeResult | undefined;
+    try {
+      runResult = await Effect.runPromise(
+        runIngestEffect(input, requestClient) as Effect.Effect<unknown, unknown, never>,
+      ) as ResumeResult;
+    } finally {
+      restoreEnv("QUASAR_INGEST_CHUNK_DELAY_MS", previousChunkDelay);
+      restoreEnv("QUASAR_INGEST_MAX_EVENTS_PER_CHUNK", previousMaxEvents);
+      restoreEnv("QUASAR_INGEST_UPLOAD_GROUP_SIZE", previousUploadGroupSize);
+      restoreEnv("QUASAR_HOME", previousQuasarHome);
+    }
+    const uploadedChunks = requests
+      .filter((request) => request.method === "POST" && request.path === "/api/ingest/job-chunks-bulk")
+      .flatMap((request) => (
+        request.body as { chunks: Array<{ sequence: number; completeJob?: boolean }> }
+      ).chunks);
+
+    expect(uploadedChunks.map((chunk) => chunk.sequence)).toEqual([0, 1, 2]);
+    expect(runResult?.uploadedThisRunCount).toBe(3);
+    expect(runResult?.skippedUploadedChunkCount).toBe(0);
+  }, 20_000);
+
+  test("schedules the import worker when every chunk was already uploaded", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-cli-pi-"));
+    writePiFixture(root, 12);
+    const plannedBatch = sanitizeIngestBatchForTransport(
+      await buildIngestBatch({
+        providers: ["pi"],
+        roots: { pi: root },
+        machine: testMachine,
+      }),
+    );
+    const plannedHashes = chunkIngestBatch(plannedBatch, {
+      maxEventsPerChunk: 5,
+      maxOperationsPerChunk: 120,
+    }).map(ingestBatchPayloadHash);
+    const previousChunkDelay = process.env.QUASAR_INGEST_CHUNK_DELAY_MS;
+    const previousMaxEvents = process.env.QUASAR_INGEST_MAX_EVENTS_PER_CHUNK;
+    const previousUploadGroupSize = process.env.QUASAR_INGEST_UPLOAD_GROUP_SIZE;
+    const previousQuasarHome = process.env.QUASAR_HOME;
+    const quasarHome = mkdtempSync(join(tmpdir(), "quasar-cli-home-"));
+    writeMachineIdentity(quasarHome);
+    process.env.QUASAR_INGEST_CHUNK_DELAY_MS = "0";
+    process.env.QUASAR_INGEST_MAX_EVENTS_PER_CHUNK = "5";
+    process.env.QUASAR_INGEST_UPLOAD_GROUP_SIZE = "2";
+    process.env.QUASAR_HOME = quasarHome;
+    const requests: Array<{ method: string; path: string; body?: unknown }> = [];
+    const requestClient = ((spec: { method: string; path: string; body?: unknown }) => {
+      requests.push({ method: spec.method, path: spec.path, body: spec.body });
+      if (spec.method === "POST" && spec.path === "/api/ingest/jobs") {
+        const record = spec.body as Record<string, unknown>;
+        return Effect.succeed({
+          importJobId: "job:complete-upload",
+          status: "running",
+          chunkCount: plannedHashes.length,
+          expectedChunkCount: record.expectedChunkCount,
+        });
+      }
+      if (spec.method === "POST" && spec.path === "/api/ingest/job-chunks-bulk") {
+        return Effect.fail(new Error("bulk upload should not run for an uploaded job"));
+      }
+      if (spec.method === "POST" && spec.path === "/api/ingest/jobs/schedule") {
+        return Effect.succeed({ importJobId: "job:complete-upload", scheduled: true });
+      }
+      if (spec.method === "GET" && spec.path === "/api/ingest/jobs") {
+        return Effect.succeed({
+          job: { importJobId: "job:complete-upload", status: "running" },
+          chunks: plannedHashes.map((payloadHash, sequence) => ({
+            sequence,
+            payloadHash,
+            payloadStored: true,
+            status: "pending",
+          })),
+          failures: [],
+          readiness: {
+            total: 0,
+            pending: 0,
+            syncing: 0,
+            ready: 0,
+            skipped: 0,
+            failed: 0,
+            deadLetter: 0,
+          },
+        });
+      }
+      return Effect.fail(new Error(`Unexpected request ${spec.method} ${spec.path}`));
+    }) as NonNullable<Parameters<typeof runIngestEffect>[1]>;
+
+    const input = JSON.stringify({
+      providers: ["pi"],
+      roots: { pi: root },
+    });
+    type ResumeResult = {
+      uploadComplete: boolean;
+      uploadedThisRunCount: number;
+      skippedUploadedChunkCount: number;
+    };
+    let runResult: ResumeResult | undefined;
+    try {
+      runResult = await Effect.runPromise(
+        runIngestEffect(input, requestClient) as Effect.Effect<unknown, unknown, never>,
+      ) as ResumeResult;
+    } finally {
+      restoreEnv("QUASAR_INGEST_CHUNK_DELAY_MS", previousChunkDelay);
+      restoreEnv("QUASAR_INGEST_MAX_EVENTS_PER_CHUNK", previousMaxEvents);
+      restoreEnv("QUASAR_INGEST_UPLOAD_GROUP_SIZE", previousUploadGroupSize);
+      restoreEnv("QUASAR_HOME", previousQuasarHome);
+    }
+
+    expect(
+      requests.some(
+        (request) => request.method === "POST" && request.path === "/api/ingest/job-chunks-bulk",
+      ),
+    ).toBe(false);
+    expect(
+      requests.some(
+        (request) => request.method === "POST" && request.path === "/api/ingest/jobs/schedule",
+      ),
+    ).toBe(true);
+    expect(runResult?.uploadComplete).toBe(true);
+    expect(runResult?.uploadedThisRunCount).toBe(0);
+    expect(runResult?.skippedUploadedChunkCount).toBe(3);
   }, 20_000);
 
   test("bounds non-dry-run upload slices without completing the job", async () => {
@@ -420,6 +664,9 @@ describe("CLI command graph", () => {
             enqueued: true,
           })),
         });
+      }
+      if (spec.method === "POST" && spec.path === "/api/ingest/jobs/schedule") {
+        return Effect.succeed({ importJobId: "job:snapshot", scheduled: true });
       }
       if (spec.method === "GET" && spec.path === "/api/ingest/jobs") {
         return Effect.succeed({
@@ -542,6 +789,9 @@ describe("CLI command graph", () => {
           })),
         });
       }
+      if (spec.method === "POST" && spec.path === "/api/ingest/jobs/schedule") {
+        return Effect.succeed({ importJobId: "job:snapshot", scheduled: true });
+      }
       if (spec.method === "GET" && spec.path === "/api/ingest/jobs") {
         return Effect.succeed({
           job: { importJobId: "job:snapshot", status: "succeeded" },
@@ -633,6 +883,11 @@ const writeCodexFixture = (root: string, count: number) => {
       })),
     ],
   );
+};
+
+const writeMachineIdentity = (quasarHome: string) => {
+  mkdirSync(quasarHome, { recursive: true });
+  writeFileSync(join(quasarHome, "machine.json"), JSON.stringify(testMachine));
 };
 
 const restoreEnv = (name: string, value: string | undefined) => {
