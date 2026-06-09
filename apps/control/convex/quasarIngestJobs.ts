@@ -1288,6 +1288,15 @@ const isTerminal = (status: ImportChunkStatus) =>
 const isClosedImportJob = (job: Doc<"importJobs">) =>
   job.status === "failed" || job.completedAt !== undefined;
 
+const isUnsuccessfulImportJob = (job: Doc<"importJobs">) =>
+  job.status === "failed" || job.status === "partial_failure";
+
+const importJobAttemptIdempotencyKey = (
+  sourceIdentityKey: string,
+  attemptNumber: number,
+) =>
+  `import-job-attempt:${wideHash(`${sourceIdentityKey}\u001f${attemptNumber}`)}`;
+
 const assertNonNegativeInteger = (value: number, label: string) => {
   if (!Number.isInteger(value) || value < 0) {
     throw new Error(`${label} must be a non-negative integer.`);
