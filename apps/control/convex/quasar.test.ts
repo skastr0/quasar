@@ -492,22 +492,101 @@ describe("quasar ingestion and search", () => {
     expect(status?.chunks[0]?.status).toBe("pending");
   });
 
-  test("closed import jobs cannot be reused by idempotency key", async () => {
+  test("closed unsuccessful import jobs allocate a fresh attempt", async () => {
     const t = setup();
     const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const sourceIdentityKey = "source:test";
     const job = await t.mutation(internal.quasar.startImportJobInternal, {
-      input: { batch, expectedChunkCount: 1 },
+      input: { batch, sourceIdentityKey, expectedChunkCount: 1 },
+    });
+    await t.action(internal.quasar.submitImportChunkInternal, {
+      input: {
+        importJobId: job.importJobId,
+        batch,
+        sequence: 0,
+        expectedChunkCount: 1,
+        completeJob: true,
+      },
     });
     await t.mutation(internal.quasar.cancelImportJobInternal, {
       importJobId: job.importJobId,
       reason: "test closed job",
     });
 
-    await expect(
-      t.mutation(internal.quasar.startImportJobInternal, {
-        input: { batch, expectedChunkCount: 1 },
-      }),
-    ).rejects.toThrow(/Import job is closed/);
+    const retry = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { batch, sourceIdentityKey, expectedChunkCount: 1 },
+    });
+    const oldStatus = await t.query(internal.quasar.readImportJobInternal, {
+      input: { importJobId: job.importJobId },
+    });
+    const retryStatus = await t.query(internal.quasar.readImportJobInternal, {
+      input: { importJobId: retry.importJobId },
+    });
+
+    expect(retry.importJobId).not.toBe(job.importJobId);
+    expect(retry).toMatchObject({ status: "queued", chunkCount: 0, attemptNumber: 1 });
+    expect(oldStatus?.chunks[0]?.status).toBe("pending");
+    expect(retryStatus?.chunks).toHaveLength(0);
+  });
+
+  test("partial failure import jobs allocate a fresh attempt", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const sourceIdentityKey = "source:partial";
+    const job = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { batch, sourceIdentityKey, expectedChunkCount: 1 },
+    });
+    await t.run(async (ctx) => {
+      const row = await ctx.db
+        .query("importJobs")
+        .withIndex("by_importJobId", (q) => q.eq("importJobId", job.importJobId))
+        .unique();
+      if (row === null) throw new Error("Import job was not found.");
+      await ctx.db.patch(row._id, {
+        status: "partial_failure",
+        completedAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+    });
+
+    const retry = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { batch, sourceIdentityKey, expectedChunkCount: 1 },
+    });
+
+    expect(retry.importJobId).not.toBe(job.importJobId);
+    expect(retry).toMatchObject({ status: "queued", chunkCount: 0, attemptNumber: 1 });
+  });
+
+  test("succeeded import jobs remain idempotent by source identity", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const sourceIdentityKey = "source:succeeded";
+    const job = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { batch, sourceIdentityKey, expectedChunkCount: 1 },
+    });
+    await t.action(internal.quasar.submitImportChunkInternal, {
+      input: {
+        importJobId: job.importJobId,
+        batch,
+        sequence: 0,
+        expectedChunkCount: 1,
+        completeJob: true,
+      },
+    });
+    await t.action(internal.quasar.processImportJobChunksInternal, {
+      importJobId: job.importJobId,
+      limit: 1,
+    });
+
+    const rerun = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { batch, sourceIdentityKey, expectedChunkCount: 1 },
+    });
+
+    expect(rerun).toMatchObject({
+      importJobId: job.importJobId,
+      status: "succeeded",
+      attemptNumber: 0,
+    });
   });
 
   test("durable import worker drains uploaded chunks before complete upload", async () => {

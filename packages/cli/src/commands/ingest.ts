@@ -408,7 +408,7 @@ const jobStatusFromPayload = (job: unknown) => {
 };
 
 const isClosedImportJobStatus = (status: string) =>
-  status === "failed" || status === "partial_failure" || status === "succeeded";
+  status === "failed" || status === "partial_failure";
 
 const validateCommand = Command.make("validate", { input: inputArg }, ({ input }) =>
   executeJsonCommand(
@@ -497,7 +497,7 @@ export const runIngestEffect = (
           path: QuasarApiPaths.ingestJobs,
           body: {
             manifest: plan.manifest,
-            idempotencyKey: plan.idempotencyKey,
+            sourceIdentityKey: plan.idempotencyKey,
             expectedChunkCount: plan.expectedChunkCount,
           },
           responseSchema: ImportJobStartResponse,

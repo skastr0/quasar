@@ -300,7 +300,7 @@ describe("CLI command graph", () => {
     );
     const uploadedChunks = bulkBodies.flatMap((body) => body.chunks);
     expect(jobRequest?.body).toMatchObject({
-      idempotencyKey: expect.stringMatching(/^import-job:/),
+      sourceIdentityKey: expect.stringMatching(/^import-job:/),
       expectedChunkCount: 3,
     });
     expect(bulkRequests).toHaveLength(2);
