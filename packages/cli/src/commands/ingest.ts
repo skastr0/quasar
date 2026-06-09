@@ -1,7 +1,9 @@
 import { execFileSync } from "node:child_process";
 import {
+  appendFileSync,
   copyFileSync,
   cpSync,
+  createReadStream,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -13,6 +15,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { createInterface } from "node:readline";
 
 import { Args, Command } from "@effect/cli";
 import { Duration, Effect, Schema } from "effect";
@@ -58,6 +61,11 @@ import { CommandInputError } from "../errors";
 import { loadJsonInput, loadOptionalJsonInput } from "../json";
 import { executeJsonCommand } from "../output";
 import { IngestOptions } from "../protocol";
+import {
+  IngestLedger,
+  type IngestLedgerChunkIdentity,
+  type IngestLedgerStatusChunk,
+} from "./ingest-ledger";
 
 const inputArg = Args.text({ name: "input" }).pipe(Args.optional);
 const requiredInputArg = Args.text({ name: "input" });
@@ -84,6 +92,7 @@ type PreparedSourceSnapshot = {
   readonly skip?: number;
   readonly generatedAt?: string;
   readonly plan?: StreamIngestPlan;
+  readonly chunkLedgerPath?: string;
   readonly generation?: {
     readonly generationId: string;
     readonly path: string;
@@ -128,8 +137,10 @@ const cleanupSourceSnapshot = (prepared: PreparedSourceSnapshot) =>
     }
   });
 
-const INGEST_GENERATION_SCHEMA_VERSION = "quasar.ingest-generation/v1";
-const INGEST_GENERATION_IDENTITY_VERSION = "quasar.ingest-generation-identity/v4";
+const INGEST_GENERATION_SCHEMA_VERSION = "quasar.ingest-generation/v2";
+const INGEST_GENERATION_IDENTITY_VERSION = "quasar.ingest-generation-identity/v5";
+const INGEST_CHUNK_LEDGER_FORMAT = "quasar.ingest-chunks-jsonl/v1";
+const INGEST_CHUNK_LEDGER_FILENAME = "chunks.ndjson";
 const STREAM_INGEST_UPLOAD_IDENTITY_VERSION = "quasar.stream-ingest/v4";
 const DURABLE_SNAPSHOT_PROVIDERS = new Set<Provider>([
   "codex",
@@ -190,9 +201,15 @@ const PersistedIngestGeneration = Schema.Struct({
   plan: Schema.Struct({
     manifest: IngestManifestSchema,
     expectedChunkCount: PersistedPositiveInteger,
-    chunkPayloadHashes: Schema.Array(Schema.String),
+    chunkPayloadFingerprint: Schema.String,
     idempotencyKey: Schema.String,
     sourceBefore: Schema.Array(SourceManifestEntrySchema),
+  }),
+  chunkLedger: Schema.Struct({
+    format: Schema.Literal(INGEST_CHUNK_LEDGER_FORMAT),
+    path: Schema.String,
+    chunkCount: PersistedNonNegativeInteger,
+    byteLength: PersistedNonNegativeInteger,
   }),
 });
 type PersistedIngestGeneration = typeof PersistedIngestGeneration.Type;
@@ -322,9 +339,9 @@ const selectedIngestGenerationAdapters = (options: IngestOptions) => {
 const canSnapshotDurableProviderSource = (provider: Provider, root: string) => {
   switch (provider) {
     case "codex":
-      return isDirectory(join(root, "sessions"));
+      return pathExistsAsDirectory(join(root, "sessions"));
     case "claude":
-      return isDirectory(join(root, "projects"));
+      return pathExistsAsDirectory(join(root, "projects"));
     case "hermes":
       return sqliteDbPathForRoot(root, "state.db") !== undefined;
     case "opencode":
@@ -348,6 +365,9 @@ const ingestGenerationDirectory = (generationId: string) =>
   join(ingestGenerationsRoot(), generationId);
 const ingestGenerationFilePath = (generationId: string) =>
   join(ingestGenerationDirectory(generationId), "generation.json");
+const ingestLedgerPath = () => join(quasarHome(), "ingest-ledger.sqlite");
+const ingestGenerationChunkLedgerPath = (generationPath: string, ledgerPath: string) =>
+  join(dirname(generationPath), ledgerPath);
 
 const readPersistedIngestGeneration = (path: string, expectedGenerationId?: string) => {
   try {
@@ -371,7 +391,18 @@ const readPersistedIngestGeneration = (path: string, expectedGenerationId?: stri
 const staleIngestGenerationIdentityError = (value: unknown) => {
   if (value === null || typeof value !== "object") return undefined;
   const record = value as Record<string, unknown>;
-  if (record.schemaVersion !== INGEST_GENERATION_SCHEMA_VERSION) return undefined;
+  const schemaVersion = record.schemaVersion;
+  const generationId = typeof record.generationId === "string"
+    ? record.generationId
+    : "unknown";
+  if (schemaVersion !== INGEST_GENERATION_SCHEMA_VERSION) {
+    return typeof schemaVersion === "string" && schemaVersion.startsWith("quasar.ingest-generation/")
+      ? new CommandInputError({
+          field: "ingestGeneration",
+          message: `Ingest generation ${generationId} uses ${schemaVersion}; current CLI requires ${INGEST_GENERATION_SCHEMA_VERSION}. Create a fresh ingest generation.`,
+        })
+      : undefined;
+  }
   const intent = record.intent;
   if (intent === null || typeof intent !== "object") return undefined;
   const identityVersion = (intent as Record<string, unknown>).identityVersion;
@@ -381,9 +412,6 @@ const staleIngestGenerationIdentityError = (value: unknown) => {
   ) {
     return undefined;
   }
-  const generationId = typeof record.generationId === "string"
-    ? record.generationId
-    : "unknown";
   return new CommandInputError({
     field: "ingestGeneration",
     message: `Ingest generation ${generationId} was created for ${identityVersion}; current CLI requires ${INGEST_GENERATION_IDENTITY_VERSION}. Create a fresh ingest generation.`,
@@ -405,9 +433,12 @@ const assertPersistedIngestGeneration = (
   if (generation.sourceIdentityKey !== generation.plan.idempotencyKey) {
     throw new Error("sourceIdentityKey does not match the persisted plan idempotencyKey");
   }
-  if (generation.plan.expectedChunkCount !== generation.plan.chunkPayloadHashes.length) {
+  if (generation.chunkLedger.format !== INGEST_CHUNK_LEDGER_FORMAT) {
+    throw new Error("chunk ledger format does not match the current CLI");
+  }
+  if (generation.plan.expectedChunkCount !== generation.chunkLedger.chunkCount) {
     throw new Error(
-      "expectedChunkCount does not match the persisted chunkPayloadHashes length",
+      "expectedChunkCount does not match the persisted chunk ledger count",
     );
   }
 };
@@ -458,7 +489,12 @@ const createPersistedIngestGeneration = (input: {
         machine: input.machine,
         generatedAt: input.generatedAt,
       };
-      const plan = yield* planStreamedIngest(streamOptions, input.chunkOptions);
+      const ledgerPath = join(tempDirectory, INGEST_CHUNK_LEDGER_FILENAME);
+      const { plan, ledger } = yield* writeStreamedIngestLedger(
+        streamOptions,
+        input.chunkOptions,
+        ledgerPath,
+      );
       const persisted: PersistedIngestGeneration = {
         schemaVersion: INGEST_GENERATION_SCHEMA_VERSION,
         generationId: input.generationId,
@@ -479,9 +515,15 @@ const createPersistedIngestGeneration = (input: {
         plan: {
           manifest: plan.manifest,
           expectedChunkCount: plan.expectedChunkCount,
-          chunkPayloadHashes: [...plan.chunkPayloadHashes],
+          chunkPayloadFingerprint: plan.chunkPayloadFingerprint,
           idempotencyKey: plan.idempotencyKey,
           sourceBefore: [...plan.sourceBefore],
+        },
+        chunkLedger: {
+          format: INGEST_CHUNK_LEDGER_FORMAT,
+          path: INGEST_CHUNK_LEDGER_FILENAME,
+          chunkCount: ledger.chunkCount,
+          byteLength: ledger.byteLength,
         },
       };
       writeFileSync(
@@ -519,10 +561,17 @@ const preparedSourceFromGeneration = (
   generation: PersistedIngestGeneration,
   path: string,
 ): PreparedSourceSnapshot => {
+  const chunkLedgerPath = ingestGenerationChunkLedgerPath(path, generation.chunkLedger.path);
   if (!existsSync(generation.sourceSnapshot.rootPath)) {
     throw new CommandInputError({
       field: "ingestGeneration",
       message: `Ingest generation ${generation.generationId} is missing its source snapshot at ${generation.sourceSnapshot.rootPath}.`,
+    });
+  }
+  if (!existsSync(chunkLedgerPath)) {
+    throw new CommandInputError({
+      field: "ingestGeneration",
+      message: `Ingest generation ${generation.generationId} is missing its chunk ledger at ${chunkLedgerPath}.`,
     });
   }
   return {
@@ -537,10 +586,11 @@ const preparedSourceFromGeneration = (
     plan: {
       manifest: generation.plan.manifest,
       expectedChunkCount: generation.plan.expectedChunkCount,
-      chunkPayloadHashes: generation.plan.chunkPayloadHashes,
+      chunkPayloadFingerprint: generation.plan.chunkPayloadFingerprint,
       idempotencyKey: generation.plan.idempotencyKey,
       sourceBefore: generation.plan.sourceBefore,
     },
+    chunkLedgerPath,
     generation: {
       generationId: generation.generationId,
       path,
@@ -641,7 +691,7 @@ const snapshotDirectoryProvider = (
   snapshotProviderRoot: string,
   childName: string,
 ) => {
-  if (!isDirectory(sourceDirectory)) return undefined;
+  if (!pathExistsAsDirectory(sourceDirectory)) return undefined;
   mkdirSync(snapshotProviderRoot, { recursive: true });
   cpSync(sourceDirectory, join(snapshotProviderRoot, childName), {
     recursive: true,
@@ -692,7 +742,7 @@ const snapshotSqliteDatabase = (sourceDbPath: string, destinationDbPath: string)
 
 const sqliteDotCommandQuote = (value: string) => `'${value.replaceAll("'", "''")}'`;
 
-const isDirectory = (path: string) => {
+const pathExistsAsDirectory = (path: string) => {
   try {
     return statSync(path).isDirectory();
   } catch {
@@ -798,6 +848,12 @@ const safeResumeUploadedChunkCount = (
   importJobId: string,
   plan: StreamIngestPlan,
   requestClient: IngestRequestClient,
+  ledgerContext?: {
+    readonly ledger: IngestLedger;
+    readonly sourceIdentityKey: string;
+    readonly generationId?: string;
+    readonly plannedChunks: readonly IngestLedgerChunkIdentity[];
+  },
 ) =>
   Effect.gen(function* () {
     let nextSequence = 0;
@@ -807,6 +863,16 @@ const safeResumeUploadedChunkCount = (
         limit: RESUME_STATUS_PAGE_LIMIT,
         chunkCursor,
       });
+      if (ledgerContext !== undefined) {
+        observeLedgerImportJobStatus(ledgerContext.ledger, {
+          sourceIdentityKey: ledgerContext.sourceIdentityKey,
+          importJobId,
+          expectedChunkCount: plan.expectedChunkCount,
+          generationId: ledgerContext.generationId,
+          status,
+          plannedChunks: ledgerContext.plannedChunks,
+        });
+      }
       const chunks = chunkStatusRows(status.chunks).sort(
         (left, right) => chunkSequence(left) - chunkSequence(right),
       );
@@ -814,7 +880,16 @@ const safeResumeUploadedChunkCount = (
       for (const chunk of chunks) {
         const sequence = chunkSequence(chunk);
         if (sequence !== nextSequence) return nextSequence;
-        const compatibility = chunkResumeCompatibility(chunk, importJobId, plan, sequence);
+        const planned = ledgerContext?.plannedChunks[sequence] ??
+          (plan.chunkPayloadHashes === undefined
+            ? undefined
+            : expectedPlanChunkIdentity(importJobId, plan, sequence));
+        if (planned === undefined) {
+          throw new Error(
+            `import job ${importJobId} has an incompatible chunk at sequence ${sequence}`,
+          );
+        }
+        const compatibility = chunkResumeCompatibility(chunk, planned);
         if (compatibility === "incompatible") {
           throw new Error(
             `import job ${importJobId} has an incompatible chunk at sequence ${sequence}`,
@@ -833,6 +908,109 @@ const safeResumeUploadedChunkCount = (
 
 const RESUME_STATUS_PAGE_LIMIT = 200;
 
+const resumeUploadedChunkCount = (input: {
+  readonly job: { readonly chunkCount: number };
+  readonly preUploadDrain?: DrainResult;
+  readonly sourceIdentityKey: string;
+  readonly importJobId: string;
+  readonly generationId?: string;
+  readonly plan: StreamIngestPlan;
+  readonly plannedChunks: readonly IngestLedgerChunkIdentity[];
+  readonly ledger: IngestLedger;
+  readonly client: IngestRequestClient;
+}) =>
+  Effect.gen(function* () {
+    if (input.job.chunkCount <= 0) return 0;
+    const ledgerPrefix = input.ledger.uploadedPrefixCount({
+      sourceIdentityKey: input.sourceIdentityKey,
+      importJobId: input.importJobId,
+      chunks: input.plannedChunks,
+    });
+    const serverPrefix = jobNumber(input.preUploadDrain?.status.job, "succeededPrefixCount");
+    if (ledgerPrefix > 0 && serverPrefix === ledgerPrefix) return ledgerPrefix;
+    return yield* safeResumeUploadedChunkCount(
+      input.importJobId,
+      input.plan,
+      input.client,
+      {
+        ledger: input.ledger,
+        sourceIdentityKey: input.sourceIdentityKey,
+        generationId: input.generationId,
+        plannedChunks: input.plannedChunks,
+      },
+    );
+  });
+
+const plannedChunkIdentities = (
+  importJobId: string,
+  plan: StreamIngestPlan,
+): IngestLedgerChunkIdentity[] =>
+  requiredPlanChunkPayloadHashes(plan).map((payloadHash, sequence) => ({
+    sequence,
+    payloadHash,
+    idempotencyKey: ingestChunkIdempotencyKey(importJobId, sequence, payloadHash),
+  }));
+
+const plannedChunkIdentitiesFromLedger = (
+  importJobId: string,
+  chunkLedgerPath: string,
+  expectedChunkCount: number,
+) =>
+  Effect.tryPromise({
+    try: async () => {
+      const identities: IngestLedgerChunkIdentity[] = [];
+      for await (const item of streamChunkLedgerItems(chunkLedgerPath, expectedChunkCount)) {
+        identities.push({
+          sequence: item.index,
+          payloadHash: item.payloadHash,
+          idempotencyKey: ingestChunkIdempotencyKey(importJobId, item.index, item.payloadHash),
+        });
+      }
+      return identities;
+    },
+    catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+  });
+
+const observeLedgerImportJobStatus = (
+  ledger: IngestLedger,
+  input: {
+    readonly sourceIdentityKey: string;
+    readonly importJobId: string;
+    readonly expectedChunkCount: number;
+    readonly generationId?: string;
+    readonly status: ImportJobStatusSnapshot;
+    readonly plannedChunks: readonly IngestLedgerChunkIdentity[];
+  },
+) => {
+  const plannedBySequence = new Map(
+    input.plannedChunks.map((chunk) => [chunk.sequence, chunk]),
+  );
+  const chunks: IngestLedgerStatusChunk[] = chunkStatusRows(input.status.chunks).flatMap((chunk) => {
+    const sequence = chunkSequence(chunk);
+    const planned = Number.isFinite(sequence) ? plannedBySequence.get(sequence) : undefined;
+    return [{
+      sequence,
+      chunkId: chunk.chunkId,
+      status: chunk.status,
+      payloadHash: chunk.payloadHash ?? planned?.payloadHash,
+      idempotencyKey: chunk.idempotencyKey ?? planned?.idempotencyKey,
+      payloadStored: chunk.payloadStored,
+      error: chunk.error,
+    }];
+  });
+  ledger.observeStatus({
+    sourceIdentityKey: input.sourceIdentityKey,
+    importJobId: input.importJobId,
+    expectedChunkCount: input.expectedChunkCount,
+    generationId: input.generationId,
+    status: input.status.jobStatus,
+    now: ledgerTimestamp(),
+    chunks,
+  });
+};
+
+const ledgerTimestamp = () => new Date().toISOString();
+
 const chunkStatusRows = (chunks: unknown) =>
   Array.isArray(chunks)
     ? chunks.filter((chunk): chunk is Record<string, unknown> =>
@@ -847,20 +1025,24 @@ const chunkSequence = (chunk: Record<string, unknown>) => {
     : Number.POSITIVE_INFINITY;
 };
 
-const chunkResumeCompatibility = (
-  chunk: Record<string, unknown>,
+const expectedPlanChunkIdentity = (
   importJobId: string,
   plan: StreamIngestPlan,
   sequence: number,
-): "safe" | "repair" | "incompatible" => {
-  const expectedHash = plan.chunkPayloadHashes[sequence];
-  if (typeof expectedHash !== "string") return "incompatible";
-  const expectedIdempotencyKey = ingestChunkIdempotencyKey(
-    importJobId,
+): IngestLedgerChunkIdentity => {
+  const payloadHash = expectedChunkPayloadHash(plan, sequence);
+  return {
     sequence,
-    expectedHash,
-  );
-  if (chunk.idempotencyKey !== expectedIdempotencyKey) {
+    payloadHash,
+    idempotencyKey: ingestChunkIdempotencyKey(importJobId, sequence, payloadHash),
+  };
+};
+
+const chunkResumeCompatibility = (
+  chunk: Record<string, unknown>,
+  planned: IngestLedgerChunkIdentity,
+): "safe" | "repair" | "incompatible" => {
+  if (chunk.idempotencyKey !== planned.idempotencyKey) {
     return "incompatible";
   }
   if (chunk.status === "succeeded") return "safe";
@@ -1059,6 +1241,7 @@ const runPreparedIngest = (input: {
   readonly generatedAt: string;
   readonly chunkOptions: Required<ChunkOptions>;
   readonly prepared: PreparedSourceSnapshot;
+  readonly ledger: IngestLedger;
 }) =>
   Effect.gen(function* () {
     const streamGeneratedAt = input.prepared.generatedAt ?? input.generatedAt;
@@ -1091,6 +1274,23 @@ const runPreparedIngest = (input: {
         message: `Import job ${job.importJobId} is ${job.status}; create a fresh ingest attempt.`,
       });
     }
+    const sourceIdentityKey = plan.idempotencyKey;
+    const plannedChunks = input.prepared.chunkLedgerPath === undefined
+      ? plannedChunkIdentities(job.importJobId, plan)
+      : yield* plannedChunkIdentitiesFromLedger(
+          job.importJobId,
+          input.prepared.chunkLedgerPath,
+          plan.expectedChunkCount,
+        );
+    input.ledger.recordPlan({
+      sourceIdentityKey,
+      importJobId: job.importJobId,
+      expectedChunkCount: plan.expectedChunkCount,
+      generationId: input.prepared.generation?.generationId,
+      status: job.status,
+      now: ledgerTimestamp(),
+      chunks: plannedChunks,
+    });
     const drainOptions = drainOptionsFromOptions(input.options);
     const preUploadDrain = job.chunkCount <= 0
       ? undefined
@@ -1098,6 +1298,16 @@ const runPreparedIngest = (input: {
           scheduleWorker: true,
           alreadyScheduled: false,
         });
+    if (preUploadDrain !== undefined) {
+      observeLedgerImportJobStatus(input.ledger, {
+        sourceIdentityKey,
+        importJobId: job.importJobId,
+        expectedChunkCount: plan.expectedChunkCount,
+        generationId: input.prepared.generation?.generationId,
+        status: preUploadDrain.status,
+        plannedChunks,
+      });
+    }
     if (preUploadDrain?.timedOut === true) {
       return yield* new CommandInputError({
         field: "importJobId",
@@ -1112,11 +1322,24 @@ const runPreparedIngest = (input: {
       streamOptions,
       chunkOptions: input.chunkOptions,
       plan,
+      chunkLedgerPath: input.prepared.chunkLedgerPath,
       client: input.client,
       importJobId: job.importJobId,
-      resumeUploadedChunkCount: job.chunkCount <= 0
-        ? 0
-        : yield* safeResumeUploadedChunkCount(job.importJobId, plan, input.client),
+      sourceIdentityKey,
+      generationId: input.prepared.generation?.generationId,
+      ledger: input.ledger,
+      plannedChunks,
+      resumeUploadedChunkCount: yield* resumeUploadedChunkCount({
+        job,
+        preUploadDrain,
+        sourceIdentityKey,
+        importJobId: job.importJobId,
+        generationId: input.prepared.generation?.generationId,
+        plan,
+        plannedChunks,
+        ledger: input.ledger,
+        client: input.client,
+      }),
       uploadGroupSize: uploadGroupSizeFromEnv(),
       maxUploadChunksPerRun: maxUploadChunksFromOptions(input.options),
       chunkDelayMs,
@@ -1133,6 +1356,19 @@ const runPreparedIngest = (input: {
       : undefined;
     const status = postUploadDrain?.status ??
       (yield* readImportJob(job.importJobId, input.client, { limit: 0 }));
+    observeLedgerImportJobStatus(input.ledger, {
+      sourceIdentityKey,
+      importJobId: job.importJobId,
+      expectedChunkCount: plan.expectedChunkCount,
+      generationId: input.prepared.generation?.generationId,
+      status,
+      plannedChunks,
+    });
+    const ledger = input.ledger.summary({
+      sourceIdentityKey,
+      importJobId: job.importJobId,
+      chunks: plannedChunks,
+    });
     const after = resnapshotSourceManifestEntries(plan.sourceBefore);
     return {
       ...summaryFromManifest(plan.manifest),
@@ -1150,6 +1386,7 @@ const runPreparedIngest = (input: {
         ...(postUploadDrain !== undefined ? { afterUpload: drainPublicResult(postUploadDrain) } : {}),
       },
       status,
+      ledger,
       ingestGeneration: input.prepared.generation,
       sourceSnapshot: input.prepared.sourceSnapshot,
       sourceSafetyReport: createSourceSafetyReport({
@@ -1188,6 +1425,7 @@ export const runIngestEffect = (
     const generatedAt = new Date().toISOString();
     const chunkOptions = chunkOptionsFromEnv();
     const prepared = yield* prepareRunSource(options, machine, generatedAt, chunkOptions);
+    const ledger = new IngestLedger(ingestLedgerPath());
     try {
       return yield* runPreparedIngest({
         options,
@@ -1196,8 +1434,10 @@ export const runIngestEffect = (
         generatedAt,
         chunkOptions,
         prepared,
+        ledger,
       });
     } finally {
+      ledger.close();
       yield* cleanupSourceSnapshot(prepared);
     }
   });
@@ -1247,9 +1487,16 @@ type StreamIngestOptions = StreamIngestBatchOptions & {
 type StreamIngestPlan = {
   readonly manifest: IngestManifest;
   readonly expectedChunkCount: number;
-  readonly chunkPayloadHashes: readonly string[];
+  readonly chunkPayloadHashes?: readonly string[];
+  readonly chunkPayloadFingerprint: string;
   readonly idempotencyKey: string;
   readonly sourceBefore: readonly SourceManifestEntry[];
+};
+
+type ChunkUploadItem = {
+  readonly chunk: IngestBatch;
+  readonly index: number;
+  readonly payloadHash: string;
 };
 
 type IngestManifestDraft = {
@@ -1277,6 +1524,7 @@ const planStreamedIngest = (
       const manifest = emptyIngestManifest(streamOptions.machine, streamOptions.generatedAt);
       const sourceBefore = new Map<string, SourceManifestEntry>();
       const chunkPayloadHashes: string[] = [];
+      let chunkPayloadFingerprint = emptyChunkPayloadFingerprint();
       for await (const rawBatch of streamIngestBatches(streamOptions)) {
         const batch = toConvexSafeSessionIntelligenceBatch(rawBatch);
         mergeManifest(manifest, manifestFromBatch(batch));
@@ -1286,7 +1534,13 @@ const planStreamedIngest = (
         const chunks = chunkIngestBatch(batch, chunkOptions);
         validateChunkPayloads(chunks);
         for (const chunk of chunks) {
-          chunkPayloadHashes.push(ingestBatchPayloadHash(chunk));
+          const payloadHash = ingestBatchPayloadHash(chunk);
+          chunkPayloadHashes.push(payloadHash);
+          chunkPayloadFingerprint = updateChunkPayloadFingerprint(
+            chunkPayloadFingerprint,
+            chunkPayloadHashes.length - 1,
+            payloadHash,
+          );
         }
       }
       const plannedManifest: IngestManifest = manifest;
@@ -1294,44 +1548,117 @@ const planStreamedIngest = (
         manifest: plannedManifest,
         expectedChunkCount: chunkPayloadHashes.length,
         chunkPayloadHashes,
-        idempotencyKey: streamedIngestJobIdempotencyKey(plannedManifest, chunkPayloadHashes),
+        chunkPayloadFingerprint,
+        idempotencyKey: streamedIngestJobIdempotencyKey(plannedManifest, chunkPayloadFingerprint),
         sourceBefore: sortedSourceManifestEntries(sourceBefore.values()),
       };
     },
     catch: (error) => (error instanceof Error ? error : new Error(String(error))),
   });
 
-const uploadStreamedIngest = (input: {
+const writeStreamedIngestLedger = (
+  streamOptions: StreamIngestOptions,
+  chunkOptions: Required<ChunkOptions>,
+  ledgerPath: string,
+) =>
+  Effect.tryPromise({
+    try: async () => {
+      writeFileSync(ledgerPath, "", { encoding: "utf8", mode: 0o600 });
+      const manifest = emptyIngestManifest(streamOptions.machine, streamOptions.generatedAt);
+      const sourceBefore = new Map<string, SourceManifestEntry>();
+      let chunkPayloadFingerprint = emptyChunkPayloadFingerprint();
+      let chunkCount = 0;
+      let byteLength = 0;
+      for await (const rawBatch of streamIngestBatches(streamOptions)) {
+        const batch = toConvexSafeSessionIntelligenceBatch(rawBatch);
+        mergeManifest(manifest, manifestFromBatch(batch));
+        for (const entry of snapshotIngestSourceManifest(rawBatch)) {
+          sourceBefore.set(sourceManifestKey(entry), entry);
+        }
+        for (const chunk of chunkIngestBatch(batch, chunkOptions)) {
+          assertJsonBudget(chunk, MAX_UPLOAD_CHUNK_BATCH_BYTES, `chunk ${chunkCount}`);
+          const payloadHash = ingestBatchPayloadHash(chunk);
+          const payloadBytes = jsonByteLength(chunk);
+          chunkPayloadFingerprint = updateChunkPayloadFingerprint(
+            chunkPayloadFingerprint,
+            chunkCount,
+            payloadHash,
+          );
+          const line = `${JSON.stringify({
+            format: INGEST_CHUNK_LEDGER_FORMAT,
+            sequence: chunkCount,
+            payloadHash,
+            payloadBytes,
+            batch: chunk,
+          })}\n`;
+          appendFileSync(ledgerPath, line, { encoding: "utf8" });
+          byteLength += Buffer.byteLength(line, "utf8");
+          chunkCount += 1;
+        }
+      }
+      const plannedManifest: IngestManifest = manifest;
+      const plan: StreamIngestPlan = {
+        manifest: plannedManifest,
+        expectedChunkCount: chunkCount,
+        chunkPayloadFingerprint,
+        idempotencyKey: streamedIngestJobIdempotencyKey(plannedManifest, chunkPayloadFingerprint),
+        sourceBefore: sortedSourceManifestEntries(sourceBefore.values()),
+      };
+      return { plan, ledger: { chunkCount, byteLength } };
+    },
+    catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+  });
+
+type UploadStreamedIngestInput = {
   readonly streamOptions: StreamIngestOptions;
   readonly chunkOptions: Required<ChunkOptions>;
   readonly plan: StreamIngestPlan;
+  readonly chunkLedgerPath?: string;
   readonly client: IngestRequestClient;
   readonly importJobId: string;
+  readonly sourceIdentityKey: string;
+  readonly generationId?: string;
+  readonly ledger: IngestLedger;
+  readonly plannedChunks: readonly IngestLedgerChunkIdentity[];
   readonly resumeUploadedChunkCount: number;
   readonly uploadGroupSize: number;
   readonly maxUploadChunksPerRun?: number;
   readonly chunkDelayMs: number;
   readonly progress: UploadProgressOptions;
-}) =>
+};
+
+type UploadProgressState = {
+  readonly uploadedThisRunCount: number;
+  readonly uploadedChunkCount: number;
+  readonly uploadGroupCount: number;
+};
+
+const uploadStreamedIngest = (input: UploadStreamedIngestInput) =>
   Effect.gen(function* () {
-    const iterator = streamChunkBatches(input.streamOptions, input.chunkOptions)[Symbol.asyncIterator]();
-    let group: Array<{ chunk: IngestBatch; index: number }> = [];
+    const iterator = (
+      input.chunkLedgerPath === undefined
+        ? streamChunkItems(input.streamOptions, input.chunkOptions)
+        : streamChunkLedgerItems(input.chunkLedgerPath, input.plan.expectedChunkCount)
+    )[Symbol.asyncIterator]();
+    let group: ChunkUploadItem[] = [];
     const skippedUploadedChunkCount = Math.min(
       Math.max(0, input.resumeUploadedChunkCount),
       input.plan.expectedChunkCount,
     );
-    let uploadedThisRunCount = 0;
-    let uploadedChunkCount = skippedUploadedChunkCount;
-    let uploadGroupCount = 0;
+    let progressState: UploadProgressState = {
+      uploadedThisRunCount: 0,
+      uploadedChunkCount: skippedUploadedChunkCount,
+      uploadGroupCount: 0,
+    };
     let uploadStoppedEarly = false;
-    let index = 0;
-    yield* emitUploadProgress(input, uploadedChunkCount, uploadGroupCount);
+    let iteratedChunkCount = 0;
+    yield* emitUploadProgress(input, progressState.uploadedChunkCount, progressState.uploadGroupCount);
     if (skippedUploadedChunkCount >= input.plan.expectedChunkCount) {
       return {
-        uploadedChunkCount,
-        uploadedThisRunCount,
+        uploadedChunkCount: progressState.uploadedChunkCount,
+        uploadedThisRunCount: progressState.uploadedThisRunCount,
         skippedUploadedChunkCount,
-        uploadGroupCount,
+        uploadGroupCount: progressState.uploadGroupCount,
         uploadComplete: true,
         uploadStoppedEarly: false,
       };
@@ -1339,7 +1666,7 @@ const uploadStreamedIngest = (input: {
     while (true) {
       if (
         input.maxUploadChunksPerRun !== undefined &&
-        uploadedThisRunCount + group.length >= input.maxUploadChunksPerRun
+        progressState.uploadedThisRunCount + group.length >= input.maxUploadChunksPerRun
       ) {
         uploadStoppedEarly = true;
         break;
@@ -1349,19 +1676,15 @@ const uploadStreamedIngest = (input: {
         catch: (error) => (error instanceof Error ? error : new Error(String(error))),
       });
       if (next.done === true) break;
-      const chunk = next.value;
+      const item = next.value;
+      const { chunk, index } = item;
+      iteratedChunkCount = index + 1;
       if (index < skippedUploadedChunkCount) {
-        index += 1;
         continue;
       }
       assertJsonBudget(chunk, MAX_UPLOAD_CHUNK_BATCH_BYTES, `chunk ${index}`);
-      const expectedHash = input.plan.chunkPayloadHashes[index];
-      const actualHash = ingestBatchPayloadHash(chunk);
-      if (expectedHash !== actualHash) {
-        throw new Error(`ingest source changed between planning and upload at chunk ${index}`);
-      }
-      const item = { chunk, index };
-      const candidate = [...group, item];
+      const uploadItem = validatedUploadItem(input, item);
+      const candidate = [...group, uploadItem];
       const nextBytes = jsonByteLength(
         bulkUploadRequestBody(input.importJobId, input.plan, candidate),
       );
@@ -1369,39 +1692,61 @@ const uploadStreamedIngest = (input: {
         group.length > 0 &&
         (group.length >= input.uploadGroupSize || nextBytes > MAX_BULK_UPLOAD_BODY_BYTES)
       ) {
-        yield* uploadChunkGroup(input, group);
-        uploadedThisRunCount += group.length;
-        uploadedChunkCount += group.length;
-        uploadGroupCount += 1;
-        yield* emitUploadProgress(input, uploadedChunkCount, uploadGroupCount);
-        group = [item];
+        progressState = yield* flushUploadGroup(input, group, progressState);
+        group = [uploadItem];
       } else {
         group = candidate;
       }
-      index += 1;
     }
     if (group.length > 0) {
-      yield* uploadChunkGroup(input, group);
-      uploadedThisRunCount += group.length;
-      uploadedChunkCount += group.length;
-      uploadGroupCount += 1;
-      yield* emitUploadProgress(input, uploadedChunkCount, uploadGroupCount, {
+      progressState = yield* flushUploadGroup(input, group, progressState, {
         force: uploadStoppedEarly,
       });
     }
-    if (!uploadStoppedEarly && index !== input.plan.expectedChunkCount) {
+    if (!uploadStoppedEarly && iteratedChunkCount !== input.plan.expectedChunkCount) {
       throw new Error(
-        `ingest planned ${input.plan.expectedChunkCount} chunks but uploaded ${index}`,
+        `ingest planned ${input.plan.expectedChunkCount} chunks but uploaded ${iteratedChunkCount}`,
       );
     }
     return {
-      uploadedChunkCount,
-      uploadedThisRunCount,
+      uploadedChunkCount: progressState.uploadedChunkCount,
+      uploadedThisRunCount: progressState.uploadedThisRunCount,
       skippedUploadedChunkCount,
-      uploadGroupCount,
-      uploadComplete: uploadedChunkCount >= input.plan.expectedChunkCount,
+      uploadGroupCount: progressState.uploadGroupCount,
+      uploadComplete: progressState.uploadedChunkCount >= input.plan.expectedChunkCount,
       uploadStoppedEarly,
     };
+  });
+
+const validatedUploadItem = (
+  input: UploadStreamedIngestInput,
+  item: ChunkUploadItem,
+): ChunkUploadItem => {
+  const actualHash = ingestBatchPayloadHash(item.chunk);
+  const expectedHash = input.chunkLedgerPath === undefined
+    ? requiredPlanChunkPayloadHashes(input.plan)[item.index]
+    : item.payloadHash;
+  if (expectedHash === undefined || expectedHash !== actualHash) {
+    throw new Error(`ingest source changed between planning and upload at chunk ${item.index}`);
+  }
+  return { ...item, payloadHash: expectedHash };
+};
+
+const flushUploadGroup = (
+  input: UploadStreamedIngestInput,
+  group: readonly ChunkUploadItem[],
+  state: UploadProgressState,
+  progressOptions: { readonly force?: boolean } = {},
+) =>
+  Effect.gen(function* () {
+    yield* uploadChunkGroup(input, group);
+    const next = {
+      uploadedThisRunCount: state.uploadedThisRunCount + group.length,
+      uploadedChunkCount: state.uploadedChunkCount + group.length,
+      uploadGroupCount: state.uploadGroupCount + 1,
+    };
+    yield* emitUploadProgress(input, next.uploadedChunkCount, next.uploadGroupCount, progressOptions);
+    return next;
   });
 
 type UploadProgressOptions = {
@@ -1452,10 +1797,14 @@ const uploadChunkGroup = (
   input: {
     readonly client: IngestRequestClient;
     readonly importJobId: string;
+    readonly sourceIdentityKey: string;
+    readonly generationId?: string;
+    readonly ledger: IngestLedger;
     readonly plan: StreamIngestPlan;
+    readonly plannedChunks: readonly IngestLedgerChunkIdentity[];
     readonly chunkDelayMs: number;
   },
-  group: readonly { chunk: IngestBatch; index: number }[],
+  group: readonly ChunkUploadItem[],
 ) =>
   Effect.gen(function* () {
     const requestBody = bulkUploadRequestBody(input.importJobId, input.plan, group);
@@ -1464,26 +1813,88 @@ const uploadChunkGroup = (
       MAX_BULK_UPLOAD_BODY_BYTES,
       `bulk upload group ending at chunk ${group.at(-1)?.index ?? 0}`,
     );
-    yield* input.client({
+    const ledgerChunks = ledgerChunkIdentitiesForGroup(input.plannedChunks, group);
+    input.ledger.markUploading({
+      sourceIdentityKey: input.sourceIdentityKey,
+      importJobId: input.importJobId,
+      chunks: ledgerChunks,
+      now: ledgerTimestamp(),
+    });
+    const response = yield* input.client({
       method: "POST",
       path: QuasarApiPaths.ingestJobChunksBulk,
       body: requestBody,
       responseSchema: Schema.Unknown,
+    });
+    const now = ledgerTimestamp();
+    input.ledger.markAcknowledged({
+      sourceIdentityKey: input.sourceIdentityKey,
+      importJobId: input.importJobId,
+      chunks: ledgerChunks,
+      now,
+    });
+    input.ledger.observeStatus({
+      sourceIdentityKey: input.sourceIdentityKey,
+      importJobId: input.importJobId,
+      expectedChunkCount: input.plan.expectedChunkCount,
+      generationId: input.generationId,
+      status: "running",
+      now,
+      chunks: bulkResponseStatusChunks(response, ledgerChunks),
     });
     if (group.at(-1)?.index !== input.plan.expectedChunkCount - 1 && input.chunkDelayMs > 0) {
       yield* Effect.sleep(Duration.millis(input.chunkDelayMs));
     }
   });
 
-async function* streamChunkBatches(
+async function* streamChunkItems(
   streamOptions: StreamIngestOptions,
   chunkOptions: Required<ChunkOptions>,
-): AsyncGenerator<IngestBatch> {
+): AsyncGenerator<ChunkUploadItem> {
+  let index = 0;
   for await (const rawBatch of streamIngestBatches(streamOptions)) {
     const batch = toConvexSafeSessionIntelligenceBatch(rawBatch);
     for (const chunk of chunkIngestBatch(batch, chunkOptions)) {
-      yield chunk;
+      yield { chunk, index, payloadHash: ingestBatchPayloadHash(chunk) };
+      index += 1;
     }
+  }
+}
+
+async function* streamChunkLedgerItems(
+  chunkLedgerPath: string,
+  expectedChunkCount: number,
+): AsyncGenerator<ChunkUploadItem> {
+  const lines = createInterface({
+    input: createReadStream(chunkLedgerPath, { encoding: "utf8" }),
+    crlfDelay: Infinity,
+  });
+  let index = 0;
+  for await (const line of lines) {
+    if (line.trim().length === 0) continue;
+    const record = JSON.parse(line) as Record<string, unknown>;
+    if (record.format !== INGEST_CHUNK_LEDGER_FORMAT) {
+      throw new Error(`chunk ledger ${chunkLedgerPath} has an unsupported row format`);
+    }
+    if (record.sequence !== index) {
+      throw new Error(`chunk ledger ${chunkLedgerPath} is missing sequence ${index}`);
+    }
+    if (typeof record.payloadHash !== "string" || record.payloadHash.length === 0) {
+      throw new Error(`chunk ledger ${chunkLedgerPath} is missing payloadHash for sequence ${index}`);
+    }
+    const chunk = record.batch as IngestBatch;
+    assertJsonBudget(chunk, MAX_UPLOAD_CHUNK_BATCH_BYTES, `chunk ${index}`);
+    const actualHash = ingestBatchPayloadHash(chunk);
+    if (record.payloadHash !== actualHash) {
+      throw new Error(`chunk ledger ${chunkLedgerPath} payload hash changed at sequence ${index}`);
+    }
+    yield { chunk, index, payloadHash: record.payloadHash };
+    index += 1;
+  }
+  if (index !== expectedChunkCount) {
+    throw new Error(
+      `chunk ledger ${chunkLedgerPath} has ${index} chunk(s); expected ${expectedChunkCount}`,
+    );
   }
 }
 
@@ -1538,14 +1949,34 @@ const summaryFromManifest = (manifest: IngestManifest) => ({
 
 const streamedIngestJobIdempotencyKey = (
   manifest: IngestManifest,
-  chunkPayloadHashes: readonly string[],
+  chunkPayloadFingerprint: string,
 ) =>
   `import-job:${stableJsonHash([
     STREAM_INGEST_UPLOAD_IDENTITY_VERSION,
     SESSION_INTELLIGENCE_CONTRACT_VERSION,
     manifestIdentityFromManifest(manifest),
-    chunkPayloadHashes.map((hash, sequence) => [sequence, hash]),
+    chunkPayloadFingerprint,
   ])}`;
+
+const emptyChunkPayloadFingerprint = () =>
+  stableWideHash(JSON.stringify([
+    STREAM_INGEST_UPLOAD_IDENTITY_VERSION,
+    SESSION_INTELLIGENCE_CONTRACT_VERSION,
+    "chunk-payload-fingerprint/v1",
+  ]));
+
+const updateChunkPayloadFingerprint = (
+  previous: string,
+  sequence: number,
+  payloadHash: string,
+) =>
+  stableWideHash(JSON.stringify([
+    STREAM_INGEST_UPLOAD_IDENTITY_VERSION,
+    SESSION_INTELLIGENCE_CONTRACT_VERSION,
+    previous,
+    sequence,
+    payloadHash,
+  ]));
 
 const manifestIdentityFromManifest = (manifest: IngestManifest) => ({
   ...manifest,
@@ -1568,22 +1999,58 @@ const sortedSourceManifestEntries = (entries: Iterable<SourceManifestEntry>) =>
 const bulkUploadRequestBody = (
   importJobId: string,
   plan: StreamIngestPlan,
-  group: readonly { chunk: IngestBatch; index: number }[],
+  group: readonly ChunkUploadItem[],
 ) => ({
   importJobId,
   expectedChunkCount: plan.expectedChunkCount,
   scheduleWorker: false,
-  chunks: group.map(({ chunk, index }) => ({
+  chunks: group.map(({ chunk, index, payloadHash }) => ({
     batch: chunk,
     sequence: index,
     idempotencyKey: ingestChunkIdempotencyKey(
       importJobId,
       index,
-      expectedChunkPayloadHash(plan, index),
+      payloadHash,
     ),
     completeJob: index === plan.expectedChunkCount - 1,
   })),
 });
+
+const ledgerChunkIdentitiesForGroup = (
+  plannedChunks: readonly IngestLedgerChunkIdentity[],
+  group: readonly { index: number }[],
+) =>
+  group.map(({ index }) => {
+    const planned = plannedChunks[index];
+    if (planned === undefined) {
+      throw new Error(`missing planned ingest chunk ledger identity for sequence ${index}`);
+    }
+    return planned;
+  });
+
+const bulkResponseStatusChunks = (
+  response: unknown,
+  fallback: readonly IngestLedgerChunkIdentity[],
+): IngestLedgerStatusChunk[] => {
+  if (response === null || typeof response !== "object") return [...fallback];
+  const results = (response as Record<string, unknown>).results;
+  if (!Array.isArray(results)) return [...fallback];
+  return results.flatMap((result, index) => {
+    const fallbackChunk = fallback[index];
+    if (fallbackChunk === undefined) return [];
+    if (result === null || typeof result !== "object") return [];
+    const record = result as Record<string, unknown>;
+    const chunkId = typeof record.chunkId === "string" ? record.chunkId : undefined;
+    return [{
+      sequence: fallbackChunk.sequence,
+      chunkId,
+      status: record.status,
+      payloadHash: fallbackChunk.payloadHash,
+      idempotencyKey: fallbackChunk.idempotencyKey,
+      payloadStored: true,
+    }];
+  });
+};
 
 const validateChunkPayloads = (chunks: readonly IngestBatch[]) => {
   for (let index = 0; index < chunks.length; index += 1) {
@@ -1608,7 +2075,14 @@ export const ingestJobIdempotencyKey = (
 ) =>
   streamedIngestJobIdempotencyKey(
     manifestFromBatch(batch),
-    chunks.map(ingestBatchPayloadHash),
+    chunkPayloadFingerprintFromHashes(chunks.map(ingestBatchPayloadHash)),
+  );
+
+const chunkPayloadFingerprintFromHashes = (hashes: readonly string[]) =>
+  hashes.reduce(
+    (fingerprint, payloadHash, sequence) =>
+      updateChunkPayloadFingerprint(fingerprint, sequence, payloadHash),
+    emptyChunkPayloadFingerprint(),
   );
 
 export const ingestBatchPayloadHash = (batch: IngestBatch) =>
@@ -1630,11 +2104,18 @@ export const ingestChunkIdempotencyKey = (
   )}`;
 
 const expectedChunkPayloadHash = (plan: StreamIngestPlan, index: number) => {
-  const payloadHash = plan.chunkPayloadHashes[index];
+  const payloadHash = requiredPlanChunkPayloadHashes(plan)[index];
   if (payloadHash === undefined) {
     throw new Error(`missing planned ingest chunk hash for sequence ${index}`);
   }
   return payloadHash;
+};
+
+const requiredPlanChunkPayloadHashes = (plan: StreamIngestPlan) => {
+  if (plan.chunkPayloadHashes === undefined) {
+    throw new Error("planned ingest chunk hashes are unavailable; use the durable chunk ledger");
+  }
+  return plan.chunkPayloadHashes;
 };
 
 const batchPayloadIdentity = (batch: IngestBatch) => ({

@@ -514,6 +514,7 @@ const collectArtifacts = (
     const type = typeof record.type === "string" ? record.type.toLowerCase() : "";
     if (!type.includes("diff") && !type.includes("patch")) return [];
     const path = typeof record.path === "string" ? record.path : undefined;
+    if (path === undefined) return [];
     return [
       {
         id: artifactIdFor("opencode", machineId, dbPath, nativeSessionId, [eventId, index, path, type]),

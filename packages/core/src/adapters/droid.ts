@@ -81,7 +81,8 @@ const artifactFromRecord = (
 ): DroidArtifactDraft[] => {
   const type = String(record.type ?? record.kind ?? "").toLowerCase();
   const path = typeof record.path === "string" ? record.path : typeof record.filePath === "string" ? record.filePath : undefined;
-  if (!type.includes("artifact") && !type.includes("diff") && !type.includes("patch")) return [];
+  const isPatchLike = type.includes("diff") || type.includes("patch");
+  if (!type.includes("artifact") && (!isPatchLike || path === undefined)) return [];
   const metadata = projectSessionPatchNativeValue(record.content ?? record.patch ?? record.diff);
   return [
     {
