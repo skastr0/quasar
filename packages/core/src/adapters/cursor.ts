@@ -59,6 +59,7 @@ const CURSOR_DENY = /(auth|token|secret|credential|password|api[_-]?key|keychain
 const CURSOR_DB_ALLOW = /(state\.vscdb|composer|chat|conversation|bubble|history|workspaceStorage|globalStorage)/i;
 const CURSOR_TABLE_ALLOW = /(ItemTable|composer|chat|conversation|bubble|message|cursor)/i;
 const CURSOR_KEY_ALLOW = /(composer|chat|conversation|bubble|message|ai|aichat|inlinechat|cursor|tool)/i;
+const CURSOR_ROW_DENY = /(cache|display|provider[_-]?ui|ui[_-]?state)/i;
 const CURSOR_MAX_SQL_CELL_BYTES = 128 * 1024;
 
 const cursorDbLike = (path: string) =>
@@ -154,6 +155,7 @@ const cursorRowAllowed = (table: string, row: Record<string, unknown>) => {
     .map((value) => String(value ?? ""))
     .join(" ");
   if (CURSOR_DENY.test(keyText)) return false;
+  if (CURSOR_ROW_DENY.test(keyText)) return false;
   return CURSOR_KEY_ALLOW.test(keyText);
 };
 

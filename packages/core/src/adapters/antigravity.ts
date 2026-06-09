@@ -40,6 +40,10 @@ type AntigravityArtifactDraft = Omit<
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
 >;
 
+const ANTIGRAVITY_ARTIFACT_FILE_LIMIT = 100;
+const ANTIGRAVITY_ARTIFACT_PATH_DENY =
+  /(^|[\\/])(\.cache|cache|state|display|blob|blobs|node_modules|tmp|temp)([\\/]|$)|\.(bin|db|sqlite|sqlite3|cache|tmp)$/i;
+
 const transcriptLike = (path: string) => {
   const name = basename(path).toLowerCase();
   if (name.includes("hook") || /[\\/](hooks?|callbacks?)([\\/]|$)/i.test(path)) return false;
@@ -54,15 +58,16 @@ const transcriptLike = (path: string) => {
 const artifactFilesForTranscript = (path: string, limit: number | undefined) => {
   const sessionDir = dirname(path);
   const roots = ["artifacts", "artifact", "outputs", "output"].map((name) => join(sessionDir, name));
+  const artifactLimit = Math.min(limit ?? ANTIGRAVITY_ARTIFACT_FILE_LIMIT, ANTIGRAVITY_ARTIFACT_FILE_LIMIT);
   return roots.flatMap((root) =>
     existsSync(root)
       ? collectFiles(root, (candidate) => {
           try {
-            return statSync(candidate).isFile();
+            return statSync(candidate).isFile() && !ANTIGRAVITY_ARTIFACT_PATH_DENY.test(candidate);
           } catch {
             return false;
           }
-        }, limit)
+        }, artifactLimit)
       : [],
   );
 };

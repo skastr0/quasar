@@ -367,9 +367,7 @@ export const contentBlocksFromNative = (
     }
     if (
       lowerType?.includes("file") === true ||
-      record.file !== undefined ||
-      record.file_path !== undefined ||
-      record.filePath !== undefined
+      record.file !== undefined
     ) {
       pushBlock({
         kind: "file",
@@ -381,6 +379,29 @@ export const contentBlocksFromNative = (
       return true;
     }
     return false;
+  };
+  const providerMetadataOnly = (record: Record<string, unknown>) => {
+    const hasLocator =
+      record.path !== undefined ||
+      record.file_path !== undefined ||
+      record.filePath !== undefined ||
+      record.filename !== undefined ||
+      record.uri !== undefined ||
+      record.url !== undefined;
+    const hasProviderDisplay =
+      record.displayOnly !== undefined ||
+      record.display_only !== undefined ||
+      record.providerUi !== undefined ||
+      record.provider_ui !== undefined ||
+      record.uiState !== undefined ||
+      record.viewState !== undefined;
+    const hasSemanticText =
+      typeof record.text === "string" ||
+      typeof record.content === "string" ||
+      typeof record.message === "string" ||
+      typeof record.thinking === "string" ||
+      typeof record.markdown === "string";
+    return hasLocator && hasProviderDisplay && !hasSemanticText;
   };
   const visit = (item: unknown) => {
     if (item === undefined || item === null) return;
@@ -414,12 +435,21 @@ export const contentBlocksFromNative = (
     if (record.content !== undefined) visit(record.content);
     if (record.parts !== undefined) visit(record.parts);
     if (record.message !== undefined) visit(record.message);
-    if (blocks.length === before && !pushedMediaOrFile) {
+    if (blocks.length === before && !pushedMediaOrFile && !providerMetadataOnly(record)) {
       const text = compactText(record as NativeValue);
       if (text !== undefined) pushText("text", text, metadataFor(record, type));
     }
   };
   visit(value);
+  if (
+    blocks.length === 0 &&
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    providerMetadataOnly(value as Record<string, unknown>)
+  ) {
+    return [];
+  }
   if (blocks.length > 0) return blocks;
   const text = compactText(value as NativeValue | undefined);
   return textBlock(provider, machineId, sourcePath, eventId, 0, text);
