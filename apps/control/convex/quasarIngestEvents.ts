@@ -96,9 +96,11 @@ const eventSearchDocument = (
   safeContent: unknown,
 ): SearchDocumentUpsertInput => {
   const toolBacked = isToolBackedEvent(eventPatch);
+  const canonicalText = compactSearchText(eventPatch.contentText);
+  const metadata = toolBacked ? toolMetadata(safeContent) : eventContentMetadata(safeContent);
   const summary = toolBacked
-    ? compactSearchText([eventPatch.kind, toolMetadata(safeContent)])
-    : safeSummary(eventPatch.contentText, safeContent);
+    ? compactSearchText([eventPatch.kind, metadata])
+    : safeSummary(canonicalText, metadata);
   return {
     searchDocumentId: `event:${eventPatch.eventId}`,
     sourceTable: "sessionEvents",
@@ -114,12 +116,13 @@ const eventSearchDocument = (
     title: `${state.providerValue} ${event.kind}`,
     summary,
     searchText: toolBacked
-      ? compactSearchText([summary, eventPatch.toolCallId, toolMetadata(safeContent)])
-      : compactSearchText([summary, safeContent]),
+      ? compactSearchText([summary, eventPatch.toolCallId, metadata])
+      : compactSearchText([canonicalText, metadata]),
+    embeddingText: canonicalText.length > 0 ? canonicalText : undefined,
     sourcePath: eventSourcePath(event, state.sessionPatch.sourcePath),
     sourceRef: { sessionId: state.sessionId, eventId: eventPatch.eventId },
-    embeddingEligible: eventEmbeddingEligible(state, eventPatch),
-    embeddingSkipReason: eventEmbeddingSkipReason(eventPatch),
+    embeddingEligible: eventEmbeddingEligible(state, eventPatch, canonicalText),
+    embeddingSkipReason: eventEmbeddingSkipReason(eventPatch, canonicalText),
     importJobId: state.batch.importJobId,
     importChunkId: state.batch.importChunkId,
     occurredAt: dateMillis(eventPatch.timestamp),
@@ -150,20 +153,42 @@ const toolMetadata = (value: unknown): unknown => {
       .filter((key) => /^(name|toolName|path|file|filename|cwd|uri|url|sourcePath|targetPath)$/i.test(key))
       .map((key) => [key, record[key]]),
   );
-  return { type: "object", keys, ...extracted, hash: wideHash(compactSearchText(value)) };
+  return { type: "object", keyCount: keys.length, ...extracted, hash: wideHash(compactSearchText(value)) };
+};
+
+const eventContentMetadata = (value: unknown): unknown => {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "object") {
+    const text = typeof value === "string" ? value : String(value);
+    return { type: typeof value, length: text.length, hash: wideHash(text) };
+  }
+  if (Array.isArray(value)) {
+    return { type: "array", length: value.length, hash: wideHash(compactSearchText(value)) };
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  const extracted = Object.fromEntries(
+    keys
+      .filter((key) => /^(type|name|toolName|path|file|filename|cwd|uri|url|sourcePath|targetPath)$/i.test(key))
+      .map((key) => [key, record[key]]),
+  );
+  return { type: "object", keyCount: keys.length, ...extracted, hash: wideHash(compactSearchText(value)) };
 };
 
 const eventEmbeddingEligible = (
   state: SessionIngestState,
   eventPatch: EventPatch,
+  canonicalText: string,
 ) => {
+  if (canonicalText.trim().length === 0) return false;
   if (eventPatch.kind !== "message") return false;
   if (eventPatch.role === "user") return true;
   if (eventPatch.role !== "assistant") return false;
   return isTurnFinalAssistantMessage(state, eventPatch.eventId);
 };
 
-const eventEmbeddingSkipReason = (eventPatch: EventPatch) => {
+const eventEmbeddingSkipReason = (eventPatch: EventPatch, canonicalText: string) => {
+  if (canonicalText.trim().length === 0) return "empty_text";
   if (eventPatch.kind === "tool_call" || eventPatch.kind === "tool_result") return "tool_output";
   if (eventPatch.kind === "reasoning" || eventPatch.role === "thinking") return "reasoning";
   if (eventPatch.kind === "message" && eventPatch.role === "assistant") return "assistant_not_turn_final";

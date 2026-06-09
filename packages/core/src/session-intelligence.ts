@@ -82,9 +82,13 @@ const BINARY_KEY = /(^|_)(base64|data|bytes|blob|binary|image|source)(_|$)/i;
 const NON_INTELLIGENCE_KEY =
   /(encrypted[_-]?content|cipher[_-]?text|diffs?|patches?|snapshots?|checkpoint|workspaceSnapshot|workspaceDiff)/i;
 const BASE64ISH = /^[A-Za-z0-9+/=\s]+$/;
+const DATA_URI = /^data:[^,]{0,512},/i;
+const DATA_URI_INLINE = /data:[^,\s"'<>]{0,512},[A-Za-z0-9+/=_-]{64,}/gi;
 const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 const ESCAPED_CONTROL_CHARS = /\\u00(?:0[0-9a-f]|1[0-9a-f]|7f)/gi;
 const REPLACEMENT_CHAR = /\ufffd/g;
+const CONTENT_BLOCK_LOCATOR_BYTES = 2 * 1024;
+const CONTENT_BLOCK_MEDIA_TYPE_BYTES = 256;
 
 export const byteLength = (value: string) => textEncoder.encode(value).length;
 
@@ -113,6 +117,7 @@ const truncateUtf8 = (value: string, maxBytes: number) => {
 };
 
 const isBinaryishString = (value: string) => {
+  if (DATA_URI.test(value)) return true;
   const controlCount =
     (value.match(CONTROL_CHARS)?.length ?? 0) +
     (value.match(ESCAPED_CONTROL_CHARS)?.length ?? 0) +
@@ -126,6 +131,47 @@ const isBinaryishString = (value: string) => {
   const symbolRatio = (compact.match(/[+/=]/g)?.length ?? 0) / compact.length;
   const longWordRatio = (compact.match(/[A-Za-z]{80,}/g)?.join("").length ?? 0) / compact.length;
   return alphaNumeric > 0.9 && symbolRatio > 0.01 && longWordRatio > 0.5;
+};
+
+const replaceInlineBinary = (value: string) =>
+  value.replace(DATA_URI_INLINE, (match) => {
+    const bytes = byteLength(match);
+    return `[omitted:data_uri bytes=${bytes} hash=${stableWideHash(match)}]`;
+  });
+
+const compactTextWhitespace = (value: string) =>
+  value.replace(CONTROL_CHARS, " ").replace(/\s+/g, " ").trim();
+
+const cleanTextBody = (value: string) => value.replace(CONTROL_CHARS, " ").trim();
+
+const parseJsonText = (value: string): unknown | undefined => {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return undefined;
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return undefined;
+  }
+};
+
+export const compactSessionIntelligenceText = (
+  value: string | undefined,
+  maxBytes = Number.POSITIVE_INFINITY,
+) => {
+  if (value === undefined) return undefined;
+  if (isBinaryishString(value)) {
+    return truncateUtf8(
+      `[omitted:binary_or_base64 bytes=${byteLength(value)} hash=${stableWideHash(value)}]`,
+      maxBytes,
+    );
+  }
+  const parsed = parseJsonText(value);
+  if (parsed !== undefined) {
+    const projected = boundedValue(parsed, Math.min(maxBytes, CONVEX_SAFE_INGEST_BUDGETS.metadataBytes));
+    return truncateUtf8(compactTextWhitespace(JSON.stringify(projected)), maxBytes);
+  }
+  const compact = cleanTextBody(replaceInlineBinary(value));
+  return compact.length === 0 ? undefined : truncateUtf8(compact, maxBytes);
 };
 
 const nativePathMatches = (path: NativePath, candidate: readonly string[]) => {
@@ -161,6 +207,30 @@ const declaresBinaryPayload = (record: Record<string, unknown>) =>
 
 const sortedObject = (record: Record<string, unknown>) =>
   Object.fromEntries(Object.entries(record).sort(([left], [right]) => left.localeCompare(right)));
+
+const omittedFieldValue = (_key: string, value: unknown, reason: string) => ({
+  reason,
+  byteLength: jsonByteLength(value),
+  hash: stableWideHash(JSON.stringify(value)),
+});
+
+const addOmittedField = (
+  output: Record<string, unknown>,
+  field: ReturnType<typeof omittedFieldValue>,
+) => {
+  const current = output.__quasarOmitted;
+  const currentRecord =
+    current !== null && typeof current === "object" && !Array.isArray(current)
+      ? (current as { fields?: unknown[]; omittedFieldCount?: number })
+      : {};
+  const fields = Array.isArray(currentRecord.fields) ? [...currentRecord.fields] : [];
+  if (fields.length < 12) fields.push(field);
+  output.__quasarOmitted = {
+    reason: "non_session_intelligence_fields",
+    omittedFieldCount: (currentRecord.omittedFieldCount ?? 0) + 1,
+    fields,
+  };
+};
 
 const boundedValue = (
   value: unknown,
@@ -223,11 +293,7 @@ const boundedValue = (
   for (const [key, item] of Object.entries(record)) {
     const childPath = [...path, key];
     if (matchesNativeTrashPath(childPath) || NON_INTELLIGENCE_KEY.test(key)) {
-      output[key] = {
-        omitted: true,
-        reason: "native_non_session_intelligence",
-        byteLength: jsonByteLength(item),
-      };
+      addOmittedField(output, omittedFieldValue(key, item, "native_non_session_intelligence"));
       continue;
     }
     if (
@@ -235,12 +301,11 @@ const boundedValue = (
       typeof item === "string" &&
       (binaryPayloadRecord || isBinaryishString(item))
     ) {
-      output[key] = {
-        omitted: true,
+      addOmittedField(output, {
         reason: "binary_or_base64",
         byteLength: byteLength(item),
         hash: stableWideHash(item),
-      };
+      });
       continue;
     }
     const next = boundedValue(item, maxBytes, childPath, depth + 1);
@@ -257,7 +322,7 @@ const boundedValue = (
 };
 
 const boundedText = (value: string | undefined, maxBytes: number) =>
-  value === undefined ? undefined : truncateUtf8(value, maxBytes);
+  compactSessionIntelligenceText(value, maxBytes);
 
 const omittedRecordValue = (value: unknown, reason: string) => ({
   omitted: true,
@@ -266,14 +331,74 @@ const omittedRecordValue = (value: unknown, reason: string) => ({
   hash: stableWideHash(JSON.stringify(value)),
 });
 
+const omittedStringValue = (value: string, key: string, reason: string) => ({
+  key,
+  reason,
+  byteLength: byteLength(value),
+  hash: stableWideHash(value),
+});
+
+const boundedLocator = (value: string | undefined, key: string) => {
+  if (value === undefined) return {};
+  if (isBinaryishString(value) || byteLength(value) > CONTENT_BLOCK_LOCATOR_BYTES) {
+    return {
+      omitted: omittedStringValue(value, key, `${key}_omitted`),
+    };
+  }
+  return { value };
+};
+
+const boundedMediaType = (value: string | undefined) => {
+  if (value === undefined) return {};
+  if (byteLength(value) > CONTENT_BLOCK_MEDIA_TYPE_BYTES || isBinaryishString(value)) {
+    return {
+      omitted: omittedStringValue(value, "mediaType", "media_type_omitted"),
+    };
+  }
+  return { value };
+};
+
+const mergeContentBlockMetadata = (
+  metadata: unknown,
+  omissions: readonly ReturnType<typeof omittedStringValue>[],
+) => {
+  if (omissions.length === 0) return metadata;
+  const metadataRecord =
+    metadata !== null && typeof metadata === "object" && !Array.isArray(metadata)
+      ? (metadata as Record<string, unknown>)
+      : metadata === undefined
+        ? {}
+        : { value: metadata };
+  return boundedValue(
+    {
+      ...metadataRecord,
+      __quasarOmitted: {
+        reason: "content_block_locator_fields",
+        fields: omissions,
+      },
+    },
+    CONVEX_SAFE_INGEST_BUDGETS.metadataBytes,
+  );
+};
+
 const sanitizeContentBlock = (block: ContentBlock): ContentBlock | undefined => {
+  const path = boundedLocator(block.path, "path");
+  const uri = boundedLocator(block.uri, "uri");
+  const mediaType = boundedMediaType(block.mediaType);
+  const locatorOmissions = [path.omitted, uri.omitted, mediaType.omitted].filter(
+    (item): item is ReturnType<typeof omittedStringValue> => item !== undefined,
+  );
+  const metadata = boundedValue(block.metadata, CONVEX_SAFE_INGEST_BUDGETS.metadataBytes);
   const next: ContentBlock = {
     ...block,
+    path: path.value,
+    uri: uri.value,
+    mediaType: mediaType.value,
     text: boundedText(block.text, CONVEX_SAFE_INGEST_BUDGETS.contentBlockTextBytes),
     markdown: boundedText(block.markdown, CONVEX_SAFE_INGEST_BUDGETS.contentBlockTextBytes),
     thinking: boundedText(block.thinking, CONVEX_SAFE_INGEST_BUDGETS.contentBlockTextBytes),
     value: boundedValue(block.value, CONVEX_SAFE_INGEST_BUDGETS.metadataBytes),
-    metadata: boundedValue(block.metadata, CONVEX_SAFE_INGEST_BUDGETS.metadataBytes),
+    metadata: mergeContentBlockMetadata(metadata, locatorOmissions),
   };
   if (next.kind === "json" && next.value === undefined && next.metadata === undefined) {
     return undefined;

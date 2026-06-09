@@ -100,11 +100,12 @@ const contentBlockSearchDocument = (
   },
   safeBlock: Record<string, unknown>,
 ): SearchDocumentUpsertInput => {
-  const blockText = blockSearchText(blockPatch, safeBlock);
+  const blockText = blockSearchText(blockPatch);
   const toolBacked = isToolBackedEvent(event);
+  const metadata = blockMetadata(blockPatch, safeBlock);
   const summary = toolBacked
-    ? compactSearchText([blockPatch.kind, blockMetadata(blockPatch, safeBlock)])
-    : safeSummary(blockText, safeBlock);
+    ? compactSearchText([blockPatch.kind, metadata])
+    : safeSummary(blockText, metadata);
   return {
     searchDocumentId: `block:${blockPatch.blockId}`,
     sourceTable: "contentBlocks",
@@ -120,8 +121,8 @@ const contentBlockSearchDocument = (
     title: `${state.providerValue} ${blockPatch.kind} block`,
     summary,
     searchText: toolBacked
-      ? compactSearchText([blockPatch.kind, blockMetadata(blockPatch, safeBlock)])
-      : compactSearchText([blockPatch.kind, blockText, safeBlock.value, safeBlock.metadata]),
+      ? compactSearchText([blockPatch.kind, metadata])
+      : compactSearchText([blockPatch.kind, blockText, metadata]),
     sourcePath: stringValue(blockPatch.path) ?? eventSourcePath(event, state.sessionPatch.sourcePath),
     sourceRef: {
       sessionId: state.sessionId,
@@ -173,7 +174,6 @@ const blockSearchText = (
     path?: string;
     uri?: string;
   },
-  safeBlock: Record<string, unknown>,
 ) =>
   compactSearchText([
     blockPatch.text,
@@ -181,7 +181,6 @@ const blockSearchText = (
     blockPatch.thinking,
     blockPatch.path,
     blockPatch.uri,
-    safeBlock.value,
   ]);
 
 const upsertSessionEdges = async (

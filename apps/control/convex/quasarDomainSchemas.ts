@@ -326,7 +326,7 @@ export const ImportChunkStatusSchema = Schema.Literal(
 export type ImportChunkStatusSchema = typeof ImportChunkStatusSchema.Type;
 
 export const IngestBatchBoundary = Schema.Struct({
-  protocolVersion: Schema.optional(Schema.String),
+  protocolVersion: Schema.Literal("quasar.ingest/v1"),
   machine: MachineIdentityBoundary,
   sourceRoots: Schema.optionalWith(Schema.Array(SourceRootBoundary), {
     default: () => [],

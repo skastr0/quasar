@@ -1,6 +1,8 @@
 import { internal } from "./_generated/api";
 import type { Doc } from "./_generated/dataModel";
 import type { ActionCtx, MutationCtx, QueryCtx } from "./_generated/server";
+import type { IngestBatch as CoreIngestBatch } from "../../../packages/core/src/schemas";
+import { toConvexSafeSessionIntelligenceBatch } from "../../../packages/core/src/session-intelligence";
 import {
   decodeBoundarySync,
   IngestBatchBoundary,
@@ -77,11 +79,28 @@ const MAX_IMPORT_CHUNK_BATCH_BYTES = 768 * 1024;
 const MAX_IMPORT_BULK_INPUT_BYTES = 3_500_000;
 const textEncoder = new TextEncoder();
 
+const sanitizeBoundaryBatch = (
+  batch: IngestBatchBoundaryValue,
+  label: string,
+): IngestBatchBoundaryValue =>
+  decodeBoundarySync(
+    IngestBatchBoundary,
+    toConvexSafeSessionIntelligenceBatch(batch as unknown as CoreIngestBatch),
+    `sanitized ${label}`,
+  );
+
 export const startImportJobHandler = async (
   ctx: MutationCtx,
   args: { input: unknown },
 ): Promise<StartImportJobResult> => {
-  const input = decodeBoundarySync(StartImportJobInput, args.input, "start import job input");
+  const decoded = decodeBoundarySync(StartImportJobInput, args.input, "start import job input");
+  const input =
+    decoded.batch === undefined
+      ? decoded
+      : {
+          ...decoded,
+          batch: sanitizeBoundaryBatch(decoded.batch, "start import job batch"),
+        };
   assertJsonByteBudget(input, MAX_IMPORT_JOB_INPUT_BYTES, "start import job input");
   const manifest = manifestForStart(input);
   const idempotencyKey = input.idempotencyKey ?? importJobIdempotencyKey(manifest, input.batch);
@@ -143,7 +162,11 @@ export const submitImportChunkHandler = async (
   ctx: ActionCtx,
   args: { input: unknown },
 ): Promise<SubmitImportChunkResult> => {
-  const input = decodeBoundarySync(SubmitImportChunkInput, args.input, "submit import chunk input");
+  const decoded = decodeBoundarySync(SubmitImportChunkInput, args.input, "submit import chunk input");
+  const input = {
+    ...decoded,
+    batch: sanitizeBoundaryBatch(decoded.batch, "import chunk batch"),
+  };
   assertJsonByteBudget(input.batch, MAX_IMPORT_CHUNK_BATCH_BYTES, "import chunk batch");
   const result = (await ctx.runMutation(internal.quasar.enqueueImportChunkInternal, {
     input: {
@@ -167,7 +190,14 @@ export const submitImportChunksHandler = async (
   readonly enqueuedCount: number;
   readonly results: readonly SubmitImportChunkResult[];
 }> => {
-  const input = decodeBoundarySync(SubmitImportChunksInput, args.input, "submit import chunks input");
+  const decoded = decodeBoundarySync(SubmitImportChunksInput, args.input, "submit import chunks input");
+  const input = {
+    ...decoded,
+    chunks: decoded.chunks.map((chunk, index) => ({
+      ...chunk,
+      batch: sanitizeBoundaryBatch(chunk.batch, `bulk import chunk batch ${index}`),
+    })),
+  };
   assertJsonByteBudget(input, MAX_IMPORT_BULK_INPUT_BYTES, "bulk import chunk input");
   const results: SubmitImportChunkResult[] = [];
   for (const chunk of input.chunks) {
@@ -193,7 +223,11 @@ export const enqueueImportChunkHandler = async (
   ctx: MutationCtx,
   args: { input: unknown },
 ): Promise<SubmitImportChunkResult> => {
-  const input = decodeBoundarySync(SubmitImportChunkInput, args.input, "submit import chunk input");
+  const decoded = decodeBoundarySync(SubmitImportChunkInput, args.input, "submit import chunk input");
+  const input = {
+    ...decoded,
+    batch: sanitizeBoundaryBatch(decoded.batch, "import chunk batch"),
+  };
   assertJsonByteBudget(input.batch, MAX_IMPORT_CHUNK_BATCH_BYTES, "import chunk batch");
   const now = Date.now();
   const job = await findImportJob(ctx, input.importJobId);
