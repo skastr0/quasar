@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
-import type { SessionAdapter } from "./types";
+import type { AdapterReadResult, AdapterStreamItem, SessionAdapter } from "./types";
 import type { Artifact, SessionEdge, SessionRole, ToolCall, UsageRecord } from "../schemas";
 import {
   artifactIdFor,
@@ -539,58 +539,104 @@ const copyDatabaseForRead = (dbPath: string) => {
   };
 };
 
-const readOpenCode = async (options: AdapterOptions) => {
+async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterStreamItem> {
   const root = options.roots?.opencode ?? opencodeAdapter.defaultRoot();
   const dbPath = root === undefined ? undefined : join(root, "opencode.db");
   if (root === undefined || dbPath === undefined || !existsSync(dbPath)) {
-    return missingDatabaseResult(root);
+    for (const diagnostic of missingDatabaseResult(root).diagnostics) {
+      yield { type: "diagnostic", diagnostic };
+    }
+    return;
   }
   const tempDb = copyDatabaseForRead(dbPath);
   const db = await maybeDatabase(tempDb.path);
   if (db === undefined) {
-    const sessions = readSessionRowsCli(tempDb.path, options.limit).map((row) =>
-      buildOpenCodeSessionCli(tempDb.path, dbPath, root, options, row),
-    );
-    tempDb.cleanup();
-    if (sessions.length === 0) return unsupportedRuntimeResult(dbPath);
-    return {
-      sourceRoots: [sourceRoot("opencode", opencodeAdapter.id, root, options.machine, options.now)],
-      sessions,
-      diagnostics: [
-        {
+    try {
+      const rows = readSessionRowsCli(tempDb.path, options.limit);
+      if (rows.length === 0) {
+        for (const diagnostic of unsupportedRuntimeResult(dbPath).diagnostics) {
+          yield { type: "diagnostic", diagnostic };
+        }
+        return;
+      }
+      yield {
+        type: "sourceRoot",
+        sourceRoot: sourceRoot("opencode", opencodeAdapter.id, root, options.machine, options.now),
+      };
+      let sessionCount = 0;
+      for (const row of rows) {
+        yield {
+          type: "session",
+          session: buildOpenCodeSessionCli(tempDb.path, dbPath, root, options, row),
+        };
+        sessionCount += 1;
+      }
+      yield {
+        type: "diagnostic",
+        diagnostic: {
           adapterId: opencodeAdapter.id,
           provider: "opencode" as const,
           status: "available" as const,
           parserConfidence: "observed" as const,
           rootPath: dbPath,
-          message: `Discovered ${sessions.length} OpenCode session(s) via sqlite3 fallback.`,
+          message: `Discovered ${sessionCount} OpenCode session(s) via sqlite3 fallback.`,
         },
-      ],
-    };
+      };
+    } finally {
+      tempDb.cleanup();
+    }
+    return;
   }
-  let sessions;
   try {
-    sessions = readSessionRows(db, options.limit).map((row) =>
-      buildOpenCodeSession(db, dbPath, root, options, row),
-    );
+    yield {
+      type: "sourceRoot",
+      sourceRoot: sourceRoot("opencode", opencodeAdapter.id, root, options.machine, options.now),
+    };
+    let sessionCount = 0;
+    for (const row of readSessionRows(db, options.limit)) {
+      yield {
+        type: "session",
+        session: buildOpenCodeSession(db, dbPath, root, options, row),
+      };
+      sessionCount += 1;
+    }
+    yield {
+      type: "diagnostic",
+      diagnostic: {
+        adapterId: opencodeAdapter.id,
+        provider: "opencode" as const,
+        status: sessionCount > 0 ? ("available" as const) : ("no_data_found" as const),
+        parserConfidence: "observed" as const,
+        rootPath: dbPath,
+        message: `Discovered ${sessionCount} OpenCode session(s).`,
+      },
+    };
   } finally {
     db.close();
     tempDb.cleanup();
   }
-  return {
-    sourceRoots: [sourceRoot("opencode", opencodeAdapter.id, root, options.machine, options.now)],
-    sessions,
-    diagnostics: [
-      {
-        adapterId: opencodeAdapter.id,
-        provider: "opencode" as const,
-        status: sessions.length > 0 ? ("available" as const) : ("no_data_found" as const),
-        parserConfidence: "observed" as const,
-        rootPath: dbPath,
-        message: `Discovered ${sessions.length} OpenCode session(s).`,
-      },
-    ],
+}
+
+const readOpenCode = async (options: AdapterOptions): Promise<AdapterReadResult> => {
+  const result: AdapterReadResult = {
+    sourceRoots: [],
+    sessions: [],
+    diagnostics: [],
   };
+  for await (const item of streamOpenCode(options)) {
+    switch (item.type) {
+      case "sourceRoot":
+        result.sourceRoots.push(item.sourceRoot);
+        break;
+      case "session":
+        result.sessions.push(item.session);
+        break;
+      case "diagnostic":
+        result.diagnostics.push(item.diagnostic);
+        break;
+    }
+  }
+  return result;
 };
 
 export const opencodeAdapter: SessionAdapter = {
@@ -600,4 +646,5 @@ export const opencodeAdapter: SessionAdapter = {
   stable: true,
   defaultRoot: () => homePath(".local/share/opencode"),
   read: readOpenCode,
+  stream: streamOpenCode,
 };
