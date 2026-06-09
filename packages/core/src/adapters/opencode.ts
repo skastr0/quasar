@@ -14,6 +14,7 @@ import {
   homePath,
   logicalRootFor,
   numberValue,
+  projectToolPayloadNativeValue,
   recordFrom,
   scopedId,
   sourceRoot,
@@ -323,14 +324,16 @@ const collectToolCalls = (
         ? record.time_created
         : dateFromNestedTime(state.time, "start");
     const completedAt = dateFromNestedTime(state.time, "end");
+    const input = projectToolPayloadNativeValue(state.input ?? record.input);
+    const output = projectToolPayloadNativeValue(state.output ?? record.output);
     return [
       {
         id: scopedId("opencode", machineId, sourcePath, "tool", nativeSessionId, messageId, partId),
         eventId,
         toolName,
         status: toolStatusFromPart(record),
-        input: state.input ?? record.input,
-        output: state.output ?? record.output,
+        ...(input !== undefined ? { input } : {}),
+        ...(output !== undefined ? { output } : {}),
         ...(startedAt !== undefined ? { startedAt } : {}),
         ...(completedAt !== undefined ? { completedAt } : {}),
       },

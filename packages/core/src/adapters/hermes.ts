@@ -14,6 +14,8 @@ import {
   logicalRootFor,
   numberValue,
   parseJsonString,
+  projectSessionNativeValue,
+  projectToolPayloadNativeValue,
   recordFrom,
   roleFrom,
   scopedId,
@@ -156,12 +158,15 @@ const toolNameFromCall = (call: Record<string, unknown>) => {
 
 const toolInputFromCall = (call: Record<string, unknown>) => {
   const functionRecord = recordFrom(call.function);
-  return (
+  return projectToolPayloadNativeValue(
     parseJsonString(functionRecord.arguments) ??
     parseJsonString(call.arguments) ??
+    functionRecord.input ??
+    functionRecord.parameters ??
     call.args ??
     call.input ??
-    call
+    call.params ??
+    call.parameters,
   );
 };
 
@@ -199,14 +204,18 @@ const messageContent = (
   calls: readonly Record<string, unknown>[],
 ): NativeValue => {
   const reasoning = parsedReasoningFields(message);
+  const reasoningDetails = projectSessionNativeValue(reasoning.reasoningDetails);
+  const codexReasoningItems = projectSessionNativeValue(reasoning.codexReasoningItems);
+  const codexMessageItems = projectSessionNativeValue(reasoning.codexMessageItems);
+  const projectedCalls = projectSessionNativeValue(calls);
   return {
     content: stringValue(message.content),
     reasoning: stringValue(message.reasoning),
     reasoning_content: stringValue(message.reasoning_content),
-    ...(reasoning.reasoningDetails !== undefined ? { reasoning_details: reasoning.reasoningDetails } : {}),
-    ...(reasoning.codexReasoningItems !== undefined ? { codex_reasoning_items: reasoning.codexReasoningItems } : {}),
-    ...(reasoning.codexMessageItems !== undefined ? { codex_message_items: reasoning.codexMessageItems } : {}),
-    ...(calls.length > 0 ? { tool_calls: calls as NativeValue[] } : {}),
+    ...(reasoningDetails !== undefined ? { reasoning_details: reasoningDetails } : {}),
+    ...(codexReasoningItems !== undefined ? { codex_reasoning_items: codexReasoningItems } : {}),
+    ...(codexMessageItems !== undefined ? { codex_message_items: codexMessageItems } : {}),
+    ...(projectedCalls !== undefined ? { tool_calls: projectedCalls } : {}),
     finish_reason: stringValue(message.finish_reason),
     platform_message_id: stringValue(message.platform_message_id),
   };
@@ -225,16 +234,20 @@ const messageBlocks = (
   if (content !== undefined) blockInputs.push({ type: "text", text: content });
   const thinking = stringValue(message.reasoning_content) ?? stringValue(message.reasoning);
   if (thinking !== undefined) blockInputs.push({ type: "thinking", thinking });
-  if (reasoning.reasoningDetails !== undefined) {
-    blockInputs.push({ type: "json", value: reasoning.reasoningDetails, label: "reasoning_details" });
+  const reasoningDetails = projectSessionNativeValue(reasoning.reasoningDetails);
+  if (reasoningDetails !== undefined) {
+    blockInputs.push({ type: "json", value: reasoningDetails, label: "reasoning_details" });
   }
-  if (reasoning.codexReasoningItems !== undefined) {
-    blockInputs.push({ type: "json", value: reasoning.codexReasoningItems, label: "codex_reasoning_items" });
+  const codexReasoningItems = projectSessionNativeValue(reasoning.codexReasoningItems);
+  if (codexReasoningItems !== undefined) {
+    blockInputs.push({ type: "json", value: codexReasoningItems, label: "codex_reasoning_items" });
   }
-  if (reasoning.codexMessageItems !== undefined) {
-    blockInputs.push({ type: "json", value: reasoning.codexMessageItems, label: "codex_message_items" });
+  const codexMessageItems = projectSessionNativeValue(reasoning.codexMessageItems);
+  if (codexMessageItems !== undefined) {
+    blockInputs.push({ type: "json", value: codexMessageItems, label: "codex_message_items" });
   }
-  if (calls.length > 0) blockInputs.push({ type: "json", value: calls as NativeValue[], label: "tool_calls" });
+  const projectedCalls = projectSessionNativeValue(calls);
+  if (projectedCalls !== undefined) blockInputs.push({ type: "json", value: projectedCalls, label: "tool_calls" });
   return contentBlocksFromNative("hermes", machineId, dbPath, eventId, blockInputs);
 };
 
@@ -336,12 +349,13 @@ const buildHermesSessionFromRows = (
     let eventToolCallId: string | undefined;
     for (const [callIndex, call] of calls.entries()) {
       const nativeToolId = nativeToolIdFromCall(call, `${nativeEventId}:${callIndex}`);
+      const input = toolInputFromCall(call);
       const toolCall: HermesToolCallDraft = {
         id: scopedId("hermes", machineId, dbPath, "tool", nativeSessionId, nativeToolId),
         eventId,
         toolName: toolNameFromCall(call),
         status: statusFromFinishReason(message.finish_reason),
-        input: toolInputFromCall(call),
+        ...(input !== undefined ? { input } : {}),
         startedAt: isoFromEpoch(message.timestamp),
       };
       toolCallsByNativeId.set(nativeToolId, toolCall);
@@ -358,12 +372,12 @@ const buildHermesSessionFromRows = (
           id: scopedId("hermes", machineId, dbPath, "tool", nativeSessionId, resultNativeToolId),
           eventId,
           toolName: stringValue(message.tool_name) ?? "hermes_tool",
-          input: undefined,
         } satisfies HermesToolCallDraft);
+      const output = projectToolPayloadNativeValue(stringValue(message.content) ?? message.content);
       const completed = {
         ...resultToolCall,
         status: "completed",
-        output: stringValue(message.content) ?? message.content,
+        ...(output !== undefined ? { output } : {}),
         completedAt: isoFromEpoch(message.timestamp),
       };
       toolCallsByNativeId.set(resultNativeToolId, completed);

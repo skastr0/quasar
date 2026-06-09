@@ -96,7 +96,34 @@ export const readJsonFile = (path: string) => {
   }
 };
 
-const NON_INDEXABLE_KEY = /(encrypted[_-]?content|cipher[_-]?text)/i;
+const NON_INDEXABLE_KEY =
+  /(encrypted[_-]?content|cipher[_-]?text|provider[_-]?(cache|state|ui)|cacheState|viewState|uiState|displayOnly|displayState|workspaceSnapshot|workspaceDiff|checkpoint|snapshots?)/i;
+const NON_INDEXABLE_PATHS = [
+  ["summary", "diffs"],
+  ["summary", "diff"],
+  ["summary", "patches"],
+  ["summary", "snapshots"],
+  ["summary", "cache"],
+  ["summary", "state"],
+  ["workspace", "diffs"],
+  ["workspace", "snapshot"],
+  ["workspace", "snapshots"],
+  ["workspaceDiff"],
+  ["workspaceSnapshot"],
+  ["checkpoint"],
+  ["checkpoints"],
+  ["snapshot"],
+  ["snapshots"],
+  ["diff"],
+  ["diffs"],
+  ["patch"],
+  ["patches"],
+] as const;
+const TOOL_PATCH_KEY = /^(diffs?|patch(?:es)?)$/i;
+const CONTENT_PROVIDER_STATE_KEY = /^(cache|state)$/i;
+type NativeProjectionOptions = {
+  readonly preserveToolPatchFields?: boolean;
+};
 const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 const ESCAPED_CONTROL_CHARS = /\\u00(?:0[0-9a-f]|1[0-9a-f]|7f)/gi;
 const REPLACEMENT_CHAR = /\ufffd/g;
@@ -113,18 +140,63 @@ const compactString = (value: string) => {
   return text.length === 0 ? undefined : text;
 };
 
-const stripNonIndexable = (value: unknown, depth = 0): unknown => {
-  if (depth > 8 || value === null || value === undefined) return value;
+const nativePathMatches = (path: readonly string[], candidate: readonly string[]) => {
+  if (candidate.length > path.length) return false;
+  const start = path.length - candidate.length;
+  return candidate.every((part, index) => path[start + index] === part);
+};
+
+const isProviderMetadataPath = (path: readonly string[]) =>
+  path.some((part) => /^(summary|workspace|workspaceDiff|workspaceSnapshot|checkpoint|checkpoints|snapshots?)$/i.test(part));
+
+const shouldStripNonIndexableField = (
+  key: string,
+  path: readonly string[],
+  options: NativeProjectionOptions,
+) => {
+  if (options.preserveToolPatchFields !== true && CONTENT_PROVIDER_STATE_KEY.test(key)) {
+    return true;
+  }
+  if (options.preserveToolPatchFields === true && TOOL_PATCH_KEY.test(key) && !isProviderMetadataPath(path)) {
+    return false;
+  }
+  return NON_INDEXABLE_PATHS.some((candidate) => nativePathMatches(path, candidate)) || NON_INDEXABLE_KEY.test(key);
+};
+
+const compactProjectedEntries = (entries: readonly [string, unknown][]) => {
+  const projected = Object.fromEntries(entries.filter(([, item]) => item !== undefined));
+  return Object.keys(projected).length === 0 ? undefined : projected;
+};
+
+const stripNonIndexable = (
+  value: unknown,
+  depth = 0,
+  path: readonly string[] = [],
+  options: NativeProjectionOptions = {},
+): unknown => {
+  if (value === null || value === undefined) return value;
+  if (depth > 8) return typeof value === "object" ? undefined : value;
   if (typeof value !== "object") return value;
   if (Array.isArray(value)) {
-    return value.map((item) => stripNonIndexable(item, depth + 1));
+    const projected = value
+      .map((item, index) => stripNonIndexable(item, depth + 1, [...path, String(index)], options))
+      .filter((item) => item !== undefined);
+    return projected.length === 0 ? undefined : projected;
   }
-  return Object.fromEntries(
+  return compactProjectedEntries(
     Object.entries(value as Record<string, unknown>)
-      .filter(([key]) => !NON_INDEXABLE_KEY.test(key))
-      .map(([key, item]) => [key, stripNonIndexable(item, depth + 1)]),
+      .filter(([key]) => !shouldStripNonIndexableField(key, [...path, key], options))
+      .map(([key, item]) => [key, stripNonIndexable(item, depth + 1, [...path, key], options)] as [string, unknown]),
   );
 };
+
+export const projectSessionNativeValue = (value: unknown): NativeValue | undefined => {
+  const projected = stripNonIndexable(value);
+  return projected === undefined ? undefined : (projected as NativeValue);
+};
+
+export const projectToolPayloadNativeValue = (value: unknown): unknown =>
+  stripNonIndexable(value, 0, [], { preserveToolPatchFields: true });
 
 export const collectFiles = (
   root: string,
@@ -166,9 +238,11 @@ export const compactText = (value: NativeValue | undefined): string | undefined 
     const record = value as Record<string, unknown>;
     if (typeof record.text === "string") return compactText(record.text);
     if (typeof record.content === "string") return compactText(record.content);
+    const projected = stripNonIndexable(redactSensitive(value));
+    if (projected === undefined) return undefined;
     try {
       return compactSessionIntelligenceText(
-        JSON.stringify(stripNonIndexable(redactSensitive(value))),
+        JSON.stringify(projected),
         4_000,
       );
     } catch {

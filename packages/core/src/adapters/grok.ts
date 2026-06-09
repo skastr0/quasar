@@ -11,6 +11,8 @@ import {
   eventIdFor,
   homePath,
   kindFromNative,
+  projectSessionNativeValue,
+  projectToolPayloadNativeValue,
   recordFrom,
   readJsonFile,
   readJsonLines,
@@ -84,7 +86,7 @@ const contentFields = (record: Record<string, unknown>): NativeValue | undefined
     const value = record[key];
     return value === undefined ? [] : [[key, value] as const];
   });
-  return entries.length === 0 ? undefined : Object.fromEntries(entries) as NativeValue;
+  return entries.length === 0 ? undefined : projectSessionNativeValue(Object.fromEntries(entries));
 };
 
 const grokToolCall = (
@@ -114,13 +116,15 @@ const grokToolCall = (
       : typeof record.status === "string"
         ? record.status
         : undefined;
+  const input = projectToolPayloadNativeValue(state.input ?? record.input ?? record.args ?? record.params);
+  const output = projectToolPayloadNativeValue(state.output ?? record.output ?? record.result);
   return {
     id: scopedId("grok", machineId, sourcePath, "tool", nativeSessionId, nativeToolId),
     eventId,
     toolName,
     status,
-    input: state.input ?? record.input ?? record.args ?? record.params,
-    output: state.output ?? record.output ?? record.result,
+    ...(input !== undefined ? { input } : {}),
+    ...(output !== undefined ? { output } : {}),
     ...(timestamp !== undefined ? { startedAt: timestamp } : {}),
     ...(status === "completed" && timestamp !== undefined ? { completedAt: timestamp } : {}),
   };

@@ -6,6 +6,10 @@ import { tmpdir } from "node:os";
 import { describe, expect, test } from "vitest";
 
 import { codexAdapter } from "../src/adapters/codex";
+import {
+  projectSessionNativeValue,
+  projectToolPayloadNativeValue,
+} from "../src/adapters/common";
 import type { AdapterDiscoverOptions, AdapterStreamItem } from "../src/adapters/types";
 import { buildIngestBatch, streamIngestBatches } from "../src/ingest";
 import {
@@ -41,6 +45,41 @@ const localProviders = [
 ] as const;
 
 describe("adapter ingestion", () => {
+  test("projects provider metadata while preserving real tool patch and diff payloads", () => {
+    const sessionProjection = projectSessionNativeValue({
+      type: "diff",
+      patch: "@@ real event patch",
+      diff: "@@ real event diff",
+      summary: {
+        diffs: ["provider summary diff trash"],
+        cache: { state: "provider summary cache trash" },
+      },
+      providerUi: "provider event ui trash",
+    });
+    const toolProjection = projectToolPayloadNativeValue({
+      patch: "@@ real tool patch",
+      diff: "@@ real tool diff",
+      patches: ["@@ real tool patch list"],
+      summary: { diffs: ["provider tool summary diff trash"] },
+      viewState: "provider tool view trash",
+      providerUi: "provider tool ui trash",
+    });
+    const sessionEncoded = JSON.stringify(sessionProjection);
+    const toolEncoded = JSON.stringify(toolProjection);
+
+    expect(sessionEncoded).not.toContain("@@ real event patch");
+    expect(sessionEncoded).not.toContain("@@ real event diff");
+    expect(sessionEncoded).not.toContain("provider summary diff trash");
+    expect(sessionEncoded).not.toContain("provider summary cache trash");
+    expect(sessionEncoded).not.toContain("provider event ui trash");
+    expect(toolEncoded).toContain("@@ real tool patch");
+    expect(toolEncoded).toContain("@@ real tool diff");
+    expect(toolEncoded).toContain("@@ real tool patch list");
+    expect(toolEncoded).not.toContain("provider tool summary diff trash");
+    expect(toolEncoded).not.toContain("provider tool view trash");
+    expect(toolEncoded).not.toContain("provider tool ui trash");
+  });
+
   test("reads a Codex rollout fixture", async () => {
     const root = mkdtempSync(join(tmpdir(), "quasar-codex-"));
     const sessionDir = join(root, "sessions", "2026", "06", "03");
@@ -162,10 +201,12 @@ describe("adapter ingestion", () => {
 
     const codex = sessionsByProvider.get("codex")!;
     expect(codex.toolCalls[0]?.toolName).toBe("exec_command");
+    expect(JSON.stringify(codex)).toContain("@@ real codex tool patch");
 
     const claude = sessionsByProvider.get("claude")!;
     expect(claude.toolCalls[0]).toMatchObject({ toolName: "Read", status: "completed" });
     expect(JSON.stringify(claude.toolCalls[0]?.output)).toContain("quasar");
+    expect(JSON.stringify(claude)).toContain("@@ real claude tool patch");
     expect(JSON.stringify(claude.events[2]?.contentBlocks)).toContain("quasar");
     expect(claude.sessionEdges.some((edge) => edge.kind === "parent")).toBe(true);
     expect(claude.usageRecords[0]?.inputTokens).toBe(3);
@@ -176,6 +217,8 @@ describe("adapter ingestion", () => {
 
     const opencode = sessionsByProvider.get("opencode")!;
     expect(opencode.toolCalls[0]).toMatchObject({ toolName: "bash", status: "completed" });
+    expect(JSON.stringify(opencode)).toContain("@@ real opencode tool patch");
+    expect(JSON.stringify(opencode)).toContain("@@ real opencode output patch");
     expect(opencode.usageRecords[0]?.totalTokens).toBe(12);
     expect(JSON.stringify(opencode)).not.toContain("opencode-native-diff-trash");
     expect(JSON.stringify(opencode)).not.toContain("opencode-provider-cache-trash");
@@ -188,6 +231,7 @@ describe("adapter ingestion", () => {
 
     const amp = sessionsByProvider.get("amp")!;
     expect(amp.toolCalls[0]?.toolName).toBe("bash");
+    expect(JSON.stringify(amp.toolCalls[0]?.input)).toContain("@@ amp real patch");
     expect(amp.sessionEdges.some((edge) => edge.kind === "parent")).toBe(true);
     expect(amp.usageRecords[0]?.totalTokens).toBe(3);
 
@@ -211,6 +255,7 @@ describe("adapter ingestion", () => {
       input: { command: "pwd" },
       output: "/Users/a/Projects/quasar",
     });
+    expect(JSON.stringify(hermes)).toContain("@@ real hermes parameter patch");
     expect(hermes.sessionEdges.some((edge) => edge.kind === "parent" && edge.fromId === "h0")).toBe(true);
     expect(hermes.sessionEdges.some((edge) => edge.kind === "tool_result_for")).toBe(true);
     expect(hermes.usageRecords.some((usage) => usage.inputTokens === 10 && usage.cost === 0.02)).toBe(true);
@@ -389,7 +434,35 @@ const assertAdapterContract = (batch: IngestBatch, provider: Provider) => {
   expect(encoded, provider).not.toContain("iVBORw0KGgo=");
   expect(encoded, provider).not.toContain("encrypted_content");
   expect(encoded, provider).not.toContain("ciphertext");
-  expect(encoded, provider).not.toContain("opencode-native-diff-trash");
+  for (const trash of [
+    "opencode-native-diff-trash",
+    "opencode-provider-cache-trash",
+    "opencode-provider-state-trash",
+    "opencode-tool-ui-trash",
+    "codex-tool-ui-trash",
+    "codex-provider-diff-trash",
+    "claude-tool-ui-trash",
+    "claude-provider-diff-trash",
+    "grok-provider-update-trash",
+    "grok-tool-ui-trash",
+    "amp-provider-ui-trash",
+    "amp-display-trash",
+    "amp-provider-diff-trash",
+    "pi-tool-ui-trash",
+    "kimi-ui-trash",
+    "droid-tool-ui-trash",
+    "droid-diff-ui-trash",
+    "droid-diff-ui-trash",
+    "hermes-tool-ui-trash",
+    "hermes-parameter-ui-trash",
+    "hermes-reasoning-ui-trash",
+    "hermes-summary-cache-trash",
+    "antigravity-ui-trash",
+    "cursor-ui-trash",
+    "cursor-tool-ui-trash",
+  ]) {
+    expect(encoded, provider).not.toContain(trash);
+  }
   expect(encoded, provider).not.toContain('"raw":');
 
   for (const session of batch.sessions) {
@@ -445,7 +518,20 @@ const makeAllAdapterFixtures = async (): Promise<Record<(typeof localProviders)[
   writeJsonl(join(codexSessionDir, "rollout-2026-06-04T00-00-00-test.jsonl"), [
     { type: "session_meta", payload: { cwd: "/Users/a/Projects/quasar" } },
     { type: "response_item", payload: { type: "user_message", content: "hello" } },
-    { type: "response_item", payload: { type: "function_call", call_id: "c1", name: "exec_command", arguments: "{\"cmd\":\"pwd\"}" } },
+    {
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        call_id: "c1",
+        name: "exec_command",
+        arguments: JSON.stringify({
+          cmd: "pwd",
+          patch: "@@ real codex tool patch",
+          providerUi: "codex-tool-ui-trash",
+          summary: { diffs: ["codex-provider-diff-trash"] },
+        }),
+      },
+    },
   ]);
 
   const claude = mkdtempSync(join(tmpdir(), "quasar-all-claude-"));
@@ -465,7 +551,17 @@ const makeAllAdapterFixtures = async (): Promise<Record<(typeof localProviders)[
             { type: "text", text: "I will inspect the project." },
             { type: "image", media_type: "image/png", source: { type: "base64", data: "iVBORw0KGgo=" } },
             { type: "file", file_path: "notes.md", media_type: "text/markdown" },
-            { type: "tool_use", id: "toolu_1", name: "Read", input: { file_path: "package.json" } },
+            {
+              type: "tool_use",
+              id: "toolu_1",
+              name: "Read",
+              input: {
+                file_path: "package.json",
+                patch: "@@ real claude tool patch",
+                providerUi: "claude-tool-ui-trash",
+                summary: { diffs: ["claude-provider-diff-trash"] },
+              },
+            },
           ],
           usage: { input_tokens: 3, output_tokens: 4 },
         },
@@ -525,7 +621,7 @@ const makeOpenCodeFixture = async () => {
       `insert into session values ('s1', 'OpenCode test', '/Users/a/Projects/quasar', '/Users/a/Projects/quasar', 1, 2);`,
       `insert into message values ('m1', 's1', 1, ${sql(JSON.stringify({ role: "assistant", tokens: { total: 12, input: 5, output: 7 }, modelID: "gpt-test", providerID: "openai" }))});`,
       `insert into message values ('m2', 's1', 2, ${sql(JSON.stringify({ parentID: "m1", role: "user", content: "thanks", summary: { cache: { state: "opencode-provider-cache-trash" }, state: { view: "opencode-provider-state-trash" }, diffs: [{ file: "node_modules/typescript/lib/typescript.js", after: nativeDiffTrash }] } }))});`,
-      `insert into part values ('p1', 's1', 'm1', 1, ${sql(JSON.stringify({ type: "tool", tool: "bash", callID: "call1", state: { status: "completed", input: { command: "pwd" }, output: "/repo" } }))});`,
+      `insert into part values ('p1', 's1', 'm1', 1, ${sql(JSON.stringify({ type: "tool", tool: "bash", callID: "call1", state: { status: "completed", input: { command: "pwd", patch: "@@ real opencode tool patch", providerUi: "opencode-tool-ui-trash" }, output: { text: "/repo", patch: "@@ real opencode output patch", providerUi: "opencode-tool-ui-trash" } } }))});`,
     ].join("\n"),
   ]);
   return root;
@@ -538,7 +634,16 @@ const makeGrokFixture = () => {
   writeFileSync(join(sessionDir, "summary.json"), JSON.stringify({ title: "Grok test" }));
   writeJsonl(join(sessionDir, "chat_history.jsonl"), [{ type: "user", content: "change file" }]);
   writeJsonl(join(sessionDir, "events.jsonl"), [
-    { type: "tool", tool: "bash", callID: "gcall", state: { status: "completed", input: { command: "pwd" }, output: "/repo" } },
+    {
+      type: "tool",
+      tool: "bash",
+      callID: "gcall",
+      state: {
+        status: "completed",
+        input: { command: "pwd" },
+        output: { result: "/repo", providerUi: { panel: "grok-tool-ui-trash" } },
+      },
+    },
     { type: "assistant_delta", params: { content: "nested grok answer" } },
   ]);
   writeJsonl(join(sessionDir, "updates.jsonl"), [
@@ -561,7 +666,18 @@ const makeAmpFixture = () => {
       cwd: "/Users/a/Projects/quasar",
       messages: [
         { id: "a1", role: "user", content: "run pwd" },
-        { id: "a2", parentId: "a1", role: "assistant", type: "tool", tool: "bash", input: { command: "pwd" }, output: "/repo", usage: { input: 1, output: 2 } },
+        {
+          id: "a2",
+          parentId: "a1",
+          role: "assistant",
+          type: "tool",
+          tool: "bash",
+          content: { text: "tool ran", displayOnly: "amp-display-trash" },
+          input: { command: "pwd", patch: "@@ amp real patch", summary: { diffs: ["amp-provider-diff-trash"] } },
+          output: "/repo",
+          providerUi: "amp-provider-ui-trash",
+          usage: { input: 1, output: 2 },
+        },
       ],
     }),
   );
@@ -573,7 +689,7 @@ const makePiFixture = () => {
   const root = mkdtempSync(join(tmpdir(), "quasar-all-pi-"));
   writeJsonl(join(root, "session.jsonl"), [
     { id: "p1", role: "user", content: "start", cwd: "/Users/a/Projects/quasar" },
-    { id: "p2", parentId: "p1", type: "bash", command: "pwd", output: "/repo", tokens: { total: 3 } },
+    { id: "p2", parentId: "p1", type: "bash", command: "pwd", output: { text: "/repo", displayOnly: "pi-tool-ui-trash" }, tokens: { total: 3 } },
   ]);
   return root;
 };
@@ -585,7 +701,7 @@ const makeKimiFixture = () => {
   const wireDir = join(root, "sessions", "s1", "agents", "agent-a");
   mkdirSync(wireDir, { recursive: true });
   writeJsonl(join(wireDir, "wire.jsonl"), [
-    { id: "k1", role: "assistant", type: "plan", content: "plan work", parentAgentId: "root-agent" },
+    { id: "k1", role: "assistant", type: "plan", content: { text: "plan work", providerUi: "kimi-ui-trash" }, parentAgentId: "root-agent" },
     { id: "k2", type: "tool", tool: "bash", input: { command: "pwd" }, output: "/repo", usage: { total: 4 } },
   ]);
   return root;
@@ -597,8 +713,8 @@ const makeDroidFixture = () => {
   mkdirSync(captures, { recursive: true });
   writeJsonl(join(captures, "stream.jsonl"), [
     { id: "d1", role: "user", content: "inspect" },
-    { id: "d2", type: "tool", tool: "bash", input: { command: "pwd" }, output: "/repo" },
-    { id: "d3", type: "diff", path: "/Users/a/Projects/quasar/a.ts", patch: "@@" },
+    { id: "d2", type: "tool", tool: "bash", input: { command: "pwd" }, output: { text: "/repo", providerUi: "droid-tool-ui-trash" } },
+    { id: "d3", type: "diff", path: "/Users/a/Projects/quasar/a.ts", content: { type: "diff", patch: "@@ real droid event patch", providerUi: "droid-diff-ui-trash" }, patch: "@@" },
   ]);
   return root;
 };
@@ -683,7 +799,10 @@ const makeHermesFixture = async () => {
       `insert into messages (session_id, role, content, timestamp, token_count) values ('h1', 'user', 'run pwd', 1760000101, 2);`,
       [
         "insert into messages (session_id, role, content, tool_calls, timestamp, token_count, finish_reason, reasoning_content, reasoning_details) values",
-        `('h1', 'assistant', 'I will run terminal.', ${sql(JSON.stringify([{ id: "call_1", function: { name: "terminal", arguments: JSON.stringify({ command: "pwd" }) } }]))}, 1760000102, 3, 'tool_calls', 'Need the working directory.', ${sql(JSON.stringify({ effort: "low" }))});`,
+        `('h1', 'assistant', 'I will run terminal.', ${sql(JSON.stringify([
+          { id: "call_1", function: { name: "terminal", arguments: JSON.stringify({ command: "pwd" }) }, providerUi: "hermes-tool-ui-trash" },
+          { id: "call_2", function: { name: "apply_patch", parameters: { patch: "@@ real hermes parameter patch", providerUi: "hermes-parameter-ui-trash" } } },
+        ]))}, 1760000102, 3, 'tool_calls', 'Need the working directory.', ${sql(JSON.stringify({ effort: "low", displayOnly: "hermes-reasoning-ui-trash", summary: { cache: { state: "hermes-summary-cache-trash" } } }))});`,
       ].join(" "),
       `insert into messages (session_id, role, content, tool_call_id, tool_name, timestamp, token_count) values ('h1', 'tool', '/Users/a/Projects/quasar', 'call_1', 'terminal', 1760000103, 1);`,
     ].join("\n"),
@@ -697,7 +816,7 @@ const makeAntigravityFixture = () => {
   const artifacts = join(sessionDir, "artifacts");
   mkdirSync(artifacts, { recursive: true });
   writeJsonl(join(sessionDir, "transcript.jsonl"), [
-    { id: "ag1", role: "user", content: "hello", cwd: "/Users/a/Projects/quasar" },
+    { id: "ag1", role: "user", content: { text: "hello", uiState: "antigravity-ui-trash" }, cwd: "/Users/a/Projects/quasar" },
     { id: "ag2", type: "tool", tool: "read_file", input: { path: "x" }, output: "x", usage: { total: 5 } },
   ]);
   writeFileSync(join(artifacts, "out.txt"), "artifact");
@@ -714,8 +833,8 @@ const makeCursorFixture = async () => {
       "create table ItemTable (key text, value text);",
       `insert into ItemTable values ('cursor.composerData', ${sql(JSON.stringify({
       messages: [
-        { id: "c1", role: "user", content: "open file", workspacePath: "/Users/a/Projects/quasar" },
-        { id: "c2", role: "assistant", type: "tool", toolName: "read_file", input: { path: "a.ts" }, output: "ok" },
+        { id: "c1", role: "user", content: { text: "open file", displayOnly: "cursor-ui-trash" }, workspacePath: "/Users/a/Projects/quasar" },
+        { id: "c2", role: "assistant", type: "tool", toolName: "read_file", input: { path: "a.ts" }, output: { text: "ok", providerUi: "cursor-tool-ui-trash" } },
         { id: "c3", role: "assistant", type: "diff", path: "/Users/a/Projects/quasar/a.ts", diff: "@@", tokens: { total: 6 } },
       ],
     }))});`,
