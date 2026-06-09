@@ -693,12 +693,20 @@ describe("quasar ingestion and search", () => {
     const status = await t.query(internal.quasar.readImportJobInternal, {
       input: { importJobId: job.importJobId },
     });
+    const payloads = await t.run(async (ctx) =>
+      await ctx.db
+        .query("importChunkPayloads")
+        .withIndex("by_importJobId", (q) => q.eq("importJobId", job.importJobId))
+        .collect(),
+    );
 
     expect(cancelled).toMatchObject({ status: "failed", cancelled: true });
     expect(processed.processed).toBe(0);
     expect(status?.job.status).toBe("failed");
     expect(status?.job.error).toBe("superseded by smaller chunks");
-    expect(status?.chunks[0]?.status).toBe("pending");
+    expect(status?.job.failedChunkCount).toBe(1);
+    expect(status?.chunks[0]?.status).toBe("dead_letter");
+    expect(payloads).toHaveLength(0);
   });
 
   test("cancelled import jobs fence already claimed chunks before ingest writes", async () => {
@@ -763,6 +771,104 @@ describe("quasar ingestion and search", () => {
     expect(status?.chunks[0]?.status).toBe("dead_letter");
     expect(payloads).toHaveLength(0);
     expect(session).toBeNull();
+  });
+
+  test("cancelled import job cleanup pages chunk and payload cleanup", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const job = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { batch, expectedChunkCount: 101 },
+    });
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      const row = await ctx.db
+        .query("importJobs")
+        .withIndex("by_importJobId", (q) => q.eq("importJobId", job.importJobId))
+        .unique();
+      if (row === null) throw new Error("Import job was not found.");
+      await ctx.db.patch(row._id, {
+        status: "running",
+        chunkCount: 101,
+        uploadedChunkCount: 101,
+        updatedAt: now,
+      });
+      for (let sequence = 0; sequence < 101; sequence += 1) {
+        const chunkId = `chunk:paged-cancel:${sequence}`;
+        await ctx.db.insert("importChunks", {
+          chunkId,
+          importJobId: job.importJobId,
+          idempotencyKey: `import-chunk:paged-cancel:${sequence}`,
+          sequence,
+          status: "pending",
+          sessionCount: 1,
+          eventCount: 1,
+          toolCallCount: 0,
+          contentBlockCount: 1,
+          sessionEdgeCount: 0,
+          usageRecordCount: 0,
+          artifactCount: 0,
+          attempts: 0,
+          maxAttempts: 5,
+          payloadHash: `payload:${sequence}`,
+          payloadBytes: 100,
+          nextAttemptAt: now,
+          payloadStoredAt: now,
+          createdAt: now,
+          updatedAt: now,
+        });
+        await ctx.db.insert("importChunkPayloads", {
+          chunkId,
+          importJobId: job.importJobId,
+          payloadHash: `payload:${sequence}`,
+          payloadBytes: 100,
+          batch,
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+    });
+
+    const cancelled = await t.mutation(internal.quasar.cancelImportJobInternal, {
+      importJobId: job.importJobId,
+      reason: "paged cancellation",
+    });
+    const secondPage = await t.mutation(internal.quasar.cleanupCancelledImportJobInternal, {
+      importJobId: job.importJobId,
+    });
+    const finalNoop = await t.mutation(internal.quasar.cleanupCancelledImportJobInternal, {
+      importJobId: job.importJobId,
+    });
+    const status = await t.query(internal.quasar.readImportJobInternal, {
+      input: { importJobId: job.importJobId, limit: 200 },
+    });
+    const payloads = await t.run(async (ctx) =>
+      await ctx.db
+        .query("importChunkPayloads")
+        .withIndex("by_importJobId", (q) => q.eq("importJobId", job.importJobId))
+        .collect(),
+    );
+
+    expect(cancelled).toMatchObject({
+      cancelled: true,
+      cleanedChunkCount: 100,
+      deletedPayloadCount: 100,
+      cleanupDone: false,
+    });
+    expect(secondPage).toMatchObject({
+      cleanedChunkCount: 1,
+      deletedPayloadCount: 1,
+      done: false,
+    });
+    expect(finalNoop).toMatchObject({
+      cleanedChunkCount: 0,
+      deletedPayloadCount: 0,
+      done: true,
+    });
+    expect(status?.job.status).toBe("failed");
+    expect(status?.job.failedChunkCount).toBe(101);
+    expect(status?.chunks).toHaveLength(101);
+    expect(status?.chunks.every((chunk) => chunk.status === "dead_letter")).toBe(true);
+    expect(payloads).toHaveLength(0);
   });
 
   test("sanitizes manifest-only import job diagnostics", async () => {
@@ -862,7 +968,7 @@ describe("quasar ingestion and search", () => {
 
     expect(retry.importJobId).not.toBe(job.importJobId);
     expect(retry).toMatchObject({ status: "queued", chunkCount: 0, attemptNumber: 1 });
-    expect(oldStatus?.chunks[0]?.status).toBe("pending");
+    expect(oldStatus?.chunks[0]?.status).toBe("dead_letter");
     expect(retryStatus?.chunks).toHaveLength(0);
   });
 

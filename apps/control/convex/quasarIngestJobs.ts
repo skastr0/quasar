@@ -107,6 +107,7 @@ const IMPORT_JOB_WORKER_LEASE_MS = 2 * 60_000;
 const IMPORT_CHUNK_MAX_ATTEMPTS = 5;
 const IMPORT_WORKER_BATCH_LIMIT = 24;
 const IMPORT_WORKER_SCHEDULE_DELAY_MS = 1_000;
+const IMPORT_CANCEL_CLEANUP_BATCH_LIMIT = 100;
 const STREAM_INGEST_UPLOAD_IDENTITY_VERSION = "quasar.stream-ingest/v4";
 const MAX_IMPORT_JOB_INPUT_BYTES = 3_500_000;
 const MAX_IMPORT_CHUNK_BATCH_BYTES = 768 * 1024;
@@ -427,6 +428,9 @@ export const cancelImportJobHandler = async (
   readonly importJobId: string;
   readonly status: ImportJobStatus;
   readonly cancelled: boolean;
+  readonly cleanedChunkCount?: number;
+  readonly deletedPayloadCount?: number;
+  readonly cleanupDone?: boolean;
 }> => {
   const now = Date.now();
   const job = await findImportJob(ctx, args.importJobId);
@@ -442,7 +446,40 @@ export const cancelImportJobHandler = async (
   });
   const lease = await findImportWorkerLease(ctx, args.importJobId);
   if (lease !== null) await ctx.db.delete(lease._id);
-  return { importJobId: args.importJobId, status: "failed", cancelled: true };
+  const cleanup = await cleanupCancelledImportJobRows(ctx, args.importJobId, args.reason ?? "Import job cancelled.", now);
+  if (!cleanup.done) await scheduleCancelledImportCleanup(ctx, args.importJobId);
+  return {
+    importJobId: args.importJobId,
+    status: "failed",
+    cancelled: true,
+    cleanedChunkCount: cleanup.cleanedChunkCount,
+    deletedPayloadCount: cleanup.deletedPayloadCount,
+    cleanupDone: cleanup.done,
+  };
+};
+
+export const cleanupCancelledImportJobHandler = async (
+  ctx: MutationCtx,
+  args: { importJobId: string },
+): Promise<{
+  readonly importJobId: string;
+  readonly cleanedChunkCount: number;
+  readonly deletedPayloadCount: number;
+  readonly done: boolean;
+}> => {
+  const job = await findImportJob(ctx, args.importJobId);
+  if (job === null) throw new Error("Import job was not found.");
+  if (!isClosedImportJob(job)) {
+    return { importJobId: args.importJobId, cleanedChunkCount: 0, deletedPayloadCount: 0, done: true };
+  }
+  const cleanup = await cleanupCancelledImportJobRows(
+    ctx,
+    args.importJobId,
+    job.error ?? "Import job cancelled.",
+    Date.now(),
+  );
+  if (!cleanup.done) await scheduleCancelledImportCleanup(ctx, args.importJobId);
+  return { importJobId: args.importJobId, ...cleanup };
 };
 
 export const processImportJobChunksHandler = async (
@@ -598,7 +635,10 @@ export const markImportChunkSucceededHandler = async (
   const chunk = await findImportChunk(ctx, args.chunkId);
   if (chunk === null) throw new Error("Import chunk was not found.");
   const stale = staleChunkClaim(chunk, args.importJobId, args.leaseToken);
-  if (stale !== null) return stale;
+  if (stale !== null) {
+    const job = await findImportJob(ctx, args.importJobId);
+    return { ...stale, jobStatus: job?.status ?? stale.jobStatus };
+  }
   const job = await findImportJob(ctx, args.importJobId);
   if (job === null || isClosedImportJob(job)) {
     await releaseChunkForClosedJob(ctx, chunk, job?.error ?? "Import job closed before chunk completed.", now);
@@ -1149,6 +1189,77 @@ const releaseChunkForClosedJob = async (
     updatedAt: now,
   });
   await deleteChunkPayload(ctx, chunk.chunkId);
+  if (!isTerminal(chunk.status)) {
+    await patchImportJobCounters(ctx, chunk.importJobId, {
+      failedChunkCount: 1,
+      terminalChunkSequenceSum: chunk.sequence,
+      now,
+    });
+  }
+};
+
+const cleanupCancelledImportJobRows = async (
+  ctx: MutationCtx,
+  importJobId: string,
+  error: string,
+  now: number,
+) => {
+  let cleanedChunkCount = 0;
+  let terminalSequenceSum = 0;
+  for (const status of ["pending", "running"] as const) {
+    if (cleanedChunkCount >= IMPORT_CANCEL_CLEANUP_BATCH_LIMIT) break;
+    const chunks = await ctx.db
+      .query("importChunks")
+      .withIndex("by_job_status", (q) => q.eq("importJobId", importJobId).eq("status", status))
+      .take(IMPORT_CANCEL_CLEANUP_BATCH_LIMIT - cleanedChunkCount);
+    for (const chunk of chunks) {
+      await ctx.db.patch(chunk._id, {
+        status: "dead_letter",
+        error,
+        completedAt: now,
+        leaseExpiresAt: undefined,
+        leaseToken: undefined,
+        payloadStoredAt: undefined,
+        updatedAt: now,
+      });
+      cleanedChunkCount += 1;
+      terminalSequenceSum += chunk.sequence;
+    }
+  }
+  if (cleanedChunkCount > 0) {
+    await patchImportJobCounters(ctx, importJobId, {
+      failedChunkCount: cleanedChunkCount,
+      terminalChunkSequenceSum: terminalSequenceSum,
+      now,
+    });
+  }
+
+  let deletedPayloadCount = 0;
+  const payloads = await ctx.db
+    .query("importChunkPayloads")
+    .withIndex("by_importJobId", (q) => q.eq("importJobId", importJobId))
+    .take(IMPORT_CANCEL_CLEANUP_BATCH_LIMIT);
+  for (const payload of payloads) {
+    await ctx.db.delete(payload._id);
+    deletedPayloadCount += 1;
+  }
+
+  return {
+    cleanedChunkCount,
+    deletedPayloadCount,
+    done: cleanedChunkCount === 0 && deletedPayloadCount === 0,
+  };
+};
+
+const scheduleCancelledImportCleanup = async (
+  ctx: MutationCtx,
+  importJobId: string,
+) => {
+  await ctx.scheduler.runAfter(
+    IMPORT_WORKER_SCHEDULE_DELAY_MS,
+    internal.quasar.cleanupCancelledImportJobInternal,
+    { importJobId },
+  );
 };
 
 const importChunkWorkerFailure = (error: unknown) => {

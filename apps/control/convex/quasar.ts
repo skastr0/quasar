@@ -14,6 +14,7 @@ import {
 } from "./quasarEmbeddingReadiness";
 import {
   cancelImportJobHandler,
+  cleanupCancelledImportJobHandler,
   claimImportChunkHandler,
   claimImportJobWorkerHandler,
   enqueueImportChunkHandler,
@@ -109,6 +110,11 @@ export const scheduleImportWorkerInternal = internalMutation({
 export const cancelImportJobInternal = internalMutation({
   args: { importJobId: v.string(), reason: v.optional(v.string()) },
   handler: cancelImportJobHandler,
+});
+
+export const cleanupCancelledImportJobInternal = internalMutation({
+  args: { importJobId: v.string() },
+  handler: cleanupCancelledImportJobHandler,
 });
 
 export const processImportJobChunksInternal = internalAction({
