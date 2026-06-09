@@ -488,6 +488,8 @@ export default defineSchema({
     attempts: v.number(),
     maxAttempts: v.optional(v.number()),
     batch: v.optional(v.any()),
+    payloadHash: v.optional(v.string()),
+    payloadBytes: v.optional(v.number()),
     error: v.optional(v.string()),
     nextAttemptAt: v.optional(v.number()),
     leaseExpiresAt: v.optional(v.number()),
@@ -507,6 +509,18 @@ export default defineSchema({
     .index("by_job_status_lease", ["importJobId", "status", "leaseExpiresAt"])
     .index("by_status_nextAttempt", ["status", "nextAttemptAt"])
     .index("by_status_lease", ["status", "leaseExpiresAt"]),
+
+  importChunkPayloads: defineTable({
+    chunkId: v.string(),
+    importJobId: v.string(),
+    payloadHash: v.string(),
+    payloadBytes: v.number(),
+    batch: v.any(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_chunkId", ["chunkId"])
+    .index("by_importJobId", ["importJobId"]),
 
   importCheckpoints: defineTable({
     checkpointId: v.string(),

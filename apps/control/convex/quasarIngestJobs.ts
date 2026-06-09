@@ -71,6 +71,7 @@ const IMPORT_CHUNK_LEASE_MS = 5 * 60_000;
 const IMPORT_CHUNK_MAX_ATTEMPTS = 5;
 const IMPORT_WORKER_BATCH_LIMIT = 3;
 const IMPORT_WORKER_SCHEDULE_DELAY_MS = 1_000;
+const SESSION_INTELLIGENCE_CONTRACT_VERSION = "session-intelligence/v2";
 const MAX_IMPORT_JOB_INPUT_BYTES = 3_500_000;
 const MAX_IMPORT_CHUNK_BATCH_BYTES = 768 * 1024;
 const MAX_IMPORT_BULK_INPUT_BYTES = 3_500_000;
@@ -83,7 +84,7 @@ export const startImportJobHandler = async (
   const input = decodeBoundarySync(StartImportJobInput, args.input, "start import job input");
   assertJsonByteBudget(input, MAX_IMPORT_JOB_INPUT_BYTES, "start import job input");
   const manifest = manifestForStart(input);
-  const idempotencyKey = input.idempotencyKey ?? importJobIdempotencyKey(manifest);
+  const idempotencyKey = input.idempotencyKey ?? importJobIdempotencyKey(manifest, input.batch);
   const existing = await ctx.db
     .query("importJobs")
     .withIndex("by_idempotencyKey", (q) => q.eq("idempotencyKey", idempotencyKey))
@@ -211,6 +212,8 @@ export const enqueueImportChunkHandler = async (
   const idempotencyKey =
     input.idempotencyKey ?? importChunkIdempotencyKey(input.importJobId, sequence, input.batch);
   const chunkId = input.chunkId ?? `chunk:${wideHash(idempotencyKey)}`;
+  const payloadBytes = jsonByteLength(input.batch);
+  const payloadHash = payloadHashForBatch(input.batch);
   const existingBySequence = await ctx.db
     .query("importChunks")
     .withIndex("by_job_sequence", (q) =>
@@ -249,7 +252,8 @@ export const enqueueImportChunkHandler = async (
     usageRecordCount: summary.usageRecordCount,
     artifactCount: summary.artifactCount,
     maxAttempts: IMPORT_CHUNK_MAX_ATTEMPTS,
-    batch: input.batch,
+    payloadHash,
+    payloadBytes,
     error: undefined,
     nextAttemptAt: now,
     leaseExpiresAt: undefined,
@@ -286,6 +290,14 @@ export const enqueueImportChunkHandler = async (
       await patchImportJobStatus(ctx, input.importJobId, "running", now);
     }
   }
+  await upsertChunkPayload(ctx, {
+    chunkId,
+    importJobId: input.importJobId,
+    payloadHash,
+    payloadBytes,
+    batch: input.batch,
+    now,
+  });
   await scheduleImportWorker(ctx, input.importJobId, 0);
   return {
     importJobId: input.importJobId,
@@ -363,7 +375,9 @@ export const claimImportChunkHandler = async (
     (await findDuePendingChunk(ctx, args.importJobId, args.now)) ??
     (await findStaleRunningChunk(ctx, args.importJobId, args.now));
   if (candidate === null) return null;
-  if (candidate.batch === undefined) {
+  const payload = await findChunkPayload(ctx, candidate.chunkId);
+  const batch = (payload?.batch ?? candidate.batch) as IngestBatchBoundaryValue | undefined;
+  if (batch === undefined) {
     await markChunkTerminalFailure(ctx, candidate, "Import chunk has no stored payload.", args.now);
     return null;
   }
@@ -382,7 +396,7 @@ export const claimImportChunkHandler = async (
   return {
     chunkId: candidate.chunkId,
     importJobId: candidate.importJobId,
-    batch: candidate.batch as IngestBatchBoundaryValue,
+    batch,
     attempts,
     leaseToken,
   };
@@ -398,15 +412,19 @@ export const markImportChunkSucceededHandler = async (
   const stale = staleChunkClaim(chunk, args.importJobId, args.leaseToken);
   if (stale !== null) return stale;
   const oldStatus = chunk.status;
+  const payload = await findChunkPayload(ctx, chunk.chunkId);
+  const batch = (payload?.batch ?? chunk.batch) as IngestBatchBoundaryValue | undefined;
   await ctx.db.patch(chunk._id, {
     status: "succeeded",
     completedAt: now,
     error: undefined,
     leaseExpiresAt: undefined,
     leaseToken: undefined,
+    payloadStoredAt: undefined,
     updatedAt: now,
   });
-  await writeChunkCheckpoints(ctx, chunk, now);
+  if (batch !== undefined) await writeChunkCheckpoints(ctx, chunk, batch, now);
+  await deleteChunkPayload(ctx, chunk.chunkId);
   await patchImportJobCounters(ctx, args.importJobId, {
     succeededChunkCount: oldStatus === "succeeded" ? 0 : 1,
     failedChunkCount: isTerminalFailed(oldStatus) ? -1 : 0,
@@ -440,8 +458,10 @@ export const markImportChunkFailedHandler = async (
     leaseExpiresAt: undefined,
     leaseToken: undefined,
     nextAttemptAt: exhausted ? undefined : now + retryDelayMs(chunk.attempts),
+    payloadStoredAt: exhausted ? undefined : chunk.payloadStoredAt,
     updatedAt: now,
   });
+  if (exhausted) await deleteChunkPayload(ctx, chunk.chunkId);
   await ctx.db.insert("importFailures", {
     failureId: `failure:${wideHash(`${args.importJobId}\u001f${args.chunkId}\u001f${now}`)}`,
     importJobId: args.importJobId,
@@ -478,7 +498,7 @@ export const readImportJobHandler = async (
   const limit = boundedStatusLimit(input.limit);
   const chunks = await ctx.db
     .query("importChunks")
-    .withIndex("by_importJobId", (q) => q.eq("importJobId", input.importJobId))
+    .withIndex("by_job_sequence", (q) => q.eq("importJobId", input.importJobId))
     .paginate({ cursor: input.chunkCursor ?? null, numItems: limit });
   const failures = await ctx.db
     .query("importFailures")
@@ -530,6 +550,47 @@ const findImportChunk = async (ctx: MutationCtx, chunkId: string) =>
     .query("importChunks")
     .withIndex("by_chunkId", (q) => q.eq("chunkId", chunkId))
     .unique();
+
+const findChunkPayload = async (ctx: MutationCtx, chunkId: string) =>
+  await ctx.db
+    .query("importChunkPayloads")
+    .withIndex("by_chunkId", (q) => q.eq("chunkId", chunkId))
+    .unique();
+
+const upsertChunkPayload = async (
+  ctx: MutationCtx,
+  input: {
+    readonly chunkId: string;
+    readonly importJobId: string;
+    readonly payloadHash: string;
+    readonly payloadBytes: number;
+    readonly batch: IngestBatchBoundaryValue;
+    readonly now: number;
+  },
+) => {
+  const existing = await findChunkPayload(ctx, input.chunkId);
+  const patch = {
+    importJobId: input.importJobId,
+    payloadHash: input.payloadHash,
+    payloadBytes: input.payloadBytes,
+    batch: input.batch,
+    updatedAt: input.now,
+  };
+  if (existing === null) {
+    await ctx.db.insert("importChunkPayloads", {
+      chunkId: input.chunkId,
+      ...patch,
+      createdAt: input.now,
+    });
+  } else {
+    await ctx.db.patch(existing._id, patch);
+  }
+};
+
+const deleteChunkPayload = async (ctx: MutationCtx, chunkId: string) => {
+  const existing = await findChunkPayload(ctx, chunkId);
+  if (existing !== null) await ctx.db.delete(existing._id);
+};
 
 const expectedChunkCountForExistingJob = async (
   ctx: MutationCtx,
@@ -672,8 +733,10 @@ const markChunkTerminalFailure = async (
     error,
     completedAt: now,
     leaseToken: undefined,
+    payloadStoredAt: undefined,
     updatedAt: now,
   });
+  await deleteChunkPayload(ctx, chunk.chunkId);
   if (!isTerminalFailed(chunk.status)) {
     await patchImportJobCounters(ctx, chunk.importJobId, {
       failedChunkCount: 1,
@@ -716,11 +779,11 @@ const upsertImportShards = async (
 const writeChunkCheckpoints = async (
   ctx: MutationCtx,
   chunk: Doc<"importChunks">,
+  batch: IngestBatchBoundaryValue,
   now: number,
 ) => {
-  const batch = chunk.batch as IngestBatchBoundaryValue | undefined;
-  const machineId = batch?.machine.machineId ?? "";
-  const sessions = batch?.sessions ?? [];
+  const machineId = batch.machine.machineId;
+  const sessions = batch.sessions;
   for (const session of sessions) {
     const provider = session.provider;
     const sessionId = session.id;
@@ -861,9 +924,14 @@ const manifestFromBatch = (batch: IngestBatchBoundaryValue): IngestManifest => {
   };
 };
 
-const importJobIdempotencyKey = (manifest: IngestManifest) =>
+const importJobIdempotencyKey = (
+  manifest: IngestManifest,
+  batch: IngestBatchBoundaryValue | undefined,
+) =>
   `import-job:${wideHash(
     JSON.stringify([
+      SESSION_INTELLIGENCE_CONTRACT_VERSION,
+      batch === undefined ? undefined : payloadHashForBatch(batch),
       manifest.machineId,
       manifest.sourceRoots.map((root) => [root.provider, root.rootPath]),
       manifest.sessions.map((session) => [
@@ -883,8 +951,10 @@ const importChunkIdempotencyKey = (
 ) =>
   `import-chunk:${wideHash(
     JSON.stringify([
+      SESSION_INTELLIGENCE_CONTRACT_VERSION,
       importJobId,
       sequence,
+      payloadHashForBatch(batch),
       batch.machine.machineId,
       batch.sessions.map((session) => [
         session.provider,
@@ -894,6 +964,14 @@ const importChunkIdempotencyKey = (
       ]),
     ]),
   )}`;
+
+const payloadHashForBatch = (batch: IngestBatchBoundaryValue) =>
+  wideHash(JSON.stringify([SESSION_INTELLIGENCE_CONTRACT_VERSION, batchPayloadIdentity(batch)]));
+
+const batchPayloadIdentity = (batch: IngestBatchBoundaryValue) => ({
+  ...batch,
+  generatedAt: undefined,
+});
 
 const summarizeBatch = (batch: IngestBatchBoundaryValue) => ({
   machineId: batch.machine.machineId,
@@ -980,8 +1058,8 @@ const statusChunk = (chunk: Doc<"importChunks">) => {
   const { batch, ...rest } = chunk;
   return {
     ...rest,
-    payloadStored: batch !== undefined,
-    payloadBytes: batch === undefined ? undefined : jsonByteLength(batch),
+    payloadStored: chunk.payloadStoredAt !== undefined || batch !== undefined,
+    payloadBytes: chunk.payloadBytes,
   };
 };
 

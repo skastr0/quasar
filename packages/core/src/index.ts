@@ -6,6 +6,7 @@ export * from "./redaction";
 export {
   CONVEX_SAFE_INGEST_BUDGETS,
   ConvexShapeViolationError,
+  SESSION_INTELLIGENCE_CONTRACT_VERSION,
   assertConvexSafeSessionIntelligenceBatch,
   assertConvexSafeSessionIntelligenceBatchEffect,
   jsonByteLength,

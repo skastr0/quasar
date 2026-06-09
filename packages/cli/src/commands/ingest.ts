@@ -6,11 +6,13 @@ import {
   createSourceSafetyReport,
   ImportJobStartResponse,
   ImportJobStatusResponse,
+  SESSION_INTELLIGENCE_CONTRACT_VERSION,
   jsonByteLength,
   manifestFromBatch,
   QuasarApiPaths,
   snapshotConfiguredSourceRoots,
   snapshotIngestSourceManifest,
+  stableJsonHash,
   type IngestBatch,
   type NormalizedSession,
   sanitizeIngestBatchForTransport,
@@ -74,8 +76,11 @@ const buildBatchWithSourceSnapshotEffect = (input: string | undefined) =>
     return { options, before, batch };
   });
 
-const readImportJob = (importJobId: string) =>
-  requestJson({
+const readImportJob = (
+  importJobId: string,
+  requestClient: IngestRequestClient = requestJson,
+) =>
+  requestClient({
     method: "GET",
     path: QuasarApiPaths.ingestJobs,
     query: { importJobId },
@@ -136,88 +141,89 @@ const planCommand = Command.make("plan", { input: inputArg }, ({ input }) =>
   ),
 );
 
-const runCommand = Command.make("run", { input: inputArg }, ({ input }) =>
-  executeJsonCommand(
-    "ingest run",
-    Effect.gen(function* () {
-      const { options, before, batch: rawBatch } = yield* buildBatchWithSourceSnapshotEffect(
-        toUndefined(input),
-      );
-      const batch = sanitizeIngestBatchForTransport(rawBatch);
-      if (options.dryRun === true) {
-        const after = snapshotIngestSourceManifest(batch);
-        return {
-          dryRun: true,
-          summary: summarizeBatch(batch),
-          sourceSafetyReport: createSourceSafetyReport({
-            batch,
-            before,
-            after,
-            quasarStateWrites: false,
-          }),
-        };
-      }
-      const chunks = chunkIngestBatch(batch, chunkOptionsFromEnv());
-      validateChunkPayloads(chunks);
-      const job = yield* requestJson({
-        method: "POST",
-        path: QuasarApiPaths.ingestJobs,
-        body: {
-          manifest: manifestFromBatch(batch),
-          expectedChunkCount: chunks.length,
-        },
-        responseSchema: ImportJobStartResponse,
-      });
-      const chunkDelayMs = envPositiveInteger(
-        "QUASAR_INGEST_CHUNK_DELAY_MS",
-        DEFAULT_CHUNK_DELAY_MS,
-      );
-      const results = [];
-      for (const group of chunkUploadGroups(chunks, uploadGroupSizeFromEnv())) {
-        const requestBody = {
-          importJobId: job.importJobId,
-          expectedChunkCount: chunks.length,
-          chunks: group.map(({ chunk, index }) => ({
-            batch: chunk,
-            sequence: index,
-            completeJob: index === chunks.length - 1,
-          })),
-        };
-        assertJsonBudget(
-          requestBody,
-          MAX_BULK_UPLOAD_BODY_BYTES,
-          `bulk upload group ending at chunk ${group.at(-1)?.index ?? 0}`,
-        );
-        results.push(
-          yield* requestJson({
-            method: "POST",
-            path: QuasarApiPaths.ingestJobChunksBulk,
-            body: requestBody,
-            responseSchema: Schema.Unknown,
-          }),
-        );
-        if (group.at(-1)?.index !== chunks.length - 1 && chunkDelayMs > 0) {
-          yield* Effect.sleep(Duration.millis(chunkDelayMs));
-        }
-      }
-      const status = yield* readImportJob(job.importJobId);
+type IngestRequestClient = typeof requestJson;
+
+export const runIngestEffect = (
+  input: string | undefined,
+  requestClient: IngestRequestClient = requestJson,
+) =>
+  Effect.gen(function* () {
+    const { options, before, batch: rawBatch } = yield* buildBatchWithSourceSnapshotEffect(input);
+    const batch = sanitizeIngestBatchForTransport(rawBatch);
+    if (options.dryRun === true) {
       const after = snapshotIngestSourceManifest(batch);
       return {
-        ...summarizeBatch(batch),
-        importJobId: job.importJobId,
-        jobStatus: status.jobStatus,
-        chunkCount: chunks.length,
-        results,
-        status,
+        dryRun: true,
+        summary: summarizeBatch(batch),
         sourceSafetyReport: createSourceSafetyReport({
           batch,
           before,
           after,
-          quasarStateWrites: true,
+          quasarStateWrites: false,
         }),
       };
-    }),
-  ),
+    }
+    const chunks = chunkIngestBatch(batch, chunkOptionsFromEnv());
+    validateChunkPayloads(chunks);
+    const job = yield* requestClient({
+      method: "POST",
+      path: QuasarApiPaths.ingestJobs,
+      body: {
+        manifest: manifestFromBatch(batch),
+        idempotencyKey: ingestJobIdempotencyKey(batch, chunks),
+        expectedChunkCount: chunks.length,
+      },
+      responseSchema: ImportJobStartResponse,
+    });
+    const chunkDelayMs = envPositiveInteger(
+      "QUASAR_INGEST_CHUNK_DELAY_MS",
+      DEFAULT_CHUNK_DELAY_MS,
+    );
+    const results = [];
+    for (const group of chunkUploadGroups({
+      chunks,
+      size: uploadGroupSizeFromEnv(),
+      importJobId: job.importJobId,
+      expectedChunkCount: chunks.length,
+    })) {
+      const requestBody = bulkUploadRequestBody(job.importJobId, chunks.length, group);
+      assertJsonBudget(
+        requestBody,
+        MAX_BULK_UPLOAD_BODY_BYTES,
+        `bulk upload group ending at chunk ${group.at(-1)?.index ?? 0}`,
+      );
+      results.push(
+        yield* requestClient({
+          method: "POST",
+          path: QuasarApiPaths.ingestJobChunksBulk,
+          body: requestBody,
+          responseSchema: Schema.Unknown,
+        }),
+      );
+      if (group.at(-1)?.index !== chunks.length - 1 && chunkDelayMs > 0) {
+        yield* Effect.sleep(Duration.millis(chunkDelayMs));
+      }
+    }
+    const status = yield* readImportJob(job.importJobId, requestClient);
+    const after = snapshotIngestSourceManifest(batch);
+    return {
+      ...summarizeBatch(batch),
+      importJobId: job.importJobId,
+      jobStatus: status.jobStatus,
+      chunkCount: chunks.length,
+      results,
+      status,
+      sourceSafetyReport: createSourceSafetyReport({
+        batch,
+        before,
+        after,
+        quasarStateWrites: true,
+      }),
+    };
+  });
+
+const runCommand = Command.make("run", { input: inputArg }, ({ input }) =>
+  executeJsonCommand("ingest run", runIngestEffect(toUndefined(input))),
 );
 
 export const MAX_EVENTS_PER_CHUNK = 50;
@@ -249,16 +255,23 @@ const uploadGroupSizeFromEnv = () =>
     envPositiveInteger("QUASAR_INGEST_UPLOAD_GROUP_SIZE", DEFAULT_UPLOAD_GROUP_SIZE),
   );
 
-const chunkUploadGroups = (chunks: readonly IngestBatch[], size: number) => {
+const chunkUploadGroups = (input: {
+  readonly chunks: readonly IngestBatch[];
+  readonly size: number;
+  readonly importJobId: string;
+  readonly expectedChunkCount: number;
+}) => {
   const groups: Array<Array<{ chunk: IngestBatch; index: number }>> = [];
   let current: Array<{ chunk: IngestBatch; index: number }> = [];
-  for (let index = 0; index < chunks.length; index += 1) {
-    const item = { chunk: chunks[index]!, index };
+  for (let index = 0; index < input.chunks.length; index += 1) {
+    const item = { chunk: input.chunks[index]!, index };
     const next = [...current, item];
-    const nextBytes = jsonByteLength({ chunks: next.map(({ chunk }) => ({ batch: chunk })) });
+    const nextBytes = jsonByteLength(
+      bulkUploadRequestBody(input.importJobId, input.expectedChunkCount, next),
+    );
     if (
       current.length > 0 &&
-      (current.length >= size || nextBytes > MAX_BULK_UPLOAD_BODY_BYTES)
+      (current.length >= input.size || nextBytes > MAX_BULK_UPLOAD_BODY_BYTES)
     ) {
       groups.push(current);
       current = [item];
@@ -269,6 +282,20 @@ const chunkUploadGroups = (chunks: readonly IngestBatch[], size: number) => {
   if (current.length > 0) groups.push(current);
   return groups;
 };
+
+const bulkUploadRequestBody = (
+  importJobId: string,
+  expectedChunkCount: number,
+  group: readonly { chunk: IngestBatch; index: number }[],
+) => ({
+  importJobId,
+  expectedChunkCount,
+  chunks: group.map(({ chunk, index }) => ({
+    batch: chunk,
+    sequence: index,
+    completeJob: index === expectedChunkCount - 1,
+  })),
+});
 
 const validateChunkPayloads = (chunks: readonly IngestBatch[]) => {
   for (let index = 0; index < chunks.length; index += 1) {
@@ -286,6 +313,26 @@ const assertJsonBudget = (value: unknown, maxBytes: number, label: string) => {
     throw new Error(`${label} is ${bytes} bytes; maximum is ${maxBytes} bytes.`);
   }
 };
+
+export const ingestJobIdempotencyKey = (
+  batch: IngestBatch,
+  chunks: readonly IngestBatch[],
+) =>
+  `import-job:${stableJsonHash([
+    SESSION_INTELLIGENCE_CONTRACT_VERSION,
+    manifestIdentity(batch),
+    chunks.map((chunk, sequence) => [sequence, stableJsonHash(batchPayloadIdentity(chunk))]),
+  ])}`;
+
+const manifestIdentity = (batch: IngestBatch) => ({
+  ...manifestFromBatch(batch),
+  generatedAt: undefined,
+});
+
+const batchPayloadIdentity = (batch: IngestBatch) => ({
+  ...batch,
+  generatedAt: undefined,
+});
 
 const envPositiveInteger = (name: string, fallback: number) => {
   const raw = process.env[name];
