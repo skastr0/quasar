@@ -414,6 +414,7 @@ export class StartImportJobInput extends Schema.Class<StartImportJobInput>(
   manifest: Schema.optional(IngestManifestBoundary),
   sourceIdentityKey: Schema.optional(BoundedIdString),
   idempotencyKey: Schema.optional(BoundedIdString),
+  chunkPayloadFingerprint: Schema.optional(BoundedIdString),
   expectedChunkCount: Schema.optional(PositiveInteger),
 }) {}
 

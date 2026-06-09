@@ -2,6 +2,7 @@ export * from "./schemas";
 export * from "./hash";
 export * from "./project-normalization";
 export * from "./ingest";
+export * from "./ingest-identity";
 export * from "./redaction";
 export {
   CONVEX_SAFE_INGEST_BUDGETS,

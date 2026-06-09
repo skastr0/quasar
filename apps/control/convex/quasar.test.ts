@@ -730,6 +730,129 @@ describe("quasar ingestion and search", () => {
     ).toHaveLength(0);
   });
 
+  test("rejects incompatible plans for an existing source identity", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const sourceIdentityKey = "source:stable-plan";
+    const job = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { batch, sourceIdentityKey, expectedChunkCount: 1 },
+    });
+    const changedBatch = {
+      ...batch,
+      sessions: batch.sessions.map((session) => ({
+        ...session,
+        events: session.events.map((event) => ({
+          ...event,
+          contentText: `${event.contentText} changed`,
+        })),
+      })),
+    };
+
+    await expect(
+      t.mutation(internal.quasar.startImportJobInternal, {
+        input: { batch: changedBatch, sourceIdentityKey, expectedChunkCount: 1 },
+      }),
+    ).rejects.toThrow(/sourceIdentityKey is already bound to a different ingest plan/);
+
+    const retry = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { batch, sourceIdentityKey, expectedChunkCount: 1 },
+    });
+
+    expect(retry.importJobId).toBe(job.importJobId);
+  });
+
+  test("rejects stale start idempotency keys for changed manifest plans", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const session = batch.sessions[0]!;
+    const summary = {
+      provider: "codex" as const,
+      sessionCount: 1,
+      eventCount: 1,
+      toolCallCount: 0,
+      contentBlockCount: 0,
+      sessionEdgeCount: 0,
+      usageRecordCount: 0,
+      artifactCount: 0,
+    };
+    const manifest = {
+      protocolVersion: "quasar.ingest-manifest/v1" as const,
+      machine: batch.machine,
+      sourceRoots: batch.sourceRoots,
+      sessions: [
+        {
+          id: session.id,
+          nativeSessionId: session.nativeSessionId,
+          provider: session.provider,
+          machineId: session.machineId,
+          projectIdentityKey: session.projectIdentity.projectIdentityKey,
+          sourceRoot: session.sourceRoot,
+          sourcePath: session.sourcePath,
+          eventCount: 1,
+          toolCallCount: 0,
+          contentBlockCount: 0,
+          sessionEdgeCount: 0,
+          usageRecordCount: 0,
+          artifactCount: 0,
+        },
+      ],
+      providerSummaries: [summary],
+      diagnostics: [],
+      generatedAt: batch.generatedAt,
+      sessionCount: 1,
+      eventCount: 1,
+      toolCallCount: 0,
+      contentBlockCount: 0,
+      sessionEdgeCount: 0,
+      usageRecordCount: 0,
+      artifactCount: 0,
+    };
+    const first = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: {
+        manifest,
+        chunkPayloadFingerprint: "chunk-fingerprint:old",
+        expectedChunkCount: 1,
+      },
+    });
+    const stalePlanIdentity = first.sourceIdentityKey;
+    expect(stalePlanIdentity).toEqual(expect.stringMatching(/^import-job:/));
+
+    await expect(
+      t.mutation(internal.quasar.startImportJobInternal, {
+        input: {
+          manifest: {
+            ...manifest,
+            providerSummaries: [{ ...summary, eventCount: 2 }],
+            eventCount: 2,
+          },
+          sourceIdentityKey: stalePlanIdentity,
+          idempotencyKey: stalePlanIdentity,
+          chunkPayloadFingerprint: "chunk-fingerprint:old",
+          expectedChunkCount: 1,
+        },
+      }),
+    ).rejects.toThrow(/idempotencyKey does not match its derived plan identity/);
+  });
+
+  test("rejects start-job idempotency keys not derived from direct batch identity", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+
+    await expect(
+      t.mutation(internal.quasar.startImportJobInternal, {
+        input: {
+          batch,
+          sourceIdentityKey: "source:bad-start-idempotency",
+          idempotencyKey: "import-job:not-derived",
+          expectedChunkCount: 1,
+        },
+      }),
+    ).rejects.toThrow(/idempotencyKey does not match/);
+    expect(
+      await t.run(async (ctx) => await ctx.db.query("importJobs").collect()),
+    ).toHaveLength(0);
+  });
+
   test("rejects chunk idempotency keys not derived from job sequence and payload", async () => {
     const t = setup();
     const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
