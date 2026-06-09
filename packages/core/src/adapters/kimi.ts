@@ -73,7 +73,7 @@ const artifactFromRecord = (
 ): KimiArtifactDraft[] => {
   const type = String(record.type ?? record.kind ?? "").toLowerCase();
   const path = typeof record.path === "string" ? record.path : undefined;
-  if (!type.includes("artifact") && !type.includes("plan") && path === undefined) return [];
+  if (!type.includes("artifact") && !type.includes("plan")) return [];
   return [
     {
       id: artifactIdFor("kimi", machineId, sourcePath, nativeSessionId, [eventId, index, path, type]),

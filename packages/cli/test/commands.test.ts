@@ -1,5 +1,5 @@
-import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1661,6 +1661,11 @@ describe("CLI command graph", () => {
       chunkCount: number;
       uploadedThisRunCount: number;
       uploadComplete: boolean;
+      ledger?: {
+        path: string;
+        uploadedPrefixCount: number;
+        recordedUploadedChunkCount: number;
+      };
       ingestGeneration?: { generationId: string; path: string };
     };
     let first: GenerationResult | undefined;
@@ -1677,6 +1682,26 @@ describe("CLI command graph", () => {
           requestClient,
         ) as Effect.Effect<unknown, unknown, never>,
       ) as GenerationResult;
+      const generationPath = first.ingestGeneration?.path;
+      if (generationPath === undefined) throw new Error("missing ingest generation path");
+      const generationDirectory = dirname(generationPath);
+      const persisted = JSON.parse(readFileSync(generationPath, "utf8")) as {
+        plan?: { chunkPayloadHashes?: unknown };
+        chunkLedger?: { format?: unknown; path?: unknown; chunkCount?: unknown; byteLength?: unknown };
+      };
+      expect(persisted.plan?.chunkPayloadHashes).toBeUndefined();
+      expect(persisted.chunkLedger).toMatchObject({
+        format: "quasar.ingest-chunks-jsonl/v1",
+        path: "chunks.ndjson",
+        chunkCount: 5,
+      });
+      expect(typeof persisted.chunkLedger?.byteLength).toBe("number");
+      const chunkLedgerPath = join(generationDirectory, "chunks.ndjson");
+      expect(existsSync(chunkLedgerPath)).toBe(true);
+      const ledgerLines = readFileSync(chunkLedgerPath, "utf8").trim().split("\n");
+      expect(ledgerLines).toHaveLength(5);
+      expect(JSON.parse(ledgerLines[1]!)?.payloadHash).toEqual(expect.any(String));
+      writeCodexFixture(join(generationDirectory, "sources", "codex"), 20);
       writeCodexFixture(root, 20);
       writeMachineIdentity(quasarHome, {
         machineId: "machine:changed",
@@ -1714,7 +1739,45 @@ describe("CLI command graph", () => {
     expect(uploadedChunks.map((chunk) => chunk.completeJob === true)).toEqual([false, false, false, false, true]);
     expect(first?.ingestGeneration?.generationId).toBe(second?.ingestGeneration?.generationId);
     expect(first?.ingestGeneration?.path === undefined ? false : existsSync(first.ingestGeneration.path)).toBe(true);
-  }, 20_000);
+    expect(second?.ledger).toMatchObject({
+      uploadedPrefixCount: 5,
+      recordedUploadedChunkCount: 5,
+    });
+
+    const ledgerRows = sqliteJson<{
+      source_identity_key?: string;
+      import_job_id?: string;
+      expected_chunk_count?: number;
+      status?: string;
+      total?: number;
+      acknowledged?: number;
+      uploading?: number;
+    }>(
+      join(quasarHome, "ingest-ledger.sqlite"),
+      `
+        select source_identity_key, import_job_id, expected_chunk_count, status,
+          null as total, null as acknowledged, null as uploading
+        from ingest_attempts
+        union all
+        select null, null, null, null,
+          count(*),
+          sum(case when local_status = 'acknowledged' then 1 else 0 end),
+          sum(case when local_status = 'uploading' then 1 else 0 end)
+        from ingest_chunks
+      `,
+    );
+    expect(ledgerRows[0]).toMatchObject({
+      source_identity_key: sourceIdentityKeys[0],
+      import_job_id: "job:generation",
+      expected_chunk_count: 5,
+      status: "running",
+    });
+    expect(ledgerRows[1]).toMatchObject({
+      total: 5,
+      acknowledged: 5,
+      uploading: 0,
+    });
+  }, 40_000);
 
   test("rejects stale durable ingest generation identity versions", async () => {
     const root = mkdtempSync(join(tmpdir(), "quasar-cli-codex-"));
@@ -1757,7 +1820,7 @@ describe("CLI command graph", () => {
           ) as Effect.Effect<unknown, unknown, never>,
         ),
       ).rejects.toThrow(
-        /created for quasar\.ingest-generation-identity\/v3.*fresh ingest generation/,
+        /uses quasar\.ingest-generation\/v1.*requires quasar\.ingest-generation\/v2.*fresh ingest generation/,
       );
     } finally {
       restoreEnv("QUASAR_HOME", previousQuasarHome);
@@ -1959,6 +2022,11 @@ const writeCodexSessionFile = (root: string, suffix: string, content: string) =>
 const writeMachineIdentity = (quasarHome: string, machine = testMachine) => {
   mkdirSync(quasarHome, { recursive: true });
   writeFileSync(join(quasarHome, "machine.json"), JSON.stringify(machine));
+};
+
+const sqliteJson = <A>(dbPath: string, query: string): A[] => {
+  const output = execFileSync("sqlite3", ["-json", dbPath, query], { encoding: "utf8" });
+  return output.trim().length === 0 ? [] : JSON.parse(output) as A[];
 };
 
 const restoreEnv = (name: string, value: string | undefined) => {

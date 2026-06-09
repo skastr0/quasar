@@ -397,7 +397,7 @@ describe("adapter ingestion", () => {
     expect(readHermesSessionRowsForWindow(hermesDbPath, 25)).toHaveLength(25);
     expect(readOpenCodeSessionRowsForWindow(opencodeDbPath, undefined, 500)[0]?.id).toBe("s-0");
     expect(readHermesSessionRowsForWindow(hermesDbPath, undefined, 500)[0]?.id).toBe("h-0");
-  });
+  }, 20_000);
 
   test("reads graph fixtures for all local adapters", async () => {
     const fixtures = await makeAllAdapterFixtures();
@@ -659,7 +659,8 @@ describe("adapter ingestion", () => {
 
   test("keeps OpenCode diff parts out of message content", async () => {
     const root = mkdtempSync(join(tmpdir(), "quasar-opencode-diff-part-"));
-    writeOpenCodeDb(join(root, "opencode-local.db"), {
+    const dbPath = join(root, "opencode-local.db");
+    writeOpenCodeDb(dbPath, {
       sessionId: "diff-part-session",
       title: "OpenCode Diff Part DB",
       content: "review this change",
@@ -674,6 +675,14 @@ describe("adapter ingestion", () => {
         },
       },
     });
+    execFileSync("sqlite3", [
+      dbPath,
+      `insert into part values ('p-pathless-diff', 'diff-part-session', 'm1', 2, ${sql(JSON.stringify({
+        type: "diff",
+        text: "opencode pathless diff part trash",
+        diff: "@@ opencode pathless diff trash",
+      }))});`,
+    ]);
 
     const batch = await buildIngestBatch({
       providers: ["opencode"],
@@ -689,6 +698,8 @@ describe("adapter ingestion", () => {
     expect(encoded).not.toContain("opencode diff text trash");
     expect(encoded).not.toContain("@@ opencode diff body trash");
     expect(encoded).not.toContain("opencode display trash");
+    expect(encoded).not.toContain("opencode pathless diff part trash");
+    expect(encoded).not.toContain("@@ opencode pathless diff trash");
   });
 
   test("does not materialize unused Kimi state provider data", async () => {
@@ -713,6 +724,29 @@ describe("adapter ingestion", () => {
     expect(encoded).not.toContain("kimi-state-workspace-trash");
     expect(encoded).not.toContain("kimi-state-provider-trash");
     expect(encoded).not.toContain("kimi-state-diff-trash");
+  });
+
+  test("does not create Kimi artifacts from ordinary path-bearing messages", async () => {
+    const root = makeKimiFixture();
+    writeJsonl(join(root, "sessions", "s1", "agents", "agent-a", "wire.jsonl"), [
+      { id: "k1", role: "assistant", type: "plan", content: { text: "plan work" } },
+      {
+        id: "k-path",
+        role: "assistant",
+        content: "read the file and continue",
+        path: "/Users/a/Projects/quasar/src/index.ts",
+      },
+    ]);
+
+    const batch = await buildIngestBatch({
+      providers: ["kimi"],
+      roots: { kimi: root },
+      machine,
+    });
+
+    assertAdapterContract(batch, "kimi");
+    expect(batch.sessions[0]?.artifacts).toHaveLength(1);
+    expect(batch.sessions[0]?.artifacts[0]?.kind).toBe("plan");
   });
 
   test("keeps Grok provider stream deltas out of session content and tool payloads", async () => {
@@ -1019,6 +1053,11 @@ describe("adapter ingestion", () => {
       },
       {
         id: "d2",
+        type: "diff",
+        content: { patch: "@@ pathless droid diff display trash" },
+      },
+      {
+        id: "d3",
         type: "diff",
         path: "/Users/a/Projects/quasar/src/index.ts",
         content: { patch: "@@ real droid patch", providerUi: "droid-diff-ui-trash" },
