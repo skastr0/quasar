@@ -51,6 +51,7 @@ export interface BuildIngestBatchOptions {
   readonly providers?: readonly Provider[];
   readonly includeExperimental?: boolean;
   readonly limit?: number;
+  readonly skip?: number;
   readonly roots?: Partial<Record<Provider, string>>;
   readonly logicalRoots?: Partial<Record<Provider, string>>;
   readonly machine?: MachineIdentity;
@@ -72,6 +73,7 @@ export const buildIngestBatch = async (
     roots: options.roots,
     logicalRoots: options.logicalRoots,
     limit: options.limit,
+    skip: options.skip,
   });
   return toConvexSafeSessionIntelligenceBatch({
     protocolVersion: "quasar.ingest/v1",
@@ -108,6 +110,7 @@ export async function* streamIngestBatches(
         roots: options.roots,
         logicalRoots: options.logicalRoots,
         limit: options.limit,
+        skip: options.skip,
       });
       continue;
     }
@@ -117,6 +120,7 @@ export async function* streamIngestBatches(
       roots: options.roots,
       logicalRoots: options.logicalRoots,
       limit: options.limit,
+      skip: options.skip,
     });
     yield toConvexSafeSessionIntelligenceBatch({
       protocolVersion: "quasar.ingest/v1",

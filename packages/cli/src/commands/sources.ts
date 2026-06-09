@@ -28,6 +28,7 @@ export const sourcesCommand = Command.make("sources").pipe(
                 providers: options.providers,
                 includeExperimental: options.includeExperimental ?? true,
                 limit: options.limit ?? 1,
+                skip: options.skip,
                 roots: options.roots,
               }),
             catch: (error) => (error instanceof Error ? error : new Error(String(error))),

@@ -381,7 +381,9 @@ export const cursorAdapter: SessionAdapter = {
         ],
       };
     }
-    const files = statSync(root).isFile() ? [root] : collectFiles(root, cursorDbLike, options.limit);
+    const files = statSync(root).isFile()
+      ? [root]
+      : collectFiles(root, cursorDbLike, options.limit, options.skip);
     const sessions: NormalizedSession[] = [];
     for (const path of files) {
       const session = await buildCursorSession(path, root, options);

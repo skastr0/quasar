@@ -383,7 +383,12 @@ async function* streamClaude(options: AdapterOptions) {
   const projectsRoot = join(root, "projects");
   const logicalRoot = logicalRootFor("claude", root, options);
   const logicalProjectsRoot = join(logicalRoot, "projects");
-  const files = collectFiles(projectsRoot, (path) => path.endsWith(".jsonl"), options.limit);
+  const files = collectFiles(
+    projectsRoot,
+    (path) => path.endsWith(".jsonl"),
+    options.limit,
+    options.skip,
+  );
   yield {
     type: "sourceRoot" as const,
     sourceRoot: sourceRoot("claude", claudeAdapter.id, logicalProjectsRoot, options.machine, options.now),

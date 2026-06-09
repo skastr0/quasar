@@ -157,10 +157,12 @@ export const collectFiles = (
   root: string,
   predicate: (path: string) => boolean,
   limit: number = Number.POSITIVE_INFINITY,
+  skip: number = 0,
 ) => {
-  const input = parseCollectFilesInput(root, limit);
+  const input = parseCollectFilesInput(root, limit, skip);
   if (input === undefined) return [];
   const files: string[] = [];
+  let matched = 0;
   const visit = (path: string) => {
     if (files.length >= input.limit) return;
     let stat;
@@ -170,13 +172,15 @@ export const collectFiles = (
       return;
     }
     if (stat.isDirectory()) {
-      for (const entry of readdirSync(path)) visit(join(path, entry));
+      for (const entry of readdirSync(path).sort()) visit(join(path, entry));
       return;
     }
-    if (predicate(path)) files.push(path);
+    if (!predicate(path)) return;
+    if (matched >= input.skip) files.push(path);
+    matched += 1;
   };
   if (existsSync(input.root)) visit(input.root);
-  return files.sort();
+  return files;
 };
 
 export const compactText = (value: NativeValue | undefined): string | undefined => {
@@ -654,12 +658,13 @@ export const nativeSessionIdFromPath = (path: string) =>
 
 export const parentDirectoryName = (path: string) => basename(dirname(path));
 
-const parseCollectFilesInput = (root: string, limit: number) => {
+const parseCollectFilesInput = (root: string, limit: number, skip: number) => {
   const trimmedRoot = root.trim();
   if (trimmedRoot.length === 0 || limit <= 0) return undefined;
   return {
     root: trimmedRoot,
     limit: Number.isFinite(limit) ? Math.floor(limit) : Number.POSITIVE_INFINITY,
+    skip: Number.isFinite(skip) && skip > 0 ? Math.floor(skip) : 0,
   };
 };
 

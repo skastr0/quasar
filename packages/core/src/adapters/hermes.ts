@@ -100,18 +100,31 @@ const hermesDbPath = (root: string | undefined) => {
   }
 };
 
-const readSessionRows = (db: HermesDatabase, limit: number | undefined) =>
-  db.query("select * from sessions order by started_at desc limit ?").all(limit ?? 500) as HermesSessionRow[];
+const sessionWindowLimit = (limit: number | undefined) => Math.max(1, Math.floor(limit ?? 500));
+const sessionWindowSkip = (skip: number | undefined) => Math.max(0, Math.floor(skip ?? 0));
+
+const readSessionRows = (
+  db: HermesDatabase,
+  limit: number | undefined,
+  skip: number | undefined,
+) =>
+  db
+    .query("select * from sessions order by started_at desc, id desc limit ? offset ?")
+    .all(sessionWindowLimit(limit), sessionWindowSkip(skip)) as HermesSessionRow[];
 
 const readMessageRows = (db: HermesDatabase, sessionId: string) =>
   db
     .query("select * from messages where session_id = ? order by timestamp, id")
     .all(sessionId) as HermesMessageRow[];
 
-const readSessionRowsCli = (dbPath: string, limit: number | undefined) =>
+const readSessionRowsCli = (
+  dbPath: string,
+  limit: number | undefined,
+  skip: number | undefined,
+) =>
   sqliteJson<HermesSessionRow>(
     dbPath,
-    `select * from sessions order by started_at desc limit ${Math.max(1, Math.floor(limit ?? 500))}`,
+    `select * from sessions order by started_at desc, id desc limit ${sessionWindowLimit(limit)} offset ${sessionWindowSkip(skip)}`,
   );
 
 const readMessageRowsCli = (dbPath: string, sessionId: string) =>
@@ -468,7 +481,7 @@ async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStr
     };
     if (db === undefined) {
       usedFallback = true;
-      for (const session of readSessionRowsCli(tempDb.path, options.limit)) {
+      for (const session of readSessionRowsCli(tempDb.path, options.limit, options.skip)) {
         yield {
           type: "session",
           session: buildHermesSessionFromRows(
@@ -482,7 +495,7 @@ async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStr
         sessionCount += 1;
       }
     } else {
-      for (const session of readSessionRows(db, options.limit)) {
+      for (const session of readSessionRows(db, options.limit, options.skip)) {
         yield {
           type: "session",
           session: buildHermesSessionFromRows(

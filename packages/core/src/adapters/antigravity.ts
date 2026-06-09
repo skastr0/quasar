@@ -170,7 +170,9 @@ export const antigravityAdapter: SessionAdapter = {
         ],
       };
     }
-    const files = statSync(root).isFile() ? [root] : collectFiles(root, transcriptLike, options.limit);
+    const files = statSync(root).isFile()
+      ? [root]
+      : collectFiles(root, transcriptLike, options.limit, options.skip);
     const sessions = files.flatMap((path) => (readJsonLines(path).length === 0 ? [] : [buildAntigravitySession(path, root, options)]));
     return {
       sourceRoots: [sourceRoot("antigravity", antigravityAdapter.id, root, options.machine, options.now)],

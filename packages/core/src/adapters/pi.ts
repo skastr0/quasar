@@ -176,7 +176,12 @@ export const piAdapter: SessionAdapter = {
         ],
       };
     }
-    const files = collectFiles(root, (path) => /\.(jsonl|json)$/.test(path), options.limit);
+    const files = collectFiles(
+      root,
+      (path) => /\.(jsonl|json)$/.test(path),
+      options.limit,
+      options.skip,
+    );
     const sessions = files.flatMap((path) => (recordsFromFile(path).length === 0 ? [] : [buildPiSession(path, root, options)]));
     return {
       sourceRoots: [sourceRoot("pi", piAdapter.id, root, options.machine, options.now)],

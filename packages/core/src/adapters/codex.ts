@@ -370,6 +370,7 @@ async function* streamCodex(options: AdapterOptions) {
     sessionsRoot,
     (path) => /rollout-.*\.jsonl$/.test(path),
     options.limit,
+    options.skip,
   );
   yield {
     type: "sourceRoot" as const,

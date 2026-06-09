@@ -1,6 +1,6 @@
-import { copyFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { execFileSync } from "node:child_process";
 
 import type { AdapterReadResult, AdapterStreamItem, SessionAdapter } from "./types";
@@ -49,8 +49,13 @@ type OpenCodePartRow = {
   data: string;
 };
 
+const OPENCODE_MAX_RAW_MESSAGE_DATA_BYTES = 256 * 1024;
+const OPENCODE_MAX_RAW_PART_DATA_BYTES = 128 * 1024;
+
 const OPENCODE_PRUNED_MESSAGE_DATA_SQL = [
-  "case when json_valid(data) then",
+  "case",
+  `when length(data) > ${OPENCODE_MAX_RAW_MESSAGE_DATA_BYTES} then json_object('content', '[omitted:large_opencode_message bytes=' || length(data) || ']')`,
+  "when json_valid(data) then",
   "json_remove(",
   "data,",
   "'$.summary.diffs',",
@@ -68,7 +73,33 @@ const OPENCODE_PRUNED_MESSAGE_DATA_SQL = [
   "'$.snapshots',",
   "'$.diffs',",
   "'$.patches'",
-  ") else data end",
+  ")",
+  "else data end",
+].join(" ");
+
+const OPENCODE_PRUNED_PART_DATA_SQL = [
+  "case",
+  `when length(data) > ${OPENCODE_MAX_RAW_PART_DATA_BYTES} then json_object('type', 'omitted', 'text', '[omitted:large_opencode_part bytes=' || length(data) || ']')`,
+  "when json_valid(data) then",
+  "json_remove(",
+  "data,",
+  "'$.summary.diffs',",
+  "'$.summary.diff',",
+  "'$.summary.patches',",
+  "'$.summary.snapshots',",
+  "'$.workspace.diffs',",
+  "'$.workspace.snapshot',",
+  "'$.workspace.snapshots',",
+  "'$.workspaceDiff',",
+  "'$.workspaceSnapshot',",
+  "'$.checkpoint',",
+  "'$.checkpoints',",
+  "'$.snapshot',",
+  "'$.snapshots',",
+  "'$.diffs',",
+  "'$.patches'",
+  ")",
+  "else data end",
 ].join(" ");
 
 const toolNameFromPart = (part: unknown) => {
@@ -106,6 +137,8 @@ type OpenCodeArtifactDraft = Omit<
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
 >;
 
+const OPENCODE_DB_FILENAMES = ["opencode-local.db", "opencode.db"] as const;
+
 const missingDatabaseResult = (root: string | undefined) => ({
   sourceRoots: [],
   sessions: [],
@@ -136,12 +169,19 @@ const unsupportedRuntimeResult = (dbPath: string) => ({
   ],
 });
 
-const readSessionRows = (db: OpenCodeDatabase, limit: number | undefined) =>
+const sessionWindowLimit = (limit: number | undefined) => Math.max(1, Math.floor(limit ?? 500));
+const sessionWindowSkip = (skip: number | undefined) => Math.max(0, Math.floor(skip ?? 0));
+
+const readSessionRows = (
+  db: OpenCodeDatabase,
+  limit: number | undefined,
+  skip: number | undefined,
+) =>
   db
     .query(
-      "select id, title, directory, path, time_created, time_updated from session order by time_updated desc limit ?",
+      "select id, title, directory, path, time_created, time_updated from session order by time_updated desc, id desc limit ? offset ?",
     )
-    .all(limit ?? 500) as OpenCodeSessionRow[];
+    .all(sessionWindowLimit(limit), sessionWindowSkip(skip)) as OpenCodeSessionRow[];
 
 const readMessages = (db: OpenCodeDatabase, sessionId: string) =>
   db
@@ -153,7 +193,7 @@ const readMessages = (db: OpenCodeDatabase, sessionId: string) =>
 const readPartsByMessage = (db: OpenCodeDatabase, sessionId: string) => {
   const rows = db
     .query(
-      "select id, message_id, time_created, data from part where session_id = ? order by time_created, id",
+      `select id, message_id, time_created, ${OPENCODE_PRUNED_PART_DATA_SQL} as data from part where session_id = ? order by time_created, id`,
     )
     .all(sessionId) as OpenCodePartRow[];
   const partsByMessage = new Map<string, NativeValue[]>();
@@ -165,10 +205,14 @@ const readPartsByMessage = (db: OpenCodeDatabase, sessionId: string) => {
   return partsByMessage;
 };
 
-const readSessionRowsCli = (dbPath: string, limit: number | undefined) =>
+const readSessionRowsCli = (
+  dbPath: string,
+  limit: number | undefined,
+  skip: number | undefined,
+) =>
   sqliteJson<OpenCodeSessionRow>(
     dbPath,
-    `select id, title, directory, path, time_created, time_updated from session order by time_updated desc limit ${Math.max(1, Math.floor(limit ?? 500))}`,
+    `select id, title, directory, path, time_created, time_updated from session order by time_updated desc, id desc limit ${sessionWindowLimit(limit)} offset ${sessionWindowSkip(skip)}`,
   );
 
 const readMessagesCli = (dbPath: string, sessionId: string) =>
@@ -180,7 +224,7 @@ const readMessagesCli = (dbPath: string, sessionId: string) =>
 const readPartsByMessageCli = (dbPath: string, sessionId: string) => {
   const rows = sqliteJson<OpenCodePartRow>(
     dbPath,
-    `select id, message_id, time_created, data from part where session_id = ${sql(sessionId)} order by time_created, id`,
+    `select id, message_id, time_created, ${OPENCODE_PRUNED_PART_DATA_SQL} as data from part where session_id = ${sql(sessionId)} order by time_created, id`,
   );
   const partsByMessage = new Map<string, NativeValue[]>();
   for (const part of rows) {
@@ -549,11 +593,41 @@ const copyDatabaseForRead = (dbPath: string) => {
   };
 };
 
+const opencodeDbPath = (root: string | undefined) => {
+  if (root === undefined) return undefined;
+  try {
+    if (statSync(root).isFile()) return root;
+  } catch {
+    // Fall through to conventional directory candidates.
+  }
+  for (const filename of OPENCODE_DB_FILENAMES) {
+    const candidate = join(root, filename);
+    if (existsSync(candidate)) return candidate;
+  }
+  return join(root, "opencode.db");
+};
+
+const logicalOpencodeDbPath = (
+  root: string | undefined,
+  logicalRoot: string | undefined,
+  dbPath: string | undefined,
+) => {
+  if (logicalRoot === undefined || dbPath === undefined) return undefined;
+  if (root !== undefined) {
+    try {
+      if (statSync(root).isFile()) return logicalRoot;
+    } catch {
+      // Treat missing roots as directories for diagnostics.
+    }
+  }
+  return join(logicalRoot, basename(dbPath));
+};
+
 async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterStreamItem> {
   const root = options.roots?.opencode ?? opencodeAdapter.defaultRoot();
-  const dbPath = root === undefined ? undefined : join(root, "opencode.db");
+  const dbPath = opencodeDbPath(root);
   const logicalRoot = root === undefined ? undefined : logicalRootFor("opencode", root, options);
-  const logicalDbPath = logicalRoot === undefined ? undefined : join(logicalRoot, "opencode.db");
+  const logicalDbPath = logicalOpencodeDbPath(root, logicalRoot, dbPath);
   if (root === undefined || dbPath === undefined || !existsSync(dbPath)) {
     for (const diagnostic of missingDatabaseResult(logicalRoot ?? root).diagnostics) {
       yield { type: "diagnostic", diagnostic };
@@ -564,7 +638,7 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
   const db = await maybeDatabase(tempDb.path);
   if (db === undefined) {
     try {
-      const rows = readSessionRowsCli(tempDb.path, options.limit);
+      const rows = readSessionRowsCli(tempDb.path, options.limit, options.skip);
       if (rows.length === 0) {
         for (const diagnostic of unsupportedRuntimeResult(dbPath).diagnostics) {
           yield { type: "diagnostic", diagnostic };
@@ -605,7 +679,7 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
       sourceRoot: sourceRoot("opencode", opencodeAdapter.id, logicalRoot ?? root, options.machine, options.now),
     };
     let sessionCount = 0;
-    for (const row of readSessionRows(db, options.limit)) {
+    for (const row of readSessionRows(db, options.limit, options.skip)) {
       yield {
         type: "session",
         session: buildOpenCodeSession(db, logicalDbPath ?? dbPath, logicalRoot ?? root, options, row),

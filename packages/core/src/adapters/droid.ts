@@ -190,7 +190,7 @@ export const droidAdapter: SessionAdapter = {
     }
     const files = statSync(root).isFile()
       ? [root]
-      : collectFiles(root, captureLike, options.limit);
+      : collectFiles(root, captureLike, options.limit, options.skip);
     const sessions = files.flatMap((path) => (recordsFromFile(path).length === 0 ? [] : [buildDroidSession(path, root, options)]));
     return {
       sourceRoots: [sourceRoot("droid", droidAdapter.id, root, options.machine, options.now)],
