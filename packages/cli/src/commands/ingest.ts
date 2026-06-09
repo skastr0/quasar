@@ -142,6 +142,7 @@ const INGEST_GENERATION_IDENTITY_VERSION = "quasar.ingest-generation-identity/v5
 const INGEST_CHUNK_LEDGER_FORMAT = "quasar.ingest-chunks-jsonl/v1";
 const INGEST_CHUNK_LEDGER_FILENAME = "chunks.ndjson";
 const STREAM_INGEST_UPLOAD_IDENTITY_VERSION = "quasar.stream-ingest/v4";
+const MAX_INGEST_MANIFEST_SESSION_SAMPLES = 25;
 const DURABLE_SNAPSHOT_PROVIDERS = new Set<Provider>([
   "codex",
   "claude",
@@ -1219,7 +1220,11 @@ const planCommand = Command.make("plan", { input: inputArg }, ({ input }) =>
         ...summaryFromManifest(plan.manifest),
         chunkCount: plan.expectedChunkCount,
         selection,
-        sessions: plan.manifest.sessions.map((session) => ({
+        providerSummaries: plan.manifest.providerSummaries ?? [],
+        sessionSampleLimit: MAX_INGEST_MANIFEST_SESSION_SAMPLES,
+        sessionSamplesTruncated:
+          plan.manifest.sessionCount > plan.manifest.sessions.length,
+        sessionSamples: plan.manifest.sessions.map((session) => ({
           id: session.id,
           provider: session.provider,
           nativeSessionId: session.nativeSessionId,
@@ -1493,6 +1498,8 @@ type StreamIngestPlan = {
   readonly sourceBefore: readonly SourceManifestEntry[];
 };
 
+type IngestProviderSummary = NonNullable<IngestManifest["providerSummaries"]>[number];
+
 type ChunkUploadItem = {
   readonly chunk: IngestBatch;
   readonly index: number;
@@ -1504,6 +1511,7 @@ type IngestManifestDraft = {
   machine: IngestManifest["machine"];
   sourceRoots: IngestManifest["sourceRoots"][number][];
   sessions: IngestManifest["sessions"][number][];
+  providerSummaries: IngestProviderSummary[];
   diagnostics: IngestManifest["diagnostics"][number][];
   generatedAt: string;
   sessionCount: number;
@@ -1916,13 +1924,21 @@ const emptyIngestManifest = (
     ...manifest,
     sourceRoots: [...manifest.sourceRoots],
     sessions: [...manifest.sessions],
+    providerSummaries: [...(manifest.providerSummaries ?? [])],
     diagnostics: [...manifest.diagnostics],
   };
 };
 
 const mergeManifest = (target: IngestManifestDraft, batch: IngestManifest) => {
   target.sourceRoots.push(...batch.sourceRoots);
-  target.sessions.push(...batch.sessions);
+  const remainingSessionSampleSlots = Math.max(
+    0,
+    MAX_INGEST_MANIFEST_SESSION_SAMPLES - target.sessions.length,
+  );
+  if (remainingSessionSampleSlots > 0) {
+    target.sessions.push(...batch.sessions.slice(0, remainingSessionSampleSlots));
+  }
+  mergeProviderSummaries(target.providerSummaries, batch);
   target.diagnostics.push(...batch.diagnostics);
   target.sessionCount += batch.sessionCount;
   target.eventCount += batch.eventCount;
@@ -1933,10 +1949,81 @@ const mergeManifest = (target: IngestManifestDraft, batch: IngestManifest) => {
   target.artifactCount += batch.artifactCount;
 };
 
+const mergeProviderSummaries = (
+  target: IngestProviderSummary[],
+  batch: IngestManifest,
+) => {
+  const byProvider = new Map(target.map((summary) => [summary.provider, summary]));
+  for (const summary of providerSummariesForManifest(batch)) {
+    const current = byProvider.get(summary.provider) ?? {
+      provider: summary.provider,
+      sessionCount: 0,
+      eventCount: 0,
+      toolCallCount: 0,
+      contentBlockCount: 0,
+      sessionEdgeCount: 0,
+      usageRecordCount: 0,
+      artifactCount: 0,
+    };
+    byProvider.set(summary.provider, {
+      provider: summary.provider,
+      sessionCount: current.sessionCount + summary.sessionCount,
+      eventCount: current.eventCount + summary.eventCount,
+      toolCallCount: current.toolCallCount + summary.toolCallCount,
+      contentBlockCount: current.contentBlockCount + summary.contentBlockCount,
+      sessionEdgeCount: current.sessionEdgeCount + summary.sessionEdgeCount,
+      usageRecordCount: current.usageRecordCount + summary.usageRecordCount,
+      artifactCount: current.artifactCount + summary.artifactCount,
+    });
+  }
+  target.splice(
+    0,
+    target.length,
+    ...[...byProvider.values()].sort((left, right) =>
+      left.provider.localeCompare(right.provider),
+    ),
+  );
+};
+
+const providerSummariesForManifest = (manifest: IngestManifest) =>
+  manifest.providerSummaries ?? providerSummariesFromManifestSessions(manifest.sessions);
+
+const providerSummariesFromManifestSessions = (
+  sessions: readonly IngestManifest["sessions"][number][],
+): IngestProviderSummary[] => {
+  const summaries = new Map<Provider, IngestProviderSummary>();
+  for (const session of sessions) {
+    const current = summaries.get(session.provider) ?? {
+      provider: session.provider,
+      sessionCount: 0,
+      eventCount: 0,
+      toolCallCount: 0,
+      contentBlockCount: 0,
+      sessionEdgeCount: 0,
+      usageRecordCount: 0,
+      artifactCount: 0,
+    };
+    summaries.set(session.provider, {
+      provider: session.provider,
+      sessionCount: current.sessionCount + 1,
+      eventCount: current.eventCount + session.eventCount,
+      toolCallCount: current.toolCallCount + session.toolCallCount,
+      contentBlockCount: current.contentBlockCount + session.contentBlockCount,
+      sessionEdgeCount: current.sessionEdgeCount + session.sessionEdgeCount,
+      usageRecordCount: current.usageRecordCount + session.usageRecordCount,
+      artifactCount: current.artifactCount + session.artifactCount,
+    });
+  }
+  return [...summaries.values()].sort((left, right) =>
+    left.provider.localeCompare(right.provider),
+  );
+};
+
 const summaryFromManifest = (manifest: IngestManifest) => ({
   machine: manifest.machine,
   generatedAt: manifest.generatedAt,
   sourceRootCount: manifest.sourceRoots.length,
+  providerSummaries: manifest.providerSummaries ?? [],
   sessionCount: manifest.sessionCount,
   eventCount: manifest.eventCount,
   toolCallCount: manifest.toolCallCount,
@@ -1982,6 +2069,8 @@ const manifestIdentityFromManifest = (manifest: IngestManifest) => ({
   ...manifest,
   generatedAt: undefined,
   sourceRoots: manifest.sourceRoots.map(sourceRootIdentity),
+  sessions: undefined,
+  providerSummaries: providerSummariesForManifest(manifest),
 });
 
 const sourceRootIdentity = (root: IngestManifest["sourceRoots"][number]) => ({

@@ -288,6 +288,7 @@ export const manifestFromBatch = (batch: IngestBatch): IngestManifest => {
       usageRecordCount: session.usageRecords.length,
       artifactCount: session.artifacts.length,
     })),
+    providerSummaries: providerSummariesFromSessions(batch.sessions),
     diagnostics: batch.diagnostics,
     generatedAt: batch.generatedAt,
     sessionCount: summary.sessionCount,
@@ -298,6 +299,39 @@ export const manifestFromBatch = (batch: IngestBatch): IngestManifest => {
     usageRecordCount: summary.usageRecordCount,
     artifactCount: summary.artifactCount,
   };
+};
+
+const providerSummariesFromSessions = (
+  sessions: readonly IngestBatch["sessions"][number][],
+): NonNullable<IngestManifest["providerSummaries"]> => {
+  const summaries = new Map<Provider, NonNullable<IngestManifest["providerSummaries"]>[number]>();
+  for (const session of sessions) {
+    const current = summaries.get(session.provider) ?? {
+      provider: session.provider,
+      sessionCount: 0,
+      eventCount: 0,
+      toolCallCount: 0,
+      contentBlockCount: 0,
+      sessionEdgeCount: 0,
+      usageRecordCount: 0,
+      artifactCount: 0,
+    };
+    summaries.set(session.provider, {
+      provider: session.provider,
+      sessionCount: current.sessionCount + 1,
+      eventCount: current.eventCount + session.events.length,
+      toolCallCount: current.toolCallCount + session.toolCalls.length,
+      contentBlockCount:
+        current.contentBlockCount +
+        session.events.reduce((sum, event) => sum + event.contentBlocks.length, 0),
+      sessionEdgeCount: current.sessionEdgeCount + session.sessionEdges.length,
+      usageRecordCount: current.usageRecordCount + session.usageRecords.length,
+      artifactCount: current.artifactCount + session.artifacts.length,
+    });
+  }
+  return [...summaries.values()].sort((left, right) =>
+    left.provider.localeCompare(right.provider),
+  );
 };
 
 export const snapshotIngestSourceManifest = (

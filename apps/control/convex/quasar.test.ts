@@ -501,6 +501,142 @@ describe("quasar ingestion and search", () => {
     expect(session?.session.ingestState).toBe("complete");
   });
 
+  test("starts compact manifest jobs from provider summaries without enumerating sessions", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const job = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: {
+        manifest: {
+          protocolVersion: "quasar.ingest-manifest/v1",
+          machine: batch.machine,
+          sourceRoots: batch.sourceRoots,
+          sessions: [],
+          providerSummaries: [
+            {
+              provider: "codex",
+              sessionCount: 37,
+              eventCount: 111,
+              toolCallCount: 12,
+              contentBlockCount: 9,
+              sessionEdgeCount: 4,
+              usageRecordCount: 3,
+              artifactCount: 2,
+            },
+          ],
+          diagnostics: [],
+          generatedAt: batch.generatedAt,
+          sessionCount: 37,
+          eventCount: 111,
+          toolCallCount: 12,
+          contentBlockCount: 9,
+          sessionEdgeCount: 4,
+          usageRecordCount: 3,
+          artifactCount: 2,
+        },
+        sourceIdentityKey: "test:compact-provider-summary",
+        expectedChunkCount: 5,
+      },
+    });
+
+    const shards = await t.run(async (ctx) =>
+      await ctx.db
+        .query("importShards")
+        .withIndex("by_importJobId", (q) => q.eq("importJobId", job.importJobId))
+        .collect(),
+    );
+    expect(shards).toHaveLength(1);
+    expect(shards[0]).toMatchObject({
+      provider: "codex",
+      sessionCount: 37,
+      eventCount: 111,
+    });
+  });
+
+  test("rejects sampled manifests without exact provider summaries", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+
+    await expect(
+      t.mutation(internal.quasar.startImportJobInternal, {
+        input: {
+          manifest: {
+            protocolVersion: "quasar.ingest-manifest/v1",
+            machine: batch.machine,
+            sourceRoots: batch.sourceRoots,
+            sessions: [],
+            diagnostics: [],
+            generatedAt: batch.generatedAt,
+            sessionCount: 2,
+            eventCount: 2,
+            toolCallCount: 0,
+            contentBlockCount: 0,
+            sessionEdgeCount: 0,
+            usageRecordCount: 0,
+            artifactCount: 0,
+          },
+          expectedChunkCount: 1,
+        },
+      }),
+    ).rejects.toThrow(/sampled ingest manifests require providerSummaries/);
+  });
+
+  test("compact manifest job identity ignores retained session samples", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const sampleSession = batch.sessions[0]!;
+    const manifestSession = (suffix: string) => ({
+      id: `codex:machine:a:sample-${suffix}`,
+      nativeSessionId: `sample-${suffix}`,
+      provider: sampleSession.provider,
+      machineId: sampleSession.machineId,
+      projectIdentityKey: sampleSession.projectIdentity.projectIdentityKey,
+      sourceRoot: sampleSession.sourceRoot,
+      sourcePath: `${sampleSession.sourcePath}.${suffix}`,
+      eventCount: 1,
+      toolCallCount: 0,
+      contentBlockCount: 0,
+      sessionEdgeCount: 0,
+      usageRecordCount: 0,
+      artifactCount: 0,
+    });
+    const compactManifest = (suffix: string) => ({
+      protocolVersion: "quasar.ingest-manifest/v1" as const,
+      machine: batch.machine,
+      sourceRoots: batch.sourceRoots,
+      sessions: [manifestSession(suffix)],
+      providerSummaries: [
+        {
+          provider: "codex" as const,
+          sessionCount: 10,
+          eventCount: 20,
+          toolCallCount: 3,
+          contentBlockCount: 4,
+          sessionEdgeCount: 2,
+          usageRecordCount: 1,
+          artifactCount: 1,
+        },
+      ],
+      diagnostics: [],
+      generatedAt: batch.generatedAt,
+      sessionCount: 10,
+      eventCount: 20,
+      toolCallCount: 3,
+      contentBlockCount: 4,
+      sessionEdgeCount: 2,
+      usageRecordCount: 1,
+      artifactCount: 1,
+    });
+
+    const first = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { manifest: compactManifest("a"), expectedChunkCount: 2 },
+    });
+    const second = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { manifest: compactManifest("b"), expectedChunkCount: 2 },
+    });
+
+    expect(second.importJobId).toBe(first.importJobId);
+  });
+
   test("rejects oversized import identifiers before durable rows are written", async () => {
     const t = setup();
     const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
