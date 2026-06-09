@@ -382,6 +382,14 @@ describe("quasar ingestion and search", () => {
     });
     expect(chunk.status).toBe("pending");
     expect(chunk.enqueued).toBe(true);
+    expect(
+      await t.run(async (ctx) =>
+        await ctx.db
+          .query("importChunkPayloads")
+          .withIndex("by_importJobId", (q) => q.eq("importJobId", job.importJobId))
+          .collect(),
+      ),
+    ).toHaveLength(1);
 
     const processed = await t.action(internal.quasar.processImportJobChunksInternal, {
       importJobId: job.importJobId,
@@ -394,8 +402,17 @@ describe("quasar ingestion and search", () => {
     });
     expect(status?.job.succeededChunkCount).toBe(1);
     expect(status?.chunks[0]?.status).toBe("succeeded");
-    expect(status?.chunks[0]?.payloadStored).toBe(true);
+    expect(status?.chunks[0]?.payloadStored).toBe(false);
+    expect(status?.chunks[0]?.payloadBytes).toBeGreaterThan(0);
     expect(status?.chunks[0]).not.toHaveProperty("batch");
+    expect(
+      await t.run(async (ctx) =>
+        await ctx.db
+          .query("importChunkPayloads")
+          .withIndex("by_importJobId", (q) => q.eq("importJobId", job.importJobId))
+          .collect(),
+      ),
+    ).toHaveLength(0);
     expect(status?.readiness.total).toBeGreaterThan(0);
 
     const session = await t.query(internal.quasar.readSessionInternal, {

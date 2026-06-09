@@ -42,6 +42,57 @@ type ClaudeEdgeDraft = Omit<
 const contentArray = (message: Record<string, unknown> | undefined) =>
   Array.isArray(message?.content) ? (message.content as unknown[]) : [];
 
+const claudeStructuredContentProjection = (value: unknown): NativeValue => {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => {
+      const block = recordFrom(item);
+      const type = typeof block.type === "string" ? block.type : undefined;
+      if (type === "text" && typeof block.text === "string") {
+        return [{ type, text: block.text } as NativeValue];
+      }
+      if (type === "thinking" && typeof block.thinking === "string") {
+        return [{ type, thinking: block.thinking } as NativeValue];
+      }
+      if (type === "document") {
+        return [
+          {
+            type,
+            ...(typeof block.title === "string" ? { title: block.title } : {}),
+            ...(typeof block.media_type === "string" ? { media_type: block.media_type } : {}),
+            ...(block.content !== undefined
+              ? { content: claudeStructuredContentProjection(block.content) }
+              : {}),
+          } as NativeValue,
+        ];
+      }
+      if (type === "image") {
+        return [
+          {
+            type,
+            ...(typeof block.media_type === "string" ? { media_type: block.media_type } : {}),
+          } as NativeValue,
+        ];
+      }
+      if (type === "file") {
+        return [
+          {
+            type,
+            ...(typeof block.file_path === "string" ? { file_path: block.file_path } : {}),
+            ...(typeof block.media_type === "string" ? { media_type: block.media_type } : {}),
+          } as NativeValue,
+        ];
+      }
+      if (Object.keys(block).length > 0) {
+        return [{ type: type ?? "json", value: block } as NativeValue];
+      }
+      return [];
+    });
+  }
+  if (value !== undefined && value !== null) return value as NativeValue;
+  return {};
+};
+
 const claudeContentProjection = (
   message: Record<string, unknown> | undefined,
   record: Record<string, unknown>,
@@ -73,7 +124,9 @@ const claudeContentProjection = (
           {
             type,
             ...(typeof block.tool_use_id === "string" ? { tool_use_id: block.tool_use_id } : {}),
-            ...(typeof block.content === "string" ? { content: block.content } : {}),
+            ...(block.content !== undefined
+              ? { content: claudeStructuredContentProjection(block.content) }
+              : {}),
           } as NativeValue,
         ];
       }

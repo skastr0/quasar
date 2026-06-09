@@ -157,6 +157,8 @@ describe("adapter ingestion", () => {
 
     const claude = sessionsByProvider.get("claude")!;
     expect(claude.toolCalls[0]).toMatchObject({ toolName: "Read", status: "completed" });
+    expect(JSON.stringify(claude.toolCalls[0]?.output)).toContain("quasar");
+    expect(JSON.stringify(claude.events[2]?.content)).toContain("quasar");
     expect(claude.sessionEdges.some((edge) => edge.kind === "parent")).toBe(true);
     expect(claude.usageRecords[0]?.inputTokens).toBe(3);
     expect(claude.events[1]?.contentBlocks.map((block) => block.kind)).toEqual(
@@ -288,7 +290,16 @@ const makeAllAdapterFixtures = async (): Promise<Record<(typeof localProviders)[
       uuid: "u3",
       parentUuid: "u2",
       type: "user",
-      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "{}" }] },
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_1",
+            content: [{ type: "text", text: "{\"name\":\"quasar\"}" }],
+          },
+        ],
+      },
     },
   ]);
 

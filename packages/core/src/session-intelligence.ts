@@ -14,6 +14,8 @@ import type {
 
 const textEncoder = new TextEncoder();
 
+export const SESSION_INTELLIGENCE_CONTRACT_VERSION = "session-intelligence/v2";
+
 export const SessionIntelligenceBudgets = Schema.Struct({
   contentTextBytes: Schema.Number,
   contentBlockTextBytes: Schema.Number,

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { Effect } from "effect";
 import { describe, expect, test } from "vitest";
 
 import {
@@ -13,8 +14,10 @@ import {
 } from "@skastr0/quasar-core";
 import {
   DEFAULT_UPLOAD_GROUP_SIZE,
+  MAX_BULK_UPLOAD_BODY_BYTES,
   MAX_UPLOAD_CHUNK_BATCH_BYTES,
   chunkIngestBatch,
+  runIngestEffect,
 } from "../src/commands/ingest";
 
 const testDir = dirname(fileURLToPath(import.meta.url));
@@ -142,6 +145,81 @@ describe("CLI command graph", () => {
   test("keeps default bulk upload groups below local Convex isolate limits", () => {
     expect(DEFAULT_UPLOAD_GROUP_SIZE).toBeLessThanOrEqual(10);
   });
+
+  test("runs non-dry-run ingest through job creation and bulk upload", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-cli-pi-"));
+    writePiFixture(root, 12);
+    const requests: Array<{ method: string; path: string; body?: unknown }> = [];
+    const requestClient = ((spec: { method: string; path: string; body?: unknown }) => {
+      requests.push({ method: spec.method, path: spec.path, body: spec.body });
+      if (spec.method === "POST" && spec.path === "/api/ingest/jobs") {
+        const record = spec.body as Record<string, unknown>;
+        return Effect.succeed({
+          importJobId: "job:test",
+          status: "queued",
+          chunkCount: 0,
+          expectedChunkCount: record.expectedChunkCount,
+        });
+      }
+      if (spec.method === "POST" && spec.path === "/api/ingest/job-chunks-bulk") {
+        const record = spec.body as { chunks?: Array<{ sequence?: number }> };
+        return Effect.succeed({
+          importJobId: "job:test",
+          enqueuedCount: record.chunks?.length ?? 0,
+          results: (record.chunks ?? []).map((chunk) => ({
+            importJobId: "job:test",
+            chunkId: `chunk:${chunk.sequence ?? 0}`,
+            status: "pending",
+            jobStatus: "running",
+            enqueued: true,
+          })),
+        });
+      }
+      if (spec.method === "GET" && spec.path === "/api/ingest/jobs") {
+        return Effect.succeed({
+          job: { importJobId: "job:test", status: "succeeded" },
+          chunks: [],
+          failures: [],
+          readiness: {
+            total: 0,
+            pending: 0,
+            syncing: 0,
+            ready: 0,
+            skipped: 0,
+            failed: 0,
+            deadLetter: 0,
+          },
+        });
+      }
+      return Effect.fail(new Error(`Unexpected request ${spec.method} ${spec.path}`));
+    }) as NonNullable<Parameters<typeof runIngestEffect>[1]>;
+
+    const input = JSON.stringify({
+      providers: ["pi"],
+      roots: { pi: root },
+    });
+    await Effect.runPromise(
+      runIngestEffect(input, requestClient) as Effect.Effect<unknown, unknown, never>,
+    );
+    const jobRequest = requests.find(
+      (request) => request.method === "POST" && request.path === "/api/ingest/jobs",
+    );
+    const bulkRequest = requests.find(
+      (request) => request.method === "POST" && request.path === "/api/ingest/job-chunks-bulk",
+    );
+    expect(jobRequest?.body).toMatchObject({
+      idempotencyKey: expect.stringMatching(/^import-job:/),
+      expectedChunkCount: expect.any(Number),
+    });
+    expect(bulkRequest?.body).toMatchObject({
+      importJobId: "job:test",
+      expectedChunkCount: expect.any(Number),
+    });
+    expect(jsonByteLength(bulkRequest?.body)).toBeLessThanOrEqual(MAX_BULK_UPLOAD_BODY_BYTES);
+    expect(
+      requests.some((request) => request.method === "GET" && request.path === "/api/ingest/jobs"),
+    ).toBe(true);
+  }, 20_000);
 });
 
 type ChunkMetadata = {
