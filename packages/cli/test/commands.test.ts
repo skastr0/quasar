@@ -112,11 +112,88 @@ describe("CLI command graph", () => {
     expect(result.status, result.stderr).toBe(0);
     const envelope = JSON.parse(result.stdout) as {
       ok: true;
-      data: { sessionCount: number; eventCount: number };
+      data: {
+        sessionCount: number;
+        eventCount: number;
+        selection: { limit: number; skip: number; defaultLimitApplied: boolean };
+      };
     };
     expect(envelope.ok).toBe(true);
     expect(envelope.data.sessionCount).toBe(1);
     expect(envelope.data.eventCount).toBe(1);
+    expect(envelope.data.selection).toEqual({
+      limit: 1,
+      skip: 1,
+      defaultLimitApplied: false,
+    });
+  }, 20_000);
+
+  test("reports when source discovery uses the default one-session sample", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-cli-codex-"));
+    writeCodexSessionFile(root, "a", "first codex session");
+    writeCodexSessionFile(root, "b", "second codex session");
+
+    const result = await runCli([
+      "sources",
+      "discover",
+      JSON.stringify({ providers: ["codex"], roots: { codex: root } }),
+    ], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        QUASAR_HOME: mkdtempSync(join(tmpdir(), "quasar-cli-home-")),
+      },
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    const envelope = JSON.parse(result.stdout) as {
+      ok: true;
+      data: {
+        sessionCount: number;
+        selection: { limit: number; skip: number; defaultLimitApplied: boolean };
+      };
+    };
+    expect(envelope.data.sessionCount).toBe(1);
+    expect(envelope.data.selection).toEqual({
+      limit: 1,
+      skip: 0,
+      defaultLimitApplied: true,
+    });
+  }, 20_000);
+
+  test("plans ingest through the streamed manifest path with explicit skip", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-cli-codex-"));
+    writeCodexSessionFile(root, "a", "first codex session");
+    writeCodexSessionFile(root, "b", "second codex session");
+
+    const result = await runCli([
+      "ingest",
+      "plan",
+      JSON.stringify({ providers: ["codex"], roots: { codex: root }, limit: 1, skip: 1 }),
+    ], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        QUASAR_HOME: mkdtempSync(join(tmpdir(), "quasar-cli-home-")),
+      },
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    const envelope = JSON.parse(result.stdout) as {
+      ok: true;
+      data: {
+        sessionCount: number;
+        chunkCount: number;
+        selection: { limit: number; skip: number };
+        sessions: Array<{ sourcePath: string; eventCount: number }>;
+      };
+    };
+    expect(envelope.data.sessionCount).toBe(1);
+    expect(envelope.data.chunkCount).toBeGreaterThan(0);
+    expect(envelope.data.selection).toEqual({ limit: 1, skip: 1 });
+    expect(envelope.data.sessions).toHaveLength(1);
+    expect(envelope.data.sessions[0]?.sourcePath).toContain("-b.jsonl");
+    expect(envelope.data.sessions[0]?.eventCount).toBeGreaterThan(0);
   }, 20_000);
 
   test("chunks large ingest sessions with final expected-id cleanup metadata", async () => {
@@ -1625,6 +1702,27 @@ const writeCodexFixture = (root: string, count: number) => {
       })),
     ],
   );
+};
+
+const writeCodexSessionFile = (root: string, suffix: string, content: string) => {
+  const sessionDir = join(root, "sessions", "2026", "06", "09");
+  mkdirSync(sessionDir, { recursive: true });
+  writeJsonl(join(sessionDir, `rollout-2026-06-09T00-00-00-${suffix}.jsonl`), [
+    {
+      type: "session_meta",
+      timestamp: "2026-06-09T00:00:00.000Z",
+      payload: { cwd: "/Users/a/Projects/quasar" },
+    },
+    {
+      type: "response_item",
+      timestamp: "2026-06-09T00:00:01.000Z",
+      payload: {
+        type: "message",
+        role: "user",
+        content,
+      },
+    },
+  ]);
 };
 
 const writeMachineIdentity = (quasarHome: string, machine = testMachine) => {

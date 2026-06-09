@@ -7,6 +7,7 @@ import { stableWideHash } from "./hash";
 import { allAdapters, readAdapters, stableAdapters } from "./adapters/registry";
 import type { AdapterDiscoverOptions, AdapterReadResult, SessionAdapter } from "./adapters/types";
 import type {
+  AdapterDiagnostic,
   IngestBatch,
   IngestManifest,
   MachineIdentity,
@@ -200,6 +201,67 @@ export const summarizeBatch = (batch: IngestBatch) => ({
     0,
   ),
   diagnostics: batch.diagnostics,
+});
+
+type IngestSummary = ReturnType<typeof summarizeBatch>;
+
+export const summarizeIngestBatches = async (
+  options: StreamIngestBatchOptions = {},
+): Promise<IngestSummary> => {
+  let summary: MutableIngestSummary | undefined;
+  const sourceRootKeys = new Set<string>();
+  for await (const batch of streamIngestBatches(options)) {
+    const batchSummary = summarizeBatch(batch);
+    if (summary === undefined) {
+      summary = {
+        machine: batchSummary.machine,
+        generatedAt: batchSummary.generatedAt,
+        sourceRootCount: 0,
+        sessionCount: 0,
+        eventCount: 0,
+        toolCallCount: 0,
+        contentBlockCount: 0,
+        sessionEdgeCount: 0,
+        usageRecordCount: 0,
+        artifactCount: 0,
+        diagnostics: [],
+      };
+    }
+    for (const root of batch.sourceRoots) sourceRootKeys.add(root.rootPath);
+    summary.sourceRootCount = sourceRootKeys.size;
+    summary.sessionCount += batchSummary.sessionCount;
+    summary.eventCount += batchSummary.eventCount;
+    summary.toolCallCount += batchSummary.toolCallCount;
+    summary.contentBlockCount += batchSummary.contentBlockCount;
+    summary.sessionEdgeCount += batchSummary.sessionEdgeCount;
+    summary.usageRecordCount += batchSummary.usageRecordCount;
+    summary.artifactCount += batchSummary.artifactCount;
+    summary.diagnostics.push(...batchSummary.diagnostics);
+  }
+  return summary ?? summarizeBatch(emptyIngestBatch(options));
+};
+
+type MutableIngestSummary = {
+  machine: MachineIdentity;
+  generatedAt: string;
+  sourceRootCount: number;
+  sessionCount: number;
+  eventCount: number;
+  toolCallCount: number;
+  contentBlockCount: number;
+  sessionEdgeCount: number;
+  usageRecordCount: number;
+  artifactCount: number;
+  diagnostics: AdapterDiagnostic[];
+};
+
+const emptyIngestBatch = (options: StreamIngestBatchOptions): IngestBatch => ({
+  protocolVersion: "quasar.ingest/v1",
+  machine: options.machine ?? loadMachineIdentity(),
+  sourceRoots: [],
+  sessions: [],
+  diagnostics: [],
+  generatedAt: options.generatedAt ?? new Date().toISOString(),
 });
 
 export const manifestFromBatch = (batch: IngestBatch): IngestManifest => {

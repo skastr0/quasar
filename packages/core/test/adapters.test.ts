@@ -11,7 +11,7 @@ import {
   projectToolPayloadNativeValue,
 } from "../src/adapters/common";
 import type { AdapterDiscoverOptions, AdapterStreamItem } from "../src/adapters/types";
-import { buildIngestBatch, streamIngestBatches } from "../src/ingest";
+import { buildIngestBatch, streamIngestBatches, summarizeIngestBatches } from "../src/ingest";
 import {
   CONVEX_SAFE_INGEST_BUDGETS,
   assertConvexSafeSessionIntelligenceBatch,
@@ -29,6 +29,55 @@ const writeJsonl = (path: string, records: readonly unknown[]) =>
   writeFileSync(path, records.map((record) => JSON.stringify(record)).join("\n"));
 
 const sql = (value: string) => `'${value.replaceAll("'", "''")}'`;
+
+const writeOpenCodeDb = (
+  dbPath: string,
+  input: {
+    readonly sessionId: string;
+    readonly title: string;
+    readonly content: string;
+    readonly part?: { readonly id: string; readonly data: unknown };
+  },
+) => {
+  execFileSync("sqlite3", [
+    dbPath,
+    [
+      "create table session (id text, title text, directory text, path text, time_created integer, time_updated integer);",
+      "create table message (id text, session_id text, time_created integer, data text);",
+      "create table part (id text, session_id text, message_id text, time_created integer, data text);",
+      `insert into session values (${sql(input.sessionId)}, ${sql(input.title)}, '/Users/a/Projects/quasar', '/Users/a/Projects/quasar', 1, 2);`,
+      `insert into message values ('m1', ${sql(input.sessionId)}, 1, ${sql(JSON.stringify({ role: "user", content: input.content }))});`,
+      ...(input.part === undefined
+        ? []
+        : [
+            `insert into part values (${sql(input.part.id)}, ${sql(input.sessionId)}, 'm1', 1, ${sql(JSON.stringify(input.part.data))});`,
+          ]),
+    ].join("\n"),
+  ]);
+};
+
+const writeOpenCodeLocalSchemaDb = (
+  dbPath: string,
+  sessions: readonly {
+    readonly sessionId: string;
+    readonly title: string;
+    readonly content: string;
+    readonly timeUpdated: number;
+  }[],
+) => {
+  execFileSync("sqlite3", [
+    dbPath,
+    [
+      "create table session (id text, title text, directory text, time_created integer, time_updated integer);",
+      "create table message (id text, session_id text, time_created integer, data text);",
+      "create table part (id text, session_id text, message_id text, time_created integer, data text);",
+      ...sessions.flatMap((session, index) => [
+        `insert into session values (${sql(session.sessionId)}, ${sql(session.title)}, '/Users/a/Projects/quasar', ${index + 1}, ${session.timeUpdated});`,
+        `insert into message values (${sql(`m-${index}`)}, ${sql(session.sessionId)}, ${index + 1}, ${sql(JSON.stringify({ role: "user", content: session.content }))});`,
+      ]),
+    ].join("\n"),
+  ]);
+};
 
 const localProviders = [
   "codex",
@@ -219,7 +268,7 @@ describe("adapter ingestion", () => {
   });
 
   test("applies deterministic skip windows to sqlite-backed adapters", async () => {
-    const root = await makeOpenCodeWindowFixture();
+    const root = makeOpenCodeWindowFixture();
     const firstWindow = await buildIngestBatch({
       providers: ["opencode"],
       roots: { opencode: root },
@@ -236,6 +285,33 @@ describe("adapter ingestion", () => {
 
     expect(firstWindow.sessions.map((session) => session.nativeSessionId)).toEqual(["s-new"]);
     expect(secondWindow.sessions.map((session) => session.nativeSessionId)).toEqual(["s-mid"]);
+  }, 15_000);
+
+  test("summarizes streamed ingest batches without requiring aggregate session storage", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-codex-stream-summary-"));
+    const sessionDir = join(root, "sessions", "2026", "06", "03");
+    mkdirSync(sessionDir, { recursive: true });
+    for (const name of ["a", "b", "c"]) {
+      writeJsonl(join(sessionDir, `rollout-2026-06-03T00-00-00-${name}.jsonl`), [
+        { type: "session_meta", payload: { cwd: "/Users/a/Projects/quasar" } },
+        { type: "response_item", payload: { type: "user_message", content: `hello ${name}` } },
+      ]);
+    }
+
+    const summary = await summarizeIngestBatches({
+      providers: ["codex"],
+      roots: { codex: root },
+      machine,
+      limit: 2,
+      skip: 1,
+      generatedAt: "2026-06-03T00:00:00.000Z",
+    });
+
+    expect(summary.sourceRootCount).toBe(1);
+    expect(summary.sessionCount).toBe(2);
+    expect(summary.eventCount).toBe(4);
+    expect(summary.contentBlockCount).toBeGreaterThanOrEqual(2);
+    expect(summary.diagnostics[0]?.message).toBe("Discovered 2 Codex session(s).");
   });
 
   test("reads graph fixtures for all local adapters", async () => {
@@ -386,6 +462,115 @@ describe("adapter ingestion", () => {
       "hermes",
     ]);
   }, 15_000);
+
+  test("prefers the larger local OpenCode corpus database and supports the no-path schema", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-opencode-db-choice-"));
+    writeOpenCodeDb(join(root, "opencode.db"), {
+      sessionId: "tiny-db-session",
+      title: "Tiny OpenCode DB",
+      content: "tiny db content",
+    });
+    writeOpenCodeLocalSchemaDb(join(root, "opencode-local.db"), [
+      {
+        sessionId: "local-db-old-session",
+        title: "Old Local OpenCode DB",
+        content: "old local db content",
+        timeUpdated: 2,
+      },
+      {
+        sessionId: "local-db-new-session",
+        title: "New Local OpenCode DB",
+        content: "new local db content",
+        timeUpdated: 3,
+      },
+    ]);
+
+    const batch = await buildIngestBatch({
+      providers: ["opencode"],
+      roots: { opencode: root },
+      machine,
+      limit: 1,
+    });
+
+    expect(batch.sessions).toHaveLength(1);
+    expect(batch.sessions[0]?.nativeSessionId).toBe("local-db-new-session");
+    expect(batch.sessions[0]?.nativeProjectKey).toBe("/Users/a/Projects/quasar");
+    expect(batch.sessions[0]?.sourcePath).toContain("opencode-local.db");
+    expect(JSON.stringify(batch)).toContain("new local db content");
+    expect(JSON.stringify(batch)).not.toContain("tiny db content");
+  });
+
+  test("omits huge OpenCode message and part rows before normalized batch materialization", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-opencode-huge-"));
+    const dbPath = join(root, "opencode-local.db");
+    const hugeMessageTrash = "opencode-huge-message-trash".repeat(16_000);
+    const hugePartTrash = "opencode-huge-part-trash".repeat(8_000);
+    execFileSync("sqlite3", [
+      dbPath,
+      [
+        "create table session (id text, title text, directory text, path text, time_created integer, time_updated integer);",
+        "create table message (id text, session_id text, time_created integer, data text);",
+        "create table part (id text, session_id text, message_id text, time_created integer, data text);",
+        `insert into session values ('huge-session', 'Huge OpenCode DB', '/Users/a/Projects/quasar', '/Users/a/Projects/quasar', 1, 2);`,
+        `insert into message values ('m-huge', 'huge-session', 1, ${sql(JSON.stringify({ role: "user", content: hugeMessageTrash }))});`,
+        `insert into message values ('m-part', 'huge-session', 2, ${sql(JSON.stringify({ role: "assistant", content: "small message with huge part" }))});`,
+        `insert into part values ('p-huge', 'huge-session', 'm-part', 2, ${sql(JSON.stringify({
+          type: "text",
+          text: hugePartTrash,
+          providerUi: "opencode-huge-part-ui-trash",
+          summary: { diffs: ["opencode-huge-part-diff-trash"] },
+        }))});`,
+      ].join("\n"),
+    ]);
+
+    const batch = await buildIngestBatch({
+      providers: ["opencode"],
+      roots: { opencode: root },
+      machine,
+      limit: 1,
+    });
+    const encoded = JSON.stringify(batch);
+
+    assertAdapterContract(batch, "opencode");
+    expect(encoded).toContain("[omitted:large_opencode_message bytes=");
+    expect(encoded).not.toContain("opencode-huge-message-trash");
+    expect(encoded).not.toContain("opencode-huge-part-trash");
+    expect(encoded).not.toContain("opencode-huge-part-ui-trash");
+    expect(encoded).not.toContain("opencode-huge-part-diff-trash");
+  });
+
+  test("surfaces an omitted marker for huge OpenCode part rows", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-opencode-huge-part-"));
+    const hugePartTrash = "opencode-huge-part-trash".repeat(8_000);
+    writeOpenCodeDb(join(root, "opencode-local.db"), {
+      sessionId: "huge-part-session",
+      title: "Huge OpenCode Part DB",
+      content: "",
+      part: {
+        id: "p-huge",
+        data: {
+          type: "text",
+          text: hugePartTrash,
+          providerUi: "opencode-huge-part-ui-trash",
+          summary: { diffs: ["opencode-huge-part-diff-trash"] },
+        },
+      },
+    });
+
+    const batch = await buildIngestBatch({
+      providers: ["opencode"],
+      roots: { opencode: root },
+      machine,
+      limit: 1,
+    });
+    const encoded = JSON.stringify(batch);
+
+    assertAdapterContract(batch, "opencode");
+    expect(encoded).toContain("[omitted:large_opencode_part bytes=");
+    expect(encoded).not.toContain("opencode-huge-part-trash");
+    expect(encoded).not.toContain("opencode-huge-part-ui-trash");
+    expect(encoded).not.toContain("opencode-huge-part-diff-trash");
+  });
 
   test("flushes streamed sessions before later adapter failures", async () => {
     const originalStream = codexAdapter.stream;
@@ -686,7 +871,7 @@ const makeOpenCodeFixture = async () => {
   return root;
 };
 
-const makeOpenCodeWindowFixture = async () => {
+const makeOpenCodeWindowFixture = () => {
   const root = mkdtempSync(join(tmpdir(), "quasar-window-opencode-"));
   const dbPath = join(root, "opencode.db");
   execFileSync("sqlite3", [
