@@ -10,6 +10,10 @@ export const IngestOptions = Schema.Struct({
   logicalRoots: Schema.optional(Schema.partial(Schema.Record({ key: Provider, value: Schema.String }))),
   snapshotSources: Schema.optional(Schema.Boolean),
   maxUploadChunks: Schema.optional(Schema.Number),
+  drainPollIntervalMs: Schema.optional(Schema.Number),
+  drainTimeoutMs: Schema.optional(Schema.Number),
+  drainRescheduleIntervalMs: Schema.optional(Schema.Number),
+  inFlightHighWatermark: Schema.optional(Schema.Number),
   dryRun: Schema.optional(Schema.Boolean),
 });
 export type IngestOptions = typeof IngestOptions.Type;
