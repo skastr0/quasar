@@ -1013,7 +1013,7 @@ const validateCommand = Command.make("validate", { input: inputArg }, ({ input }
     buildBatchWithSourceSnapshotEffect(toUndefined(input)).pipe(
       Effect.map(({ before, batch: rawBatch }) => {
         const batch = sanitizeInspectionBatch(rawBatch);
-        const after = snapshotIngestSourceManifest(batch);
+        const after = snapshotIngestSourceManifest(rawBatch);
         return {
           ...summarizeBatch(batch),
           sourceSafetyReport: createSourceSafetyReport({
@@ -1171,7 +1171,7 @@ export const runIngestEffect = (
     if (options.dryRun === true) {
       const { before, batch: rawBatch } = yield* buildBatchWithSourceSnapshotEffect(input);
       const batch = sanitizeInspectionBatch(rawBatch);
-      const after = snapshotIngestSourceManifest(batch);
+      const after = snapshotIngestSourceManifest(rawBatch);
       return {
         dryRun: true,
         summary: summarizeBatch(batch),
@@ -1276,9 +1276,10 @@ const planStreamedIngest = (
       const manifest = emptyIngestManifest(streamOptions.machine, streamOptions.generatedAt);
       const sourceBefore = new Map<string, SourceManifestEntry>();
       const chunkPayloadHashes: string[] = [];
-      for await (const batch of streamIngestBatches(streamOptions)) {
+      for await (const rawBatch of streamIngestBatches(streamOptions)) {
+        const batch = toConvexSafeSessionIntelligenceBatch(rawBatch);
         mergeManifest(manifest, manifestFromBatch(batch));
-        for (const entry of snapshotIngestSourceManifest(batch)) {
+        for (const entry of snapshotIngestSourceManifest(rawBatch)) {
           sourceBefore.set(sourceManifestKey(entry), entry);
         }
         const chunks = chunkIngestBatch(batch, chunkOptions);
@@ -1477,7 +1478,8 @@ async function* streamChunkBatches(
   streamOptions: StreamIngestOptions,
   chunkOptions: Required<ChunkOptions>,
 ): AsyncGenerator<IngestBatch> {
-  for await (const batch of streamIngestBatches(streamOptions)) {
+  for await (const rawBatch of streamIngestBatches(streamOptions)) {
+    const batch = toConvexSafeSessionIntelligenceBatch(rawBatch);
     for (const chunk of chunkIngestBatch(batch, chunkOptions)) {
       yield chunk;
     }
@@ -1487,21 +1489,24 @@ async function* streamChunkBatches(
 const emptyIngestManifest = (
   machine: StreamIngestOptions["machine"],
   generatedAt: string,
-): IngestManifestDraft => ({
-  protocolVersion: "quasar.ingest-manifest/v1",
-  machine,
-  sourceRoots: [],
-  sessions: [],
-  diagnostics: [],
-  generatedAt,
-  sessionCount: 0,
-  eventCount: 0,
-  toolCallCount: 0,
-  contentBlockCount: 0,
-  sessionEdgeCount: 0,
-  usageRecordCount: 0,
-  artifactCount: 0,
-});
+): IngestManifestDraft => {
+  const manifest = manifestFromBatch(
+    toConvexSafeSessionIntelligenceBatch({
+      protocolVersion: "quasar.ingest/v1",
+      machine,
+      sourceRoots: [],
+      sessions: [],
+      diagnostics: [],
+      generatedAt,
+    }),
+  );
+  return {
+    ...manifest,
+    sourceRoots: [...manifest.sourceRoots],
+    sessions: [...manifest.sessions],
+    diagnostics: [...manifest.diagnostics],
+  };
+};
 
 const mergeManifest = (target: IngestManifestDraft, batch: IngestManifest) => {
   target.sourceRoots.push(...batch.sourceRoots);
