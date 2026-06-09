@@ -292,8 +292,12 @@ describe("CLI command graph", () => {
     );
     const bulkBodies = bulkRequests.map((request) => request.body as {
       expectedChunkCount: number;
+      scheduleWorker?: boolean;
       chunks: Array<{ sequence: number; completeJob?: boolean }>;
     });
+    const scheduleRequests = requests.filter(
+      (request) => request.method === "POST" && request.path === "/api/ingest/jobs/schedule",
+    );
     const uploadedChunks = bulkBodies.flatMap((body) => body.chunks);
     expect(jobRequest?.body).toMatchObject({
       idempotencyKey: expect.stringMatching(/^import-job:/),
@@ -301,17 +305,14 @@ describe("CLI command graph", () => {
     });
     expect(bulkRequests).toHaveLength(2);
     expect(new Set(bulkBodies.map((body) => body.expectedChunkCount))).toEqual(new Set([3]));
+    expect(new Set(bulkBodies.map((body) => body.scheduleWorker))).toEqual(new Set([false]));
     expect(uploadedChunks.map((chunk) => chunk.sequence)).toEqual([0, 1, 2]);
     expect(uploadedChunks.map((chunk) => chunk.completeJob === true)).toEqual([false, false, true]);
     expect(bulkBodies.every((body) => jsonByteLength(body) <= MAX_BULK_UPLOAD_BODY_BYTES)).toBe(true);
     expect(
       requests.some((request) => request.method === "GET" && request.path === "/api/ingest/jobs"),
     ).toBe(true);
-    expect(
-      requests.some(
-        (request) => request.method === "POST" && request.path === "/api/ingest/jobs/schedule",
-      ),
-    ).toBe(true);
+    expect(scheduleRequests).toHaveLength(1);
     expect(runResult?.chunkCount).toBe(3);
     expect(runResult?.uploadedChunkCount).toBe(3);
     expect(runResult?.uploadGroupCount).toBe(2);
@@ -765,7 +766,7 @@ describe("CLI command graph", () => {
     const previousUploadGroupSize = process.env.QUASAR_INGEST_UPLOAD_GROUP_SIZE;
     process.env.QUASAR_INGEST_CHUNK_DELAY_MS = "0";
     process.env.QUASAR_INGEST_MAX_EVENTS_PER_CHUNK = "5";
-    process.env.QUASAR_INGEST_UPLOAD_GROUP_SIZE = "5";
+    process.env.QUASAR_INGEST_UPLOAD_GROUP_SIZE = "1";
     const requests: Array<{ method: string; path: string; body?: unknown }> = [];
     const requestClient = ((spec: { method: string; path: string; body?: unknown }) => {
       requests.push({ method: spec.method, path: spec.path, body: spec.body });
@@ -793,7 +794,7 @@ describe("CLI command graph", () => {
         });
       }
       if (spec.method === "POST" && spec.path === "/api/ingest/jobs/schedule") {
-        return Effect.succeed({ importJobId: "job:snapshot", scheduled: true });
+        return Effect.succeed({ importJobId: "job:slice", scheduled: true });
       }
       if (spec.method === "GET" && spec.path === "/api/ingest/jobs") {
         return Effect.succeed({
@@ -840,7 +841,23 @@ describe("CLI command graph", () => {
       .flatMap((request) => (
         request.body as { chunks: Array<{ sequence: number; completeJob?: boolean }> }
       ).chunks);
+    const bulkRequests = requests.filter(
+      (request) => request.method === "POST" && request.path === "/api/ingest/job-chunks-bulk",
+    );
+    const scheduleRequests = requests.filter(
+      (request) => request.method === "POST" && request.path === "/api/ingest/jobs/schedule",
+    );
 
+    expect(bulkRequests).toHaveLength(2);
+    expect(
+      bulkRequests.every(
+        (request) => (request.body as { scheduleWorker?: boolean }).scheduleWorker === false,
+      ),
+    ).toBe(true);
+    expect(scheduleRequests).toHaveLength(1);
+    expect(requests.indexOf(scheduleRequests[0]!)).toBeGreaterThan(
+      requests.lastIndexOf(bulkRequests[bulkRequests.length - 1]!),
+    );
     expect(uploadedChunks.map((chunk) => chunk.sequence)).toEqual([0, 1]);
     expect(uploadedChunks.map((chunk) => chunk.completeJob === true)).toEqual([false, false]);
     expect(runResult?.uploadedChunkCount).toBe(2);

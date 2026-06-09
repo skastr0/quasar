@@ -190,6 +190,7 @@ export const startImportJobHandler = async (
     expectedChunkCount: input.expectedChunkCount,
     uploadedChunkCount: 0,
     succeededChunkCount: 0,
+    succeededPrefixCount: 0,
     failedChunkCount: 0,
     terminalChunkSequenceSum: 0,
     diagnostics: redactSensitive(manifest.diagnostics) as unknown[],
@@ -596,8 +597,10 @@ export const markImportChunkSucceededHandler = async (
     updatedAt: now,
   });
   await deleteChunkPayload(ctx, chunk.chunkId);
+  const succeededPrefixCount = await nextSucceededPrefixCount(ctx, args.importJobId, chunk);
   await patchImportJobCounters(ctx, args.importJobId, {
     succeededChunkCount: oldStatus === "succeeded" ? 0 : 1,
+    succeededPrefixCount,
     failedChunkCount: isTerminalFailed(oldStatus) ? -1 : 0,
     terminalChunkSequenceSum: isTerminal(oldStatus) ? 0 : chunk.sequence,
     now,
@@ -870,9 +873,7 @@ const findClaimableChunk = async (
     .take(IMPORT_WORKER_CLAIM_SCAN_LIMIT);
   for (const chunk of pending) {
     const candidate = await materializeClaimableChunk(ctx, chunk, job);
-    if (candidate !== null && canClaimImportChunk(job, chunk, candidate.batch)) {
-      return candidate;
-    }
+    if (candidate !== null) return candidate;
   }
   const staleRunning = await ctx.db
     .query("importChunks")
@@ -882,9 +883,7 @@ const findClaimableChunk = async (
     .take(IMPORT_WORKER_CLAIM_SCAN_LIMIT);
   for (const chunk of staleRunning) {
     const candidate = await materializeClaimableChunk(ctx, chunk, job);
-    if (candidate !== null && canClaimImportChunk(job, chunk, candidate.batch)) {
-      return candidate;
-    }
+    if (candidate !== null) return candidate;
   }
   return null;
 };
@@ -898,15 +897,16 @@ const materializeClaimableChunk = async (
   if (job === null || isClosedImportJob(job)) return null;
   const payload = await findChunkPayload(ctx, chunk.chunkId);
   const batch = (payload?.batch ?? chunk.batch) as IngestBatchBoundaryValue | undefined;
-  if (!canClaimImportChunk(job, chunk, batch)) return null;
+  if (!(await canClaimImportChunk(ctx, job, chunk, batch))) return null;
   return { chunk, payload, batch };
 };
 
-const canClaimImportChunk = (
+const canClaimImportChunk = async (
+  ctx: MutationCtx,
   job: Doc<"importJobs">,
   chunk: Doc<"importChunks">,
   batch: IngestBatchBoundaryValue | undefined,
-) => !chunkCanRunCleanup(batch) || canClaimCleanupChunk(job, chunk);
+) => !chunkCanRunCleanup(batch) || await canClaimCleanupChunk(ctx, job, chunk);
 
 const chunkCanRunCleanup = (batch: IngestBatchBoundaryValue | undefined) =>
   batch === undefined ||
@@ -914,15 +914,47 @@ const chunkCanRunCleanup = (batch: IngestBatchBoundaryValue | undefined) =>
     (session) => session.partialSession !== true && session.deferCleanup !== true,
   );
 
-const canClaimCleanupChunk = (job: Doc<"importJobs">, chunk: Doc<"importChunks">) => {
-  const priorCount = chunk.sequence;
-  if (priorCount <= 0) return true;
-  const priorSequenceSum = (priorCount * (priorCount - 1)) / 2;
-  return (
-    job.failedChunkCount === 0 &&
-    job.succeededChunkCount >= priorCount &&
-    (job.terminalChunkSequenceSum ?? 0) === priorSequenceSum
-  );
+const canClaimCleanupChunk = async (
+  ctx: MutationCtx,
+  job: Doc<"importJobs">,
+  chunk: Doc<"importChunks">,
+) => {
+  if (chunk.sequence <= 0) return true;
+  if (job.failedChunkCount > 0) return false;
+  const prefix = job.succeededPrefixCount ?? (await computeSucceededPrefixCount(ctx, chunk.importJobId, 0));
+  return prefix >= chunk.sequence;
+};
+
+const nextSucceededPrefixCount = async (
+  ctx: MutationCtx,
+  importJobId: string,
+  chunk: Doc<"importChunks">,
+) => {
+  const job = await findImportJob(ctx, importJobId);
+  if (job?.succeededPrefixCount === undefined) {
+    return await computeSucceededPrefixCount(ctx, importJobId, 0);
+  }
+  const current = job?.succeededPrefixCount ?? 0;
+  if (chunk.sequence > current) return current;
+  return await computeSucceededPrefixCount(ctx, importJobId, current);
+};
+
+const computeSucceededPrefixCount = async (
+  ctx: MutationCtx,
+  importJobId: string,
+  start: number,
+) => {
+  let prefix = Math.max(0, start);
+  while (true) {
+    const chunk = await ctx.db
+      .query("importChunks")
+      .withIndex("by_job_sequence", (q) =>
+        q.eq("importJobId", importJobId).eq("sequence", prefix),
+      )
+      .unique();
+    if (chunk?.status !== "succeeded") return prefix;
+    prefix += 1;
+  }
 };
 
 const findStaleRunningChunk = async (
@@ -949,6 +981,7 @@ const patchImportJobCounters = async (
     readonly chunkCount?: number;
     readonly uploadedChunkCount?: number;
     readonly succeededChunkCount?: number;
+    readonly succeededPrefixCount?: number;
     readonly failedChunkCount?: number;
     readonly terminalChunkSequenceSum?: number;
     readonly status?: ImportJobStatus;
@@ -962,6 +995,7 @@ const patchImportJobCounters = async (
     chunkCount: Math.max(0, job.chunkCount + (delta.chunkCount ?? 0)),
     uploadedChunkCount: Math.max(0, (job.uploadedChunkCount ?? job.chunkCount) + (delta.uploadedChunkCount ?? 0)),
     succeededChunkCount: Math.max(0, job.succeededChunkCount + (delta.succeededChunkCount ?? 0)),
+    succeededPrefixCount: Math.max(job.succeededPrefixCount ?? 0, delta.succeededPrefixCount ?? 0),
     failedChunkCount: Math.max(0, job.failedChunkCount + (delta.failedChunkCount ?? 0)),
     terminalChunkSequenceSum: Math.max(
       0,

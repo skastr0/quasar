@@ -916,6 +916,86 @@ describe("quasar ingestion and search", () => {
     expect(session?.events).toHaveLength(60);
   }, 20_000);
 
+  test("cleanup chunks can run after prior chunks when later partial chunks already succeeded", async () => {
+    const t = setup();
+    const batch = largeEventBatch("/Users/a/Projects/quasar", "machine:a", 90);
+    const chunks = chunkBatchForTest(batch, 30);
+    const cleanupAtSequenceOne = {
+      ...chunks[1]!,
+      sessions: chunks[1]!.sessions.map((session) => ({
+        ...session,
+        partialSession: undefined,
+      })),
+    };
+    const laterPartial = {
+      ...chunks[2]!,
+      sessions: chunks[2]!.sessions.map((session) => ({
+        ...session,
+        partialSession: true,
+      })),
+    };
+    const job = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { batch, expectedChunkCount: chunks.length },
+    });
+
+    await t.action(internal.quasar.submitImportChunksInternal, {
+      input: {
+        importJobId: job.importJobId,
+        expectedChunkCount: chunks.length,
+        chunks: [
+          { batch: chunks[0], sequence: 0 },
+          { batch: laterPartial, sequence: 2 },
+        ],
+      },
+    });
+    const firstPass = await t.action(internal.quasar.processImportJobChunksInternal, {
+      importJobId: job.importJobId,
+      limit: chunks.length,
+    });
+    const partialStatus = await t.query(internal.quasar.readImportJobInternal, {
+      input: { importJobId: job.importJobId, limit: chunks.length },
+    });
+
+    expect(firstPass.processed).toBe(2);
+    expect(partialStatus?.job.succeededChunkCount).toBe(2);
+    expect(partialStatus?.chunks.find((chunk) => chunk.sequence === 2)?.status).toBe("succeeded");
+
+    await t.run(async (ctx) => {
+      const row = await ctx.db
+        .query("importJobs")
+        .withIndex("by_importJobId", (q) => q.eq("importJobId", job.importJobId))
+        .unique();
+      if (row === null) throw new Error("Import job was not found.");
+      await ctx.db.patch(row._id, { succeededPrefixCount: undefined });
+    });
+    await t.action(internal.quasar.submitImportChunkInternal, {
+      input: {
+        importJobId: job.importJobId,
+        batch: cleanupAtSequenceOne,
+        sequence: 1,
+        expectedChunkCount: chunks.length,
+        completeJob: true,
+      },
+    });
+    const secondPass = await t.action(internal.quasar.processImportJobChunksInternal, {
+      importJobId: job.importJobId,
+      limit: chunks.length,
+    });
+    const finalStatus = await t.query(internal.quasar.readImportJobInternal, {
+      input: { importJobId: job.importJobId, limit: chunks.length },
+    });
+    const session = await t.query(internal.quasar.readSessionInternal, {
+      sessionId: "codex:machine:a:session",
+      limit: 100,
+    });
+
+    expect(secondPass.processed).toBe(1);
+    expect(finalStatus?.job.status).toBe("succeeded");
+    expect(finalStatus?.job.succeededChunkCount).toBe(chunks.length);
+    expect(session?.session.ingestState).toBe("complete");
+    expect(session?.events).toHaveLength(90);
+  }, 20_000);
+
   test("redacts string contentText before session storage and search indexing", async () => {
     const t = setup();
     const batch = testBatch("/Users/a/Projects/quasar", "machine:a");

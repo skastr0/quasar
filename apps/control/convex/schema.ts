@@ -443,6 +443,7 @@ export default defineSchema({
     expectedChunkCount: v.optional(v.number()),
     uploadedChunkCount: v.optional(v.number()),
     succeededChunkCount: v.number(),
+    succeededPrefixCount: v.optional(v.number()),
     failedChunkCount: v.number(),
     terminalChunkSequenceSum: v.optional(v.number()),
     diagnostics: v.array(v.any()),
@@ -507,6 +508,7 @@ export default defineSchema({
     .index("by_job_sequence", ["importJobId", "sequence"])
     .index("by_importJobId", ["importJobId"])
     .index("by_job_status", ["importJobId", "status"])
+    .index("by_job_status_sequence", ["importJobId", "status", "sequence"])
     .index("by_job_status_nextAttempt", ["importJobId", "status", "nextAttemptAt"])
     .index("by_job_status_lease", ["importJobId", "status", "leaseExpiresAt"])
     .index("by_status_nextAttempt", ["status", "nextAttemptAt"])
