@@ -477,6 +477,99 @@ describe("quasar ingestion and search", () => {
     expect(session?.session.ingestState).toBe("complete");
   });
 
+  test("rejects oversized import identifiers before durable rows are written", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const oversizedId = `source:${"x".repeat(600)}`;
+
+    await expect(
+      t.mutation(internal.quasar.startImportJobInternal, {
+        input: { batch, sourceIdentityKey: oversizedId, expectedChunkCount: 1 },
+      }),
+    ).rejects.toThrow(/no longer than 512/);
+    expect(
+      await t.run(async (ctx) => await ctx.db.query("importJobs").collect()),
+    ).toHaveLength(0);
+
+    const job = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { batch, expectedChunkCount: 1 },
+    });
+    await expect(
+      t.mutation(internal.quasar.enqueueImportChunkInternal, {
+        input: {
+          importJobId: job.importJobId,
+          batch,
+          chunkId: oversizedId,
+          sequence: 0,
+          expectedChunkCount: 1,
+        },
+        scheduleWorker: false,
+      }),
+    ).rejects.toThrow(/no longer than 512/);
+    await expect(
+      t.action(internal.quasar.submitImportChunksInternal, {
+        input: {
+          importJobId: job.importJobId,
+          expectedChunkCount: 1,
+          chunks: [{ batch, chunkId: oversizedId, sequence: 0 }],
+        },
+      }),
+    ).rejects.toThrow(/no longer than 512/);
+    expect(
+      await t.run(async (ctx) => await ctx.db.query("importChunks").collect()),
+    ).toHaveLength(0);
+    expect(
+      await t.run(async (ctx) => await ctx.db.query("importChunkPayloads").collect()),
+    ).toHaveLength(0);
+  });
+
+  test("rejects manifest-only import jobs without generatedAt", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const session = batch.sessions[0]!;
+    const manifest = {
+      protocolVersion: "quasar.ingest-manifest/v1",
+      machine: batch.machine,
+      sourceRoots: batch.sourceRoots,
+      sessions: [
+        {
+          id: session.id,
+          nativeSessionId: session.nativeSessionId,
+          provider: session.provider,
+          machineId: session.machineId,
+          projectIdentityKey: session.projectIdentity.projectIdentityKey,
+          sourceRoot: session.sourceRoot,
+          sourcePath: session.sourcePath,
+          eventCount: session.events.length,
+          toolCallCount: session.toolCalls.length,
+          contentBlockCount: 0,
+          sessionEdgeCount: 0,
+          usageRecordCount: 0,
+          artifactCount: 0,
+        },
+      ],
+      diagnostics: [],
+      generatedAt: batch.generatedAt,
+      sessionCount: 1,
+      eventCount: session.events.length,
+      toolCallCount: session.toolCalls.length,
+      contentBlockCount: 0,
+      sessionEdgeCount: 0,
+      usageRecordCount: 0,
+      artifactCount: 0,
+    };
+    const { generatedAt: _generatedAt, ...manifestWithoutGeneratedAt } = manifest;
+
+    await expect(
+      t.mutation(internal.quasar.startImportJobInternal, {
+        input: { manifest: manifestWithoutGeneratedAt, expectedChunkCount: 1 },
+      }),
+    ).rejects.toThrow(/generatedAt/);
+    expect(
+      await t.run(async (ctx) => await ctx.db.query("importJobs").collect()),
+    ).toHaveLength(0);
+  });
+
   test("rejects chunk idempotency keys not derived from job sequence and payload", async () => {
     const t = setup();
     const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
