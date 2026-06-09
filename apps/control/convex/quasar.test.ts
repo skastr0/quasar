@@ -492,6 +492,43 @@ describe("quasar ingestion and search", () => {
     expect(status?.chunks[0]?.status).toBe("pending");
   });
 
+  test("durable import worker waits for complete upload", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const job = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { batch, expectedChunkCount: 2 },
+    });
+    await t.action(internal.quasar.submitImportChunkInternal, {
+      input: {
+        importJobId: job.importJobId,
+        batch,
+        sequence: 0,
+        expectedChunkCount: 2,
+      },
+    });
+
+    const beforeCompleteUpload = await t.action(internal.quasar.processImportJobChunksInternal, {
+      importJobId: job.importJobId,
+      limit: 1,
+    });
+    await t.action(internal.quasar.submitImportChunkInternal, {
+      input: {
+        importJobId: job.importJobId,
+        batch,
+        sequence: 1,
+        expectedChunkCount: 2,
+        completeJob: true,
+      },
+    });
+    const afterCompleteUpload = await t.action(internal.quasar.processImportJobChunksInternal, {
+      importJobId: job.importJobId,
+      limit: 1,
+    });
+
+    expect(beforeCompleteUpload.processed).toBe(0);
+    expect(afterCompleteUpload.processed).toBe(1);
+  });
+
   test("sanitizes direct Convex ingest batches at the write boundary", async () => {
     const t = setup();
     const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
@@ -561,6 +598,26 @@ describe("quasar ingestion and search", () => {
     expect(searchText).not.toContain("summary provider state trash");
     expect(searchText).not.toContain("summary diff trash");
     expect(searchText).not.toContain("workspace snapshot trash");
+  });
+
+  test("keeps tool diff and patch payloads in compacted search text", () => {
+    const searchText = compactSearchText({
+      toolResult: {
+        diff: "real tool diff",
+        patch: "real tool patch",
+      },
+      summary: {
+        diffs: ["provider summary diff trash"],
+      },
+      workspace: {
+        patch: "workspace patch trash",
+      },
+    });
+
+    expect(searchText).toContain("real tool diff");
+    expect(searchText).toContain("real tool patch");
+    expect(searchText).not.toContain("provider summary diff trash");
+    expect(searchText).not.toContain("workspace patch trash");
   });
 
   test("sanitizes queued import chunks before transient payload storage", async () => {
