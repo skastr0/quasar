@@ -265,7 +265,7 @@ export const submitImportChunksHandler = async (
       })) as SubmitImportChunkResult,
     );
   }
-  if (input.chunks.some((chunk) => chunk.completeJob === true)) {
+  if (input.chunks.length > 0) {
     await ctx.runMutation(internal.quasar.scheduleImportWorkerInternal, {
       importJobId: input.importJobId,
       delayMs: 0,
@@ -534,10 +534,6 @@ export const releaseImportJobWorkerHandler = async (
   return { released: true };
 };
 
-const isImportJobUploadComplete = (job: Doc<"importJobs">) =>
-  job.expectedChunkCount === undefined ||
-  (job.uploadedChunkCount ?? job.chunkCount) >= job.expectedChunkCount;
-
 export const claimImportChunkHandler = async (
   ctx: MutationCtx,
   args: { importJobId?: string; now: number },
@@ -548,24 +544,21 @@ export const claimImportChunkHandler = async (
   readonly attempts: number;
   readonly leaseToken: string;
 } | null> => {
+  let job: Doc<"importJobs"> | null = null;
   if (args.importJobId !== undefined) {
-    const job = await findImportJob(ctx, args.importJobId);
+    job = await findImportJob(ctx, args.importJobId);
     if (job === null || isClosedImportJob(job)) return null;
-    if (!isImportJobUploadComplete(job)) return null;
   }
-  const candidate =
-    (await findDuePendingChunk(ctx, args.importJobId, args.now)) ??
-    (await findStaleRunningChunk(ctx, args.importJobId, args.now));
+  const candidate = await findClaimableChunk(ctx, job, args.importJobId, args.now);
   if (candidate === null) return null;
-  const payload = await findChunkPayload(ctx, candidate.chunkId);
-  const batch = (payload?.batch ?? candidate.batch) as IngestBatchBoundaryValue | undefined;
+  const { chunk, batch } = candidate;
   if (batch === undefined) {
-    await markChunkTerminalFailure(ctx, candidate, "Import chunk has no stored payload.", args.now);
+    await markChunkTerminalFailure(ctx, chunk, "Import chunk has no stored payload.", args.now);
     return null;
   }
-  const attempts = candidate.attempts + 1;
+  const attempts = chunk.attempts + 1;
   const leaseToken = `chunk-lease:${crypto.randomUUID?.() ?? `${args.now}:${Math.random()}`}`;
-  await ctx.db.patch(candidate._id, {
+  await ctx.db.patch(chunk._id, {
     status: "running",
     attempts,
     startedAt: args.now,
@@ -573,10 +566,10 @@ export const claimImportChunkHandler = async (
     leaseToken,
     updatedAt: args.now,
   });
-  await patchImportJobStatus(ctx, candidate.importJobId, "running", args.now);
+  await patchImportJobStatus(ctx, chunk.importJobId, "running", args.now);
   return {
-    chunkId: candidate.chunkId,
-    importJobId: candidate.importJobId,
+    chunkId: chunk.chunkId,
+    importJobId: chunk.importJobId,
     batch,
     attempts,
     leaseToken,
@@ -840,6 +833,97 @@ const findDuePendingChunk = async (
           q.eq("importJobId", importJobId).eq("status", "pending").lte("nextAttemptAt", now),
         )
         .first();
+
+const IMPORT_WORKER_CLAIM_SCAN_LIMIT = 50;
+
+const findClaimableChunk = async (
+  ctx: MutationCtx,
+  job: Doc<"importJobs"> | null,
+  importJobId: string | undefined,
+  now: number,
+) => {
+  if (importJobId === undefined) {
+    const pending = await ctx.db
+      .query("importChunks")
+      .withIndex("by_status_nextAttempt", (q) => q.eq("status", "pending").lte("nextAttemptAt", now))
+      .take(IMPORT_WORKER_CLAIM_SCAN_LIMIT);
+    for (const chunk of pending) {
+      const candidate = await materializeClaimableChunk(ctx, chunk);
+      if (candidate !== null) return candidate;
+    }
+    const staleRunning = await ctx.db
+      .query("importChunks")
+      .withIndex("by_status_lease", (q) => q.eq("status", "running").lte("leaseExpiresAt", now))
+      .take(IMPORT_WORKER_CLAIM_SCAN_LIMIT);
+    for (const chunk of staleRunning) {
+      const candidate = await materializeClaimableChunk(ctx, chunk);
+      if (candidate !== null) return candidate;
+    }
+    return null;
+  }
+  if (job === null) return null;
+  const pending = await ctx.db
+    .query("importChunks")
+    .withIndex("by_job_status_nextAttempt", (q) =>
+      q.eq("importJobId", importJobId).eq("status", "pending").lte("nextAttemptAt", now),
+    )
+    .take(IMPORT_WORKER_CLAIM_SCAN_LIMIT);
+  for (const chunk of pending) {
+    const candidate = await materializeClaimableChunk(ctx, chunk, job);
+    if (candidate !== null && canClaimImportChunk(job, chunk, candidate.batch)) {
+      return candidate;
+    }
+  }
+  const staleRunning = await ctx.db
+    .query("importChunks")
+    .withIndex("by_job_status_lease", (q) =>
+      q.eq("importJobId", importJobId).eq("status", "running").lte("leaseExpiresAt", now),
+    )
+    .take(IMPORT_WORKER_CLAIM_SCAN_LIMIT);
+  for (const chunk of staleRunning) {
+    const candidate = await materializeClaimableChunk(ctx, chunk, job);
+    if (candidate !== null && canClaimImportChunk(job, chunk, candidate.batch)) {
+      return candidate;
+    }
+  }
+  return null;
+};
+
+const materializeClaimableChunk = async (
+  ctx: MutationCtx,
+  chunk: Doc<"importChunks">,
+  knownJob?: Doc<"importJobs">,
+) => {
+  const job = knownJob ?? await findImportJob(ctx, chunk.importJobId);
+  if (job === null || isClosedImportJob(job)) return null;
+  const payload = await findChunkPayload(ctx, chunk.chunkId);
+  const batch = (payload?.batch ?? chunk.batch) as IngestBatchBoundaryValue | undefined;
+  if (!canClaimImportChunk(job, chunk, batch)) return null;
+  return { chunk, payload, batch };
+};
+
+const canClaimImportChunk = (
+  job: Doc<"importJobs">,
+  chunk: Doc<"importChunks">,
+  batch: IngestBatchBoundaryValue | undefined,
+) => !chunkCanRunCleanup(batch) || canClaimCleanupChunk(job, chunk);
+
+const chunkCanRunCleanup = (batch: IngestBatchBoundaryValue | undefined) =>
+  batch === undefined ||
+  batch.sessions.some(
+    (session) => session.partialSession !== true && session.deferCleanup !== true,
+  );
+
+const canClaimCleanupChunk = (job: Doc<"importJobs">, chunk: Doc<"importChunks">) => {
+  const priorCount = chunk.sequence;
+  if (priorCount <= 0) return true;
+  const priorSequenceSum = (priorCount * (priorCount - 1)) / 2;
+  return (
+    job.failedChunkCount === 0 &&
+    job.succeededChunkCount >= priorCount &&
+    (job.terminalChunkSequenceSum ?? 0) === priorSequenceSum
+  );
+};
 
 const findStaleRunningChunk = async (
   ctx: MutationCtx,
