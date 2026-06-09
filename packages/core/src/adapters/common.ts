@@ -9,6 +9,7 @@ import { redactSensitive } from "../redaction";
 import {
   compactSessionIntelligenceText,
   projectSessionIntelligenceNativeValue,
+  projectSessionIntelligencePatchPayloadValue,
   projectSessionIntelligenceToolPayloadValue,
   sanitizeSessionIntelligenceSession,
 } from "../session-intelligence";
@@ -142,6 +143,15 @@ export const projectSessionNativeValue = (value: unknown): NativeValue | undefin
     () => value,
   );
   const projected = projectSessionIntelligenceNativeValue(decoded);
+  return projected === undefined ? undefined : (projected as NativeValue);
+};
+
+export const projectSessionPatchNativeValue = (value: unknown): NativeValue | undefined => {
+  const decoded = Option.getOrElse(
+    Schema.decodeUnknownOption(NativeProjectionInputSchema)(value),
+    () => value,
+  );
+  const projected = projectSessionIntelligencePatchPayloadValue(decoded);
   return projected === undefined ? undefined : (projected as NativeValue);
 };
 

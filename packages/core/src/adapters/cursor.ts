@@ -58,7 +58,7 @@ type CursorColumnRow = { name: string };
 const CURSOR_DENY = /(auth|token|secret|credential|password|api[_-]?key|keychain|oauth|session[_-]?storage)/i;
 const CURSOR_DB_ALLOW = /(state\.vscdb|composer|chat|conversation|bubble|history|workspaceStorage|globalStorage)/i;
 const CURSOR_TABLE_ALLOW = /(ItemTable|composer|chat|conversation|bubble|message|cursor)/i;
-const CURSOR_KEY_ALLOW = /(composer|chat|conversation|bubble|message|ai|aichat|inlinechat|cursor|tool|diff|patch)/i;
+const CURSOR_KEY_ALLOW = /(composer|chat|conversation|bubble|message|ai|aichat|inlinechat|cursor|tool)/i;
 const CURSOR_MAX_SQL_CELL_BYTES = 128 * 1024;
 
 const cursorDbLike = (path: string) =>
@@ -209,23 +209,16 @@ const cursorReference = (table: string, key: string, row: Record<string, unknown
 });
 
 const cursorRecordLike = (record: Record<string, unknown>) => {
-  const cursor = recordFrom(record._cursor);
-  const text = [
-    cursor.table,
-    cursor.key,
-    record.type,
-    record.kind,
-    record.role,
-    record.text,
-    record.content,
-    record.toolName,
-    record.tool,
-    record.diff,
-    record.patch,
-  ]
-    .map((value) => String(value ?? "").toLowerCase())
-    .join(" ");
-  return /(chat|composer|bubble|conversation|message|tool|diff|patch|ai|cursor)/.test(text);
+  const type = String(record.type ?? record.kind ?? "").toLowerCase();
+  const role = String(record.role ?? "").toLowerCase();
+  const hasMessageRole = /^(user|assistant|developer|system|tool|thinking)$/.test(role);
+  const hasContent = record.content !== undefined || record.text !== undefined || record.message !== undefined;
+  const path =
+    stringValue(record.path) ??
+    stringValue(record.filePath) ??
+    stringValue(record.file_path);
+  const explicitPatchArtifact = /(diff|patch)/.test(type) && path !== undefined;
+  return (hasMessageRole && hasContent) || toolNameFromRecord(record) !== undefined || explicitPatchArtifact;
 };
 
 const cursorContentFromRecord = (record: Record<string, unknown>): NativeValue | undefined => {
@@ -241,24 +234,6 @@ const cursorContentFromRecord = (record: Record<string, unknown>): NativeValue |
       ...(toolName !== undefined ? { toolName } : {}),
       ...(input !== undefined ? { input } : {}),
       ...(output !== undefined ? { output } : {}),
-    };
-  }
-
-  const diff = stringValue(record.diff);
-  if (diff !== undefined) {
-    return {
-      type: "diff",
-      ...(stringValue(record.path) !== undefined ? { path: stringValue(record.path) } : {}),
-      diff,
-    };
-  }
-
-  const patch = stringValue(record.patch);
-  if (patch !== undefined) {
-    return {
-      type: "patch",
-      ...(stringValue(record.path) !== undefined ? { path: stringValue(record.path) } : {}),
-      patch,
     };
   }
 
@@ -285,7 +260,7 @@ const artifactFromRecord = (
       : typeof record.filePath === "string"
         ? record.filePath
         : undefined;
-  if (!type.includes("diff") && !type.includes("patch") && record.diff === undefined && record.patch === undefined) {
+  if (!type.includes("diff") && !type.includes("patch")) {
     return [];
   }
   return [

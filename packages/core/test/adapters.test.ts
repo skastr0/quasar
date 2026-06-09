@@ -154,15 +154,28 @@ describe("adapter ingestion", () => {
       },
       providerUi: "provider event ui trash",
     });
+    const genericProjection = projectSessionNativeValue({
+      content: "real message",
+      cache_state: "generic cache state trash",
+      display_only: "generic display trash",
+      state: { view: "generic state trash" },
+      cache: { view: "generic cache trash" },
+      patch: "@@ generic event patch trash",
+      diffs: ["generic event diff trash"],
+    });
     const toolProjection = projectToolPayloadNativeValue({
       patch: "@@ real tool patch",
       diff: "@@ real tool diff",
       patches: ["@@ real tool patch list"],
+      cache_state: "provider tool snake cache trash",
+      display_only: "provider tool snake display trash",
+      state: { view: "provider tool state trash" },
       summary: { diffs: ["provider tool summary diff trash"] },
       viewState: "provider tool view trash",
       providerUi: "provider tool ui trash",
     });
     const sessionEncoded = JSON.stringify(sessionProjection);
+    const genericEncoded = JSON.stringify(genericProjection);
     const toolEncoded = JSON.stringify(toolProjection);
 
     expect(sessionEncoded).toContain("@@ real event patch");
@@ -173,9 +186,19 @@ describe("adapter ingestion", () => {
     expect(sessionEncoded).not.toContain("provider workspace patch trash");
     expect(sessionEncoded).not.toContain("provider workspace patches trash");
     expect(sessionEncoded).not.toContain("provider event ui trash");
+    expect(genericEncoded).toContain("real message");
+    expect(genericEncoded).not.toContain("generic cache state trash");
+    expect(genericEncoded).not.toContain("generic display trash");
+    expect(genericEncoded).not.toContain("generic state trash");
+    expect(genericEncoded).not.toContain("generic cache trash");
+    expect(genericEncoded).not.toContain("@@ generic event patch trash");
+    expect(genericEncoded).not.toContain("generic event diff trash");
     expect(toolEncoded).toContain("@@ real tool patch");
     expect(toolEncoded).toContain("@@ real tool diff");
     expect(toolEncoded).toContain("@@ real tool patch list");
+    expect(toolEncoded).not.toContain("provider tool snake cache trash");
+    expect(toolEncoded).not.toContain("provider tool snake display trash");
+    expect(toolEncoded).not.toContain("provider tool state trash");
     expect(toolEncoded).not.toContain("provider tool summary diff trash");
     expect(toolEncoded).not.toContain("provider tool view trash");
     expect(toolEncoded).not.toContain("provider tool ui trash");
@@ -634,6 +657,40 @@ describe("adapter ingestion", () => {
     expect(encoded).not.toContain("opencode-huge-part-diff-trash");
   });
 
+  test("keeps OpenCode diff parts out of message content", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-opencode-diff-part-"));
+    writeOpenCodeDb(join(root, "opencode-local.db"), {
+      sessionId: "diff-part-session",
+      title: "OpenCode Diff Part DB",
+      content: "review this change",
+      part: {
+        id: "p-diff",
+        data: {
+          type: "diff",
+          path: "/Users/a/Projects/quasar/src/index.ts",
+          text: "opencode diff text trash",
+          diff: "@@ opencode diff body trash",
+          display_only: "opencode display trash",
+        },
+      },
+    });
+
+    const batch = await buildIngestBatch({
+      providers: ["opencode"],
+      roots: { opencode: root },
+      machine,
+      limit: 1,
+    });
+    const encoded = JSON.stringify(batch);
+
+    assertAdapterContract(batch, "opencode");
+    expect(batch.sessions[0]?.artifacts).toHaveLength(1);
+    expect(encoded).toContain("review this change");
+    expect(encoded).not.toContain("opencode diff text trash");
+    expect(encoded).not.toContain("@@ opencode diff body trash");
+    expect(encoded).not.toContain("opencode display trash");
+  });
+
   test("does not materialize unused Kimi state provider data", async () => {
     const root = makeKimiFixture();
     writeFileSync(
@@ -656,6 +713,62 @@ describe("adapter ingestion", () => {
     expect(encoded).not.toContain("kimi-state-workspace-trash");
     expect(encoded).not.toContain("kimi-state-provider-trash");
     expect(encoded).not.toContain("kimi-state-diff-trash");
+  });
+
+  test("keeps Grok provider stream deltas out of session content and tool payloads", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-grok-delta-trash-"));
+    const sessionDir = join(root, "sessions", "%2FUsers%2Fa%2FProjects%2Fquasar", "g-delta");
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(join(sessionDir, "summary.json"), JSON.stringify({ title: "Grok delta test" }));
+    writeJsonl(join(sessionDir, "chat_history.jsonl"), [{ type: "user", content: "real grok message" }]);
+    writeJsonl(join(sessionDir, "events.jsonl"), [
+      {
+        type: "assistant_delta",
+        params: {
+          delta: {
+            text: "real grok delta text",
+            patch: "@@ grok provider delta patch trash",
+          },
+        },
+      },
+      {
+        type: "tool",
+        tool: "bash",
+        state: {
+          status: "completed",
+          input: { command: "pwd" },
+          output: {
+            text: "/repo",
+            delta: { diff: "@@ grok provider output delta diff trash" },
+          },
+        },
+      },
+    ]);
+    writeJsonl(join(sessionDir, "updates.jsonl"), [
+      {
+        method: "session/update",
+        params: {
+          delta: { patch: "@@ grok provider update delta patch trash" },
+          display_only: "grok update display trash",
+        },
+      },
+    ]);
+
+    const batch = await buildIngestBatch({
+      providers: ["grok"],
+      roots: { grok: root },
+      machine,
+    });
+    const encoded = JSON.stringify(batch);
+
+    assertAdapterContract(batch, "grok");
+    expect(encoded).toContain("real grok message");
+    expect(encoded).toContain("real grok delta text");
+    expect(encoded).toContain("/repo");
+    expect(encoded).not.toContain("@@ grok provider delta patch trash");
+    expect(encoded).not.toContain("@@ grok provider output delta diff trash");
+    expect(encoded).not.toContain("@@ grok provider update delta patch trash");
+    expect(encoded).not.toContain("grok update display trash");
   });
 
   test("caps broad Cursor SQLite cells before parsing allowed rows", async () => {
@@ -700,6 +813,44 @@ describe("adapter ingestion", () => {
     expect(encoded).not.toContain("cursor-huge-provider-trash");
   });
 
+  test("does not admit Cursor provider diff cache rows as artifacts", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-cursor-diff-cache-"));
+    const storage = join(root, "globalStorage");
+    mkdirSync(storage, { recursive: true });
+    execFileSync("sqlite3", [
+      join(storage, "state.vscdb"),
+      [
+        "create table ItemTable (key text, value text);",
+        `insert into ItemTable values ('cursor.composerData', ${sql(JSON.stringify({
+          messages: [
+            { id: "c1", role: "user", content: "real cursor message", workspacePath: "/Users/a/Projects/quasar" },
+          ],
+        }))});`,
+        `insert into ItemTable values ('cursor.diffCache', ${sql(JSON.stringify({
+          diff: "@@ cursor provider diff trash",
+          patch: "@@ cursor provider patch trash",
+          cache_state: "cursor provider cache state trash",
+          display_only: "cursor provider display trash",
+        }))});`,
+      ].join("\n"),
+    ]);
+
+    const batch = await buildIngestBatch({
+      providers: ["cursor"],
+      roots: { cursor: root },
+      machine,
+    });
+    const encoded = JSON.stringify(batch);
+
+    assertAdapterContract(batch, "cursor");
+    expect(encoded).toContain("real cursor message");
+    expect(batch.sessions[0]?.artifacts).toHaveLength(0);
+    expect(encoded).not.toContain("@@ cursor provider diff trash");
+    expect(encoded).not.toContain("@@ cursor provider patch trash");
+    expect(encoded).not.toContain("cursor provider cache state trash");
+    expect(encoded).not.toContain("cursor provider display trash");
+  });
+
   test("caps broad Hermes message JSON fields before adapter parsing", async () => {
     const root = makeHermesHugeFixture();
     const batch = await buildIngestBatch({
@@ -718,7 +869,7 @@ describe("adapter ingestion", () => {
     expect(encoded).not.toContain("hermes-huge-reasoning-trash");
   });
 
-  test("rejects Pi provider state files while preserving explicit event and tool patches", async () => {
+  test("rejects Pi provider state files while preserving explicit tool patches", async () => {
     const root = mkdtempSync(join(tmpdir(), "quasar-pi-trash-"));
     writeFileSync(
       join(root, "state.json"),
@@ -790,7 +941,7 @@ describe("adapter ingestion", () => {
     expect(batch.sessions[0]?.toolCalls).toHaveLength(1);
     expect(batch.sessions[0]?.usageRecords).toHaveLength(1);
     expect(batch.sessions[0]?.usageRecords[0]?.totalTokens).toBe(3);
-    expect(encoded).toContain("@@ real pi event patch");
+    expect(encoded).not.toContain("@@ real pi event patch");
     expect(encoded).toContain("@@ real pi tool patch");
     expect(encoded).toContain("@@ real pi tool output patch");
     expect(encoded).not.toContain("pi-state-provider-trash");

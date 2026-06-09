@@ -284,9 +284,7 @@ const contentValueLike = (value: unknown): boolean => {
     contentValueLike(record.content) ||
     contentValueLike(record.message) ||
     contentValueLike(record.parts) ||
-    contentValueLike(record.delta) ||
-    contentValueLike(record.patch) ||
-    contentValueLike(record.diff)
+    contentValueLike(record.delta)
   );
 };
 
@@ -320,6 +318,7 @@ const recordHasKnownEventType = (record: Record<string, unknown>) => {
   if (/(^|[_:-])(usage|token|cost|metrics?)([_:-]|$)/i.test(type)) {
     return recordHasUsageSignal(record);
   }
+  if (/(^|[_:-])(diff|patch|edit|artifact|hunk)([_:-]|$)/i.test(type)) return true;
   return /(^|[_:-])(user|assistant|system|developer|message|reasoning|thinking|tool|bash|command)([_:-]|$)/i.test(type);
 };
 
