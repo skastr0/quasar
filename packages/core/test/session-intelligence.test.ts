@@ -225,4 +225,76 @@ describe("session intelligence contract", () => {
     expect(sanitized.sessions[0]!.events[0]!.contentBlocks[0]?.uri).toBeUndefined();
     assertConvexSafeSessionIntelligenceBatch(sanitized);
   });
+
+  test("omits snapshot event payloads from Convex-shaped content", () => {
+    const batch = baseBatch({
+      events: [
+        {
+          id: "event:snapshot",
+          sessionId: "session:test",
+          sequence: 0,
+          machineId: "machine:test",
+          provider: "grok",
+          agentName: "grok",
+          projectIdentityKey: "project:test",
+          role: "system",
+          kind: "snapshot",
+          contentText: "provider workspace snapshot trash",
+          contentBlocks: [
+            {
+              id: "block:snapshot",
+              sequence: 0,
+              kind: "text",
+              text: "provider snapshot block trash",
+            },
+          ],
+          rawReference: { sourcePath: "/tmp/events.jsonl", line: 1, nativeType: "diff" },
+        },
+      ],
+    });
+
+    const sanitized = toConvexSafeSessionIntelligenceBatch(batch);
+    const event = sanitized.sessions[0]!.events[0]!;
+    const encoded = JSON.stringify(sanitized);
+
+    expect(event.kind).toBe("snapshot");
+    expect(event.contentText).toBeUndefined();
+    expect(event.contentBlocks).toEqual([]);
+    expect(encoded).not.toContain("provider workspace snapshot trash");
+    expect(encoded).not.toContain("provider snapshot block trash");
+  });
+
+  test("bounds artifact locators like content block locators", () => {
+    const base64 = "c".repeat(8_192);
+    const dataUri = `data:text/plain;base64,${base64}`;
+    const batch = baseBatch({
+      artifacts: [
+        {
+          id: "artifact:data-uri",
+          sessionId: "session:test",
+          eventId: "event:test",
+          machineId: "machine:test",
+          provider: "claude",
+          agentName: "claude",
+          projectIdentityKey: "project:test",
+          kind: "file",
+          path: dataUri,
+          uri: dataUri,
+          sourcePath: dataUri,
+          sourceRef: { sourcePath: "/tmp/session.jsonl" },
+        },
+      ],
+    });
+
+    const sanitized = toConvexSafeSessionIntelligenceBatch(batch);
+    const artifact = sanitized.sessions[0]!.artifacts[0]!;
+    const encoded = JSON.stringify(artifact);
+
+    expect(artifact.path).toBeUndefined();
+    expect(artifact.uri).toBeUndefined();
+    expect(artifact.sourcePath).toBeUndefined();
+    expect(encoded).toContain("artifact_locator_fields");
+    expect(encoded).not.toContain("data:text/plain;base64");
+    expect(encoded).not.toContain(base64);
+  });
 });

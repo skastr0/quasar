@@ -183,6 +183,7 @@ describe("adapter ingestion", () => {
 
     const grok = sessionsByProvider.get("grok")!;
     expect(grok.artifacts[0]).toMatchObject({ kind: "edit_hunk" });
+    expect(JSON.stringify(grok)).not.toContain("grok-provider-update-trash");
 
     const amp = sessionsByProvider.get("amp")!;
     expect(amp.toolCalls[0]?.toolName).toBe("bash");
@@ -538,7 +539,9 @@ const makeGrokFixture = () => {
   writeJsonl(join(sessionDir, "events.jsonl"), [
     { type: "tool", tool: "bash", callID: "gcall", state: { status: "completed", input: { command: "pwd" }, output: "/repo" } },
   ]);
-  writeJsonl(join(sessionDir, "updates.jsonl"), [{ method: "session/update", params: { ok: true } }]);
+  writeJsonl(join(sessionDir, "updates.jsonl"), [
+    { method: "session/update", params: { displayOnly: "grok-provider-update-trash" } },
+  ]);
   writeJsonl(join(sessionDir, "hunk_records.jsonl"), [
     { hunkId: "h1", filePath: "/Users/a/Projects/quasar/src/index.ts", hunkStart: 1, hunkEnd: 2, linesAdded: 1, linesRemoved: 0 },
   ]);

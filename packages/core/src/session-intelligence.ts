@@ -460,6 +460,9 @@ const sanitizeContentBlock = (block: ContentBlock): ContentBlock | undefined => 
   return fitContentBlockRecord(compactUndefined(next));
 };
 
+const eventCarriesSessionContent = (event: SessionEvent) =>
+  event.kind !== "snapshot";
+
 const fitContentBlockRecord = (block: ContentBlock): ContentBlock => {
   if (jsonByteLength(block) <= CONVEX_SAFE_INGEST_BUDGETS.contentBlockRecordBytes) return block;
   const compact = compactUndefined({
@@ -495,11 +498,15 @@ const sanitizeEvent = (event: SessionEvent): SessionEvent =>
     projectIdentityKey: event.projectIdentityKey,
     role: event.role,
     kind: event.kind,
-    contentText: boundedText(event.contentText, CONVEX_SAFE_INGEST_BUDGETS.contentTextBytes),
-    contentBlocks: event.contentBlocks.flatMap((block) => {
-      const next = sanitizeContentBlock(block);
-      return next === undefined ? [] : [next];
-    }),
+    contentText: eventCarriesSessionContent(event)
+      ? boundedText(event.contentText, CONVEX_SAFE_INGEST_BUDGETS.contentTextBytes)
+      : undefined,
+    contentBlocks: eventCarriesSessionContent(event)
+      ? event.contentBlocks.flatMap((block) => {
+          const next = sanitizeContentBlock(block);
+          return next === undefined ? [] : [next];
+        })
+      : [],
     toolCallId: event.toolCallId,
     parentEventId: event.parentEventId,
     rawReference: event.rawReference,
@@ -548,8 +555,18 @@ const sanitizeUsageRecord = (usageRecord: UsageRecord): UsageRecord =>
     currency: usageRecord.currency,
   });
 
-const sanitizeArtifact = (artifact: Artifact): Artifact =>
-  compactUndefined({
+const sanitizeArtifact = (artifact: Artifact): Artifact => {
+  const path = boundedLocator(artifact.path, "path");
+  const uri = boundedLocator(artifact.uri, "uri");
+  const sourcePath = boundedLocator(artifact.sourcePath, "sourcePath");
+  const locatorOmissions = [path.omitted, uri.omitted, sourcePath.omitted].filter(
+    (item): item is ReturnType<typeof omittedStringValue> => item !== undefined,
+  );
+  const metadata = mergeArtifactMetadata(
+    boundedValue(artifact.metadata, CONVEX_SAFE_INGEST_BUDGETS.metadataBytes),
+    locatorOmissions,
+  );
+  return compactUndefined({
     id: artifact.id,
     sessionId: artifact.sessionId,
     eventId: artifact.eventId,
@@ -558,13 +575,37 @@ const sanitizeArtifact = (artifact: Artifact): Artifact =>
     agentName: artifact.agentName,
     projectIdentityKey: artifact.projectIdentityKey,
     kind: artifact.kind,
-    path: artifact.path,
-    uri: artifact.uri,
+    path: path.value,
+    uri: uri.value,
     contentHash: artifact.contentHash,
-    sourcePath: artifact.sourcePath,
+    sourcePath: sourcePath.value,
     sourceRef: boundedValue(artifact.sourceRef, CONVEX_SAFE_INGEST_BUDGETS.metadataBytes),
-    metadata: boundedValue(artifact.metadata, CONVEX_SAFE_INGEST_BUDGETS.metadataBytes),
+    metadata,
   });
+};
+
+const mergeArtifactMetadata = (
+  metadata: unknown,
+  omissions: readonly ReturnType<typeof omittedStringValue>[],
+) => {
+  if (omissions.length === 0) return metadata;
+  const metadataRecord =
+    metadata !== null && typeof metadata === "object" && !Array.isArray(metadata)
+      ? (metadata as Record<string, unknown>)
+      : metadata === undefined
+        ? {}
+        : { value: metadata };
+  return boundedValue(
+    {
+      ...metadataRecord,
+      __quasarOmitted: {
+        reason: "artifact_locator_fields",
+        fields: omissions,
+      },
+    },
+    CONVEX_SAFE_INGEST_BUDGETS.metadataBytes,
+  );
+};
 
 const sanitizeEdge = (edge: SessionEdge): SessionEdge =>
   compactUndefined({

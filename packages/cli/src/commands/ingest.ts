@@ -110,7 +110,7 @@ const prepareSourceSnapshotSync = (options: IngestOptions): PreparedSourceSnapsh
     };
   }
 
-  const snapshotRoot = mkdtempSync(join(tmpdir(), "quasar-ingest-snapshot-"));
+  const snapshotRoot = mkdtempSync(join(tmpdir(), "qis-"));
   const roots: Partial<Record<Provider, string>> = { ...(options.roots ?? {}) };
   const logicalRoots: Partial<Record<Provider, string>> = { ...(options.logicalRoots ?? {}) };
   const copiedProviders: Provider[] = [];
@@ -274,7 +274,11 @@ const buildBatchWithSourceSnapshotEffect = (input: string | undefined) =>
 const readImportJob = (
   importJobId: string,
   requestClient: IngestRequestClient = requestJson,
-  options: { readonly limit?: number } = {},
+  options: {
+    readonly limit?: number;
+    readonly chunkCursor?: string;
+    readonly failureCursor?: string;
+  } = {},
 ) =>
   requestClient({
     method: "GET",
@@ -282,6 +286,8 @@ const readImportJob = (
     query: {
       importJobId,
       ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+      chunkCursor: options.chunkCursor,
+      failureCursor: options.failureCursor,
     },
     responseSchema: ImportJobStatusResponse,
   }).pipe(
@@ -291,6 +297,93 @@ const readImportJob = (
       jobStatus: jobStatusFromPayload(status.job),
     })),
   );
+
+const ensureImportWorkerScheduled = (
+  importJobId: string,
+  requestClient: IngestRequestClient = requestJson,
+) =>
+  requestClient({
+    method: "POST",
+    path: QuasarApiPaths.ingestJobsSchedule,
+    body: { importJobId },
+    responseSchema: Schema.Unknown,
+  }).pipe(Effect.asVoid);
+
+const safeResumeUploadedChunkCount = (
+  importJobId: string,
+  plan: StreamIngestPlan,
+  requestClient: IngestRequestClient,
+) =>
+  Effect.gen(function* () {
+    let nextSequence = 0;
+    let chunkCursor: string | undefined;
+    while (nextSequence < plan.expectedChunkCount) {
+      const status = yield* readImportJob(importJobId, requestClient, {
+        limit: RESUME_STATUS_PAGE_LIMIT,
+        chunkCursor,
+      });
+      const chunks = chunkStatusRows(status.chunks).sort(
+        (left, right) => chunkSequence(left) - chunkSequence(right),
+      );
+      if (chunks.length === 0) return nextSequence;
+      for (const chunk of chunks) {
+        const sequence = chunkSequence(chunk);
+        if (sequence !== nextSequence) return nextSequence;
+        if (!chunkMatchesResumePlan(chunk, plan, sequence)) return nextSequence;
+        nextSequence += 1;
+        if (nextSequence >= plan.expectedChunkCount) return nextSequence;
+      }
+      const nextCursor = chunkPaginationCursor(status.pagination);
+      if (nextCursor === undefined) return nextSequence;
+      chunkCursor = nextCursor;
+    }
+    return nextSequence;
+  }).pipe(
+    Effect.catchAll(() => Effect.succeed(0)),
+  );
+
+const RESUME_STATUS_PAGE_LIMIT = 200;
+
+const chunkStatusRows = (chunks: unknown) =>
+  Array.isArray(chunks)
+    ? chunks.filter((chunk): chunk is Record<string, unknown> =>
+        chunk !== null && typeof chunk === "object",
+      )
+    : [];
+
+const chunkSequence = (chunk: Record<string, unknown>) => {
+  const sequence = chunk.sequence;
+  return typeof sequence === "number" && Number.isInteger(sequence)
+    ? sequence
+    : Number.POSITIVE_INFINITY;
+};
+
+const chunkMatchesResumePlan = (
+  chunk: Record<string, unknown>,
+  plan: StreamIngestPlan,
+  sequence: number,
+) => {
+  const expectedHash = plan.chunkPayloadHashes[sequence];
+  if (typeof expectedHash !== "string") return false;
+  if (chunk.payloadHash !== expectedHash) return false;
+  if (chunk.status === "succeeded") return true;
+  if (
+    (chunk.status === "pending" || chunk.status === "running") &&
+    chunk.payloadStored === true
+  ) return true;
+  return false;
+};
+
+const chunkPaginationCursor = (pagination: unknown) => {
+  if (pagination === null || typeof pagination !== "object") return undefined;
+  const chunks = (pagination as Record<string, unknown>).chunks;
+  if (chunks === null || typeof chunks !== "object") return undefined;
+  const page = chunks as Record<string, unknown>;
+  if (page.isDone === true) return undefined;
+  return typeof page.continueCursor === "string" && page.continueCursor.length > 0
+    ? page.continueCursor
+    : undefined;
+};
 
 const jobStatusFromPayload = (job: unknown) => {
   if (job !== null && typeof job === "object" && "status" in job) {
@@ -402,12 +495,19 @@ export const runIngestEffect = (
           plan,
           client,
           importJobId: job.importJobId,
-          resumeUploadedChunkCount: job.chunkCount,
+          resumeUploadedChunkCount: yield* safeResumeUploadedChunkCount(
+            job.importJobId,
+            plan,
+            client,
+          ),
           uploadGroupSize: uploadGroupSizeFromEnv(),
           maxUploadChunksPerRun: maxUploadChunksFromOptions(options),
           chunkDelayMs,
           progress: progressOptionsFromEnv(),
         });
+        if (upload.uploadComplete) {
+          yield* ensureImportWorkerScheduled(job.importJobId, client);
+        }
         const status = yield* readImportJob(job.importJobId, client, { limit: 0 });
         const after = resnapshotSourceManifestEntries(plan.sourceBefore);
         return {
@@ -516,7 +616,7 @@ const planStreamedIngest = (
         const chunks = chunkIngestBatch(batch, chunkOptions);
         validateChunkPayloads(chunks);
         for (const chunk of chunks) {
-          chunkPayloadHashes.push(stableJsonHash(batchPayloadIdentity(chunk)));
+          chunkPayloadHashes.push(ingestBatchPayloadHash(chunk));
         }
       }
       const plannedManifest: IngestManifest = manifest;
@@ -582,7 +682,7 @@ const uploadStreamedIngest = (input: {
       const chunk = next.value;
       assertJsonBudget(chunk, MAX_UPLOAD_CHUNK_BATCH_BYTES, `chunk ${index}`);
       const expectedHash = input.plan.chunkPayloadHashes[index];
-      const actualHash = stableJsonHash(batchPayloadIdentity(chunk));
+      const actualHash = ingestBatchPayloadHash(chunk);
       if (expectedHash !== actualHash) {
         throw new Error(`ingest source changed between planning and upload at chunk ${index}`);
       }
@@ -831,8 +931,11 @@ export const ingestJobIdempotencyKey = (
 ) =>
   streamedIngestJobIdempotencyKey(
     manifestFromBatch(batch),
-    chunks.map((chunk) => stableJsonHash(batchPayloadIdentity(chunk))),
+    chunks.map(ingestBatchPayloadHash),
   );
+
+export const ingestBatchPayloadHash = (batch: IngestBatch) =>
+  stableJsonHash(batchPayloadIdentity(batch));
 
 const batchPayloadIdentity = (batch: IngestBatch) => ({
   ...batch,

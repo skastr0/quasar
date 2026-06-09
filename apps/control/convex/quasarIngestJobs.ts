@@ -457,7 +457,7 @@ export const claimImportJobWorkerHandler = async (
   ctx: MutationCtx,
   args: { importJobId?: string; now: number },
 ): Promise<{ readonly importJobId?: string; readonly leaseToken: string } | null> => {
-  if (args.importJobId === undefined) return { leaseToken: "global-worker" };
+  if (args.importJobId === undefined) return { leaseToken: "unscoped" };
   const existing = await findImportWorkerLease(ctx, args.importJobId);
   if (existing !== null && existing.leaseExpiresAt > args.now) return null;
   const leaseToken = `job-worker:${crypto.randomUUID?.() ?? `${args.now}:${Math.random()}`}`;
