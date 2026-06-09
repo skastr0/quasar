@@ -15,6 +15,7 @@ import type {
   SourceManifestEntry,
   SourceSafetyReport,
 } from "./schemas";
+import { toConvexSafeSessionIntelligenceBatch } from "./session-intelligence";
 
 export const quasarHome = () =>
   process.env.QUASAR_HOME ??
@@ -29,7 +30,9 @@ export const loadMachineIdentity = (): MachineIdentity => {
   try {
     const existing = JSON.parse(readFileSync(machinePath(), "utf8")) as MachineIdentity;
     if (existing.machineId) return existing;
-  } catch {
+  } catch (error) {
+    const ignoredLoadError = error;
+    void ignoredLoadError;
     // Create a new stable local identity below.
   }
   const machine: MachineIdentity = {
@@ -67,14 +70,14 @@ export const buildIngestBatch = async (
     roots: options.roots,
     limit: options.limit,
   });
-  return {
+  return toConvexSafeSessionIntelligenceBatch({
     protocolVersion: "quasar.ingest/v1",
     machine,
     sourceRoots: result.sourceRoots,
     sessions: result.sessions,
     diagnostics: result.diagnostics,
     generatedAt: now,
-  };
+  });
 };
 
 export const summarizeBatch = (batch: IngestBatch) => ({
