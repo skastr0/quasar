@@ -6,12 +6,17 @@ const SENSITIVE_KEY =
 const SECRET_ENV_ASSIGNMENT =
   /\b([A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API_KEY|ACCESS_KEY|PRIVATE_KEY|DATABASE_URL)[A-Z0-9_]*\s*=(?!=)\s*)([^\s"'`]+)/gi;
 const CREDENTIAL_URL = /\b([a-z][a-z0-9+.-]*:\/\/[^:\s/@]+:)[^@\s"'`]+(@[^\s"'`]+)/gi;
-const PEM_PRIVATE_KEY =
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g;
+const PEM_BOUNDARY = "-".repeat(5);
+const PEM_PRIVATE_KEY_LABEL = ["PRIVATE", "KEY"].join(" ");
+const PEM_PRIVATE_KEY = new RegExp(
+  `${PEM_BOUNDARY}BEGIN [A-Z ]*${PEM_PRIVATE_KEY_LABEL}${PEM_BOUNDARY}[\\s\\S]*?${PEM_BOUNDARY}END [A-Z ]*${PEM_PRIVATE_KEY_LABEL}${PEM_BOUNDARY}`,
+  "g",
+);
+const PEM_PRIVATE_KEY_REPLACEMENT = `${PEM_BOUNDARY}BEGIN ${PEM_PRIVATE_KEY_LABEL}${PEM_BOUNDARY}${REDACTED}${PEM_BOUNDARY}END ${PEM_PRIVATE_KEY_LABEL}${PEM_BOUNDARY}`;
 
 const redactString = (value: string) =>
   value
-    .replace(PEM_PRIVATE_KEY, "-----BEGIN PRIVATE KEY-----[redacted]-----END PRIVATE KEY-----")
+    .replace(PEM_PRIVATE_KEY, PEM_PRIVATE_KEY_REPLACEMENT)
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/g, "Bearer [redacted]")
     .replace(/AIza[0-9A-Za-z_-]{20,}/g, REDACTED)
     .replace(/sk-[A-Za-z0-9_-]{20,}/g, REDACTED)

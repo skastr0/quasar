@@ -6,7 +6,12 @@ import { tmpdir } from "node:os";
 import { describe, expect, test } from "vitest";
 
 import { buildIngestBatch } from "../src/ingest";
-import type { NormalizedSession, Provider } from "../src/schemas";
+import {
+  CONVEX_SAFE_INGEST_BUDGETS,
+  assertConvexSafeSessionIntelligenceBatch,
+  jsonByteLength,
+} from "../src/session-intelligence";
+import type { IngestBatch, NormalizedSession, Provider } from "../src/schemas";
 
 const machine = {
   machineId: "machine:test",
@@ -146,6 +151,7 @@ describe("adapter ingestion", () => {
       expect(diagnostic?.parserConfidence, provider).toBeDefined();
       expect(batch.sessions.length, provider).toBeGreaterThan(0);
       const session = batch.sessions[0]!;
+      assertAdapterContract(batch, provider);
       expect(session.events.length, provider).toBeGreaterThan(0);
       expect(session.events.flatMap((event) => event.contentBlocks).length, provider).toBeGreaterThan(0);
       expect(session.sessionEdges.some((edge) => edge.kind === "next"), provider).toBe(true);
@@ -252,6 +258,63 @@ const providerSession = async (provider: Provider, root: string, machineOverride
     machine: machineOverride,
   });
   return batch.sessions[0]!;
+};
+
+const hasOwn = (value: object, key: string) => Object.prototype.hasOwnProperty.call(value, key);
+
+const assertAdapterContract = (batch: IngestBatch, provider: Provider) => {
+  assertConvexSafeSessionIntelligenceBatch(batch);
+  const encoded = JSON.stringify(batch);
+  expect(encoded, provider).not.toMatch(/data:[^"\\]*base64/i);
+  expect(encoded, provider).not.toContain("iVBORw0KGgo=");
+  expect(encoded, provider).not.toContain("encrypted_content");
+  expect(encoded, provider).not.toContain("ciphertext");
+  expect(encoded, provider).not.toContain("opencode-native-diff-trash");
+  expect(encoded, provider).not.toContain('"raw":');
+
+  for (const session of batch.sessions) {
+    expect(
+      jsonByteLength({
+        ...session,
+        events: undefined,
+        toolCalls: undefined,
+        sessionEdges: undefined,
+        usageRecords: undefined,
+        artifacts: undefined,
+      }),
+      provider,
+    ).toBeLessThanOrEqual(CONVEX_SAFE_INGEST_BUDGETS.eventRecordBytes);
+    for (const event of session.events) {
+      expect(hasOwn(event, "raw"), `${provider} event ${event.id}`).toBe(false);
+      expect(jsonByteLength({ ...event, contentBlocks: undefined }), `${provider} event ${event.id}`).toBeLessThanOrEqual(
+        CONVEX_SAFE_INGEST_BUDGETS.eventRecordBytes,
+      );
+      for (const block of event.contentBlocks) {
+        expect(block.uri ?? "", `${provider} block ${block.id}`).not.toMatch(/^data:/i);
+        expect(jsonByteLength(block), `${provider} block ${block.id}`).toBeLessThanOrEqual(
+          CONVEX_SAFE_INGEST_BUDGETS.contentBlockRecordBytes,
+        );
+      }
+    }
+    for (const toolCall of session.toolCalls) {
+      expect(hasOwn(toolCall, "raw"), `${provider} tool ${toolCall.id}`).toBe(false);
+      expect(jsonByteLength(toolCall), `${provider} tool ${toolCall.id}`).toBeLessThanOrEqual(
+        CONVEX_SAFE_INGEST_BUDGETS.toolCallRecordBytes,
+      );
+    }
+    for (const usageRecord of session.usageRecords) {
+      expect(hasOwn(usageRecord, "raw"), `${provider} usage ${usageRecord.id}`).toBe(false);
+      expect(jsonByteLength(usageRecord), `${provider} usage ${usageRecord.id}`).toBeLessThanOrEqual(
+        CONVEX_SAFE_INGEST_BUDGETS.usageRecordBytes,
+      );
+    }
+    for (const artifact of session.artifacts) {
+      expect(hasOwn(artifact, "raw"), `${provider} artifact ${artifact.id}`).toBe(false);
+      expect(jsonByteLength(artifact), `${provider} artifact ${artifact.id}`).toBeLessThanOrEqual(
+        CONVEX_SAFE_INGEST_BUDGETS.artifactRecordBytes,
+      );
+    }
+  }
 };
 
 const makeAllAdapterFixtures = async (): Promise<Record<(typeof localProviders)[number], string>> => {

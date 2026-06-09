@@ -172,7 +172,7 @@ const graphBatch = (path: string, machineId: string) => ({
               id: `block:${machineId}:2`,
               sequence: 0,
               kind: "json",
-              value: { cmd: "pwd", note: "graph json block" },
+              value: { cmd: "pwd", note: "graph json block", warehouseToken: "warehouse-only-json-block" },
             },
           ],
         },
@@ -422,19 +422,125 @@ describe("quasar ingestion and search", () => {
     expect(session?.session.ingestState).toBe("complete");
   });
 
+  test("sanitizes direct Convex ingest batches at the write boundary", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const session = batch.sessions[0]! as Record<string, unknown>;
+    const event = batch.sessions[0]!.events[0]! as Record<string, unknown>;
+    const base64 = "a".repeat(8_192);
+    session.rawMetadata = {
+      summary: { diffs: ["direct-ingest-diff-trash"] },
+      providerCache: "keep only if bounded",
+    };
+    event.contentText = JSON.stringify({
+      type: "provider-warehouse-row",
+      summary: { diffs: ["direct-ingest-text-trash"] },
+      image_url: `data:image/png;base64,${base64}`,
+    });
+    event.content = {
+      encrypted_content: "direct-ingest-encrypted-trash",
+      payload: `data:image/png;base64,${base64}`,
+    };
+    event.contentBlocks = [
+      {
+        id: "block:direct:trash",
+        sequence: 0,
+        kind: "image",
+        uri: `data:image/png;base64,${base64}`,
+        value: { type: "base64", data: base64 },
+      },
+    ];
+    event.raw = { native: "direct-ingest-raw-trash" };
+
+    await t.mutation(internal.quasar.ingestBatchInternal, { batch });
+
+    const stored = await t.query(internal.quasar.readSessionInternal, {
+      sessionId: "codex:machine:a:session",
+      view: "tool-expanded",
+    });
+    const encoded = JSON.stringify(stored);
+    expect(encoded).toContain("native_non_session_intelligence");
+    expect(encoded).toContain("uri_omitted");
+    expect(encoded).not.toContain("direct-ingest-diff-trash");
+    expect(encoded).not.toContain("direct-ingest-text-trash");
+    expect(encoded).not.toContain("direct-ingest-encrypted-trash");
+    expect(encoded).not.toContain("direct-ingest-raw-trash");
+    expect(encoded).not.toContain("data:image/png;base64");
+    expect(encoded).not.toContain(base64);
+  });
+
+  test("sanitizes queued import chunks before transient payload storage", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const event = batch.sessions[0]!.events[0]! as Record<string, unknown>;
+    const base64 = "b".repeat(8_192);
+    event.contentText = JSON.stringify({
+      summary: { diffs: ["queued-ingest-text-trash"] },
+      image_url: `data:image/png;base64,${base64}`,
+    });
+    event.contentBlocks = [
+      {
+        id: "block:queued:trash",
+        sequence: 0,
+        kind: "image",
+        uri: `data:image/png;base64,${base64}`,
+        value: { type: "base64", data: base64 },
+      },
+    ];
+
+    const job = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { batch, expectedChunkCount: 1 },
+    });
+    await t.action(internal.quasar.submitImportChunkInternal, {
+      input: {
+        importJobId: job.importJobId,
+        batch,
+        sequence: 0,
+        expectedChunkCount: 1,
+      },
+    });
+
+    const payloads = await t.run(async (ctx) =>
+      await ctx.db
+        .query("importChunkPayloads")
+        .withIndex("by_importJobId", (q) => q.eq("importJobId", job.importJobId))
+        .collect(),
+    );
+    const encoded = JSON.stringify(payloads);
+    expect(encoded).toContain("native_non_session_intelligence");
+    expect(encoded).toContain("uri_omitted");
+    expect(encoded).not.toContain("queued-ingest-text-trash");
+    expect(encoded).not.toContain("data:image/png;base64");
+    expect(encoded).not.toContain(base64);
+  });
+
+  test("rejects old or unknown ingest protocol versions", async () => {
+    const t = setup();
+    await expect(
+      t.mutation(internal.quasar.ingestBatchInternal, {
+        batch: {
+          ...testBatch("/Users/a/Projects/quasar", "machine:a"),
+          protocolVersion: "quasar.ingest/v2",
+        },
+      }),
+    ).rejects.toThrow(/quasar\.ingest\/v1|protocolVersion/);
+    const { protocolVersion: _protocolVersion, ...missingProtocol } = testBatch(
+      "/Users/a/Projects/quasar",
+      "machine:a",
+    );
+    await expect(
+      t.mutation(internal.quasar.ingestBatchInternal, { batch: missingProtocol }),
+    ).rejects.toThrow(/quasar\.ingest\/v1|protocolVersion/);
+  });
+
   test("rejects oversized import chunk payloads before enqueue", async () => {
     const t = setup();
     const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
-    const oversizedBatch = {
-      ...batch,
-      sessions: batch.sessions.map((session) => ({
-        ...session,
-        events: session.events.map((event) => ({
-          ...event,
-          contentText: "oversized chunk payload\n".repeat(40_000),
-        })),
-      })),
-    };
+    const oversizedBatch = largeEventBatch("/Users/a/Projects/quasar", "machine:a", 30);
+    oversizedBatch.sessions[0]!.events = oversizedBatch.sessions[0]!.events.map((event) => ({
+      ...event,
+      contentText: "oversized chunk payload\n".repeat(40_000),
+    }));
     const job = await t.mutation(internal.quasar.startImportJobInternal, {
       input: { batch, expectedChunkCount: 1 },
     });
@@ -534,6 +640,35 @@ describe("quasar ingestion and search", () => {
     expect(search.matches).toHaveLength(0);
   });
 
+  test("keeps object event content out of search text and embeddings", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const mutableEvent = batch.sessions[0]!.events[0]! as Record<string, unknown>;
+    mutableEvent.contentText = "canonical user request for session intelligence";
+    mutableEvent.content = {
+      type: "provider-ui-cache",
+      displayOnly: "warehouse-only-event-content",
+      summary: { diffs: ["not session intelligence"] },
+    };
+
+    await t.mutation(internal.quasar.ingestBatchInternal, { batch });
+
+    const rawContentSearch = await t.query(internal.quasar.textSearchInternal, {
+      query: "warehouse-only-event-content",
+      limit: 10,
+    });
+    expect(rawContentSearch.matches).toHaveLength(0);
+
+    const docs = await t.query(internal.quasar.fetchSearchDocumentsInternal, {
+      searchDocumentIds: ["event:event:machine:a:1"],
+    });
+    expect(docs[0]?.searchText).toContain("canonical user request");
+    expect(docs[0]?.embeddingText).toContain("canonical user request");
+    expect(docs[0]?.searchText).not.toContain("warehouse-only-event-content");
+    expect(docs[0]?.embeddingText).not.toContain("warehouse-only-event-content");
+    expect(docs[0]?.searchText).not.toContain("not session intelligence");
+  });
+
   test("links tool call and result events into one tool-call row", async () => {
     const t = setup();
     await t.mutation(internal.quasar.ingestBatchInternal, {
@@ -605,6 +740,18 @@ describe("quasar ingestion and search", () => {
       limit: 10,
     });
     expect(blockSearch.matches.some((match) => match.family === "contentBlocks")).toBe(true);
+
+    const rawBlockSearch = await t.query(internal.quasar.textSearchInternal, {
+      query: "warehouse-only-json-block",
+      limit: 10,
+    });
+    expect(rawBlockSearch.matches.some((match) => match.family === "contentBlocks")).toBe(false);
+
+    const blockDocs = await t.query(internal.quasar.fetchSearchDocumentsInternal, {
+      searchDocumentIds: ["block:block:machine:a:2"],
+    });
+    expect(blockDocs[0]?.searchText).not.toContain("warehouse-only-json-block");
+    expect(blockDocs[0]?.searchText).not.toContain("graph json block");
 
     const rawArtifactSearch = await t.query(internal.quasar.textSearchInternal, {
       query: "artifact diff searchable",

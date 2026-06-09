@@ -4,7 +4,10 @@ import { basename, dirname, join } from "node:path";
 import { stableJsonHash, stableWideHash } from "../hash";
 import { resolveProjectIdentity } from "../project-normalization";
 import { redactSensitive } from "../redaction";
-import { sanitizeSessionIntelligenceSession } from "../session-intelligence";
+import {
+  compactSessionIntelligenceText,
+  sanitizeSessionIntelligenceSession,
+} from "../session-intelligence";
 import type {
   Artifact,
   ContentBlock,
@@ -126,7 +129,7 @@ const stripNonIndexable = (value: unknown, depth = 0): unknown => {
 export const collectFiles = (
   root: string,
   predicate: (path: string) => boolean,
-  limit = Number.POSITIVE_INFINITY,
+  limit: number = Number.POSITIVE_INFINITY,
 ) => {
   const input = parseCollectFilesInput(root, limit);
   if (input === undefined) return [];
@@ -152,7 +155,7 @@ export const collectFiles = (
 export const compactText = (value: NativeValue | undefined): string | undefined => {
   if (value === undefined || value === null) return undefined;
   if (typeof value === "string") {
-    const text = compactString(value);
+    const text = compactSessionIntelligenceText(compactString(value));
     return text === undefined ? undefined : (redactSensitive(text) as string);
   }
   if (Array.isArray(value)) {
@@ -164,7 +167,10 @@ export const compactText = (value: NativeValue | undefined): string | undefined 
     if (typeof record.text === "string") return compactText(record.text);
     if (typeof record.content === "string") return compactText(record.content);
     try {
-      return JSON.stringify(stripNonIndexable(redactSensitive(value))).slice(0, 4_000);
+      return compactSessionIntelligenceText(
+        JSON.stringify(stripNonIndexable(redactSensitive(value))),
+        4_000,
+      );
     } catch {
       return undefined;
     }

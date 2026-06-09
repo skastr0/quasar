@@ -1,4 +1,6 @@
 import type { MutationCtx } from "./_generated/server";
+import type { IngestBatch as CoreIngestBatch } from "../../../packages/core/src/schemas";
+import { toConvexSafeSessionIntelligenceBatch } from "../../../packages/core/src/session-intelligence";
 import {
   cleanupMissingSessionRows,
   upsertSessionEvents,
@@ -27,10 +29,12 @@ import { compactSearchText, redactSensitive, wideHash } from "./quasarText";
 import { isToolEventKind, normalizeToolCallId } from "./quasarToolExtraction";
 import { dateMillis } from "./quasarValues";
 
+type IngestBatchResult = ReturnType<typeof importRunSummary>;
+
 export const ingestBatchHandler = async (
   ctx: MutationCtx,
   args: { batch: unknown; importJobId?: string; importChunkId?: string },
-) => {
+): Promise<IngestBatchResult> => {
   const batch = parseIngestBatch(args.batch, {
     importJobId: args.importJobId,
     importChunkId: args.importChunkId,
@@ -50,7 +54,9 @@ const parseIngestBatch = (
   value: unknown,
   metadata: { importJobId?: string; importChunkId?: string } = {},
 ): ParsedIngestBatch => {
-  const batch = decodeBoundarySync(IngestBatchBoundary, value, "ingest batch");
+  const decoded = decodeBoundarySync(IngestBatchBoundary, value, "ingest batch");
+  const sanitized = toConvexSafeSessionIntelligenceBatch(decoded as unknown as CoreIngestBatch);
+  const batch = decodeBoundarySync(IngestBatchBoundary, sanitized, "sanitized ingest batch");
   const machine = batch.machine;
   const sessions = batch.sessions;
   const sourceRoots = batch.sourceRoots;

@@ -96,6 +96,7 @@ describe("session intelligence contract", () => {
 
     expect(encoded).toContain("Please wire the CLI.");
     expect(encoded).toContain("native_non_session_intelligence");
+    expect(JSON.stringify(sanitized.sessions[0]!.events[0]!.content)).not.toContain("diffs");
     expect(encoded).not.toContain("not-session-intelligence");
     expect(encoded).not.toContain("should");
     expect(jsonByteLength(sanitized.sessions[0]!.events[0])).toBeLessThanOrEqual(
@@ -138,6 +139,7 @@ describe("session intelligence contract", () => {
 
   test("replaces binary and base64 payloads with bounded refs", () => {
     const base64 = "a".repeat(8_192);
+    const dataUri = `data:image/png;base64,${base64}`;
     const batch = baseBatch({
       events: [
         {
@@ -150,12 +152,17 @@ describe("session intelligence contract", () => {
           projectIdentityKey: "project:test",
           role: "user",
           kind: "message",
+          content: {
+            type: "input_image",
+            image_url: dataUri,
+          },
           contentBlocks: [
             {
               id: "block:image",
               sequence: 0,
               kind: "image",
               mediaType: "image/png",
+              uri: dataUri,
               value: { type: "base64", data: base64 },
               metadata: { source: { type: "base64", data: base64 } },
             },
@@ -169,7 +176,10 @@ describe("session intelligence contract", () => {
     const encoded = JSON.stringify(sanitized);
 
     expect(encoded).toContain("binary_or_base64");
+    expect(encoded).toContain("uri_omitted");
     expect(encoded).not.toContain(base64);
+    expect(encoded).not.toContain("data:image/png;base64");
+    expect(sanitized.sessions[0]!.events[0]!.contentBlocks[0]?.uri).toBeUndefined();
     assertConvexSafeSessionIntelligenceBatch(sanitized);
   });
 });

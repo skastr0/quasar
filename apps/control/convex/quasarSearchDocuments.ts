@@ -12,6 +12,7 @@ import type {
 import {
   compactText,
   hashText,
+  MAX_EMBEDDING_TEXT_BYTES,
   MAX_SEARCH_TEXT_LENGTH,
   MAX_SUMMARY_LENGTH,
   truncate,
@@ -79,7 +80,7 @@ export const upsertSearchDocument = async (
     : undefined;
   const embeddingText =
     eligibility.eligible && searchText.trim().length > 0
-      ? truncate(input.embeddingText ?? searchText, MAX_SEARCH_TEXT_LENGTH)
+      ? truncate(input.embeddingText ?? searchText, MAX_EMBEDDING_TEXT_BYTES)
       : undefined;
   const ragContentHash =
     eligibility.eligible && embeddingText !== undefined
@@ -141,7 +142,7 @@ export const requeueSearchDocumentEmbedding = async (
     : undefined;
   const embeddingText =
     eligibility.eligible && searchText.trim().length > 0
-      ? truncate(doc.embeddingText ?? searchText, MAX_SEARCH_TEXT_LENGTH)
+      ? truncate(doc.embeddingText ?? searchText, MAX_EMBEDDING_TEXT_BYTES)
       : undefined;
   const ragContentHash =
     eligibility.eligible && embeddingText !== undefined
