@@ -6,7 +6,10 @@
   "license": "MIT",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./hash": "./src/hash.ts",
+    "./schemas": "./src/schemas.ts",
+    "./session-intelligence": "./src/session-intelligence.ts"
   },
   "scripts": {
     "build": "tsc --noEmit",
