@@ -1,11 +1,8 @@
 import { internal } from "./_generated/api";
 import type { Doc } from "./_generated/dataModel";
 import type { ActionCtx, MutationCtx, QueryCtx } from "./_generated/server";
-import type { IngestBatch as CoreIngestBatch } from "../../../packages/core/src/schemas";
-import { toConvexSafeSessionIntelligenceBatch } from "../../../packages/core/src/session-intelligence";
 import {
   decodeBoundarySync,
-  IngestBatchBoundary,
   ReadImportJobInput,
   type SourceRootBoundary,
   StartImportJobInput,
@@ -16,6 +13,7 @@ import {
   type ProviderSchema,
   type StartImportJobInput as StartImportJobInputValue,
 } from "./quasarDomainSchemas";
+import { sanitizeIngestBoundaryBatch } from "./quasarIngestContract";
 import { readinessCounts } from "./quasarEmbeddingReadiness";
 import { redactSensitive, wideHash } from "./quasarText";
 
@@ -99,46 +97,6 @@ const MAX_IMPORT_CHUNK_BATCH_BYTES = 768 * 1024;
 const MAX_IMPORT_BULK_INPUT_BYTES = 3_500_000;
 const textEncoder = new TextEncoder();
 
-const sanitizeBoundaryBatch = (
-  batch: IngestBatchBoundaryValue,
-  label: string,
-): IngestBatchBoundaryValue =>
-  decodeBoundarySync(
-    IngestBatchBoundary,
-    restoreIngestControlMetadata(
-      batch,
-      toConvexSafeSessionIntelligenceBatch(batch as unknown as CoreIngestBatch),
-    ),
-    `sanitized ${label}`,
-  );
-
-const restoreIngestControlMetadata = (
-  original: IngestBatchBoundaryValue,
-  sanitized: CoreIngestBatch,
-): IngestBatchBoundaryValue => ({
-  ...sanitized,
-  sessions: sanitized.sessions.map((session, index) => {
-    const control = original.sessions[index];
-    return {
-      ...session,
-      ...(control?.expectedEventIds !== undefined ? { expectedEventIds: control.expectedEventIds } : {}),
-      ...(control?.expectedToolCallIds !== undefined ? { expectedToolCallIds: control.expectedToolCallIds } : {}),
-      ...(control?.expectedContentBlockIds !== undefined
-        ? { expectedContentBlockIds: control.expectedContentBlockIds }
-        : {}),
-      ...(control?.expectedSessionEdgeIds !== undefined
-        ? { expectedSessionEdgeIds: control.expectedSessionEdgeIds }
-        : {}),
-      ...(control?.expectedUsageRecordIds !== undefined
-        ? { expectedUsageRecordIds: control.expectedUsageRecordIds }
-        : {}),
-      ...(control?.expectedArtifactIds !== undefined ? { expectedArtifactIds: control.expectedArtifactIds } : {}),
-      ...(control?.partialSession !== undefined ? { partialSession: control.partialSession } : {}),
-      ...(control?.deferCleanup !== undefined ? { deferCleanup: control.deferCleanup } : {}),
-    };
-  }),
-});
-
 export const startImportJobHandler = async (
   ctx: MutationCtx,
   args: { input: unknown },
@@ -149,7 +107,7 @@ export const startImportJobHandler = async (
       ? decoded
       : {
           ...decoded,
-          batch: sanitizeBoundaryBatch(decoded.batch, "start import job batch"),
+          batch: sanitizeIngestBoundaryBatch(decoded.batch, "start import job batch"),
   };
   assertJsonByteBudget(input, MAX_IMPORT_JOB_INPUT_BYTES, "start import job input");
   const manifest = manifestForStart(input);
@@ -223,7 +181,7 @@ export const submitImportChunkHandler = async (
   const decoded = decodeBoundarySync(SubmitImportChunkInput, args.input, "submit import chunk input");
   const input = {
     ...decoded,
-    batch: sanitizeBoundaryBatch(decoded.batch, "import chunk batch"),
+    batch: sanitizeIngestBoundaryBatch(decoded.batch, "import chunk batch"),
   };
   assertJsonByteBudget(input.batch, MAX_IMPORT_CHUNK_BATCH_BYTES, "import chunk batch");
   const result = (await ctx.runMutation(internal.quasar.enqueueImportChunkInternal, {
@@ -253,7 +211,7 @@ export const submitImportChunksHandler = async (
     ...decoded,
     chunks: decoded.chunks.map((chunk, index) => ({
       ...chunk,
-      batch: sanitizeBoundaryBatch(chunk.batch, `bulk import chunk batch ${index}`),
+      batch: sanitizeIngestBoundaryBatch(chunk.batch, `bulk import chunk batch ${index}`),
     })),
   };
   assertJsonByteBudget(input, MAX_IMPORT_BULK_INPUT_BYTES, "bulk import chunk input");
@@ -291,7 +249,7 @@ export const enqueueImportChunkHandler = async (
   const decoded = decodeBoundarySync(SubmitImportChunkInput, args.input, "submit import chunk input");
   const input = {
     ...decoded,
-    batch: sanitizeBoundaryBatch(decoded.batch, "import chunk batch"),
+    batch: sanitizeIngestBoundaryBatch(decoded.batch, "import chunk batch"),
   };
   assertJsonByteBudget(input.batch, MAX_IMPORT_CHUNK_BATCH_BYTES, "import chunk batch");
   const now = Date.now();

@@ -6,6 +6,30 @@ export const UnknownRecord = Schema.Record({
 });
 export type UnknownRecord = typeof UnknownRecord.Type;
 
+const NonNegativeInteger = Schema.Number.pipe(
+  Schema.filter((value) => Number.isInteger(value) && value >= 0, {
+    message: () => "Expected a non-negative integer",
+  }),
+);
+
+const PositiveInteger = Schema.Number.pipe(
+  Schema.filter((value) => Number.isInteger(value) && value > 0, {
+    message: () => "Expected a positive integer",
+  }),
+);
+
+const NonNegativeNumber = Schema.Number.pipe(
+  Schema.filter((value) => Number.isFinite(value) && value >= 0, {
+    message: () => "Expected a non-negative finite number",
+  }),
+);
+
+const BoundedIdString = Schema.String.pipe(
+  Schema.filter((value) => value.length <= 512, {
+    message: () => "Expected an id string no longer than 512 characters",
+  }),
+);
+
 export const ProviderSchema = Schema.Literal(
   "codex",
   "claude",
@@ -134,7 +158,7 @@ export type ProjectResolutionBoundary = typeof ProjectResolutionBoundary.Type;
 
 export const ContentBlockBoundary = Schema.Struct({
   id: Schema.String,
-  sequence: Schema.Number,
+  sequence: NonNegativeInteger,
   kind: ContentBlockKindSchema,
   text: Schema.optional(Schema.String),
   markdown: Schema.optional(Schema.String),
@@ -149,7 +173,7 @@ export type ContentBlockBoundary = typeof ContentBlockBoundary.Type;
 
 export const RawReferenceBoundary = Schema.Struct({
   sourcePath: Schema.String,
-  line: Schema.optional(Schema.Number),
+  line: Schema.optional(PositiveInteger),
   table: Schema.optional(Schema.String),
   rowId: Schema.optional(Schema.String),
   nativeType: Schema.optional(Schema.String),
@@ -160,7 +184,7 @@ export const SessionEventBoundary = Schema.Struct({
   id: Schema.String,
   sessionId: Schema.String,
   nativeEventId: Schema.optional(Schema.String),
-  sequence: Schema.Number,
+  sequence: NonNegativeInteger,
   timestamp: Schema.optional(Schema.String),
   machineId: Schema.String,
   provider: ProviderSchema,
@@ -223,13 +247,13 @@ export const UsageRecordBoundary = Schema.Struct({
   timestamp: Schema.optional(Schema.String),
   model: Schema.optional(Schema.String),
   modelProvider: Schema.optional(Schema.String),
-  inputTokens: Schema.optional(Schema.Number),
-  outputTokens: Schema.optional(Schema.Number),
-  reasoningTokens: Schema.optional(Schema.Number),
-  cacheCreationInputTokens: Schema.optional(Schema.Number),
-  cacheReadInputTokens: Schema.optional(Schema.Number),
-  totalTokens: Schema.optional(Schema.Number),
-  cost: Schema.optional(Schema.Number),
+  inputTokens: Schema.optional(NonNegativeInteger),
+  outputTokens: Schema.optional(NonNegativeInteger),
+  reasoningTokens: Schema.optional(NonNegativeInteger),
+  cacheCreationInputTokens: Schema.optional(NonNegativeInteger),
+  cacheReadInputTokens: Schema.optional(NonNegativeInteger),
+  totalTokens: Schema.optional(NonNegativeInteger),
+  cost: Schema.optional(NonNegativeNumber),
   currency: Schema.optional(Schema.String),
 });
 export type UsageRecordBoundary = typeof UsageRecordBoundary.Type;
@@ -280,18 +304,18 @@ export const IngestSessionBoundary = Schema.Struct({
   artifacts: Schema.optionalWith(Schema.Array(ArtifactBoundary), {
     default: () => [],
   }),
-  eventCount: Schema.optional(Schema.Number),
-  toolCallCount: Schema.optional(Schema.Number),
-  contentBlockCount: Schema.optional(Schema.Number),
-  sessionEdgeCount: Schema.optional(Schema.Number),
-  usageRecordCount: Schema.optional(Schema.Number),
-  artifactCount: Schema.optional(Schema.Number),
-  expectedEventIds: Schema.optional(Schema.Array(Schema.String)),
-  expectedToolCallIds: Schema.optional(Schema.Array(Schema.String)),
-  expectedContentBlockIds: Schema.optional(Schema.Array(Schema.String)),
-  expectedSessionEdgeIds: Schema.optional(Schema.Array(Schema.String)),
-  expectedUsageRecordIds: Schema.optional(Schema.Array(Schema.String)),
-  expectedArtifactIds: Schema.optional(Schema.Array(Schema.String)),
+  eventCount: Schema.optional(NonNegativeInteger),
+  toolCallCount: Schema.optional(NonNegativeInteger),
+  contentBlockCount: Schema.optional(NonNegativeInteger),
+  sessionEdgeCount: Schema.optional(NonNegativeInteger),
+  usageRecordCount: Schema.optional(NonNegativeInteger),
+  artifactCount: Schema.optional(NonNegativeInteger),
+  expectedEventIds: Schema.optional(Schema.Array(BoundedIdString)),
+  expectedToolCallIds: Schema.optional(Schema.Array(BoundedIdString)),
+  expectedContentBlockIds: Schema.optional(Schema.Array(BoundedIdString)),
+  expectedSessionEdgeIds: Schema.optional(Schema.Array(BoundedIdString)),
+  expectedUsageRecordIds: Schema.optional(Schema.Array(BoundedIdString)),
+  expectedArtifactIds: Schema.optional(Schema.Array(BoundedIdString)),
   partialSession: Schema.optional(Schema.Boolean),
   deferCleanup: Schema.optional(Schema.Boolean),
 });
@@ -344,12 +368,12 @@ export const IngestSessionManifestBoundary = Schema.Struct({
   projectIdentityKey: Schema.String,
   sourceRoot: Schema.String,
   sourcePath: Schema.String,
-  eventCount: Schema.Number,
-  toolCallCount: Schema.Number,
-  contentBlockCount: Schema.Number,
-  sessionEdgeCount: Schema.Number,
-  usageRecordCount: Schema.Number,
-  artifactCount: Schema.Number,
+  eventCount: NonNegativeInteger,
+  toolCallCount: NonNegativeInteger,
+  contentBlockCount: NonNegativeInteger,
+  sessionEdgeCount: NonNegativeInteger,
+  usageRecordCount: NonNegativeInteger,
+  artifactCount: NonNegativeInteger,
 });
 export type IngestSessionManifestBoundary = typeof IngestSessionManifestBoundary.Type;
 
@@ -360,27 +384,15 @@ export const IngestManifestBoundary = Schema.Struct({
   sessions: Schema.Array(IngestSessionManifestBoundary),
   diagnostics: Schema.Array(AdapterDiagnosticBoundary),
   generatedAt: Schema.optional(Schema.String),
-  sessionCount: Schema.Number,
-  eventCount: Schema.Number,
-  toolCallCount: Schema.Number,
-  contentBlockCount: Schema.Number,
-  sessionEdgeCount: Schema.Number,
-  usageRecordCount: Schema.Number,
-  artifactCount: Schema.Number,
+  sessionCount: NonNegativeInteger,
+  eventCount: NonNegativeInteger,
+  toolCallCount: NonNegativeInteger,
+  contentBlockCount: NonNegativeInteger,
+  sessionEdgeCount: NonNegativeInteger,
+  usageRecordCount: NonNegativeInteger,
+  artifactCount: NonNegativeInteger,
 });
 export type IngestManifestBoundary = typeof IngestManifestBoundary.Type;
-
-const NonNegativeInteger = Schema.Number.pipe(
-  Schema.filter((value) => Number.isInteger(value) && value >= 0, {
-    message: () => "Expected a non-negative integer",
-  }),
-);
-
-const PositiveInteger = Schema.Number.pipe(
-  Schema.filter((value) => Number.isInteger(value) && value > 0, {
-    message: () => "Expected a positive integer",
-  }),
-);
 
 export class StartImportJobInput extends Schema.Class<StartImportJobInput>(
   "StartImportJobInput",
@@ -428,7 +440,7 @@ export class ReadImportJobInput extends Schema.Class<ReadImportJobInput>(
   importJobId: Schema.String,
   chunkCursor: Schema.optional(Schema.Union(Schema.String, Schema.Null)),
   failureCursor: Schema.optional(Schema.Union(Schema.String, Schema.Null)),
-  limit: Schema.optional(Schema.Number),
+  limit: Schema.optional(NonNegativeInteger),
 }) {}
 
 export const EmbeddingOutboxStatusSchema = Schema.Literal(
@@ -480,7 +492,7 @@ export const EmbeddingControlInput = Schema.Struct({
   retryFailed: Schema.optional(Schema.Boolean),
   rebuildPending: Schema.optional(Schema.Boolean),
   projectIdentityKey: Schema.optional(Schema.String),
-  limit: Schema.optional(Schema.Number),
+  limit: Schema.optional(PositiveInteger),
 });
 export type EmbeddingControlInput = typeof EmbeddingControlInput.Type;
 

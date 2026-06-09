@@ -1,5 +1,23 @@
 import { Schema } from "effect";
 
+const NonNegativeInteger = Schema.Number.pipe(
+  Schema.filter((value) => Number.isInteger(value) && value >= 0, {
+    message: () => "Expected a non-negative integer",
+  }),
+);
+
+const PositiveInteger = Schema.Number.pipe(
+  Schema.filter((value) => Number.isInteger(value) && value > 0, {
+    message: () => "Expected a positive integer",
+  }),
+);
+
+const NonNegativeNumber = Schema.Number.pipe(
+  Schema.filter((value) => Number.isFinite(value) && value >= 0, {
+    message: () => "Expected a non-negative finite number",
+  }),
+);
+
 export const Provider = Schema.Literal(
   "codex",
   "claude",
@@ -81,7 +99,7 @@ export type ContentBlockKind = typeof ContentBlockKind.Type;
 
 export const ContentBlock = Schema.Struct({
   id: Schema.String,
-  sequence: Schema.Number,
+  sequence: NonNegativeInteger,
   kind: ContentBlockKind,
   text: Schema.optional(Schema.String),
   markdown: Schema.optional(Schema.String),
@@ -133,13 +151,13 @@ export const UsageRecord = Schema.Struct({
   timestamp: Schema.optional(Schema.String),
   model: Schema.optional(Schema.String),
   modelProvider: Schema.optional(Schema.String),
-  inputTokens: Schema.optional(Schema.Number),
-  outputTokens: Schema.optional(Schema.Number),
-  reasoningTokens: Schema.optional(Schema.Number),
-  cacheCreationInputTokens: Schema.optional(Schema.Number),
-  cacheReadInputTokens: Schema.optional(Schema.Number),
-  totalTokens: Schema.optional(Schema.Number),
-  cost: Schema.optional(Schema.Number),
+  inputTokens: Schema.optional(NonNegativeInteger),
+  outputTokens: Schema.optional(NonNegativeInteger),
+  reasoningTokens: Schema.optional(NonNegativeInteger),
+  cacheCreationInputTokens: Schema.optional(NonNegativeInteger),
+  cacheReadInputTokens: Schema.optional(NonNegativeInteger),
+  totalTokens: Schema.optional(NonNegativeInteger),
+  cost: Schema.optional(NonNegativeNumber),
   currency: Schema.optional(Schema.String),
 });
 export type UsageRecord = typeof UsageRecord.Type;
@@ -207,7 +225,7 @@ export type SourceRoot = typeof SourceRoot.Type;
 
 export const RawReference = Schema.Struct({
   sourcePath: Schema.String,
-  line: Schema.optional(Schema.Number),
+  line: Schema.optional(PositiveInteger),
   table: Schema.optional(Schema.String),
   rowId: Schema.optional(Schema.String),
   nativeType: Schema.optional(Schema.String),
@@ -235,7 +253,7 @@ export const SessionEvent = Schema.Struct({
   id: Schema.String,
   sessionId: Schema.String,
   nativeEventId: Schema.optional(Schema.String),
-  sequence: Schema.Number,
+  sequence: NonNegativeInteger,
   timestamp: Schema.optional(Schema.String),
   machineId: Schema.String,
   provider: Provider,
@@ -269,12 +287,12 @@ export const NormalizedSession = Schema.Struct({
   sessionEdges: Schema.Array(SessionEdge),
   usageRecords: Schema.Array(UsageRecord),
   artifacts: Schema.Array(Artifact),
-  eventCount: Schema.optional(Schema.Number),
-  toolCallCount: Schema.optional(Schema.Number),
-  contentBlockCount: Schema.optional(Schema.Number),
-  sessionEdgeCount: Schema.optional(Schema.Number),
-  usageRecordCount: Schema.optional(Schema.Number),
-  artifactCount: Schema.optional(Schema.Number),
+  eventCount: Schema.optional(NonNegativeInteger),
+  toolCallCount: Schema.optional(NonNegativeInteger),
+  contentBlockCount: Schema.optional(NonNegativeInteger),
+  sessionEdgeCount: Schema.optional(NonNegativeInteger),
+  usageRecordCount: Schema.optional(NonNegativeInteger),
+  artifactCount: Schema.optional(NonNegativeInteger),
 });
 export type NormalizedSession = typeof NormalizedSession.Type;
 
@@ -325,12 +343,12 @@ export const IngestSessionManifest = Schema.Struct({
   projectIdentityKey: Schema.String,
   sourceRoot: Schema.String,
   sourcePath: Schema.String,
-  eventCount: Schema.Number,
-  toolCallCount: Schema.Number,
-  contentBlockCount: Schema.Number,
-  sessionEdgeCount: Schema.Number,
-  usageRecordCount: Schema.Number,
-  artifactCount: Schema.Number,
+  eventCount: NonNegativeInteger,
+  toolCallCount: NonNegativeInteger,
+  contentBlockCount: NonNegativeInteger,
+  sessionEdgeCount: NonNegativeInteger,
+  usageRecordCount: NonNegativeInteger,
+  artifactCount: NonNegativeInteger,
 });
 export type IngestSessionManifest = typeof IngestSessionManifest.Type;
 
@@ -341,13 +359,13 @@ export const IngestManifest = Schema.Struct({
   sessions: Schema.Array(IngestSessionManifest),
   diagnostics: Schema.Array(AdapterDiagnostic),
   generatedAt: Schema.String,
-  sessionCount: Schema.Number,
-  eventCount: Schema.Number,
-  toolCallCount: Schema.Number,
-  contentBlockCount: Schema.Number,
-  sessionEdgeCount: Schema.Number,
-  usageRecordCount: Schema.Number,
-  artifactCount: Schema.Number,
+  sessionCount: NonNegativeInteger,
+  eventCount: NonNegativeInteger,
+  toolCallCount: NonNegativeInteger,
+  contentBlockCount: NonNegativeInteger,
+  sessionEdgeCount: NonNegativeInteger,
+  usageRecordCount: NonNegativeInteger,
+  artifactCount: NonNegativeInteger,
 });
 export type IngestManifest = typeof IngestManifest.Type;
 
@@ -358,7 +376,7 @@ export class ImportJobStartRequest extends Schema.Class<ImportJobStartRequest>(
   manifest: Schema.optional(IngestManifest),
   sourceIdentityKey: Schema.optional(Schema.String),
   idempotencyKey: Schema.optional(Schema.String),
-  expectedChunkCount: Schema.optional(Schema.Number),
+  expectedChunkCount: Schema.optional(PositiveInteger),
 }) {}
 
 export class ImportJobStartResponse extends Schema.Class<ImportJobStartResponse>(
@@ -366,8 +384,8 @@ export class ImportJobStartResponse extends Schema.Class<ImportJobStartResponse>
 )({
   importJobId: Schema.String,
   status: ImportJobStatus,
-  chunkCount: Schema.Number,
-  expectedChunkCount: Schema.optional(Schema.Number),
+  chunkCount: NonNegativeInteger,
+  expectedChunkCount: Schema.optional(PositiveInteger),
   sourceIdentityKey: Schema.optional(Schema.String),
   attemptNumber: Schema.optional(Schema.Number),
 }) {}
@@ -379,8 +397,8 @@ export class ImportJobChunkRequest extends Schema.Class<ImportJobChunkRequest>(
   batch: IngestBatch,
   chunkId: Schema.optional(Schema.String),
   idempotencyKey: Schema.optional(Schema.String),
-  sequence: Schema.optional(Schema.Number),
-  expectedChunkCount: Schema.optional(Schema.Number),
+  sequence: Schema.optional(NonNegativeInteger),
+  expectedChunkCount: Schema.optional(PositiveInteger),
   completeJob: Schema.optional(Schema.Boolean),
 }) {}
 
@@ -395,13 +413,13 @@ export class ImportJobChunkResponse extends Schema.Class<ImportJobChunkResponse>
 }) {}
 
 export const EmbeddingReadinessCounts = Schema.Struct({
-  total: Schema.Number,
-  pending: Schema.Number,
-  syncing: Schema.Number,
-  ready: Schema.Number,
-  skipped: Schema.Number,
-  failed: Schema.Number,
-  deadLetter: Schema.optional(Schema.Number),
+  total: NonNegativeInteger,
+  pending: NonNegativeInteger,
+  syncing: NonNegativeInteger,
+  ready: NonNegativeInteger,
+  skipped: NonNegativeInteger,
+  failed: NonNegativeInteger,
+  deadLetter: Schema.optional(NonNegativeInteger),
 });
 export type EmbeddingReadinessCounts = typeof EmbeddingReadinessCounts.Type;
 
@@ -429,8 +447,8 @@ export const SourceManifestEntry = Schema.Struct({
   role: Schema.Literal("source_root", "session_source"),
   exists: Schema.Boolean,
   kind: Schema.Literal("file", "directory", "missing", "other"),
-  size: Schema.optional(Schema.Number),
-  mtimeMs: Schema.optional(Schema.Number),
+  size: Schema.optional(NonNegativeInteger),
+  mtimeMs: Schema.optional(NonNegativeNumber),
   contentHash: Schema.optional(Schema.String),
 });
 export type SourceManifestEntry = typeof SourceManifestEntry.Type;
@@ -468,6 +486,6 @@ export const SearchRequest = Schema.Struct({
   toolName: Schema.optional(Schema.String),
   from: Schema.optional(Schema.String),
   to: Schema.optional(Schema.String),
-  limit: Schema.optional(Schema.Number),
+  limit: Schema.optional(PositiveInteger),
 });
 export type SearchRequest = typeof SearchRequest.Type;
