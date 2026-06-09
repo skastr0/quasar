@@ -6,6 +6,7 @@ import {
   createSourceSafetyReport,
   ImportJobStartResponse,
   ImportJobStatusResponse,
+  jsonByteLength,
   manifestFromBatch,
   QuasarApiPaths,
   snapshotConfiguredSourceRoots,
@@ -157,6 +158,7 @@ const runCommand = Command.make("run", { input: inputArg }, ({ input }) =>
         };
       }
       const chunks = chunkIngestBatch(batch, chunkOptionsFromEnv());
+      validateChunkPayloads(chunks);
       const job = yield* requestJson({
         method: "POST",
         path: QuasarApiPaths.ingestJobs,
@@ -171,20 +173,26 @@ const runCommand = Command.make("run", { input: inputArg }, ({ input }) =>
         DEFAULT_CHUNK_DELAY_MS,
       );
       const results = [];
-      for (const group of chunkGroups(chunks, uploadGroupSizeFromEnv())) {
+      for (const group of chunkUploadGroups(chunks, uploadGroupSizeFromEnv())) {
+        const requestBody = {
+          importJobId: job.importJobId,
+          expectedChunkCount: chunks.length,
+          chunks: group.map(({ chunk, index }) => ({
+            batch: chunk,
+            sequence: index,
+            completeJob: index === chunks.length - 1,
+          })),
+        };
+        assertJsonBudget(
+          requestBody,
+          MAX_BULK_UPLOAD_BODY_BYTES,
+          `bulk upload group ending at chunk ${group.at(-1)?.index ?? 0}`,
+        );
         results.push(
           yield* requestJson({
             method: "POST",
             path: QuasarApiPaths.ingestJobChunksBulk,
-            body: {
-              importJobId: job.importJobId,
-              expectedChunkCount: chunks.length,
-              chunks: group.map(({ chunk, index }) => ({
-                batch: chunk,
-                sequence: index,
-                completeJob: index === chunks.length - 1,
-              })),
-            },
+            body: requestBody,
             responseSchema: Schema.Unknown,
           }),
         );
@@ -215,7 +223,9 @@ const runCommand = Command.make("run", { input: inputArg }, ({ input }) =>
 export const MAX_EVENTS_PER_CHUNK = 50;
 export const MAX_OPERATIONS_PER_CHUNK = 120;
 export const DEFAULT_CHUNK_DELAY_MS = 750;
-export const DEFAULT_UPLOAD_GROUP_SIZE = 100;
+export const DEFAULT_UPLOAD_GROUP_SIZE = 10;
+export const MAX_UPLOAD_CHUNK_BATCH_BYTES = 768 * 1024;
+export const MAX_BULK_UPLOAD_BODY_BYTES = 3_500_000;
 
 export interface ChunkOptions {
   readonly maxEventsPerChunk?: number;
@@ -239,16 +249,42 @@ const uploadGroupSizeFromEnv = () =>
     envPositiveInteger("QUASAR_INGEST_UPLOAD_GROUP_SIZE", DEFAULT_UPLOAD_GROUP_SIZE),
   );
 
-const chunkGroups = <A>(items: readonly A[], size: number) => {
-  const groups: Array<Array<{ chunk: A; index: number }>> = [];
-  for (let start = 0; start < items.length; start += size) {
-    groups.push(
-      items
-        .slice(start, start + size)
-        .map((chunk, offset) => ({ chunk, index: start + offset })),
+const chunkUploadGroups = (chunks: readonly IngestBatch[], size: number) => {
+  const groups: Array<Array<{ chunk: IngestBatch; index: number }>> = [];
+  let current: Array<{ chunk: IngestBatch; index: number }> = [];
+  for (let index = 0; index < chunks.length; index += 1) {
+    const item = { chunk: chunks[index]!, index };
+    const next = [...current, item];
+    const nextBytes = jsonByteLength({ chunks: next.map(({ chunk }) => ({ batch: chunk })) });
+    if (
+      current.length > 0 &&
+      (current.length >= size || nextBytes > MAX_BULK_UPLOAD_BODY_BYTES)
+    ) {
+      groups.push(current);
+      current = [item];
+      continue;
+    }
+    current = next;
+  }
+  if (current.length > 0) groups.push(current);
+  return groups;
+};
+
+const validateChunkPayloads = (chunks: readonly IngestBatch[]) => {
+  for (let index = 0; index < chunks.length; index += 1) {
+    assertJsonBudget(
+      chunks[index],
+      MAX_UPLOAD_CHUNK_BATCH_BYTES,
+      `chunk ${index}`,
     );
   }
-  return groups;
+};
+
+const assertJsonBudget = (value: unknown, maxBytes: number, label: string) => {
+  const bytes = jsonByteLength(value);
+  if (bytes > maxBytes) {
+    throw new Error(`${label} is ${bytes} bytes; maximum is ${maxBytes} bytes.`);
+  }
 };
 
 const envPositiveInteger = (name: string, fallback: number) => {

@@ -501,7 +501,7 @@ export default defineSchema({
     .index("by_chunkId", ["chunkId"])
     .index("by_idempotencyKey", ["idempotencyKey"])
     .index("by_job_sequence", ["importJobId", "sequence"])
-    .index("by_importJobId", ["importJobId", "sequence"])
+    .index("by_importJobId", ["importJobId"])
     .index("by_job_status", ["importJobId", "status"])
     .index("by_job_status_nextAttempt", ["importJobId", "status", "nextAttemptAt"])
     .index("by_job_status_lease", ["importJobId", "status", "leaseExpiresAt"])

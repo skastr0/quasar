@@ -71,12 +71,17 @@ const IMPORT_CHUNK_LEASE_MS = 5 * 60_000;
 const IMPORT_CHUNK_MAX_ATTEMPTS = 5;
 const IMPORT_WORKER_BATCH_LIMIT = 3;
 const IMPORT_WORKER_SCHEDULE_DELAY_MS = 1_000;
+const MAX_IMPORT_JOB_INPUT_BYTES = 3_500_000;
+const MAX_IMPORT_CHUNK_BATCH_BYTES = 768 * 1024;
+const MAX_IMPORT_BULK_INPUT_BYTES = 3_500_000;
+const textEncoder = new TextEncoder();
 
 export const startImportJobHandler = async (
   ctx: MutationCtx,
   args: { input: unknown },
 ): Promise<StartImportJobResult> => {
   const input = decodeBoundarySync(StartImportJobInput, args.input, "start import job input");
+  assertJsonByteBudget(input, MAX_IMPORT_JOB_INPUT_BYTES, "start import job input");
   const manifest = manifestForStart(input);
   const idempotencyKey = input.idempotencyKey ?? importJobIdempotencyKey(manifest);
   const existing = await ctx.db
@@ -138,6 +143,7 @@ export const submitImportChunkHandler = async (
   args: { input: unknown },
 ): Promise<SubmitImportChunkResult> => {
   const input = decodeBoundarySync(SubmitImportChunkInput, args.input, "submit import chunk input");
+  assertJsonByteBudget(input.batch, MAX_IMPORT_CHUNK_BATCH_BYTES, "import chunk batch");
   const result = (await ctx.runMutation(internal.quasar.enqueueImportChunkInternal, {
     input: {
       importJobId: input.importJobId,
@@ -161,8 +167,10 @@ export const submitImportChunksHandler = async (
   readonly results: readonly SubmitImportChunkResult[];
 }> => {
   const input = decodeBoundarySync(SubmitImportChunksInput, args.input, "submit import chunks input");
+  assertJsonByteBudget(input, MAX_IMPORT_BULK_INPUT_BYTES, "bulk import chunk input");
   const results: SubmitImportChunkResult[] = [];
   for (const chunk of input.chunks) {
+    assertJsonByteBudget(chunk.batch, MAX_IMPORT_CHUNK_BATCH_BYTES, "bulk import chunk batch");
     results.push(
       (await ctx.runMutation(internal.quasar.enqueueImportChunkInternal, {
         input: {
@@ -185,6 +193,7 @@ export const enqueueImportChunkHandler = async (
   args: { input: unknown },
 ): Promise<SubmitImportChunkResult> => {
   const input = decodeBoundarySync(SubmitImportChunkInput, args.input, "submit import chunk input");
+  assertJsonByteBudget(input.batch, MAX_IMPORT_CHUNK_BATCH_BYTES, "import chunk batch");
   const now = Date.now();
   const job = await findImportJob(ctx, input.importJobId);
   if (job === null) throw new Error("Import job was not found.");
@@ -478,7 +487,7 @@ export const readImportJobHandler = async (
   const readiness = await embeddingReadiness(ctx, input.importJobId);
   return {
     job,
-    chunks: chunks.page,
+    chunks: chunks.page.map(statusChunk),
     failures: failures.page,
     readiness,
     pagination: {
@@ -951,6 +960,30 @@ const retryDelayMs = (attempts: number) =>
 
 const boundedStatusLimit = (limit: number | undefined) =>
   Math.min(200, Math.max(1, Math.trunc(limit ?? 50)));
+
+const jsonByteLength = (value: unknown) => {
+  try {
+    return textEncoder.encode(JSON.stringify(value)).length;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+};
+
+const assertJsonByteBudget = (value: unknown, maxBytes: number, label: string) => {
+  const bytes = jsonByteLength(value);
+  if (bytes > maxBytes) {
+    throw new Error(`${label} is ${bytes} bytes; maximum is ${maxBytes} bytes.`);
+  }
+};
+
+const statusChunk = (chunk: Doc<"importChunks">) => {
+  const { batch, ...rest } = chunk;
+  return {
+    ...rest,
+    payloadStored: batch !== undefined,
+    payloadBytes: batch === undefined ? undefined : jsonByteLength(batch),
+  };
+};
 
 const scheduleImportWorker = async (
   ctx: MutationCtx,

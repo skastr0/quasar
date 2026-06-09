@@ -11,6 +11,12 @@ import { quasarApiPaths } from "./quasarApiPaths";
 import { serverEmbeddingsConfigured } from "./quasarRag";
 
 const http = httpRouter();
+const DEFAULT_JSON_BODY_LIMIT_BYTES = 512 * 1024;
+const INGEST_BATCH_JSON_BODY_LIMIT_BYTES = 768 * 1024;
+const INGEST_JOB_JSON_BODY_LIMIT_BYTES = 3_500_000;
+const INGEST_CHUNK_JSON_BODY_LIMIT_BYTES = 1 * 1024 * 1024;
+const INGEST_BULK_JSON_BODY_LIMIT_BYTES = 3_500_000;
+const textEncoder = new TextEncoder();
 
 const corsHeaders = () => ({
   "access-control-allow-origin": process.env.QUASAR_ALLOWED_ORIGIN ?? "*",
@@ -44,8 +50,24 @@ const preflight = () =>
     headers: { ...corsHeaders(), "access-control-max-age": "86400" },
   });
 
-const readJson = async (req: Request): Promise<unknown> => {
+const byteLength = (value: string) => textEncoder.encode(value).length;
+
+const readJson = async (
+  req: Request,
+  maxBytes = DEFAULT_JSON_BODY_LIMIT_BYTES,
+): Promise<unknown> => {
+  const contentLength = req.headers.get("content-length");
+  if (contentLength !== null) {
+    const parsed = Number(contentLength);
+    if (Number.isFinite(parsed) && parsed > maxBytes) {
+      throw new Error(`Request body is ${parsed} bytes; maximum is ${maxBytes} bytes.`);
+    }
+  }
   const text = await req.text();
+  const bytes = byteLength(text);
+  if (bytes > maxBytes) {
+    throw new Error(`Request body is ${bytes} bytes; maximum is ${maxBytes} bytes.`);
+  }
   return text.trim().length === 0 ? {} : JSON.parse(text);
 };
 
@@ -172,7 +194,7 @@ http.route({
   handler: handleMutation(async (ctx, req) =>
     json(
       await ctx.runMutation(internal.quasar.startImportJobInternal, {
-        input: await readJson(req),
+        input: await readJson(req, INGEST_JOB_JSON_BODY_LIMIT_BYTES),
       }),
     ),
   ),
@@ -209,7 +231,7 @@ http.route({
   handler: handleMutation(async (ctx, req) =>
     json(
       await ctx.runAction(internal.quasar.submitImportChunkInternal, {
-        input: await readJson(req),
+        input: await readJson(req, INGEST_CHUNK_JSON_BODY_LIMIT_BYTES),
       }),
     ),
   ),
@@ -221,7 +243,7 @@ http.route({
   handler: handleMutation(async (ctx, req) =>
     json(
       await ctx.runAction(internal.quasar.submitImportChunksInternal, {
-        input: await readJson(req),
+        input: await readJson(req, INGEST_BULK_JSON_BODY_LIMIT_BYTES),
       }),
     ),
   ),
@@ -270,7 +292,7 @@ http.route({
   handler: handleMutation(async (ctx, req) =>
     json(
       await ctx.runMutation(internal.quasar.ingestBatchInternal, {
-        batch: await readJson(req),
+        batch: await readJson(req, INGEST_BATCH_JSON_BODY_LIMIT_BYTES),
       }),
     ),
   ),
