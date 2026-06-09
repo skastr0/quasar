@@ -16,7 +16,8 @@ import {
 import { sanitizeIngestBoundaryBatch } from "./quasarIngestContract";
 import { readinessCounts } from "./quasarEmbeddingReadiness";
 import { redactSensitive, wideHash } from "./quasarText";
-import { stableCanonicalJsonHash } from "@skastr0/quasar-core";
+import { stableCanonicalJsonHash } from "@skastr0/quasar-core/hash";
+import { SESSION_INTELLIGENCE_CONTRACT_VERSION } from "@skastr0/quasar-core/session-intelligence";
 
 type ImportJobStatus = "queued" | "running" | "succeeded" | "partial_failure" | "failed";
 type ImportChunkStatus = "pending" | "running" | "succeeded" | "failed" | "dead_letter";
@@ -102,7 +103,6 @@ const IMPORT_JOB_WORKER_LEASE_MS = 2 * 60_000;
 const IMPORT_CHUNK_MAX_ATTEMPTS = 5;
 const IMPORT_WORKER_BATCH_LIMIT = 24;
 const IMPORT_WORKER_SCHEDULE_DELAY_MS = 1_000;
-const SESSION_INTELLIGENCE_CONTRACT_VERSION = "session-intelligence/v2";
 const STREAM_INGEST_UPLOAD_IDENTITY_VERSION = "quasar.stream-ingest/v3";
 const MAX_IMPORT_JOB_INPUT_BYTES = 3_500_000;
 const MAX_IMPORT_CHUNK_BATCH_BYTES = 768 * 1024;

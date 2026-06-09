@@ -1,8 +1,10 @@
 import {
+  type IngestBatch as CoreIngestBatch,
+} from "@skastr0/quasar-core/schemas";
+import {
   jsonByteLength,
   toConvexSafeSessionIntelligenceBatch,
-  type IngestBatch as CoreIngestBatch,
-} from "@skastr0/quasar-core";
+} from "@skastr0/quasar-core/session-intelligence";
 import {
   decodeBoundarySync,
   IngestBatchBoundary,
