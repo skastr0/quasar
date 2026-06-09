@@ -76,7 +76,19 @@ type IngestManifest = {
   readonly generatedAt: string;
   readonly sourceRoots: readonly SourceRootBoundary[];
   readonly sessions: readonly IngestManifestSession[];
+  readonly providerSummaries?: readonly IngestManifestProviderSummary[];
   readonly diagnostics: readonly AdapterDiagnosticBoundary[];
+  readonly sessionCount: number;
+  readonly eventCount: number;
+  readonly toolCallCount: number;
+  readonly contentBlockCount: number;
+  readonly sessionEdgeCount: number;
+  readonly usageRecordCount: number;
+  readonly artifactCount: number;
+};
+
+type IngestManifestProviderSummary = {
+  readonly provider: ProviderSchema;
   readonly sessionCount: number;
   readonly eventCount: number;
   readonly toolCallCount: number;
@@ -1275,19 +1287,13 @@ const upsertImportShards = async (
   manifest: IngestManifest,
   now: number,
 ) => {
-  const byProvider = new Map<ProviderSchema, { sessionCount: number; eventCount: number }>();
-  for (const session of manifest.sessions) {
-    const current = byProvider.get(session.provider) ?? { sessionCount: 0, eventCount: 0 };
-    current.sessionCount += 1;
-    current.eventCount += session.eventCount;
-    byProvider.set(session.provider, current);
-  }
-  for (const [provider, summary] of byProvider) {
-    const shardId = `shard:${wideHash(`${importJobId}\u001f${provider}`)}`;
+  for (const summary of providerSummariesForManifest(manifest)) {
+    if (summary.sessionCount <= 0) continue;
+    const shardId = `shard:${wideHash(`${importJobId}\u001f${summary.provider}`)}`;
     await ctx.db.insert("importShards", {
       shardId,
       importJobId,
-      provider,
+      provider: summary.provider,
       machineId: manifest.machineId,
       status: "queued",
       sessionCount: summary.sessionCount,
@@ -1312,20 +1318,25 @@ const manifestForStart = (input: StartImportJobInputValue): IngestManifest => {
   throw new Error("start import job input requires either manifest or batch.");
 };
 
-const manifestFromBoundary = (manifest: IngestManifestBoundary): IngestManifest => ({
-  machineId: manifest.machine.machineId,
-  generatedAt: manifest.generatedAt,
-  sourceRoots: manifest.sourceRoots,
-  sessions: manifest.sessions,
-  diagnostics: sanitizeDiagnosticsForStorage(manifest.diagnostics),
-  sessionCount: manifest.sessionCount,
-  eventCount: manifest.eventCount,
-  toolCallCount: manifest.toolCallCount,
-  contentBlockCount: manifest.contentBlockCount,
-  sessionEdgeCount: manifest.sessionEdgeCount,
-  usageRecordCount: manifest.usageRecordCount,
-  artifactCount: manifest.artifactCount,
-});
+const manifestFromBoundary = (manifest: IngestManifestBoundary): IngestManifest => {
+  const output = {
+    machineId: manifest.machine.machineId,
+    generatedAt: manifest.generatedAt,
+    sourceRoots: manifest.sourceRoots,
+    sessions: manifest.sessions,
+    providerSummaries: manifest.providerSummaries,
+    diagnostics: sanitizeDiagnosticsForStorage(manifest.diagnostics),
+    sessionCount: manifest.sessionCount,
+    eventCount: manifest.eventCount,
+    toolCallCount: manifest.toolCallCount,
+    contentBlockCount: manifest.contentBlockCount,
+    sessionEdgeCount: manifest.sessionEdgeCount,
+    usageRecordCount: manifest.usageRecordCount,
+    artifactCount: manifest.artifactCount,
+  };
+  assertExactManifestSummaries(output);
+  return output;
+};
 
 const manifestFromBatch = (batch: IngestBatchBoundaryValue): IngestManifest => {
   const summary = summarizeBatch(batch);
@@ -1348,6 +1359,7 @@ const manifestFromBatch = (batch: IngestBatchBoundaryValue): IngestManifest => {
       usageRecordCount: session.usageRecords.length,
       artifactCount: session.artifacts.length,
     })),
+    providerSummaries: providerSummariesFromSessions(batch.sessions),
     diagnostics: sanitizeDiagnosticsForStorage(batch.diagnostics),
     sessionCount: summary.sessionCount,
     eventCount: summary.eventCount,
@@ -1359,6 +1371,110 @@ const manifestFromBatch = (batch: IngestBatchBoundaryValue): IngestManifest => {
   };
 };
 
+const providerSummariesForManifest = (
+  manifest: IngestManifest,
+): readonly IngestManifestProviderSummary[] =>
+  manifest.providerSummaries ?? providerSummariesFromManifestSessions(manifest.sessions);
+
+const assertExactManifestSummaries = (manifest: IngestManifest) => {
+  if (manifest.sessions.length > manifest.sessionCount) {
+    throw new Error("manifest sessions cannot exceed sessionCount.");
+  }
+  const compactManifest = manifest.sessions.length < manifest.sessionCount;
+  if (!compactManifest && manifest.providerSummaries === undefined) return;
+  if (manifest.providerSummaries === undefined) {
+    throw new Error("sampled ingest manifests require providerSummaries.");
+  }
+  const summary = manifest.providerSummaries.reduce(
+    (current, provider) => ({
+      sessionCount: current.sessionCount + provider.sessionCount,
+      eventCount: current.eventCount + provider.eventCount,
+      toolCallCount: current.toolCallCount + provider.toolCallCount,
+      contentBlockCount: current.contentBlockCount + provider.contentBlockCount,
+      sessionEdgeCount: current.sessionEdgeCount + provider.sessionEdgeCount,
+      usageRecordCount: current.usageRecordCount + provider.usageRecordCount,
+      artifactCount: current.artifactCount + provider.artifactCount,
+    }),
+    {
+      sessionCount: 0,
+      eventCount: 0,
+      toolCallCount: 0,
+      contentBlockCount: 0,
+      sessionEdgeCount: 0,
+      usageRecordCount: 0,
+      artifactCount: 0,
+    },
+  );
+  for (const key of [
+    "sessionCount",
+    "eventCount",
+    "toolCallCount",
+    "contentBlockCount",
+    "sessionEdgeCount",
+    "usageRecordCount",
+    "artifactCount",
+  ] as const) {
+    if (summary[key] !== manifest[key]) {
+      throw new Error(`manifest providerSummaries ${key} does not match manifest ${key}.`);
+    }
+  }
+};
+
+const providerSummariesFromManifestSessions = (
+  sessions: readonly IngestManifestSession[],
+): readonly IngestManifestProviderSummary[] => {
+  const summaries = new Map<ProviderSchema, IngestManifestProviderSummary>();
+  for (const session of sessions) {
+    const current = summaries.get(session.provider) ?? {
+      provider: session.provider,
+      sessionCount: 0,
+      eventCount: 0,
+      toolCallCount: 0,
+      contentBlockCount: 0,
+      sessionEdgeCount: 0,
+      usageRecordCount: 0,
+      artifactCount: 0,
+    };
+    summaries.set(session.provider, {
+      provider: session.provider,
+      sessionCount: current.sessionCount + 1,
+      eventCount: current.eventCount + session.eventCount,
+      toolCallCount: current.toolCallCount + session.toolCallCount,
+      contentBlockCount: current.contentBlockCount + session.contentBlockCount,
+      sessionEdgeCount: current.sessionEdgeCount + session.sessionEdgeCount,
+      usageRecordCount: current.usageRecordCount + session.usageRecordCount,
+      artifactCount: current.artifactCount + session.artifactCount,
+    });
+  }
+  return [...summaries.values()].sort((left, right) =>
+    left.provider.localeCompare(right.provider),
+  );
+};
+
+const providerSummariesFromSessions = (
+  sessions: readonly IngestBatchBoundaryValue["sessions"][number][],
+): readonly IngestManifestProviderSummary[] =>
+  providerSummariesFromManifestSessions(
+    sessions.map((session) => ({
+      id: session.id,
+      nativeSessionId: session.nativeSessionId,
+      provider: session.provider,
+      machineId: session.machineId,
+      projectIdentityKey: session.projectIdentity.projectIdentityKey,
+      sourceRoot: session.sourceRoot,
+      sourcePath: session.sourcePath,
+      eventCount: session.events.length,
+      toolCallCount: session.toolCalls.length,
+      contentBlockCount: session.events.reduce(
+        (sum, event) => sum + event.contentBlocks.length,
+        0,
+      ),
+      sessionEdgeCount: session.sessionEdges.length,
+      usageRecordCount: session.usageRecords.length,
+      artifactCount: session.artifacts.length,
+    })),
+  );
+
 const sanitizeDiagnosticsForStorage = (
   diagnostics: readonly IngestManifestBoundary["diagnostics"][number][],
 ) =>
@@ -1369,22 +1485,38 @@ const sanitizeDiagnosticsForStorage = (
 const importJobIdempotencyKey = (
   manifest: IngestManifest,
   batch: IngestBatchBoundaryValue | undefined,
-) =>
-  `import-job:${wideHash(
+) => {
+  const compactManifest = manifest.sessions.length < manifest.sessionCount;
+  return `import-job:${wideHash(
     JSON.stringify([
       SESSION_INTELLIGENCE_CONTRACT_VERSION,
       batch === undefined ? undefined : payloadHashForBatch(batch),
       manifest.machineId,
       manifest.sourceRoots.map((root) => [root.provider, root.rootPath]),
-      manifest.sessions.map((session) => [
-        session.id,
-        session.provider,
-        session.machineId,
-        session.sourcePath,
-        session.eventCount,
-      ]),
+      compactManifest
+        ? providerSummariesForManifest(manifest).map((summary) => [
+            summary.provider,
+            summary.sessionCount,
+            summary.eventCount,
+            summary.toolCallCount,
+            summary.contentBlockCount,
+            summary.sessionEdgeCount,
+            summary.usageRecordCount,
+            summary.artifactCount,
+          ])
+        : undefined,
+      compactManifest
+        ? undefined
+        : manifest.sessions.map((session) => [
+            session.id,
+            session.provider,
+            session.machineId,
+            session.sourcePath,
+            session.eventCount,
+          ]),
     ]),
   )}`;
+};
 
 const importChunkIdempotencyKey = (
   importJobId: string,

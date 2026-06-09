@@ -352,11 +352,24 @@ export const IngestSessionManifest = Schema.Struct({
 });
 export type IngestSessionManifest = typeof IngestSessionManifest.Type;
 
+export const IngestProviderSummary = Schema.Struct({
+  provider: Provider,
+  sessionCount: NonNegativeInteger,
+  eventCount: NonNegativeInteger,
+  toolCallCount: NonNegativeInteger,
+  contentBlockCount: NonNegativeInteger,
+  sessionEdgeCount: NonNegativeInteger,
+  usageRecordCount: NonNegativeInteger,
+  artifactCount: NonNegativeInteger,
+});
+export type IngestProviderSummary = typeof IngestProviderSummary.Type;
+
 export const IngestManifest = Schema.Struct({
   protocolVersion: Schema.Literal("quasar.ingest-manifest/v1"),
   machine: MachineIdentity,
   sourceRoots: Schema.Array(SourceRoot),
   sessions: Schema.Array(IngestSessionManifest),
+  providerSummaries: Schema.optional(Schema.Array(IngestProviderSummary)),
   diagnostics: Schema.Array(AdapterDiagnostic),
   generatedAt: Schema.String,
   sessionCount: NonNegativeInteger,

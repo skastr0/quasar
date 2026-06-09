@@ -189,15 +189,61 @@ describe("CLI command graph", () => {
         sessionCount: number;
         chunkCount: number;
         selection: { limit: number; skip: number };
-        sessions: Array<{ sourcePath: string; eventCount: number }>;
+        providerSummaries: Array<{ provider: string; sessionCount: number; eventCount: number }>;
+        sessionSampleLimit: number;
+        sessionSamplesTruncated: boolean;
+        sessionSamples: Array<{ sourcePath: string; eventCount: number }>;
       };
     };
     expect(envelope.data.sessionCount).toBe(1);
     expect(envelope.data.chunkCount).toBeGreaterThan(0);
     expect(envelope.data.selection).toEqual({ limit: 1, skip: 1 });
-    expect(envelope.data.sessions).toHaveLength(1);
-    expect(envelope.data.sessions[0]?.sourcePath).toContain("-b.jsonl");
-    expect(envelope.data.sessions[0]?.eventCount).toBeGreaterThan(0);
+    expect(envelope.data.providerSummaries).toEqual([
+      expect.objectContaining({ provider: "codex", sessionCount: 1 }),
+    ]);
+    expect(envelope.data.sessionSampleLimit).toBeGreaterThan(0);
+    expect(envelope.data.sessionSamplesTruncated).toBe(false);
+    expect(envelope.data.sessionSamples).toHaveLength(1);
+    expect(envelope.data.sessionSamples[0]?.sourcePath).toContain("-b.jsonl");
+    expect(envelope.data.sessionSamples[0]?.eventCount).toBeGreaterThan(0);
+  }, 20_000);
+
+  test("caps streamed ingest plan session samples while preserving exact provider counts", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-cli-codex-"));
+    for (let index = 0; index < 30; index += 1) {
+      writeCodexSessionFile(root, String(index).padStart(2, "0"), `codex session ${index}`);
+    }
+
+    const result = await runCli([
+      "ingest",
+      "plan",
+      JSON.stringify({ providers: ["codex"], roots: { codex: root }, limit: 30 }),
+    ], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        QUASAR_HOME: mkdtempSync(join(tmpdir(), "quasar-cli-home-")),
+      },
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    const envelope = JSON.parse(result.stdout) as {
+      ok: true;
+      data: {
+        sessionCount: number;
+        providerSummaries: Array<{ provider: string; sessionCount: number; eventCount: number }>;
+        sessionSampleLimit: number;
+        sessionSamplesTruncated: boolean;
+        sessionSamples: Array<{ sourcePath: string }>;
+      };
+    };
+    expect(envelope.data.sessionCount).toBe(30);
+    expect(envelope.data.providerSummaries).toEqual([
+      expect.objectContaining({ provider: "codex", sessionCount: 30, eventCount: 60 }),
+    ]);
+    expect(envelope.data.sessionSampleLimit).toBe(25);
+    expect(envelope.data.sessionSamples).toHaveLength(25);
+    expect(envelope.data.sessionSamplesTruncated).toBe(true);
   }, 20_000);
 
   test("chunks large ingest sessions with final expected-id cleanup metadata", async () => {
