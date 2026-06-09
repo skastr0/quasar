@@ -1,7 +1,7 @@
 import { Args, Command } from "@effect/cli";
 import { Effect } from "effect";
 
-import { buildIngestBatch, summarizeBatch } from "@skastr0/quasar-core";
+import { summarizeIngestBatches } from "@skastr0/quasar-core";
 
 import { loadOptionalJsonInput } from "../json";
 import { executeJsonCommand } from "../output";
@@ -17,23 +17,33 @@ export const sourcesCommand = Command.make("sources").pipe(
       executeJsonCommand(
         "sources discover",
         Effect.gen(function* () {
+          const inputText = toUndefined(input);
           const options = yield* loadOptionalJsonInput(
             IngestOptions,
-            toUndefined(input),
-            { includeExperimental: true, limit: 1 },
+            inputText,
+            { includeExperimental: true },
           );
-          const batch = yield* Effect.tryPromise({
+          const effectiveLimit = options.limit ?? 1;
+          const summary = yield* Effect.tryPromise({
             try: () =>
-              buildIngestBatch({
+              summarizeIngestBatches({
                 providers: options.providers,
                 includeExperimental: options.includeExperimental ?? true,
-                limit: options.limit ?? 1,
+                limit: effectiveLimit,
                 skip: options.skip,
                 roots: options.roots,
+                logicalRoots: options.logicalRoots,
               }),
             catch: (error) => (error instanceof Error ? error : new Error(String(error))),
           });
-          return summarizeBatch(batch);
+          return {
+            ...summary,
+            selection: {
+              limit: effectiveLimit,
+              skip: options.skip ?? 0,
+              defaultLimitApplied: options.limit === undefined,
+            },
+          };
         }),
       ),
     ),

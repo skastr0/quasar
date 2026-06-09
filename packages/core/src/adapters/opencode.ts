@@ -48,6 +48,8 @@ type OpenCodePartRow = {
   time_created: number;
   data: string;
 };
+type SQLiteColumnRow = { name: string };
+type SQLiteCountRow = { count: number };
 
 const OPENCODE_MAX_RAW_MESSAGE_DATA_BYTES = 256 * 1024;
 const OPENCODE_MAX_RAW_PART_DATA_BYTES = 128 * 1024;
@@ -79,7 +81,7 @@ const OPENCODE_PRUNED_MESSAGE_DATA_SQL = [
 
 const OPENCODE_PRUNED_PART_DATA_SQL = [
   "case",
-  `when length(data) > ${OPENCODE_MAX_RAW_PART_DATA_BYTES} then json_object('type', 'omitted', 'text', '[omitted:large_opencode_part bytes=' || length(data) || ']')`,
+  `when length(data) > ${OPENCODE_MAX_RAW_PART_DATA_BYTES} then json_object('type', 'text', 'text', '[omitted:large_opencode_part bytes=' || length(data) || ']')`,
   "when json_valid(data) then",
   "json_remove(",
   "data,",
@@ -179,7 +181,7 @@ const readSessionRows = (
 ) =>
   db
     .query(
-      "select id, title, directory, path, time_created, time_updated from session order by time_updated desc, id desc limit ? offset ?",
+      `select id, title, directory, ${sessionPathProjection(db)} as path, time_created, time_updated from session order by time_updated desc, id desc limit ? offset ?`,
     )
     .all(sessionWindowLimit(limit), sessionWindowSkip(skip)) as OpenCodeSessionRow[];
 
@@ -212,7 +214,7 @@ const readSessionRowsCli = (
 ) =>
   sqliteJson<OpenCodeSessionRow>(
     dbPath,
-    `select id, title, directory, path, time_created, time_updated from session order by time_updated desc, id desc limit ${sessionWindowLimit(limit)} offset ${sessionWindowSkip(skip)}`,
+    `select id, title, directory, ${sessionPathProjectionCli(dbPath)} as path, time_created, time_updated from session order by time_updated desc, id desc limit ${sessionWindowLimit(limit)} offset ${sessionWindowSkip(skip)}`,
   );
 
 const readMessagesCli = (dbPath: string, sessionId: string) =>
@@ -245,6 +247,27 @@ const sqliteJson = <A>(dbPath: string, query: string): A[] => {
 };
 
 const sql = (value: string) => `'${value.replaceAll("'", "''")}'`;
+
+const hasSqliteSessionColumn = (db: OpenCodeDatabase, column: "path") =>
+  (db.query("pragma table_info(session)").all() as SQLiteColumnRow[]).some(
+    (row) => row.name === column,
+  );
+
+const hasSqliteSessionColumnCli = (dbPath: string, column: "path") =>
+  sqliteJson<SQLiteColumnRow>(dbPath, "pragma table_info(session)").some(
+    (row) => row.name === column,
+  );
+
+const sessionPathProjection = (db: OpenCodeDatabase) =>
+  hasSqliteSessionColumn(db, "path") ? "path" : "directory";
+
+const sessionPathProjectionCli = (dbPath: string) =>
+  hasSqliteSessionColumnCli(dbPath, "path") ? "path" : "directory";
+
+const readSessionCountCli = (dbPath: string) => {
+  const [row] = sqliteJson<SQLiteCountRow>(dbPath, "select count(*) as count from session");
+  return typeof row?.count === "number" && Number.isFinite(row.count) ? row.count : undefined;
+};
 
 const parsePartData = (data: string): NativeValue => {
   try {
@@ -600,9 +623,16 @@ const opencodeDbPath = (root: string | undefined) => {
   } catch {
     // Fall through to conventional directory candidates.
   }
-  for (const filename of OPENCODE_DB_FILENAMES) {
-    const candidate = join(root, filename);
-    if (existsSync(candidate)) return candidate;
+  const candidates = OPENCODE_DB_FILENAMES.flatMap((filename, index) => {
+    const path = join(root, filename);
+    if (!existsSync(path)) return [];
+    return [{ path, index, sessionCount: readSessionCountCli(path) }];
+  });
+  if (candidates.length > 0) {
+    return candidates.sort((left, right) => {
+      const countDiff = (right.sessionCount ?? -1) - (left.sessionCount ?? -1);
+      return countDiff === 0 ? left.index - right.index : countDiff;
+    })[0]?.path;
   }
   return join(root, "opencode.db");
 };

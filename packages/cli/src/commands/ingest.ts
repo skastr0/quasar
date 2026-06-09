@@ -674,25 +674,6 @@ const isDirectory = (path: string) => {
   }
 };
 
-const buildBatchEffect = (input: string | undefined) =>
-  Effect.gen(function* () {
-    const options = yield* loadOptions(input);
-    return yield* withPreparedSourceSnapshot(options, (prepared) => {
-      return Effect.tryPromise({
-        try: () =>
-          buildIngestBatch({
-            providers: options.providers,
-            includeExperimental: options.includeExperimental,
-            limit: options.limit,
-            skip: options.skip,
-            roots: prepared.roots,
-            logicalRoots: prepared.logicalRoots,
-          }),
-        catch: (error) => (error instanceof Error ? error : new Error(String(error))),
-      });
-    });
-  });
-
 const buildBatchWithSourceSnapshotEffect = (input: string | undefined) =>
   Effect.gen(function* () {
     const options = yield* loadOptions(input);
@@ -1022,15 +1003,16 @@ const validateCommand = Command.make("validate", { input: inputArg }, ({ input }
 const planCommand = Command.make("plan", { input: inputArg }, ({ input }) =>
   executeJsonCommand(
     "ingest plan",
-    buildBatchEffect(toUndefined(input)).pipe(
-      Effect.map((batch) => ({
-        ...summarizeBatch(batch),
-        sessions: batch.sessions.map((session) => ({
+    buildStreamedPlanEffect(toUndefined(input)).pipe(
+      Effect.map(({ plan, selection }) => ({
+        ...summaryFromManifest(plan.manifest),
+        chunkCount: plan.expectedChunkCount,
+        selection,
+        sessions: plan.manifest.sessions.map((session) => ({
           id: session.id,
           provider: session.provider,
           nativeSessionId: session.nativeSessionId,
-          projectIdentity: session.projectIdentity,
-          eventCount: session.events.length,
+          eventCount: session.eventCount,
           sourcePath: session.sourcePath,
         })),
       })),
