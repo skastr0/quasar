@@ -537,8 +537,8 @@ const runCommand = Command.make("run", { input: inputArg }, ({ input }) =>
   executeJsonCommand("ingest run", runIngestEffect(toUndefined(input))),
 );
 
-export const MAX_EVENTS_PER_CHUNK = 50;
-export const MAX_OPERATIONS_PER_CHUNK = 120;
+export const MAX_EVENTS_PER_CHUNK = 10;
+export const MAX_OPERATIONS_PER_CHUNK = 35;
 export const DEFAULT_CHUNK_DELAY_MS = 750;
 export const DEFAULT_UPLOAD_GROUP_SIZE = 10;
 export const MAX_UPLOAD_CHUNK_BATCH_BYTES = 768 * 1024;
