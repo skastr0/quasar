@@ -1004,12 +1004,15 @@ const jobNumber = (job: unknown, key: string) => {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 };
 
+export const sanitizeInspectionBatch = (batch: IngestBatch): IngestBatch =>
+  sanitizeIngestBatchForTransport(toConvexSafeSessionIntelligenceBatch(batch));
+
 const validateCommand = Command.make("validate", { input: inputArg }, ({ input }) =>
   executeJsonCommand(
     "ingest validate",
     buildBatchWithSourceSnapshotEffect(toUndefined(input)).pipe(
       Effect.map(({ before, batch: rawBatch }) => {
-        const batch = sanitizeIngestBatchForTransport(rawBatch);
+        const batch = sanitizeInspectionBatch(rawBatch);
         const after = snapshotIngestSourceManifest(batch);
         return {
           ...summarizeBatch(batch),
@@ -1167,7 +1170,7 @@ export const runIngestEffect = (
     const options = yield* loadOptions(input);
     if (options.dryRun === true) {
       const { before, batch: rawBatch } = yield* buildBatchWithSourceSnapshotEffect(input);
-      const batch = sanitizeIngestBatchForTransport(rawBatch);
+      const batch = sanitizeInspectionBatch(rawBatch);
       const after = snapshotIngestSourceManifest(batch);
       return {
         dryRun: true,

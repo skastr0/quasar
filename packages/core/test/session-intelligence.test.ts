@@ -135,6 +135,46 @@ describe("session intelligence contract", () => {
     );
   });
 
+  test("compacts top-level machine and source root rows before Convex writes", () => {
+    const hugeHostname = "host-trash-".repeat(2_000);
+    const hugeRootPath = `/Users/a/${"source-root-trash/".repeat(2_000)}`;
+    const batch = baseBatch({
+      sourceRoot: hugeRootPath,
+      sourcePath: `${hugeRootPath}/session.jsonl`,
+    });
+    const input: IngestBatch = {
+      ...batch,
+      machine: {
+        machineId: "machine:test",
+        hostname: hugeHostname,
+        platform: "darwin",
+      },
+      sourceRoots: [
+        {
+          provider: "opencode",
+          adapterId: "opencode:test",
+          rootPath: hugeRootPath,
+          machineId: "machine:test",
+          discoveredAt: "2026-06-09T00:00:00.000Z",
+        },
+      ],
+    };
+
+    const sanitized = toConvexSafeSessionIntelligenceBatch(input);
+
+    expect(jsonByteLength(sanitized.machine)).toBeLessThanOrEqual(
+      CONVEX_SAFE_INGEST_BUDGETS.machineRecordBytes,
+    );
+    expect(jsonByteLength(sanitized.sourceRoots[0])).toBeLessThanOrEqual(
+      CONVEX_SAFE_INGEST_BUDGETS.sourceRootRecordBytes,
+    );
+    expect(sanitized.machine.hostname?.length).toBeLessThan(hugeHostname.length);
+    expect(sanitized.sourceRoots[0]?.rootPath.length).toBeLessThan(hugeRootPath.length);
+    expect(sanitized.sessions[0]?.sourceRoot.length).toBeLessThan(hugeRootPath.length);
+    expect(sanitized.sessions[0]?.sourcePath.length).toBeLessThan(hugeRootPath.length);
+    assertConvexSafeSessionIntelligenceBatch(sanitized);
+  });
+
   test("truncates giant tool output while preserving tool-call intelligence", () => {
     const hugeOutput = "line with useful command output\n".repeat(20_000);
     const toolCall = {
@@ -361,6 +401,117 @@ describe("session intelligence contract", () => {
     expect(event.contentBlocks).toEqual([]);
     expect(encoded).not.toContain("provider workspace snapshot trash");
     expect(encoded).not.toContain("provider snapshot block trash");
+  });
+
+  test("sanitizes envelope metadata before Convex budget assertions", () => {
+    const unsafeSentinel = "UNSAFE_ENVELOPE_SENTINEL";
+    const hugeMachineId = `machine:${"m".repeat(20_000)}:${unsafeSentinel}`;
+    const hugeProjectKey = `path:${"p".repeat(20_000)}:${unsafeSentinel}`;
+    const hugePath = `/Users/example/${"deep/".repeat(5_000)}${unsafeSentinel}`;
+    const hugeTitle = `Session ${"title ".repeat(5_000)}${unsafeSentinel}`;
+    const signalKinds = ["path", "workspace", "git_remote", "package"] as const;
+    const batch: IngestBatch = {
+      ...baseBatch({
+        machineId: hugeMachineId,
+        projectIdentity: {
+          projectIdentityKey: hugeProjectKey,
+          displayName: hugeTitle,
+          confidence: "low",
+          rawPath: hugePath,
+          normalizedPath: hugePath,
+          gitRemote: hugePath,
+          gitRemoteNormalized: hugePath,
+          packageName: `pkg-${"x".repeat(20_000)}-${unsafeSentinel}`,
+          signals: Array.from({ length: 24 }, (_, index) => ({
+            kind: signalKinds[index % signalKinds.length]!,
+            value: `${hugePath}-${index}`,
+            confidence: "low",
+          })),
+        },
+        nativeProjectKey: hugePath,
+        title: hugeTitle,
+        sourceRoot: hugePath,
+        sourcePath: hugePath,
+        events: [
+          {
+            id: "event:envelope",
+            sessionId: "session:test",
+            sequence: 0,
+            machineId: hugeMachineId,
+            provider: "opencode",
+            agentName: "opencode",
+            projectIdentityKey: hugeProjectKey,
+            role: "user",
+            kind: "message",
+            contentText: "inspect envelope",
+            contentBlocks: [],
+            rawReference: {
+              sourcePath: hugePath,
+              table: hugePath,
+              rowId: hugePath,
+              nativeType: hugePath,
+            },
+          },
+        ],
+        toolCalls: [
+          {
+            id: "tool:envelope",
+            sessionId: "session:test",
+            eventId: "event:envelope",
+            machineId: hugeMachineId,
+            provider: "opencode",
+            agentName: "opencode",
+            projectIdentityKey: hugeProjectKey,
+            toolName: "bash",
+          },
+        ],
+      }),
+      machine: {
+        machineId: hugeMachineId,
+        hostname: hugePath,
+        tailscaleName: hugePath,
+        platform: hugePath,
+      },
+      sourceRoots: [
+        {
+          provider: "opencode",
+          adapterId: hugePath,
+          rootPath: hugePath,
+          machineId: hugeMachineId,
+          discoveredAt: hugePath,
+        },
+      ],
+    };
+
+    expect(() => assertConvexSafeSessionIntelligenceBatch(batch)).toThrow(
+      /machine is .* maximum is/,
+    );
+
+    const sanitized = toConvexSafeSessionIntelligenceBatch(batch);
+    const session = sanitized.sessions[0]!;
+    const event = session.events[0]!;
+    const toolCall = session.toolCalls[0]!;
+    const encoded = JSON.stringify(sanitized);
+
+    expect(sanitized.machine.machineId).toMatch(/^machine:/);
+    expect(session.machineId).toBe(sanitized.machine.machineId);
+    expect(event.machineId).toBe(sanitized.machine.machineId);
+    expect(toolCall.machineId).toBe(sanitized.machine.machineId);
+    expect(session.projectIdentity.projectIdentityKey).toMatch(/^project:/);
+    expect(event.projectIdentityKey).toBe(session.projectIdentity.projectIdentityKey);
+    expect(toolCall.projectIdentityKey).toBe(session.projectIdentity.projectIdentityKey);
+    expect(session.projectIdentity.signals).toHaveLength(16);
+    expect(encoded).not.toContain(unsafeSentinel);
+    expect(jsonByteLength(sanitized.machine)).toBeLessThanOrEqual(
+      CONVEX_SAFE_INGEST_BUDGETS.machineRecordBytes,
+    );
+    expect(jsonByteLength(sanitized.sourceRoots[0])).toBeLessThanOrEqual(
+      CONVEX_SAFE_INGEST_BUDGETS.sourceRootRecordBytes,
+    );
+    expect(jsonByteLength(session.projectIdentity)).toBeLessThanOrEqual(
+      CONVEX_SAFE_INGEST_BUDGETS.projectIdentityRecordBytes,
+    );
+    assertConvexSafeSessionIntelligenceBatch(sanitized);
   });
 
   test("bounds artifact locators like content block locators", () => {

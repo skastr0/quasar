@@ -6,16 +6,20 @@ import type {
   Artifact,
   ContentBlock,
   IngestBatch,
+  MachineIdentity,
   NormalizedSession,
+  ProjectResolution,
+  ProjectSignal,
   SessionEdge,
   SessionEvent,
+  SourceRoot,
   ToolCall,
   UsageRecord,
 } from "./schemas";
 
 const textEncoder = new TextEncoder();
 
-export const SESSION_INTELLIGENCE_CONTRACT_VERSION = "session-intelligence/v3";
+export const SESSION_INTELLIGENCE_CONTRACT_VERSION = "session-intelligence/v4";
 
 export const SessionIntelligenceBudgets = Schema.Struct({
   contentTextBytes: Schema.Number,
@@ -23,6 +27,9 @@ export const SessionIntelligenceBudgets = Schema.Struct({
   toolInputBytes: Schema.Number,
   toolOutputBytes: Schema.Number,
   metadataBytes: Schema.Number,
+  machineRecordBytes: Schema.Number,
+  projectIdentityRecordBytes: Schema.Number,
+  sourceRootRecordBytes: Schema.Number,
   eventRecordBytes: Schema.Number,
   contentBlockRecordBytes: Schema.Number,
   toolCallRecordBytes: Schema.Number,
@@ -39,6 +46,9 @@ export const CONVEX_SAFE_INGEST_BUDGETS = {
   toolInputBytes: 48 * 1024,
   toolOutputBytes: 96 * 1024,
   metadataBytes: 16 * 1024,
+  machineRecordBytes: 16 * 1024,
+  projectIdentityRecordBytes: 16 * 1024,
+  sourceRootRecordBytes: 16 * 1024,
   eventRecordBytes: 192 * 1024,
   contentBlockRecordBytes: 96 * 1024,
   toolCallRecordBytes: 192 * 1024,
@@ -108,6 +118,10 @@ const CONTENT_BLOCK_MEDIA_TYPE_BYTES = 256;
 const DIAGNOSTIC_MESSAGE_BYTES = 4 * 1024;
 const RAW_REFERENCE_SOURCE_PATH_BYTES = 2 * 1024;
 const RAW_REFERENCE_FIELD_BYTES = 512;
+const PROJECT_IDENTITY_FIELD_BYTES = 1024;
+const PROJECT_SIGNAL_LIMIT = 16;
+const PROJECT_SIGNAL_VALUE_BYTES = 512;
+const SESSION_TITLE_BYTES = 4 * 1024;
 const TOOL_RESULT_PATCH_KEY = /^(diff|diffs|patch|patches)$/i;
 const SESSION_PATCH_RECORD_TYPE = /(^|[_:-])(diff|patch|edit|hunk|artifact)([_:-]|$)/i;
 const PROVIDER_CONTROL_KEYS = new Set([
@@ -384,6 +398,38 @@ const addOmittedField = (
   };
 };
 
+const boundedArrayValue = (
+  value: readonly unknown[],
+  maxBytes: number,
+  path: NativePath,
+  depth: number,
+  options: BoundedValueOptions,
+) => {
+  const key = path.at(-1) ?? "";
+  if (shouldOmitNativeField(key, path, options)) {
+    return {
+      omitted: true,
+      reason: "native_non_session_intelligence",
+      itemCount: value.length,
+      byteLength: jsonByteLength(value),
+    };
+  }
+  const result: unknown[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const item = boundedValue(value[index], maxBytes, [...path, String(index)], depth + 1, options);
+    if (item !== undefined) result.push(item);
+    if (jsonByteLength(result) > maxBytes) {
+      result.push({
+        omitted: true,
+        reason: "array_byte_budget",
+        remainingItems: value.length - index - 1,
+      });
+      break;
+    }
+  }
+  return result;
+};
+
 const boundedValue = (
   value: unknown,
   maxBytes: number,
@@ -410,29 +456,7 @@ const boundedValue = (
   if (typeof value === "number" || typeof value === "boolean") return value;
   if (depth > 8) return { omitted: true, reason: "max_depth" };
   if (Array.isArray(value)) {
-    const key = path.at(-1) ?? "";
-    if (shouldOmitNativeField(key, path, options)) {
-      return {
-        omitted: true,
-        reason: "native_non_session_intelligence",
-        itemCount: value.length,
-        byteLength: jsonByteLength(value),
-      };
-    }
-    const result: unknown[] = [];
-    for (let index = 0; index < value.length; index += 1) {
-      const item = boundedValue(value[index], maxBytes, [...path, String(index)], depth + 1, options);
-      if (item !== undefined) result.push(item);
-      if (jsonByteLength(result) > maxBytes) {
-        result.push({
-          omitted: true,
-          reason: "array_byte_budget",
-          remainingItems: value.length - index - 1,
-        });
-        break;
-      }
-    }
-    return result;
+    return boundedArrayValue(value, maxBytes, path, depth, options);
   }
   if (typeof value !== "object") return String(value);
   const record = value as Record<string, unknown>;
@@ -522,6 +546,30 @@ const boundedMediaType = (value: string | undefined) => {
 
 const boundedLocatorText = (value: string | undefined, maxBytes: number) =>
   boundedText(value, maxBytes);
+
+const cleanIdentityText = (value: string) =>
+  cleanTextBody(replaceInlineBinary(value));
+
+const boundedRequiredIdentityText = (
+  value: string,
+  prefix: string,
+  maxBytes: number,
+) => {
+  const cleaned = cleanIdentityText(value);
+  if (cleaned.length > 0 && !isBinaryishString(value) && byteLength(cleaned) <= maxBytes) {
+    return cleaned;
+  }
+  return `${prefix}:${stableWideHash(value)}`;
+};
+
+const boundedRequiredLocatorText = (value: string, key: string, maxBytes: number) =>
+  boundedLocatorText(value, maxBytes) ?? `[omitted:${key}]`;
+
+const boundedMachineId = (value: string) =>
+  boundedRequiredIdentityText(value, "machine", RAW_REFERENCE_FIELD_BYTES);
+
+const boundedProjectIdentityKey = (value: string) =>
+  boundedRequiredIdentityText(value, "project", RAW_REFERENCE_FIELD_BYTES);
 
 const sanitizeRawReference = (rawReference: SessionEvent["rawReference"]): SessionEvent["rawReference"] =>
   compactUndefined({
@@ -648,10 +696,10 @@ const sanitizeEvent = (event: SessionEvent): SessionEvent =>
     nativeEventId: event.nativeEventId,
     sequence: event.sequence,
     timestamp: event.timestamp,
-    machineId: event.machineId,
+    machineId: boundedMachineId(event.machineId),
     provider: event.provider,
     agentName: event.agentName,
-    projectIdentityKey: event.projectIdentityKey,
+    projectIdentityKey: boundedProjectIdentityKey(event.projectIdentityKey),
     role: event.role,
     kind: event.kind,
     contentText: eventCarriesSessionContent(event)
@@ -673,10 +721,10 @@ const sanitizeToolCall = (toolCall: ToolCall): ToolCall =>
     id: toolCall.id,
     sessionId: toolCall.sessionId,
     eventId: toolCall.eventId,
-    machineId: toolCall.machineId,
+    machineId: boundedMachineId(toolCall.machineId),
     provider: toolCall.provider,
     agentName: toolCall.agentName,
-    projectIdentityKey: toolCall.projectIdentityKey,
+    projectIdentityKey: boundedProjectIdentityKey(toolCall.projectIdentityKey),
     toolName: toolCall.toolName,
     status: toolCall.status,
     input: boundedValue(toolCall.input, CONVEX_SAFE_INGEST_BUDGETS.toolInputBytes, [], 0, {
@@ -694,10 +742,10 @@ const sanitizeUsageRecord = (usageRecord: UsageRecord): UsageRecord =>
     id: usageRecord.id,
     sessionId: usageRecord.sessionId,
     eventId: usageRecord.eventId,
-    machineId: usageRecord.machineId,
+    machineId: boundedMachineId(usageRecord.machineId),
     provider: usageRecord.provider,
     agentName: usageRecord.agentName,
-    projectIdentityKey: usageRecord.projectIdentityKey,
+    projectIdentityKey: boundedProjectIdentityKey(usageRecord.projectIdentityKey),
     timestamp: usageRecord.timestamp,
     model: usageRecord.model,
     modelProvider: usageRecord.modelProvider,
@@ -729,10 +777,10 @@ const sanitizeArtifact = (artifact: Artifact): Artifact => {
     id: artifact.id,
     sessionId: artifact.sessionId,
     eventId: artifact.eventId,
-    machineId: artifact.machineId,
+    machineId: boundedMachineId(artifact.machineId),
     provider: artifact.provider,
     agentName: artifact.agentName,
-    projectIdentityKey: artifact.projectIdentityKey,
+    projectIdentityKey: boundedProjectIdentityKey(artifact.projectIdentityKey),
     kind: artifact.kind,
     path: path.value,
     uri: uri.value,
@@ -770,10 +818,10 @@ const sanitizeEdge = (edge: SessionEdge): SessionEdge =>
   compactUndefined({
     id: edge.id,
     sessionId: edge.sessionId,
-    machineId: edge.machineId,
+    machineId: boundedMachineId(edge.machineId),
     provider: edge.provider,
     agentName: edge.agentName,
-    projectIdentityKey: edge.projectIdentityKey,
+    projectIdentityKey: boundedProjectIdentityKey(edge.projectIdentityKey),
     kind: edge.kind,
     fromEventId: edge.fromEventId,
     toEventId: edge.toEventId,
@@ -786,6 +834,44 @@ const sanitizeEdge = (edge: SessionEdge): SessionEdge =>
 const compactUndefined = <A extends Record<string, unknown>>(record: A): A =>
   Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined)) as A;
 
+const sanitizeMachineIdentity = (machine: MachineIdentity): MachineIdentity =>
+  compactUndefined({
+    machineId: boundedMachineId(machine.machineId),
+    hostname: boundedLocatorText(machine.hostname, RAW_REFERENCE_FIELD_BYTES),
+    tailscaleName: boundedLocatorText(machine.tailscaleName, RAW_REFERENCE_FIELD_BYTES),
+    platform: boundedLocatorText(machine.platform, RAW_REFERENCE_FIELD_BYTES),
+  });
+
+const sanitizeProjectSignal = (signal: ProjectSignal): ProjectSignal => ({
+  kind: signal.kind,
+  value: boundedLocatorText(signal.value, PROJECT_SIGNAL_VALUE_BYTES) ?? "[omitted:signalValue]",
+  confidence: signal.confidence,
+});
+
+const sanitizeProjectIdentity = (project: ProjectResolution): ProjectResolution =>
+  compactUndefined({
+    projectIdentityKey: boundedProjectIdentityKey(project.projectIdentityKey),
+    displayName:
+      boundedLocatorText(project.displayName, RAW_REFERENCE_FIELD_BYTES) ??
+      boundedProjectIdentityKey(project.projectIdentityKey),
+    confidence: project.confidence,
+    rawPath: boundedLocatorText(project.rawPath, PROJECT_IDENTITY_FIELD_BYTES),
+    normalizedPath: boundedLocatorText(project.normalizedPath, PROJECT_IDENTITY_FIELD_BYTES),
+    gitRemote: boundedLocatorText(project.gitRemote, PROJECT_IDENTITY_FIELD_BYTES),
+    gitRemoteNormalized: boundedLocatorText(project.gitRemoteNormalized, PROJECT_IDENTITY_FIELD_BYTES),
+    packageName: boundedLocatorText(project.packageName, RAW_REFERENCE_FIELD_BYTES),
+    signals: project.signals.slice(0, PROJECT_SIGNAL_LIMIT).map(sanitizeProjectSignal),
+  });
+
+const sanitizeSourceRoot = (root: SourceRoot): SourceRoot =>
+  compactUndefined({
+    provider: root.provider,
+    adapterId: boundedLocatorText(root.adapterId, RAW_REFERENCE_FIELD_BYTES) ?? root.adapterId,
+    rootPath: boundedLocatorText(root.rootPath, RAW_REFERENCE_SOURCE_PATH_BYTES) ?? "[omitted:rootPath]",
+    machineId: boundedMachineId(root.machineId),
+    discoveredAt: boundedLocatorText(root.discoveredAt, RAW_REFERENCE_FIELD_BYTES) ?? root.discoveredAt,
+  });
+
 export const sanitizeSessionIntelligenceSession = (
   session: NormalizedSession,
 ): NormalizedSession =>
@@ -794,14 +880,14 @@ export const sanitizeSessionIntelligenceSession = (
     nativeSessionId: session.nativeSessionId,
     provider: session.provider,
     agentName: session.agentName,
-    machineId: session.machineId,
-    projectIdentity: session.projectIdentity,
-    nativeProjectKey: session.nativeProjectKey,
-    title: session.title,
+    machineId: boundedMachineId(session.machineId),
+    projectIdentity: sanitizeProjectIdentity(session.projectIdentity),
+    nativeProjectKey: boundedLocatorText(session.nativeProjectKey, RAW_REFERENCE_SOURCE_PATH_BYTES),
+    title: boundedText(session.title, SESSION_TITLE_BYTES),
     startedAt: session.startedAt,
     updatedAt: session.updatedAt,
-    sourceRoot: session.sourceRoot,
-    sourcePath: session.sourcePath,
+    sourceRoot: boundedLocatorText(session.sourceRoot, RAW_REFERENCE_SOURCE_PATH_BYTES) ?? "[omitted:sourceRoot]",
+    sourcePath: boundedLocatorText(session.sourcePath, RAW_REFERENCE_SOURCE_PATH_BYTES) ?? "[omitted:sourcePath]",
     events: session.events.map(sanitizeEvent),
     toolCalls: session.toolCalls.map(sanitizeToolCall),
     sessionEdges: session.sessionEdges.map(sanitizeEdge),
@@ -817,6 +903,8 @@ export const sanitizeSessionIntelligenceSession = (
 
 export const sanitizeSessionIntelligenceBatch = (batch: IngestBatch): IngestBatch => ({
   ...batch,
+  machine: sanitizeMachineIdentity(batch.machine),
+  sourceRoots: batch.sourceRoots.map(sanitizeSourceRoot),
   sessions: batch.sessions.map(sanitizeSessionIntelligenceSession),
   diagnostics: sanitizeSessionIntelligenceDiagnostics(batch.diagnostics),
 });
@@ -829,7 +917,20 @@ const assertRecordBudget = (path: string, value: unknown, maxBytes: number) => {
 export const assertConvexSafeSessionIntelligenceBatch = (
   batch: IngestBatch,
 ): IngestBatch => {
+  assertRecordBudget("machine", batch.machine, CONVEX_SAFE_INGEST_BUDGETS.machineRecordBytes);
+  batch.sourceRoots.forEach((sourceRoot, index) => {
+    assertRecordBudget(
+      `sourceRoots.${index}`,
+      sourceRoot,
+      CONVEX_SAFE_INGEST_BUDGETS.sourceRootRecordBytes,
+    );
+  });
   for (const session of batch.sessions) {
+    assertRecordBudget(
+      `projectIdentities.${session.id}`,
+      session.projectIdentity,
+      CONVEX_SAFE_INGEST_BUDGETS.projectIdentityRecordBytes,
+    );
     const sessionDoc = {
       ...session,
       events: undefined,
