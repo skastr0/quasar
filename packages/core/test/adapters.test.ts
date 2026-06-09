@@ -67,8 +67,8 @@ describe("adapter ingestion", () => {
     const sessionEncoded = JSON.stringify(sessionProjection);
     const toolEncoded = JSON.stringify(toolProjection);
 
-    expect(sessionEncoded).not.toContain("@@ real event patch");
-    expect(sessionEncoded).not.toContain("@@ real event diff");
+    expect(sessionEncoded).toContain("@@ real event patch");
+    expect(sessionEncoded).toContain("@@ real event diff");
     expect(sessionEncoded).not.toContain("provider summary diff trash");
     expect(sessionEncoded).not.toContain("provider summary cache trash");
     expect(sessionEncoded).not.toContain("provider event ui trash");

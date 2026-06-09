@@ -15,7 +15,7 @@ import type {
 
 const textEncoder = new TextEncoder();
 
-export const SESSION_INTELLIGENCE_CONTRACT_VERSION = "session-intelligence/v2";
+export const SESSION_INTELLIGENCE_CONTRACT_VERSION = "session-intelligence/v3";
 
 export const SessionIntelligenceBudgets = Schema.Struct({
   contentTextBytes: Schema.Number,
@@ -183,6 +183,14 @@ export const compactSessionIntelligenceText = (
   const compact = cleanTextBody(replaceInlineBinary(value));
   return compact.length === 0 ? undefined : truncateUtf8(compact, maxBytes);
 };
+
+export const projectSessionIntelligenceNativeValue = (value: unknown): unknown =>
+  boundedValue(value, CONVEX_SAFE_INGEST_BUDGETS.metadataBytes);
+
+export const projectSessionIntelligenceToolPayloadValue = (value: unknown): unknown =>
+  boundedValue(value, CONVEX_SAFE_INGEST_BUDGETS.toolOutputBytes, [], 0, {
+    preserveToolPatchFields: true,
+  });
 
 const nativePathMatches = (path: NativePath, candidate: readonly string[]) => {
   if (candidate.length > path.length) return false;
