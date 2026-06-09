@@ -47,6 +47,28 @@ type OpenCodePartRow = {
   data: string;
 };
 
+const OPENCODE_PRUNED_MESSAGE_DATA_SQL = [
+  "case when json_valid(data) then",
+  "json_remove(",
+  "data,",
+  "'$.summary.diffs',",
+  "'$.summary.diff',",
+  "'$.summary.patches',",
+  "'$.summary.snapshots',",
+  "'$.workspace.diffs',",
+  "'$.workspace.snapshot',",
+  "'$.workspace.snapshots',",
+  "'$.workspaceDiff',",
+  "'$.workspaceSnapshot',",
+  "'$.checkpoint',",
+  "'$.checkpoints',",
+  "'$.snapshot',",
+  "'$.snapshots',",
+  "'$.diffs',",
+  "'$.patches'",
+  ") else data end",
+].join(" ");
+
 const toolNameFromPart = (part: unknown) => {
   if (part === null || typeof part !== "object") return undefined;
   const record = part as Record<string, unknown>;
@@ -122,7 +144,7 @@ const readSessionRows = (db: OpenCodeDatabase, limit: number | undefined) =>
 const readMessages = (db: OpenCodeDatabase, sessionId: string) =>
   db
     .query(
-      "select id, time_created, data from message where session_id = ? order by time_created, id",
+      `select id, time_created, ${OPENCODE_PRUNED_MESSAGE_DATA_SQL} as data from message where session_id = ? order by time_created, id`,
     )
     .all(sessionId) as OpenCodeMessageRow[];
 
@@ -150,7 +172,7 @@ const readSessionRowsCli = (dbPath: string, limit: number | undefined) =>
 const readMessagesCli = (dbPath: string, sessionId: string) =>
   sqliteJson<OpenCodeMessageRow>(
     dbPath,
-    `select id, time_created, data from message where session_id = ${sql(sessionId)} order by time_created, id`,
+    `select id, time_created, ${OPENCODE_PRUNED_MESSAGE_DATA_SQL} as data from message where session_id = ${sql(sessionId)} order by time_created, id`,
   );
 
 const readPartsByMessageCli = (dbPath: string, sessionId: string) => {
@@ -190,8 +212,75 @@ const parseMessageData = (message: OpenCodeMessageRow) => {
   try {
     return JSON.parse(message.data) as Record<string, NativeValue | undefined>;
   } catch {
-    return { raw: message.data };
+    return { content: message.data };
   }
+};
+
+const summaryMetadata = (value: unknown): NativeValue | undefined => {
+  const summary = recordFrom(value);
+  if (Object.keys(summary).length === 0) return undefined;
+  return Object.fromEntries(
+    Object.entries(summary)
+      .filter(([key]) => !/diffs?|patches?|snapshots?|checkpoint/i.test(key))
+      .filter(([, item]) => item !== undefined),
+  ) as NativeValue;
+};
+
+const partContentProjection = (part: NativeValue): NativeValue | undefined => {
+  const record = recordFrom(part);
+  if (Object.keys(record).length === 0) return typeof part === "string" ? part : undefined;
+  const type = typeof record.type === "string" ? record.type : undefined;
+  const text =
+    typeof record.text === "string"
+      ? record.text
+      : typeof record.content === "string"
+        ? record.content
+        : typeof record.message === "string"
+          ? record.message
+          : undefined;
+  const path =
+    typeof record.path === "string"
+      ? record.path
+      : typeof record.file === "string"
+        ? record.file
+        : typeof record.filePath === "string"
+          ? record.filePath
+          : undefined;
+  const projected = {
+    ...(type !== undefined ? { type } : {}),
+    ...(text !== undefined ? { text } : {}),
+    ...(path !== undefined ? { path } : {}),
+    ...(toolNameFromPart(record) !== undefined ? { toolName: toolNameFromPart(record) } : {}),
+    ...(typeof record.callID === "string" ? { callID: record.callID } : {}),
+    ...(typeof record.id === "string" ? { id: record.id } : {}),
+  };
+  return Object.keys(projected).length === 0 ? undefined : projected;
+};
+
+const messageContentProjection = (
+  data: Record<string, NativeValue | undefined>,
+  parts: NativeValue[],
+): NativeValue => {
+  const role = typeof data.role === "string" ? data.role : undefined;
+  const content =
+    typeof data.content === "string"
+      ? data.content
+      : typeof data.text === "string"
+        ? data.text
+        : typeof data.message === "string"
+          ? data.message
+          : undefined;
+  const projectedParts = parts.flatMap((part) => {
+    const projected = partContentProjection(part);
+    return projected === undefined ? [] : [projected];
+  });
+  const summary = summaryMetadata(data.summary);
+  return {
+    ...(role !== undefined ? { role } : {}),
+    ...(content !== undefined ? { content } : {}),
+    ...(summary !== undefined ? { summary } : {}),
+    ...(projectedParts.length > 0 ? { parts: projectedParts } : {}),
+  };
 };
 
 const toolStatusFromPart = (part: Record<string, unknown>) => {
@@ -233,11 +322,10 @@ const collectToolCalls = (
         eventId,
         toolName,
         status: toolStatusFromPart(record),
-        input: state.input ?? record.input ?? part,
+        input: state.input ?? record.input,
         output: state.output ?? record.output,
         ...(startedAt !== undefined ? { startedAt } : {}),
         ...(completedAt !== undefined ? { completedAt } : {}),
-        raw: part,
       },
     ];
   });
@@ -311,7 +399,6 @@ const collectArtifacts = (
         ...(path !== undefined ? { path } : {}),
         sourcePath: dbPath,
         sourceRef: { table: "part", eventId, index },
-        raw: part,
       },
     ];
   });
@@ -325,7 +412,7 @@ const eventFromMessage = (
   nativeSessionId: string,
 ) => {
   const data = parseMessageData(message);
-  const content = { message: data, parts };
+  const content = messageContentProjection(data, parts);
   const role: SessionRole =
     data.role === "assistant" || data.role === "user" ? data.role : "unknown";
   const eventId = eventIdFor("opencode", machineId, dbPath, index, message.id);
@@ -345,7 +432,6 @@ const eventFromMessage = (
       contentText: compactText(content as NativeValue),
       content,
       rawReference: { sourcePath: dbPath, table: "message", rowId: message.id, nativeType: "message" },
-      raw: content,
     },
   };
 };

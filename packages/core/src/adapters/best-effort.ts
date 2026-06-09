@@ -125,7 +125,6 @@ export const bestEffortToolCall = (
     output: state.output ?? record.output ?? record.result ?? record.response,
     ...(timestamp !== undefined ? { startedAt: timestamp } : {}),
     ...(status === "completed" && timestamp !== undefined ? { completedAt: timestamp } : {}),
-    raw: record,
   };
 };
 
@@ -196,7 +195,6 @@ export const usageFromRecord = (
     totalTokens,
     cost,
     currency: stringValue(usage.currency),
-    raw: usage,
   };
 };
 

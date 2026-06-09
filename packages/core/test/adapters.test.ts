@@ -160,12 +160,14 @@ describe("adapter ingestion", () => {
     expect(claude.sessionEdges.some((edge) => edge.kind === "parent")).toBe(true);
     expect(claude.usageRecords[0]?.inputTokens).toBe(3);
     expect(claude.events[1]?.contentBlocks.map((block) => block.kind)).toEqual(
-      expect.arrayContaining(["text", "image", "file", "json"]),
+      expect.arrayContaining(["text", "image", "file"]),
     );
+    expect(JSON.stringify(claude)).not.toContain("iVBORw0KGgo=");
 
     const opencode = sessionsByProvider.get("opencode")!;
     expect(opencode.toolCalls[0]).toMatchObject({ toolName: "bash", status: "completed" });
     expect(opencode.usageRecords[0]?.totalTokens).toBe(12);
+    expect(JSON.stringify(opencode)).not.toContain("opencode-native-diff-trash");
 
     const grok = sessionsByProvider.get("grok")!;
     expect(grok.artifacts[0]).toMatchObject({ kind: "edit_hunk" });
@@ -199,7 +201,7 @@ describe("adapter ingestion", () => {
     expect(hermes.sessionEdges.some((edge) => edge.kind === "tool_result_for")).toBe(true);
     expect(hermes.usageRecords.some((usage) => usage.inputTokens === 10 && usage.cost === 0.02)).toBe(true);
     expect(hermes.events[1]?.contentBlocks.map((block) => block.kind)).toEqual(
-      expect.arrayContaining(["text", "thinking", "json"]),
+      expect.arrayContaining(["text", "thinking"]),
     );
     expect(hermes.rawMetadata).toMatchObject({
       gateway_routing: expect.arrayContaining([
@@ -318,6 +320,7 @@ const makeAllAdapterFixtures = async (): Promise<Record<(typeof localProviders)[
 const makeOpenCodeFixture = async () => {
   const root = mkdtempSync(join(tmpdir(), "quasar-all-opencode-"));
   const dbPath = join(root, "opencode.db");
+  const nativeDiffTrash = "opencode-native-diff-trash".repeat(128);
   execFileSync("sqlite3", [
     dbPath,
     [
@@ -326,7 +329,7 @@ const makeOpenCodeFixture = async () => {
       "create table part (id text, session_id text, message_id text, time_created integer, data text);",
       `insert into session values ('s1', 'OpenCode test', '/Users/a/Projects/quasar', '/Users/a/Projects/quasar', 1, 2);`,
       `insert into message values ('m1', 's1', 1, ${sql(JSON.stringify({ role: "assistant", tokens: { total: 12, input: 5, output: 7 }, modelID: "gpt-test", providerID: "openai" }))});`,
-      `insert into message values ('m2', 's1', 2, ${sql(JSON.stringify({ parentID: "m1", role: "user", content: "thanks" }))});`,
+      `insert into message values ('m2', 's1', 2, ${sql(JSON.stringify({ parentID: "m1", role: "user", content: "thanks", summary: { diffs: [{ file: "node_modules/typescript/lib/typescript.js", after: nativeDiffTrash }] } }))});`,
       `insert into part values ('p1', 's1', 'm1', 1, ${sql(JSON.stringify({ type: "tool", tool: "bash", callID: "call1", state: { status: "completed", input: { command: "pwd" }, output: "/repo" } }))});`,
     ].join("\n"),
   ]);
