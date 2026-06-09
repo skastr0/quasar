@@ -10,7 +10,9 @@ export {
   assertConvexSafeSessionIntelligenceBatch,
   assertConvexSafeSessionIntelligenceBatchEffect,
   jsonByteLength,
+  projectSessionIntelligenceGraphId,
   toConvexSafeSessionIntelligenceBatch,
+  type SessionIntelligenceGraphIdKind,
 } from "./session-intelligence";
 export * from "./api-paths";
 export * from "./adapters/types";

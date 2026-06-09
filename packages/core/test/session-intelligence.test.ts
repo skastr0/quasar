@@ -484,7 +484,7 @@ describe("session intelligence contract", () => {
     };
 
     expect(() => assertConvexSafeSessionIntelligenceBatch(batch)).toThrow(
-      /machine is .* maximum is/,
+      /machine\.machineId is .* maximum is/,
     );
 
     const sanitized = toConvexSafeSessionIntelligenceBatch(batch);
@@ -511,6 +511,161 @@ describe("session intelligence contract", () => {
     expect(jsonByteLength(session.projectIdentity)).toBeLessThanOrEqual(
       CONVEX_SAFE_INGEST_BUDGETS.projectIdentityRecordBytes,
     );
+    assertConvexSafeSessionIntelligenceBatch(sanitized);
+  });
+
+  test("normalizes oversized indexed graph ids and references consistently", () => {
+    const unsafeSentinel = "UNSAFE_GRAPH_ID_SENTINEL";
+    const hugeId = (prefix: string) => `${prefix}:${"x".repeat(5_000)}:${unsafeSentinel}`;
+    const rawSessionId = hugeId("session");
+    const rawNativeSessionId = hugeId("native-session");
+    const rawAgentName = hugeId("agent");
+    const rawParentEventId = hugeId("event-parent");
+    const rawChildEventId = hugeId("event-child");
+    const rawBlockId = hugeId("block");
+    const rawToolCallId = hugeId("tool");
+    const rawToolName = hugeId("tool-name");
+    const rawUsageId = hugeId("usage");
+    const rawArtifactId = hugeId("artifact");
+    const rawEdgeId = hugeId("edge");
+
+    const batch = baseBatch({
+      id: rawSessionId,
+      nativeSessionId: rawNativeSessionId,
+      agentName: rawAgentName,
+      events: [
+        {
+          id: rawParentEventId,
+          sessionId: rawSessionId,
+          sequence: 0,
+          machineId: "machine:test",
+          provider: "opencode",
+          agentName: rawAgentName,
+          projectIdentityKey: "project:test",
+          role: "user",
+          kind: "message",
+          contentText: "parent",
+          contentBlocks: [],
+          rawReference: { sourcePath: "/tmp/opencode.db" },
+        },
+        {
+          id: rawChildEventId,
+          sessionId: rawSessionId,
+          sequence: 1,
+          machineId: "machine:test",
+          provider: "opencode",
+          agentName: rawAgentName,
+          projectIdentityKey: "project:test",
+          role: "assistant",
+          kind: "tool_call",
+          contentText: "child",
+          toolCallId: rawToolCallId,
+          parentEventId: rawParentEventId,
+          contentBlocks: [
+            {
+              id: rawBlockId,
+              sequence: 0,
+              kind: "text",
+              text: "bounded block",
+            },
+          ],
+          rawReference: { sourcePath: "/tmp/opencode.db" },
+        },
+      ],
+      toolCalls: [
+        {
+          id: rawToolCallId,
+          sessionId: rawSessionId,
+          eventId: rawChildEventId,
+          machineId: "machine:test",
+          provider: "opencode",
+          agentName: rawAgentName,
+          projectIdentityKey: "project:test",
+          toolName: rawToolName,
+        },
+      ],
+      usageRecords: [
+        {
+          id: rawUsageId,
+          sessionId: rawSessionId,
+          eventId: rawChildEventId,
+          machineId: "machine:test",
+          provider: "opencode",
+          agentName: rawAgentName,
+          projectIdentityKey: "project:test",
+          totalTokens: 3,
+        },
+      ],
+      artifacts: [
+        {
+          id: rawArtifactId,
+          sessionId: rawSessionId,
+          eventId: rawChildEventId,
+          machineId: "machine:test",
+          provider: "opencode",
+          agentName: rawAgentName,
+          projectIdentityKey: "project:test",
+          kind: "file",
+          path: "/tmp/result.txt",
+        },
+      ],
+      sessionEdges: [
+        {
+          id: rawEdgeId,
+          sessionId: rawSessionId,
+          machineId: "machine:test",
+          provider: "opencode",
+          agentName: rawAgentName,
+          projectIdentityKey: "project:test",
+          kind: "artifact_of",
+          fromEventId: rawChildEventId,
+          toEventId: rawParentEventId,
+          fromId: rawToolCallId,
+          toId: rawArtifactId,
+        },
+      ],
+    });
+
+    expect(() => assertConvexSafeSessionIntelligenceBatch(batch)).toThrow(
+      /maximum is 256/,
+    );
+
+    const sanitized = toConvexSafeSessionIntelligenceBatch(batch);
+    const session = sanitized.sessions[0]!;
+    const [parentEvent, childEvent] = session.events;
+    const block = childEvent?.contentBlocks[0]!;
+    const toolCall = session.toolCalls[0]!;
+    const usage = session.usageRecords[0]!;
+    const artifact = session.artifacts[0]!;
+    const edge = session.sessionEdges[0]!;
+    const encoded = JSON.stringify(sanitized);
+
+    expect(session.id).toMatch(/^session:/);
+    expect(session.nativeSessionId).toMatch(/^native_session:/);
+    expect(session.agentName).toMatch(/^agent:/);
+    expect(parentEvent?.id).toMatch(/^event:/);
+    expect(childEvent?.id).toMatch(/^event:/);
+    expect(block.id).toMatch(/^block:/);
+    expect(toolCall.id).toMatch(/^tool:/);
+    expect(toolCall.toolName).toMatch(/^tool_name:/);
+    expect(usage.id).toMatch(/^usage:/);
+    expect(artifact.id).toMatch(/^artifact:/);
+    expect(edge.id).toMatch(/^edge:/);
+    expect(childEvent?.sessionId).toBe(session.id);
+    expect(childEvent?.parentEventId).toBe(parentEvent?.id);
+    expect(childEvent?.toolCallId).toBe(toolCall.id);
+    expect(toolCall.sessionId).toBe(session.id);
+    expect(toolCall.eventId).toBe(childEvent?.id);
+    expect(usage.sessionId).toBe(session.id);
+    expect(usage.eventId).toBe(childEvent?.id);
+    expect(artifact.sessionId).toBe(session.id);
+    expect(artifact.eventId).toBe(childEvent?.id);
+    expect(edge.sessionId).toBe(session.id);
+    expect(edge.fromEventId).toBe(childEvent?.id);
+    expect(edge.toEventId).toBe(parentEvent?.id);
+    expect(edge.fromId).toBe(toolCall.id);
+    expect(edge.toId).toBe(artifact.id);
+    expect(encoded).not.toContain(unsafeSentinel);
     assertConvexSafeSessionIntelligenceBatch(sanitized);
   });
 

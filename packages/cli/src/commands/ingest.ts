@@ -31,6 +31,7 @@ import {
   loadMachineIdentity,
   manifestFromBatch,
   Provider as ProviderSchema,
+  projectSessionIntelligenceGraphId,
   quasarHome,
   QuasarApiPaths,
   resnapshotSourceManifestEntries,
@@ -1720,21 +1721,23 @@ const sanitizeUploadChunkOnce = (chunk: IngestBatch): IngestBatch => {
         | undefined;
       return {
         ...session,
-        ...(control?.expectedEventIds !== undefined ? { expectedEventIds: control.expectedEventIds } : {}),
+        ...(control?.expectedEventIds !== undefined
+          ? { expectedEventIds: projectExpectedIds(control.expectedEventIds, "event") }
+          : {}),
         ...(control?.expectedToolCallIds !== undefined
-          ? { expectedToolCallIds: control.expectedToolCallIds }
+          ? { expectedToolCallIds: projectExpectedIds(control.expectedToolCallIds, "tool_call") }
           : {}),
         ...(control?.expectedContentBlockIds !== undefined
-          ? { expectedContentBlockIds: control.expectedContentBlockIds }
+          ? { expectedContentBlockIds: projectExpectedIds(control.expectedContentBlockIds, "content_block") }
           : {}),
         ...(control?.expectedSessionEdgeIds !== undefined
-          ? { expectedSessionEdgeIds: control.expectedSessionEdgeIds }
+          ? { expectedSessionEdgeIds: projectExpectedIds(control.expectedSessionEdgeIds, "session_edge") }
           : {}),
         ...(control?.expectedUsageRecordIds !== undefined
-          ? { expectedUsageRecordIds: control.expectedUsageRecordIds }
+          ? { expectedUsageRecordIds: projectExpectedIds(control.expectedUsageRecordIds, "usage_record") }
           : {}),
         ...(control?.expectedArtifactIds !== undefined
-          ? { expectedArtifactIds: control.expectedArtifactIds }
+          ? { expectedArtifactIds: projectExpectedIds(control.expectedArtifactIds, "artifact") }
           : {}),
         ...(control?.partialSession !== undefined ? { partialSession: control.partialSession } : {}),
         ...(control?.deferCleanup !== undefined ? { deferCleanup: control.deferCleanup } : {}),
@@ -1742,6 +1745,17 @@ const sanitizeUploadChunkOnce = (chunk: IngestBatch): IngestBatch => {
     }),
   };
 };
+
+const projectExpectedIds = (
+  ids: readonly string[],
+  kind:
+    | "event"
+    | "tool_call"
+    | "content_block"
+    | "session_edge"
+    | "usage_record"
+    | "artifact",
+) => ids.map((id) => projectSessionIntelligenceGraphId(kind, id));
 
 const normalizeChunkOptions = (
   options: ChunkOptions,

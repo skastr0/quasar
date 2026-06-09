@@ -5,6 +5,8 @@ import ragSchema from "../node_modules/@convex-dev/rag/dist/component/schema.js"
 import workpoolSchema from "../node_modules/@convex-dev/workpool/dist/component/schema.js";
 import { describe, expect, test } from "vitest";
 
+import { projectSessionIntelligenceGraphId } from "@skastr0/quasar-core/session-intelligence";
+
 import schema from "./schema";
 import { internal } from "./_generated/api";
 import { decodeBoundarySync, IngestBatchBoundary } from "./quasarDomainSchemas";
@@ -302,6 +304,28 @@ describe("quasar ingestion and search", () => {
     expect(() => sanitizeIngestBoundaryBatch(decoded, "oversized test batch")).toThrow(
       /expectedEventIds.*maximum/,
     );
+  });
+
+  test("projects oversized cleanup ids before restored boundary validation", () => {
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const rawEventId = `event:${"x".repeat(5_000)}:cleanup-sentinel`;
+    const boundary = {
+      ...batch,
+      sessions: [
+        {
+          ...batch.sessions[0]!,
+          expectedEventIds: [rawEventId],
+        },
+      ],
+    };
+    const decoded = decodeBoundarySync(IngestBatchBoundary, boundary, "oversized cleanup id");
+
+    const sanitized = sanitizeIngestBoundaryBatch(decoded, "oversized cleanup id");
+
+    expect(sanitized.sessions[0]?.expectedEventIds).toEqual([
+      projectSessionIntelligenceGraphId("event", rawEventId),
+    ]);
+    expect(JSON.stringify(sanitized)).not.toContain("cleanup-sentinel");
   });
 
   test("reports semantic search as unavailable when embeddings are unconfigured", async () => {
@@ -984,6 +1008,142 @@ describe("quasar ingestion and search", () => {
     expect(runEncoded).not.toContain("direct-diagnostic-display-trash");
     expect(runEncoded).not.toContain("direct-diagnostic-workspace-trash");
     expect(runEncoded).not.toContain("ghp_");
+  });
+
+  test("projects oversized graph ids before indexed writes and search documents", async () => {
+    const t = setup();
+    const unsafeSentinel = "CONVEX_GRAPH_ID_SENTINEL";
+    const hugeId = (prefix: string) => `${prefix}:${"x".repeat(5_000)}:${unsafeSentinel}`;
+    const rawSessionId = hugeId("session");
+    const rawNativeSessionId = hugeId("native-session");
+    const rawAgentName = hugeId("agent");
+    const rawEventId = hugeId("event");
+    const rawBlockId = hugeId("block");
+    const rawToolCallId = hugeId("tool");
+    const rawToolName = hugeId("tool-name");
+    const rawUsageId = hugeId("usage");
+    const rawArtifactId = hugeId("artifact");
+    const rawEdgeId = hugeId("edge");
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const session = batch.sessions[0]! as Record<string, unknown>;
+    session.id = rawSessionId;
+    session.nativeSessionId = rawNativeSessionId;
+    session.agentName = rawAgentName;
+    session.events = [
+      {
+        ...batch.sessions[0]!.events[0],
+        id: rawEventId,
+        sessionId: rawSessionId,
+        agentName: rawAgentName,
+        role: "assistant",
+        kind: "tool_call",
+        toolCallId: rawToolCallId,
+        contentBlocks: [
+          {
+            id: rawBlockId,
+            sequence: 0,
+            kind: "text",
+            text: "searchable oversized id block",
+          },
+        ],
+      },
+    ];
+    session.toolCalls = [
+      {
+        id: rawToolCallId,
+        sessionId: rawSessionId,
+        eventId: rawEventId,
+        machineId: "machine:a",
+        provider: "codex",
+        agentName: rawAgentName,
+        projectIdentityKey: "git:github.com/skastr0/quasar",
+        toolName: rawToolName,
+      },
+    ];
+    session.usageRecords = [
+      {
+        id: rawUsageId,
+        sessionId: rawSessionId,
+        eventId: rawEventId,
+        machineId: "machine:a",
+        provider: "codex",
+        agentName: rawAgentName,
+        projectIdentityKey: "git:github.com/skastr0/quasar",
+        totalTokens: 3,
+      },
+    ];
+    session.artifacts = [
+      {
+        id: rawArtifactId,
+        sessionId: rawSessionId,
+        eventId: rawEventId,
+        machineId: "machine:a",
+        provider: "codex",
+        agentName: rawAgentName,
+        projectIdentityKey: "git:github.com/skastr0/quasar",
+        kind: "file",
+        path: "/tmp/result.txt",
+      },
+    ];
+    session.sessionEdges = [
+      {
+        id: rawEdgeId,
+        sessionId: rawSessionId,
+        machineId: "machine:a",
+        provider: "codex",
+        agentName: rawAgentName,
+        projectIdentityKey: "git:github.com/skastr0/quasar",
+        kind: "artifact_of",
+        fromEventId: rawEventId,
+        toEventId: rawEventId,
+        fromId: rawToolCallId,
+        toId: rawArtifactId,
+      },
+    ];
+
+    const safeSessionId = projectSessionIntelligenceGraphId("session", rawSessionId);
+    const safeEventId = projectSessionIntelligenceGraphId("event", rawEventId);
+    const safeBlockId = projectSessionIntelligenceGraphId("content_block", rawBlockId);
+    const safeToolCallId = projectSessionIntelligenceGraphId("tool_call", rawToolCallId);
+    const safeUsageId = projectSessionIntelligenceGraphId("usage_record", rawUsageId);
+    const safeArtifactId = projectSessionIntelligenceGraphId("artifact", rawArtifactId);
+    const safeEdgeId = projectSessionIntelligenceGraphId("session_edge", rawEdgeId);
+
+    await t.mutation(internal.quasar.ingestBatchInternal, { batch });
+
+    const stored = await t.query(internal.quasar.readSessionInternal, {
+      sessionId: safeSessionId,
+      view: "tool-expanded",
+    });
+    expect(stored?.session.sessionId).toBe(safeSessionId);
+    expect(stored?.events[0]?.eventId).toBe(safeEventId);
+    expect(stored?.events[0]?.toolCallId).toBe(safeToolCallId);
+    expect(stored?.contentBlocks[0]?.blockId).toBe(safeBlockId);
+    expect(stored?.toolCalls[0]?.toolCallId).toBe(safeToolCallId);
+    expect(stored?.toolCalls[0]?.eventId).toBe(safeEventId);
+    expect(stored?.usageRecords[0]?.usageId).toBe(safeUsageId);
+    expect(stored?.usageRecords[0]?.eventId).toBe(safeEventId);
+    expect(stored?.artifacts[0]?.artifactId).toBe(safeArtifactId);
+    expect(stored?.artifacts[0]?.eventId).toBe(safeEventId);
+    expect(stored?.sessionEdges[0]?.edgeId).toBe(safeEdgeId);
+    expect(stored?.sessionEdges[0]?.fromId).toBe(safeToolCallId);
+    expect(stored?.sessionEdges[0]?.toId).toBe(safeArtifactId);
+
+    const indexedRows = await t.run(async (ctx) => ({
+      searchDocuments: await ctx.db.query("searchDocuments").collect(),
+      outboxRows: await ctx.db.query("embeddingOutbox").collect(),
+    }));
+    const encoded = JSON.stringify(indexedRows);
+    expect(encoded).not.toContain(unsafeSentinel);
+    for (const doc of indexedRows.searchDocuments) {
+      expect(doc.searchDocumentId.length).toBeLessThanOrEqual(256 + 16);
+      expect(doc.sourceId.length).toBeLessThanOrEqual(256);
+      expect(JSON.stringify(doc.sourceRef)).not.toContain(unsafeSentinel);
+    }
+    for (const row of indexedRows.outboxRows) {
+      expect(row.outboxKey).not.toContain(unsafeSentinel);
+      expect(row.outboxKey.length).toBeLessThan(512);
+    }
   });
 
   test("keeps provider-control metadata out of compacted search text", () => {

@@ -3,6 +3,7 @@ import {
 } from "@skastr0/quasar-core/schemas";
 import {
   jsonByteLength,
+  projectSessionIntelligenceGraphId,
   toConvexSafeSessionIntelligenceBatch,
 } from "@skastr0/quasar-core/session-intelligence";
 import {
@@ -95,23 +96,40 @@ const restoreIngestControlMetadata = (
     const control = original.sessions[index];
     return {
       ...session,
-      ...(control?.expectedEventIds !== undefined ? { expectedEventIds: control.expectedEventIds } : {}),
-      ...(control?.expectedToolCallIds !== undefined ? { expectedToolCallIds: control.expectedToolCallIds } : {}),
+      ...(control?.expectedEventIds !== undefined
+        ? { expectedEventIds: projectExpectedIds(control.expectedEventIds, "event") }
+        : {}),
+      ...(control?.expectedToolCallIds !== undefined
+        ? { expectedToolCallIds: projectExpectedIds(control.expectedToolCallIds, "tool_call") }
+        : {}),
       ...(control?.expectedContentBlockIds !== undefined
-        ? { expectedContentBlockIds: control.expectedContentBlockIds }
+        ? { expectedContentBlockIds: projectExpectedIds(control.expectedContentBlockIds, "content_block") }
         : {}),
       ...(control?.expectedSessionEdgeIds !== undefined
-        ? { expectedSessionEdgeIds: control.expectedSessionEdgeIds }
+        ? { expectedSessionEdgeIds: projectExpectedIds(control.expectedSessionEdgeIds, "session_edge") }
         : {}),
       ...(control?.expectedUsageRecordIds !== undefined
-        ? { expectedUsageRecordIds: control.expectedUsageRecordIds }
+        ? { expectedUsageRecordIds: projectExpectedIds(control.expectedUsageRecordIds, "usage_record") }
         : {}),
-      ...(control?.expectedArtifactIds !== undefined ? { expectedArtifactIds: control.expectedArtifactIds } : {}),
+      ...(control?.expectedArtifactIds !== undefined
+        ? { expectedArtifactIds: projectExpectedIds(control.expectedArtifactIds, "artifact") }
+        : {}),
       ...(control?.partialSession !== undefined ? { partialSession: control.partialSession } : {}),
       ...(control?.deferCleanup !== undefined ? { deferCleanup: control.deferCleanup } : {}),
     };
   }),
 });
+
+const projectExpectedIds = (
+  ids: readonly string[],
+  kind:
+    | "event"
+    | "tool_call"
+    | "content_block"
+    | "session_edge"
+    | "usage_record"
+    | "artifact",
+) => ids.map((id) => projectSessionIntelligenceGraphId(kind, id));
 
 const assertIngestControlMetadataBudget = (
   batch: IngestBatchBoundaryValue,
