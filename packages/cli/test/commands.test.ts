@@ -21,6 +21,7 @@ import {
   MAX_UPLOAD_CHUNK_BATCH_BYTES,
   chunkIngestBatch,
   ingestBatchPayloadHash,
+  ingestChunkIdempotencyKey,
   runIngestEffect,
 } from "../src/commands/ingest";
 
@@ -379,6 +380,11 @@ describe("CLI command graph", () => {
             {
               sequence: 0,
               payloadHash: plannedHashes[0],
+              idempotencyKey: ingestChunkIdempotencyKey(
+                "job:resume",
+                0,
+                plannedHashes[0]!,
+              ),
               payloadStored: true,
               status: "pending",
             },
@@ -437,7 +443,7 @@ describe("CLI command graph", () => {
     ).toBe(true);
   }, 20_000);
 
-  test("does not resume past a mismatched server chunk", async () => {
+  test("rejects an incompatible server chunk before uploading", async () => {
     const root = mkdtempSync(join(tmpdir(), "quasar-cli-pi-"));
     writePiFixture(root, 12);
     const previousChunkDelay = process.env.QUASAR_INGEST_CHUNK_DELAY_MS;
@@ -488,6 +494,115 @@ describe("CLI command graph", () => {
               payloadHash: "mismatched",
               payloadStored: true,
               status: "pending",
+            },
+          ],
+          failures: [],
+          readiness: {
+            total: 0,
+            pending: 0,
+            syncing: 0,
+            ready: 0,
+            skipped: 0,
+            failed: 0,
+            deadLetter: 0,
+          },
+        });
+      }
+      return Effect.fail(new Error(`Unexpected request ${spec.method} ${spec.path}`));
+    }) as NonNullable<Parameters<typeof runIngestEffect>[1]>;
+
+    const input = JSON.stringify({
+      providers: ["pi"],
+      roots: { pi: root },
+    });
+    try {
+      await expect(
+        Effect.runPromise(
+          runIngestEffect(input, requestClient) as Effect.Effect<unknown, unknown, never>,
+        ),
+      ).rejects.toThrow(/incompatible chunk at sequence 0/);
+    } finally {
+      restoreEnv("QUASAR_INGEST_CHUNK_DELAY_MS", previousChunkDelay);
+      restoreEnv("QUASAR_INGEST_MAX_EVENTS_PER_CHUNK", previousMaxEvents);
+      restoreEnv("QUASAR_INGEST_UPLOAD_GROUP_SIZE", previousUploadGroupSize);
+      restoreEnv("QUASAR_HOME", previousQuasarHome);
+    }
+    const uploadedChunks = requests
+      .filter((request) => request.method === "POST" && request.path === "/api/ingest/job-chunks-bulk")
+      .flatMap((request) => (
+        request.body as { chunks: Array<{ sequence: number; completeJob?: boolean }> }
+      ).chunks);
+
+    expect(uploadedChunks).toEqual([]);
+  }, 20_000);
+
+  test("reuploads from a repairable failed server chunk", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-cli-pi-"));
+    writePiFixture(root, 12);
+    const plannedBatch = sanitizeIngestBatchForTransport(
+      await buildIngestBatch({
+        providers: ["pi"],
+        roots: { pi: root },
+        machine: testMachine,
+      }),
+    );
+    const plannedHashes = chunkIngestBatch(plannedBatch, {
+      maxEventsPerChunk: 5,
+      maxOperationsPerChunk: 120,
+    }).map(ingestBatchPayloadHash);
+    const previousChunkDelay = process.env.QUASAR_INGEST_CHUNK_DELAY_MS;
+    const previousMaxEvents = process.env.QUASAR_INGEST_MAX_EVENTS_PER_CHUNK;
+    const previousUploadGroupSize = process.env.QUASAR_INGEST_UPLOAD_GROUP_SIZE;
+    const previousQuasarHome = process.env.QUASAR_HOME;
+    const quasarHome = mkdtempSync(join(tmpdir(), "quasar-cli-home-"));
+    writeMachineIdentity(quasarHome);
+    process.env.QUASAR_INGEST_CHUNK_DELAY_MS = "0";
+    process.env.QUASAR_INGEST_MAX_EVENTS_PER_CHUNK = "5";
+    process.env.QUASAR_INGEST_UPLOAD_GROUP_SIZE = "2";
+    process.env.QUASAR_HOME = quasarHome;
+    const requests: Array<{ method: string; path: string; body?: unknown }> = [];
+    const requestClient = ((spec: { method: string; path: string; body?: unknown }) => {
+      requests.push({ method: spec.method, path: spec.path, body: spec.body });
+      if (spec.method === "POST" && spec.path === "/api/ingest/jobs") {
+        const record = spec.body as Record<string, unknown>;
+        return Effect.succeed({
+          importJobId: "job:repair",
+          status: "running",
+          chunkCount: 1,
+          expectedChunkCount: record.expectedChunkCount,
+        });
+      }
+      if (spec.method === "POST" && spec.path === "/api/ingest/job-chunks-bulk") {
+        const record = spec.body as { chunks?: Array<{ sequence?: number }> };
+        return Effect.succeed({
+          importJobId: "job:repair",
+          enqueuedCount: record.chunks?.length ?? 0,
+          results: (record.chunks ?? []).map((chunk) => ({
+            importJobId: "job:repair",
+            chunkId: `chunk:${chunk.sequence ?? 0}`,
+            status: "pending",
+            jobStatus: "running",
+            enqueued: true,
+          })),
+        });
+      }
+      if (spec.method === "POST" && spec.path === "/api/ingest/jobs/schedule") {
+        return Effect.succeed({ importJobId: "job:repair", scheduled: true });
+      }
+      if (spec.method === "GET" && spec.path === "/api/ingest/jobs") {
+        return Effect.succeed({
+          job: { importJobId: "job:repair", status: "running" },
+          chunks: [
+            {
+              sequence: 0,
+              payloadHash: plannedHashes[0],
+              idempotencyKey: ingestChunkIdempotencyKey(
+                "job:repair",
+                0,
+                plannedHashes[0]!,
+              ),
+              payloadStored: false,
+              status: "failed",
             },
           ],
           failures: [],
@@ -583,6 +698,11 @@ describe("CLI command graph", () => {
           chunks: plannedHashes.map((payloadHash, sequence) => ({
             sequence,
             payloadHash,
+            idempotencyKey: ingestChunkIdempotencyKey(
+              "job:complete-upload",
+              sequence,
+              payloadHash,
+            ),
             payloadStored: true,
             status: "pending",
           })),
@@ -746,6 +866,22 @@ describe("CLI command graph", () => {
       }
       if (spec.method === "POST" && spec.path === "/api/ingest/job-chunks-bulk") {
         return Effect.fail(new Error("bulk upload should not run after source mutation"));
+      }
+      if (spec.method === "GET" && spec.path === "/api/ingest/jobs") {
+        return Effect.succeed({
+          job: { importJobId: "job:changed", status: "queued" },
+          chunks: [],
+          failures: [],
+          readiness: {
+            total: 0,
+            pending: 0,
+            syncing: 0,
+            ready: 0,
+            skipped: 0,
+            failed: 0,
+            deadLetter: 0,
+          },
+        });
       }
       return Effect.fail(new Error(`Unexpected request ${spec.method} ${spec.path}`));
     }) as NonNullable<Parameters<typeof runIngestEffect>[1]>;

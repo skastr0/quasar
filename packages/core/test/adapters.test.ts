@@ -183,6 +183,7 @@ describe("adapter ingestion", () => {
 
     const grok = sessionsByProvider.get("grok")!;
     expect(grok.artifacts[0]).toMatchObject({ kind: "edit_hunk" });
+    expect(JSON.stringify(grok)).toContain("nested grok answer");
     expect(JSON.stringify(grok)).not.toContain("grok-provider-update-trash");
 
     const amp = sessionsByProvider.get("amp")!;
@@ -538,6 +539,7 @@ const makeGrokFixture = () => {
   writeJsonl(join(sessionDir, "chat_history.jsonl"), [{ type: "user", content: "change file" }]);
   writeJsonl(join(sessionDir, "events.jsonl"), [
     { type: "tool", tool: "bash", callID: "gcall", state: { status: "completed", input: { command: "pwd" }, output: "/repo" } },
+    { type: "assistant_delta", params: { content: "nested grok answer" } },
   ]);
   writeJsonl(join(sessionDir, "updates.jsonl"), [
     { method: "session/update", params: { displayOnly: "grok-provider-update-trash" } },

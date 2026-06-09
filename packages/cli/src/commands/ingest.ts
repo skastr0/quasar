@@ -330,7 +330,13 @@ const safeResumeUploadedChunkCount = (
       for (const chunk of chunks) {
         const sequence = chunkSequence(chunk);
         if (sequence !== nextSequence) return nextSequence;
-        if (!chunkMatchesResumePlan(chunk, plan, sequence)) return nextSequence;
+        const compatibility = chunkResumeCompatibility(chunk, importJobId, plan, sequence);
+        if (compatibility === "incompatible") {
+          throw new Error(
+            `import job ${importJobId} has an incompatible chunk at sequence ${sequence}`,
+          );
+        }
+        if (compatibility === "repair") return nextSequence;
         nextSequence += 1;
         if (nextSequence >= plan.expectedChunkCount) return nextSequence;
       }
@@ -339,9 +345,7 @@ const safeResumeUploadedChunkCount = (
       chunkCursor = nextCursor;
     }
     return nextSequence;
-  }).pipe(
-    Effect.catchAll(() => Effect.succeed(0)),
-  );
+  });
 
 const RESUME_STATUS_PAGE_LIMIT = 200;
 
@@ -359,20 +363,28 @@ const chunkSequence = (chunk: Record<string, unknown>) => {
     : Number.POSITIVE_INFINITY;
 };
 
-const chunkMatchesResumePlan = (
+const chunkResumeCompatibility = (
   chunk: Record<string, unknown>,
+  importJobId: string,
   plan: StreamIngestPlan,
   sequence: number,
-) => {
+): "safe" | "repair" | "incompatible" => {
   const expectedHash = plan.chunkPayloadHashes[sequence];
-  if (typeof expectedHash !== "string") return false;
-  if (chunk.payloadHash !== expectedHash) return false;
-  if (chunk.status === "succeeded") return true;
+  if (typeof expectedHash !== "string") return "incompatible";
+  const expectedIdempotencyKey = ingestChunkIdempotencyKey(
+    importJobId,
+    sequence,
+    expectedHash,
+  );
+  if (chunk.idempotencyKey !== expectedIdempotencyKey) {
+    return "incompatible";
+  }
+  if (chunk.status === "succeeded") return "safe";
   if (
     (chunk.status === "pending" || chunk.status === "running") &&
     chunk.payloadStored === true
-  ) return true;
-  return false;
+  ) return "safe";
+  return "repair";
 };
 
 const chunkPaginationCursor = (pagination: unknown) => {
@@ -544,6 +556,7 @@ export const DEFAULT_CHUNK_DELAY_MS = 750;
 export const DEFAULT_UPLOAD_GROUP_SIZE = 10;
 export const MAX_UPLOAD_CHUNK_BATCH_BYTES = 768 * 1024;
 export const MAX_BULK_UPLOAD_BODY_BYTES = 3_500_000;
+const STREAM_INGEST_UPLOAD_IDENTITY_VERSION = "quasar.stream-ingest/v2";
 
 export interface ChunkOptions {
   readonly maxEventsPerChunk?: number;
@@ -694,7 +707,7 @@ const uploadStreamedIngest = (input: {
       const item = { chunk, index };
       const candidate = [...group, item];
       const nextBytes = jsonByteLength(
-        bulkUploadRequestBody(input.importJobId, input.plan.expectedChunkCount, candidate),
+        bulkUploadRequestBody(input.importJobId, input.plan, candidate),
       );
       if (
         group.length > 0 &&
@@ -789,11 +802,7 @@ const uploadChunkGroup = (
   group: readonly { chunk: IngestBatch; index: number }[],
 ) =>
   Effect.gen(function* () {
-    const requestBody = bulkUploadRequestBody(
-      input.importJobId,
-      input.plan.expectedChunkCount,
-      group,
-    );
+    const requestBody = bulkUploadRequestBody(input.importJobId, input.plan, group);
     assertJsonBudget(
       requestBody,
       MAX_BULK_UPLOAD_BODY_BYTES,
@@ -872,6 +881,7 @@ const streamedIngestJobIdempotencyKey = (
   chunkPayloadHashes: readonly string[],
 ) =>
   `import-job:${stableJsonHash([
+    STREAM_INGEST_UPLOAD_IDENTITY_VERSION,
     SESSION_INTELLIGENCE_CONTRACT_VERSION,
     manifestIdentityFromManifest(manifest),
     chunkPayloadHashes.map((hash, sequence) => [sequence, hash]),
@@ -897,15 +907,20 @@ const sortedSourceManifestEntries = (entries: Iterable<SourceManifestEntry>) =>
 
 const bulkUploadRequestBody = (
   importJobId: string,
-  expectedChunkCount: number,
+  plan: StreamIngestPlan,
   group: readonly { chunk: IngestBatch; index: number }[],
 ) => ({
   importJobId,
-  expectedChunkCount,
+  expectedChunkCount: plan.expectedChunkCount,
   chunks: group.map(({ chunk, index }) => ({
     batch: chunk,
     sequence: index,
-    completeJob: index === expectedChunkCount - 1,
+    idempotencyKey: ingestChunkIdempotencyKey(
+      importJobId,
+      index,
+      expectedChunkPayloadHash(plan, index),
+    ),
+    completeJob: index === plan.expectedChunkCount - 1,
   })),
 });
 
@@ -939,6 +954,29 @@ export const ingestBatchPayloadHash = (batch: IngestBatch) =>
   stableWideHash(
     JSON.stringify([SESSION_INTELLIGENCE_CONTRACT_VERSION, batchPayloadIdentity(batch)]),
   );
+
+export const ingestChunkIdempotencyKey = (
+  importJobId: string,
+  sequence: number,
+  payloadHash: string,
+) =>
+  `import-chunk:${stableWideHash(
+    JSON.stringify([
+      STREAM_INGEST_UPLOAD_IDENTITY_VERSION,
+      SESSION_INTELLIGENCE_CONTRACT_VERSION,
+      importJobId,
+      sequence,
+      payloadHash,
+    ]),
+  )}`;
+
+const expectedChunkPayloadHash = (plan: StreamIngestPlan, index: number) => {
+  const payloadHash = plan.chunkPayloadHashes[index];
+  if (payloadHash === undefined) {
+    throw new Error(`missing planned ingest chunk hash for sequence ${index}`);
+  }
+  return payloadHash;
+};
 
 const batchPayloadIdentity = (batch: IngestBatch) => ({
   ...batch,

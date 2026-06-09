@@ -65,6 +65,28 @@ const stringContent = (record: Record<string, unknown>) =>
         ? record.message
         : undefined;
 
+const CONTENT_KEYS = ["content", "text", "message", "delta", "response", "output", "result"] as const;
+
+const grokNestedContent = (record: Record<string, unknown>): NativeValue | undefined => {
+  const direct = contentFields(record);
+  if (direct !== undefined) return direct;
+  for (const key of ["params", "state", "delta"] as const) {
+    const nested = contentFields(recordFrom(record[key]));
+    if (nested !== undefined) return nested;
+  }
+  return undefined;
+};
+
+const contentFields = (record: Record<string, unknown>): NativeValue | undefined => {
+  const text = stringContent(record);
+  if (text !== undefined) return text;
+  const entries = CONTENT_KEYS.flatMap((key) => {
+    const value = record[key];
+    return value === undefined ? [] : [[key, value] as const];
+  });
+  return entries.length === 0 ? undefined : Object.fromEntries(entries) as NativeValue;
+};
+
 const grokToolCall = (
   machineId: string,
   sourcePath: string,
@@ -123,8 +145,8 @@ const grokKind = (record: Record<string, unknown>) => {
 };
 
 const grokContentProjection = (record: Record<string, unknown>): NativeValue | undefined => {
-  const text = stringContent(record);
-  if (text !== undefined) return text;
+  const content = grokNestedContent(record);
+  if (content !== undefined) return content;
   const toolName = grokToolName(record);
   if (toolName === undefined) return undefined;
   const state = recordFrom(record.state);
