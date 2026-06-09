@@ -556,7 +556,7 @@ export const DEFAULT_CHUNK_DELAY_MS = 750;
 export const DEFAULT_UPLOAD_GROUP_SIZE = 10;
 export const MAX_UPLOAD_CHUNK_BATCH_BYTES = 768 * 1024;
 export const MAX_BULK_UPLOAD_BODY_BYTES = 3_500_000;
-const STREAM_INGEST_UPLOAD_IDENTITY_VERSION = "quasar.stream-ingest/v2";
+const STREAM_INGEST_UPLOAD_IDENTITY_VERSION = "quasar.stream-ingest/v3";
 
 export interface ChunkOptions {
   readonly maxEventsPerChunk?: number;
