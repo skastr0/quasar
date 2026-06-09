@@ -14,12 +14,14 @@ import {
 } from "./quasarEmbeddingReadiness";
 import {
   claimImportChunkHandler,
+  claimImportJobWorkerHandler,
   enqueueImportChunkHandler,
   listImportJobsHandler,
   markImportChunkFailedHandler,
   markImportChunkSucceededHandler,
   processImportJobChunksHandler,
   readImportJobHandler,
+  releaseImportJobWorkerHandler,
   scheduleImportWorkerMutationHandler,
   startImportJobHandler,
   submitImportChunkHandler,
@@ -108,6 +110,22 @@ export const processImportJobChunksInternal = internalAction({
     limit: v.optional(v.number()),
   },
   handler: processImportJobChunksHandler,
+});
+
+export const claimImportJobWorkerInternal = internalMutation({
+  args: {
+    importJobId: v.optional(v.string()),
+    now: v.number(),
+  },
+  handler: claimImportJobWorkerHandler,
+});
+
+export const releaseImportJobWorkerInternal = internalMutation({
+  args: {
+    importJobId: v.optional(v.string()),
+    leaseToken: v.string(),
+  },
+  handler: releaseImportJobWorkerHandler,
 });
 
 export const claimImportChunkInternal = internalMutation({

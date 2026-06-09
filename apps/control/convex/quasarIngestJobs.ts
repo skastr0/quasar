@@ -70,6 +70,7 @@ type IngestManifestSession = {
 };
 
 const IMPORT_CHUNK_LEASE_MS = 5 * 60_000;
+const IMPORT_JOB_WORKER_LEASE_MS = 2 * 60_000;
 const IMPORT_CHUNK_MAX_ATTEMPTS = 5;
 const IMPORT_WORKER_BATCH_LIMIT = 3;
 const IMPORT_WORKER_SCHEDULE_DELAY_MS = 1_000;
@@ -114,6 +115,7 @@ const restoreIngestControlMetadata = (
         : {}),
       ...(control?.expectedArtifactIds !== undefined ? { expectedArtifactIds: control.expectedArtifactIds } : {}),
       ...(control?.partialSession !== undefined ? { partialSession: control.partialSession } : {}),
+      ...(control?.deferCleanup !== undefined ? { deferCleanup: control.deferCleanup } : {}),
     };
   }),
 });
@@ -246,7 +248,7 @@ export const submitImportChunksHandler = async (
       })) as SubmitImportChunkResult,
     );
   }
-  if (input.chunks.length > 0) {
+  if (input.chunks.some((chunk) => chunk.completeJob === true)) {
     await ctx.runMutation(internal.quasar.scheduleImportWorkerInternal, {
       importJobId: input.importJobId,
       delayMs: 0,
@@ -390,53 +392,101 @@ export const processImportJobChunksHandler = async (
   ctx: ActionCtx,
   args: { importJobId?: string; limit?: number },
 ): Promise<{ readonly processed: number }> => {
+  const workerLease = (await ctx.runMutation(internal.quasar.claimImportJobWorkerInternal, {
+    importJobId: args.importJobId,
+    now: Date.now(),
+  })) as { importJobId?: string; leaseToken: string } | null;
+  if (workerLease === null) return { processed: 0 };
   const limit = Math.max(
     1,
     Math.min(IMPORT_WORKER_BATCH_LIMIT, Math.trunc(args.limit ?? IMPORT_WORKER_BATCH_LIMIT)),
   );
   let processed = 0;
-  for (let index = 0; index < limit; index += 1) {
-    const claim = (await ctx.runMutation(internal.quasar.claimImportChunkInternal, {
-      importJobId: args.importJobId,
-      now: Date.now(),
-    })) as
-      | {
-          chunkId: string;
-          importJobId: string;
-          batch: IngestBatchBoundaryValue;
-          attempts: number;
-          leaseToken: string;
-        }
-      | null;
-    if (claim === null) break;
-    processed += 1;
-    try {
-      await ctx.runMutation(internal.quasar.ingestBatchInternal, {
-        batch: claim.batch,
-        importJobId: claim.importJobId,
-        importChunkId: claim.chunkId,
-      });
-      await ctx.runMutation(internal.quasar.markImportChunkSucceededInternal, {
-        importJobId: claim.importJobId,
-        chunkId: claim.chunkId,
-        leaseToken: claim.leaseToken,
-      });
-    } catch (error) {
-      await ctx.runMutation(internal.quasar.markImportChunkFailedInternal, {
-        importJobId: claim.importJobId,
-        chunkId: claim.chunkId,
-        leaseToken: claim.leaseToken,
-        error: error instanceof Error ? error.message : String(error),
+  try {
+    for (let index = 0; index < limit; index += 1) {
+      const claim = (await ctx.runMutation(internal.quasar.claimImportChunkInternal, {
+        importJobId: args.importJobId,
+        now: Date.now(),
+      })) as
+        | {
+            chunkId: string;
+            importJobId: string;
+            batch: IngestBatchBoundaryValue;
+            attempts: number;
+            leaseToken: string;
+          }
+        | null;
+      if (claim === null) break;
+      processed += 1;
+      try {
+        await ctx.runMutation(internal.quasar.ingestBatchInternal, {
+          batch: claim.batch,
+          importJobId: claim.importJobId,
+          importChunkId: claim.chunkId,
+        });
+        await ctx.runMutation(internal.quasar.markImportChunkSucceededInternal, {
+          importJobId: claim.importJobId,
+          chunkId: claim.chunkId,
+          leaseToken: claim.leaseToken,
+        });
+      } catch (error) {
+        await ctx.runMutation(internal.quasar.markImportChunkFailedInternal, {
+          importJobId: claim.importJobId,
+          chunkId: claim.chunkId,
+          leaseToken: claim.leaseToken,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    if (processed === limit) {
+      await ctx.scheduler.runAfter(IMPORT_WORKER_SCHEDULE_DELAY_MS, internal.quasar.processImportJobChunksInternal, {
+        importJobId: args.importJobId,
+        limit,
       });
     }
-  }
-  if (processed === limit) {
-    await ctx.scheduler.runAfter(IMPORT_WORKER_SCHEDULE_DELAY_MS, internal.quasar.processImportJobChunksInternal, {
-      importJobId: args.importJobId,
-      limit,
+    return { processed };
+  } finally {
+    await ctx.runMutation(internal.quasar.releaseImportJobWorkerInternal, {
+      importJobId: workerLease.importJobId,
+      leaseToken: workerLease.leaseToken,
     });
   }
-  return { processed };
+};
+
+export const claimImportJobWorkerHandler = async (
+  ctx: MutationCtx,
+  args: { importJobId?: string; now: number },
+): Promise<{ readonly importJobId?: string; readonly leaseToken: string } | null> => {
+  if (args.importJobId === undefined) return { leaseToken: "global-worker" };
+  const existing = await findImportWorkerLease(ctx, args.importJobId);
+  if (existing !== null && existing.leaseExpiresAt > args.now) return null;
+  const leaseToken = `job-worker:${crypto.randomUUID?.() ?? `${args.now}:${Math.random()}`}`;
+  const patch = {
+    leaseToken,
+    leaseExpiresAt: args.now + IMPORT_JOB_WORKER_LEASE_MS,
+    updatedAt: args.now,
+  };
+  if (existing === null) {
+    await ctx.db.insert("importWorkerLeases", {
+      importJobId: args.importJobId,
+      ...patch,
+      createdAt: args.now,
+    });
+  } else {
+    await ctx.db.patch(existing._id, patch);
+  }
+  return { importJobId: args.importJobId, leaseToken };
+};
+
+export const releaseImportJobWorkerHandler = async (
+  ctx: MutationCtx,
+  args: { importJobId?: string; leaseToken: string },
+): Promise<{ readonly released: boolean }> => {
+  if (args.importJobId === undefined) return { released: true };
+  const existing = await findImportWorkerLease(ctx, args.importJobId);
+  if (existing === null || existing.leaseToken !== args.leaseToken) return { released: false };
+  await ctx.db.delete(existing._id);
+  return { released: true };
 };
 
 export const claimImportChunkHandler = async (
@@ -470,7 +520,6 @@ export const claimImportChunkHandler = async (
     updatedAt: args.now,
   });
   await patchImportJobStatus(ctx, candidate.importJobId, "running", args.now);
-  await scheduleImportWorker(ctx, candidate.importJobId, IMPORT_CHUNK_LEASE_MS + 1_000);
   return {
     chunkId: candidate.chunkId,
     importJobId: candidate.importJobId,
@@ -490,8 +539,6 @@ export const markImportChunkSucceededHandler = async (
   const stale = staleChunkClaim(chunk, args.importJobId, args.leaseToken);
   if (stale !== null) return stale;
   const oldStatus = chunk.status;
-  const payload = await findChunkPayload(ctx, chunk.chunkId);
-  const batch = (payload?.batch ?? chunk.batch) as IngestBatchBoundaryValue | undefined;
   await ctx.db.patch(chunk._id, {
     status: "succeeded",
     completedAt: now,
@@ -501,7 +548,6 @@ export const markImportChunkSucceededHandler = async (
     payloadStoredAt: undefined,
     updatedAt: now,
   });
-  if (batch !== undefined) await writeChunkCheckpoints(ctx, chunk, batch, now);
   await deleteChunkPayload(ctx, chunk.chunkId);
   await patchImportJobCounters(ctx, args.importJobId, {
     succeededChunkCount: oldStatus === "succeeded" ? 0 : 1,
@@ -657,6 +703,12 @@ const findChunkPayload = async (ctx: MutationCtx, chunkId: string) =>
     .withIndex("by_chunkId", (q) => q.eq("chunkId", chunkId))
     .unique();
 
+const findImportWorkerLease = async (ctx: MutationCtx, importJobId: string) =>
+  await ctx.db
+    .query("importWorkerLeases")
+    .withIndex("by_importJobId", (q) => q.eq("importJobId", importJobId))
+    .unique();
+
 const upsertChunkPayload = async (
   ctx: MutationCtx,
   input: {
@@ -789,7 +841,7 @@ const patchImportJobStatus = async (
   now: number,
 ) => {
   const job = await findImportJob(ctx, importJobId);
-  if (job !== null && job.status !== "succeeded") {
+  if (job !== null && job.status !== "succeeded" && job.status !== status) {
     await ctx.db.patch(job._id, { status, updatedAt: now });
   }
 };
@@ -873,87 +925,6 @@ const upsertImportShards = async (
       createdAt: now,
       updatedAt: now,
     });
-  }
-};
-
-const writeChunkCheckpoints = async (
-  ctx: MutationCtx,
-  chunk: Doc<"importChunks">,
-  batch: IngestBatchBoundaryValue,
-  now: number,
-) => {
-  const machineId = batch.machine.machineId;
-  const sessions = batch.sessions;
-  for (const session of sessions) {
-    const provider = session.provider;
-    const sessionId = session.id;
-    const events = session.events;
-    if (events.length === 0) {
-      await upsertCheckpoint(ctx, {
-        importJobId: chunk.importJobId,
-        chunkId: chunk.chunkId,
-        provider,
-        machineId,
-        sessionId,
-        nativeRowId: session.nativeSessionId || sessionId,
-        sequence: chunk.sequence,
-        now,
-      });
-      continue;
-    }
-    for (const event of events) {
-      await upsertCheckpoint(ctx, {
-        importJobId: chunk.importJobId,
-        chunkId: chunk.chunkId,
-        provider,
-        machineId,
-        sessionId,
-        nativeRowId: event.nativeEventId ?? event.id,
-        sequence: event.sequence,
-        now,
-      });
-    }
-  }
-};
-
-const upsertCheckpoint = async (
-  ctx: MutationCtx,
-  args: {
-    readonly importJobId: string;
-    readonly chunkId: string;
-    readonly provider: ProviderSchema;
-    readonly machineId: string;
-    readonly sessionId: string;
-    readonly nativeRowId: string;
-    readonly sequence: number;
-    readonly now: number;
-  },
-) => {
-  const checkpointId = `checkpoint:${wideHash(
-    `${args.importJobId}\u001f${args.chunkId}\u001f${args.sessionId}\u001f${args.nativeRowId}`,
-  )}`;
-  const existing = await ctx.db
-    .query("importCheckpoints")
-    .withIndex("by_checkpointId", (q) => q.eq("checkpointId", checkpointId))
-    .unique();
-  const patch = {
-    importJobId: args.importJobId,
-    chunkId: args.chunkId,
-    provider: args.provider,
-    machineId: args.machineId,
-    sessionId: args.sessionId,
-    nativeRowId: args.nativeRowId,
-    sequence: args.sequence,
-    updatedAt: args.now,
-  };
-  if (existing === null) {
-    await ctx.db.insert("importCheckpoints", {
-      checkpointId,
-      ...patch,
-      createdAt: args.now,
-    });
-  } else {
-    await ctx.db.patch(existing._id, patch);
   }
 };
 

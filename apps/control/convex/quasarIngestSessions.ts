@@ -106,6 +106,7 @@ const restoreIngestControlMetadata = (
         : {}),
       ...(control?.expectedArtifactIds !== undefined ? { expectedArtifactIds: control.expectedArtifactIds } : {}),
       ...(control?.partialSession !== undefined ? { partialSession: control.partialSession } : {}),
+      ...(control?.deferCleanup !== undefined ? { deferCleanup: control.deferCleanup } : {}),
     };
   }),
 });
@@ -231,7 +232,7 @@ const upsertSourceRoots = async (ctx: MutationCtx, batch: ParsedIngestBatch) => 
       updatedAt: batch.now,
     };
     if (existing === null) await ctx.db.insert("sourceRoots", { ...patch, createdAt: batch.now });
-    else await ctx.db.patch(existing._id, patch);
+    else if (!patchMatches(existing, patch, ["updatedAt"])) await ctx.db.patch(existing._id, patch);
   }
 };
 
@@ -245,7 +246,7 @@ const ingestSession = async (
   await upsertSessionEvents(ctx, state);
   await upsertDeclaredToolCalls(ctx, state);
   await upsertSessionGraphRows(ctx, state);
-  if (sessionValue.partialSession === true) return;
+  if (sessionValue.partialSession === true || sessionValue.deferCleanup === true) return;
   const sessionCleanup = await cleanupMissingSessionRows(
     ctx,
     state.sessionId,
@@ -373,8 +374,10 @@ const buildSessionPatch = (input: {
   updatedAtNative: stringValue(input.sessionValue.updatedAt),
   sourceRoot: input.sessionValue.sourceRoot,
   sourcePath: input.sessionValue.sourcePath,
-  eventCount: input.events.length,
-  toolCallCount: countToolCallIds(input.sessionId, input.events, input.declaredIds),
+  eventCount: numberValue(input.sessionValue.eventCount) ?? input.events.length,
+  toolCallCount:
+    numberValue(input.sessionValue.toolCallCount) ??
+    countToolCallIds(input.sessionId, input.events, input.declaredIds),
   importRunId: input.batch.importRunId,
   importJobId: input.batch.importJobId,
   importChunkId: input.batch.importChunkId,
@@ -460,3 +463,15 @@ const importRunSummary = (batch: ParsedIngestBatch) => ({
 
 const stringValue = (value: unknown) =>
   typeof value === "string" ? value : undefined;
+
+const numberValue = (value: unknown) =>
+  typeof value === "number" && Number.isFinite(value) ? value : undefined;
+
+const patchMatches = (
+  existing: Record<string, unknown>,
+  patch: Record<string, unknown>,
+  ignoredKeys: readonly string[] = [],
+) =>
+  Object.entries(patch).every(([key, value]) =>
+    ignoredKeys.includes(key) ? true : existing[key] === value,
+  );

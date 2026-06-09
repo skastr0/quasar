@@ -64,6 +64,10 @@ const SESSION_TRASH_PATHS = [
   ["summary", "diff"],
   ["summary", "patches"],
   ["summary", "snapshots"],
+  ["summary", "cache"],
+  ["summary", "state"],
+  ["summary", "providerCache"],
+  ["summary", "providerState"],
   ["workspace", "diffs"],
   ["workspace", "snapshot"],
   ["workspace", "snapshots"],
@@ -81,7 +85,9 @@ const GENERATED_PATH_SEGMENTS = /(^|\/)(node_modules|\.git|\.next|\.turbo|dist|b
 const GENERATED_FILE = /(^|\/)(bun\.lockb?|package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$/i;
 const BINARY_KEY = /(^|_)(base64|data|bytes|blob|binary|image|source)(_|$)/i;
 const NON_INTELLIGENCE_KEY =
-  /(encrypted[_-]?content|cipher[_-]?text|diffs?|patches?|snapshots?|checkpoint|workspaceSnapshot|workspaceDiff)/i;
+  /(encrypted[_-]?content|cipher[_-]?text|provider[_-]?(cache|state)|diffs?|patches?|snapshots?|checkpoint|workspaceSnapshot|workspaceDiff)/i;
+const PROVIDER_CONTROL_KEY =
+  /(encrypted[_-]?content|cipher[_-]?text|provider[_-]?(cache|state)|workspaceSnapshot|workspaceDiff|checkpoint|snapshots?)/i;
 const BASE64ISH = /^[A-Za-z0-9+/=\s]+$/;
 const DATA_URI = /^data:[^,]{0,512},/i;
 const DATA_URI_INLINE = /data:[^,\s"'<>]{0,512},[A-Za-z0-9+/=_-]{64,}/gi;
@@ -90,6 +96,11 @@ const ESCAPED_CONTROL_CHARS = /\\u00(?:0[0-9a-f]|1[0-9a-f]|7f)/gi;
 const REPLACEMENT_CHAR = /\ufffd/g;
 const CONTENT_BLOCK_LOCATOR_BYTES = 2 * 1024;
 const CONTENT_BLOCK_MEDIA_TYPE_BYTES = 256;
+const TOOL_RESULT_PATCH_KEY = /^(diffs?|patches?)$/i;
+
+type BoundedValueOptions = {
+  readonly preserveToolPatchFields?: boolean;
+};
 
 export const byteLength = (value: string) => textEncoder.encode(value).length;
 
@@ -184,6 +195,40 @@ const nativePathMatches = (path: NativePath, candidate: readonly string[]) => {
 const matchesNativeTrashPath = (path: NativePath) =>
   SESSION_TRASH_PATHS.some((candidate) => nativePathMatches(path, candidate));
 
+const isProviderMetadataPath = (path: NativePath) =>
+  path.some((part) => /^(summary|workspace|workspaceDiff|workspaceSnapshot|checkpoint|checkpoints|snapshots?)$/i.test(part));
+
+const shouldOmitNativeField = (
+  key: string,
+  path: NativePath,
+  options: BoundedValueOptions,
+) => {
+  if (options.preserveToolPatchFields === true && TOOL_RESULT_PATCH_KEY.test(key) && !isProviderMetadataPath(path)) {
+    return false;
+  }
+  return matchesNativeTrashPath(path) || NON_INTELLIGENCE_KEY.test(key);
+};
+
+const hasProviderControlEnvelope = (
+  value: unknown,
+  path: NativePath = [],
+  depth = 0,
+): boolean => {
+  if (depth > 8 || value === undefined || value === null) return false;
+  if (Array.isArray(value)) {
+    return value.some((item, index) =>
+      hasProviderControlEnvelope(item, [...path, String(index)], depth + 1),
+    );
+  }
+  if (typeof value !== "object") return false;
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    const childPath = [...path, key];
+    if (matchesNativeTrashPath(childPath) || PROVIDER_CONTROL_KEY.test(key)) return true;
+    if (hasProviderControlEnvelope(item, childPath, depth + 1)) return true;
+  }
+  return false;
+};
+
 const stringValue = (value: unknown) =>
   typeof value === "string" && value.trim().length > 0 ? value : undefined;
 
@@ -238,6 +283,7 @@ const boundedValue = (
   maxBytes: number,
   path: NativePath = [],
   depth = 0,
+  options: BoundedValueOptions = {},
 ): unknown => {
   if (value === undefined || value === null) return value;
   if (typeof value === "string") {
@@ -249,12 +295,17 @@ const boundedValue = (
         hash: stableWideHash(value),
       };
     }
+    const parsed = parseJsonText(value);
+    if (parsed !== undefined && hasProviderControlEnvelope(parsed, path)) {
+      return boundedValue(parsed, maxBytes, path, depth, options);
+    }
     return truncateUtf8(value, maxBytes);
   }
   if (typeof value === "number" || typeof value === "boolean") return value;
   if (depth > 8) return { omitted: true, reason: "max_depth" };
   if (Array.isArray(value)) {
-    if (matchesNativeTrashPath(path)) {
+    const key = path.at(-1) ?? "";
+    if (shouldOmitNativeField(key, path, options)) {
       return {
         omitted: true,
         reason: "native_non_session_intelligence",
@@ -264,7 +315,7 @@ const boundedValue = (
     }
     const result: unknown[] = [];
     for (let index = 0; index < value.length; index += 1) {
-      const item = boundedValue(value[index], maxBytes, [...path, String(index)], depth + 1);
+      const item = boundedValue(value[index], maxBytes, [...path, String(index)], depth + 1, options);
       if (item !== undefined) result.push(item);
       if (jsonByteLength(result) > maxBytes) {
         result.push({
@@ -293,7 +344,7 @@ const boundedValue = (
   const output: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(record)) {
     const childPath = [...path, key];
-    if (matchesNativeTrashPath(childPath) || NON_INTELLIGENCE_KEY.test(key)) {
+    if (shouldOmitNativeField(key, childPath, options)) {
       addOmittedField(output, omittedFieldValue(key, item, "native_non_session_intelligence"));
       continue;
     }
@@ -309,7 +360,7 @@ const boundedValue = (
       });
       continue;
     }
-    const next = boundedValue(item, maxBytes, childPath, depth + 1);
+    const next = boundedValue(item, maxBytes, childPath, depth + 1, options);
     if (next !== undefined) output[key] = next;
     if (jsonByteLength(output) > maxBytes) {
       output.__quasarOmitted = {
@@ -465,8 +516,12 @@ const sanitizeToolCall = (toolCall: ToolCall): ToolCall =>
     projectIdentityKey: toolCall.projectIdentityKey,
     toolName: toolCall.toolName,
     status: toolCall.status,
-    input: boundedValue(toolCall.input, CONVEX_SAFE_INGEST_BUDGETS.toolInputBytes),
-    output: boundedValue(toolCall.output, CONVEX_SAFE_INGEST_BUDGETS.toolOutputBytes),
+    input: boundedValue(toolCall.input, CONVEX_SAFE_INGEST_BUDGETS.toolInputBytes, [], 0, {
+      preserveToolPatchFields: true,
+    }),
+    output: boundedValue(toolCall.output, CONVEX_SAFE_INGEST_BUDGETS.toolOutputBytes, [], 0, {
+      preserveToolPatchFields: true,
+    }),
     startedAt: toolCall.startedAt,
     completedAt: toolCall.completedAt,
   });
@@ -552,6 +607,12 @@ export const sanitizeSessionIntelligenceSession = (
     sessionEdges: session.sessionEdges.map(sanitizeEdge),
     usageRecords: session.usageRecords.map(sanitizeUsageRecord),
     artifacts: session.artifacts.map(sanitizeArtifact),
+    eventCount: session.eventCount,
+    toolCallCount: session.toolCallCount,
+    contentBlockCount: session.contentBlockCount,
+    sessionEdgeCount: session.sessionEdgeCount,
+    usageRecordCount: session.usageRecordCount,
+    artifactCount: session.artifactCount,
   });
 
 export const sanitizeSessionIntelligenceBatch = (batch: IngestBatch): IngestBatch => ({

@@ -11,6 +11,8 @@ import {
   eventIdFor,
   homePath,
   kindFromNative,
+  logicalPathFor,
+  logicalRootFor,
   nativeSessionIdFromPath,
   numberValue,
   readJsonLines,
@@ -244,11 +246,12 @@ const sumNumbers = (values: readonly (number | undefined)[]) => {
 
 const buildCodexSessionFromFile = (
   path: string,
-  sessionsRoot: string,
+  sourcePath: string,
+  logicalSessionsRoot: string,
   options: AdapterOptions,
 ) => {
   const lines = readJsonLines(path);
-  const nativeSessionId = nativeSessionIdFromPath(path);
+  const nativeSessionId = nativeSessionIdFromPath(sourcePath);
   const sessionMeta = lines.find(
     ({ value }) =>
       typeof value === "object" &&
@@ -284,21 +287,21 @@ const buildCodexSessionFromFile = (
       typeof payloadRecord.id === "string"
         ? payloadRecord.id
         : payloadCallId ?? (typeof record.id === "string" ? record.id : undefined);
-    const eventId = eventIdFor("codex", options.machine.machineId, path, index, nativeEventId ?? lineNumber);
+    const eventId = eventIdFor("codex", options.machine.machineId, sourcePath, index, nativeEventId ?? lineNumber);
     const timestamp =
       typeof record.timestamp === "string" ? record.timestamp : undefined;
     const toolCallId = upsertCodexToolCall(
       toolCallsById,
       options.machine.machineId,
       nativeSessionId,
-      path,
+      sourcePath,
       eventId,
       timestamp,
       payloadRecord,
     );
     const usageRecord = codexUsageRecord(
       options.machine.machineId,
-      path,
+      sourcePath,
       nativeSessionId,
       eventId,
       index,
@@ -317,7 +320,7 @@ const buildCodexSessionFromFile = (
       contentSource: payloadValue as NativeValue | undefined,
       ...(toolCallId !== undefined ? { toolCallId } : {}),
       rawReference: {
-        sourcePath: path,
+        sourcePath,
         line: lineNumber,
         nativeType: codexNativeType(nativeType, payloadType),
       },
@@ -330,8 +333,8 @@ const buildCodexSessionFromFile = (
     machine: options.machine,
     nativeSessionId,
     nativeProjectKey: projectPath,
-    sourceRoot: sessionsRoot,
-    sourcePath: path,
+    sourceRoot: logicalSessionsRoot,
+    sourcePath,
     projectPath,
     events,
     toolCalls: [...toolCallsById.values()],
@@ -357,6 +360,8 @@ async function* streamCodex(options: AdapterOptions) {
   }
 
   const sessionsRoot = join(root, "sessions");
+  const logicalRoot = logicalRootFor("codex", root, options);
+  const logicalSessionsRoot = join(logicalRoot, "sessions");
   const files = collectFiles(
     sessionsRoot,
     (path) => /rollout-.*\.jsonl$/.test(path),
@@ -364,14 +369,19 @@ async function* streamCodex(options: AdapterOptions) {
   );
   yield {
     type: "sourceRoot" as const,
-    sourceRoot: sourceRoot("codex", codexAdapter.id, sessionsRoot, options.machine, options.now),
+    sourceRoot: sourceRoot("codex", codexAdapter.id, logicalSessionsRoot, options.machine, options.now),
   };
   let sessionCount = 0;
   for (const path of files) {
     sessionCount += 1;
     yield {
       type: "session" as const,
-      session: buildCodexSessionFromFile(path, sessionsRoot, options),
+      session: buildCodexSessionFromFile(
+        path,
+        logicalPathFor(path, sessionsRoot, logicalSessionsRoot),
+        logicalSessionsRoot,
+        options,
+      ),
     };
   }
   yield {
@@ -381,7 +391,7 @@ async function* streamCodex(options: AdapterOptions) {
       provider: "codex" as const,
       status: sessionCount > 0 ? ("available" as const) : ("no_data_found" as const),
       parserConfidence: "documented" as const,
-      rootPath: sessionsRoot,
+      rootPath: logicalSessionsRoot,
       message: `Discovered ${sessionCount} Codex session(s).`,
     },
   };

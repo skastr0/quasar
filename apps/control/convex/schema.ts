@@ -447,6 +447,8 @@ export default defineSchema({
     terminalChunkSequenceSum: v.optional(v.number()),
     diagnostics: v.array(v.any()),
     error: v.optional(v.string()),
+    workerLeaseExpiresAt: v.optional(v.number()),
+    workerLeaseToken: v.optional(v.string()),
     startedAt: v.optional(v.number()),
     completedAt: v.optional(v.number()),
     createdAt: v.number(),
@@ -521,6 +523,16 @@ export default defineSchema({
   })
     .index("by_chunkId", ["chunkId"])
     .index("by_importJobId", ["importJobId"]),
+
+  importWorkerLeases: defineTable({
+    importJobId: v.string(),
+    leaseToken: v.string(),
+    leaseExpiresAt: v.number(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_importJobId", ["importJobId"])
+    .index("by_leaseExpiresAt", ["leaseExpiresAt"]),
 
   importCheckpoints: defineTable({
     checkpointId: v.string(),

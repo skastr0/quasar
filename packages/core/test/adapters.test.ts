@@ -178,6 +178,8 @@ describe("adapter ingestion", () => {
     expect(opencode.toolCalls[0]).toMatchObject({ toolName: "bash", status: "completed" });
     expect(opencode.usageRecords[0]?.totalTokens).toBe(12);
     expect(JSON.stringify(opencode)).not.toContain("opencode-native-diff-trash");
+    expect(JSON.stringify(opencode)).not.toContain("opencode-provider-cache-trash");
+    expect(JSON.stringify(opencode)).not.toContain("opencode-provider-state-trash");
 
     const grok = sessionsByProvider.get("grok")!;
     expect(grok.artifacts[0]).toMatchObject({ kind: "edit_hunk" });
@@ -520,7 +522,7 @@ const makeOpenCodeFixture = async () => {
       "create table part (id text, session_id text, message_id text, time_created integer, data text);",
       `insert into session values ('s1', 'OpenCode test', '/Users/a/Projects/quasar', '/Users/a/Projects/quasar', 1, 2);`,
       `insert into message values ('m1', 's1', 1, ${sql(JSON.stringify({ role: "assistant", tokens: { total: 12, input: 5, output: 7 }, modelID: "gpt-test", providerID: "openai" }))});`,
-      `insert into message values ('m2', 's1', 2, ${sql(JSON.stringify({ parentID: "m1", role: "user", content: "thanks", summary: { diffs: [{ file: "node_modules/typescript/lib/typescript.js", after: nativeDiffTrash }] } }))});`,
+      `insert into message values ('m2', 's1', 2, ${sql(JSON.stringify({ parentID: "m1", role: "user", content: "thanks", summary: { cache: { state: "opencode-provider-cache-trash" }, state: { view: "opencode-provider-state-trash" }, diffs: [{ file: "node_modules/typescript/lib/typescript.js", after: nativeDiffTrash }] } }))});`,
       `insert into part values ('p1', 's1', 'm1', 1, ${sql(JSON.stringify({ type: "tool", tool: "bash", callID: "call1", state: { status: "completed", input: { command: "pwd" }, output: "/repo" } }))});`,
     ].join("\n"),
   ]);

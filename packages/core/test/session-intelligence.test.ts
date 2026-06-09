@@ -60,6 +60,7 @@ describe("session intelligence contract", () => {
           kind: "json" as const,
           value: {
             summary: {
+              cache: { state: "provider-cache-trash" },
               diffs: [
                 {
                   file: "node_modules/typescript/lib/typescript.js",
@@ -77,6 +78,7 @@ describe("session intelligence contract", () => {
         role: "user",
         content: "Please wire the CLI.",
         summary: {
+          state: { cachedView: "provider-state-trash" },
           diffs: [
             {
               file: "node_modules/typescript/lib/typescript.js",
@@ -100,6 +102,8 @@ describe("session intelligence contract", () => {
     expect(Object.hasOwn(sanitized.sessions[0]!.events[0]!, "content")).toBe(false);
     expect(Object.hasOwn(sanitized.sessions[0]!.events[0]!, "raw")).toBe(false);
     expect(encoded).not.toContain("not-session-intelligence");
+    expect(encoded).not.toContain("provider-cache-trash");
+    expect(encoded).not.toContain("provider-state-trash");
     expect(encoded).not.toContain("should");
     expect(jsonByteLength(sanitized.sessions[0]!.events[0])).toBeLessThanOrEqual(
       CONVEX_SAFE_INGEST_BUDGETS.eventRecordBytes,
@@ -136,6 +140,48 @@ describe("session intelligence contract", () => {
     expect(jsonByteLength(sanitizedToolCall)).toBeLessThanOrEqual(
       CONVEX_SAFE_INGEST_BUDGETS.toolCallRecordBytes,
     );
+  });
+
+  test("preserves patch fields in tool payloads but not provider summaries", () => {
+    const batch = baseBatch({
+      toolCalls: [
+        {
+          id: "tool:patch",
+          sessionId: "session:test",
+          eventId: "event:test",
+          machineId: "machine:test",
+          provider: "opencode" as const,
+          agentName: "opencode",
+          projectIdentityKey: "project:test",
+          toolName: "apply_patch",
+          status: "completed",
+          input: {
+            patch: "@@ real tool input patch",
+            summary: { diffs: ["provider input diff trash"] },
+          },
+          output: {
+            diff: "@@ real tool result diff",
+            patches: ["@@ real tool result patch list"],
+            log: JSON.stringify({
+              result: "visible structured tool result",
+              summary: { cache: { state: "stringified provider state trash" } },
+            }),
+            workspaceDiff: "provider workspace diff trash",
+          },
+        },
+      ],
+    });
+
+    const sanitized = toConvexSafeSessionIntelligenceBatch(batch);
+    const encoded = JSON.stringify(sanitized.sessions[0]!.toolCalls[0]);
+
+    expect(encoded).toContain("@@ real tool input patch");
+    expect(encoded).toContain("@@ real tool result diff");
+    expect(encoded).toContain("@@ real tool result patch list");
+    expect(encoded).toContain("visible structured tool result");
+    expect(encoded).not.toContain("provider input diff trash");
+    expect(encoded).not.toContain("provider workspace diff trash");
+    expect(encoded).not.toContain("stringified provider state trash");
   });
 
   test("replaces binary and base64 payloads with bounded refs", () => {

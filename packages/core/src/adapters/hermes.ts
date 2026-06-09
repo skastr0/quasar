@@ -11,6 +11,7 @@ import {
   edgeIdFor,
   eventIdFor,
   homePath,
+  logicalRootFor,
   numberValue,
   parseJsonString,
   recordFrom,
@@ -57,7 +58,7 @@ type HermesArtifactDraft = Omit<
 const maybeDatabase = async (path: string) => {
   try {
     const { Database } = await import("bun:sqlite");
-    return new Database(path, { readonly: true });
+    return new Database(path);
   } catch {
     return undefined;
   }
@@ -434,8 +435,10 @@ const missingDatabaseResult = (root: string | undefined) => ({
 async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStreamItem> {
   const root = options.roots?.hermes ?? hermesAdapter.defaultRoot();
   const dbPath = hermesDbPath(root);
+  const logicalRoot = root === undefined ? undefined : logicalRootFor("hermes", root, options);
+  const logicalDbPath = hermesDbPath(logicalRoot);
   if (root === undefined || dbPath === undefined || !existsSync(dbPath)) {
-    for (const diagnostic of missingDatabaseResult(root).diagnostics) {
+    for (const diagnostic of missingDatabaseResult(logicalRoot ?? root).diagnostics) {
       yield { type: "diagnostic", diagnostic };
     }
     return;
@@ -447,7 +450,7 @@ async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStr
   try {
     yield {
       type: "sourceRoot",
-      sourceRoot: sourceRoot("hermes", hermesAdapter.id, root, options.machine, options.now),
+      sourceRoot: sourceRoot("hermes", hermesAdapter.id, logicalRoot ?? root, options.machine, options.now),
     };
     if (db === undefined) {
       usedFallback = true;
@@ -455,8 +458,8 @@ async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStr
         yield {
           type: "session",
           session: buildHermesSessionFromRows(
-            dbPath,
-            root,
+            logicalDbPath ?? dbPath,
+            logicalRoot ?? root,
             options,
             session,
             readMessageRowsCli(tempDb.path, String(session.id ?? "")),
@@ -469,8 +472,8 @@ async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStr
         yield {
           type: "session",
           session: buildHermesSessionFromRows(
-            dbPath,
-            root,
+            logicalDbPath ?? dbPath,
+            logicalRoot ?? root,
             options,
             session,
             readMessageRows(db, String(session.id ?? "")),
@@ -486,7 +489,7 @@ async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStr
         provider: "hermes" as const,
         status: sessionCount > 0 ? ("available" as const) : ("no_data_found" as const),
         parserConfidence: "documented" as const,
-        rootPath: dbPath,
+        rootPath: logicalDbPath ?? dbPath,
         message: `Discovered ${sessionCount} Hermes session(s)${usedFallback ? " via sqlite3 fallback" : ""}.`,
       },
     };
@@ -498,7 +501,7 @@ async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStr
         provider: "hermes" as const,
         status: "unsupported" as const,
         parserConfidence: "documented" as const,
-        rootPath: dbPath,
+        rootPath: logicalDbPath ?? dbPath,
         message: "Hermes state.db did not match the documented sessions/messages schema.",
         details: { error: error instanceof Error ? error.message : String(error) },
       },

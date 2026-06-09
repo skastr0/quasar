@@ -52,6 +52,7 @@ export interface BuildIngestBatchOptions {
   readonly includeExperimental?: boolean;
   readonly limit?: number;
   readonly roots?: Partial<Record<Provider, string>>;
+  readonly logicalRoots?: Partial<Record<Provider, string>>;
   readonly machine?: MachineIdentity;
 }
 
@@ -69,6 +70,7 @@ export const buildIngestBatch = async (
     machine,
     now,
     roots: options.roots,
+    logicalRoots: options.logicalRoots,
     limit: options.limit,
   });
   return toConvexSafeSessionIntelligenceBatch({
@@ -104,6 +106,7 @@ export async function* streamIngestBatches(
         machine,
         now,
         roots: options.roots,
+        logicalRoots: options.logicalRoots,
         limit: options.limit,
       });
       continue;
@@ -112,6 +115,7 @@ export async function* streamIngestBatches(
       machine,
       now,
       roots: options.roots,
+      logicalRoots: options.logicalRoots,
       limit: options.limit,
     });
     yield toConvexSafeSessionIntelligenceBatch({
