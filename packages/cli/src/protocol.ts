@@ -14,6 +14,12 @@ const PositiveInteger = Schema.Number.pipe(
   }),
 );
 
+const IngestGenerationId = Schema.String.pipe(
+  Schema.filter((value) => /^[A-Za-z0-9:_-]+$/.test(value), {
+    message: () => "Expected an ingest generation id containing only letters, numbers, ':', '_' and '-'",
+  }),
+);
+
 export const IngestOptions = Schema.Struct({
   providers: Schema.optional(Schema.Array(Provider)),
   includeExperimental: Schema.optional(Schema.Boolean),
@@ -21,6 +27,7 @@ export const IngestOptions = Schema.Struct({
   roots: Schema.optional(Schema.partial(Schema.Record({ key: Provider, value: Schema.String }))),
   logicalRoots: Schema.optional(Schema.partial(Schema.Record({ key: Provider, value: Schema.String }))),
   snapshotSources: Schema.optional(Schema.Boolean),
+  ingestGeneration: Schema.optional(IngestGenerationId),
   maxUploadChunks: Schema.optional(PositiveInteger),
   drainPollIntervalMs: Schema.optional(PositiveInteger),
   drainTimeoutMs: Schema.optional(NonNegativeInteger),

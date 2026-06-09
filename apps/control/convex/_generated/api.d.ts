@@ -14,6 +14,7 @@ import type * as quasar from "../quasar.js";
 import type * as quasarApiPaths from "../quasarApiPaths.js";
 import type * as quasarDomainSchemas from "../quasarDomainSchemas.js";
 import type * as quasarEmbeddingReadiness from "../quasarEmbeddingReadiness.js";
+import type * as quasarIngestContract from "../quasarIngestContract.js";
 import type * as quasarIngestEvents from "../quasarIngestEvents.js";
 import type * as quasarIngestGraph from "../quasarIngestGraph.js";
 import type * as quasarIngestJobs from "../quasarIngestJobs.js";
@@ -44,6 +45,7 @@ declare const fullApi: ApiFromModules<{
   quasarApiPaths: typeof quasarApiPaths;
   quasarDomainSchemas: typeof quasarDomainSchemas;
   quasarEmbeddingReadiness: typeof quasarEmbeddingReadiness;
+  quasarIngestContract: typeof quasarIngestContract;
   quasarIngestEvents: typeof quasarIngestEvents;
   quasarIngestGraph: typeof quasarIngestGraph;
   quasarIngestJobs: typeof quasarIngestJobs;

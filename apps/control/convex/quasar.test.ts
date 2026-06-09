@@ -477,6 +477,78 @@ describe("quasar ingestion and search", () => {
     expect(session?.session.ingestState).toBe("complete");
   });
 
+  test("rejects chunk idempotency keys not derived from job sequence and payload", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const job = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { batch, expectedChunkCount: 2 },
+    });
+    await t.action(internal.quasar.submitImportChunkInternal, {
+      input: {
+        importJobId: job.importJobId,
+        batch,
+        sequence: 0,
+        expectedChunkCount: 2,
+      },
+    });
+    const status = await t.query(internal.quasar.readImportJobInternal, {
+      input: { importJobId: job.importJobId },
+    });
+    const sequenceZeroKey = status?.chunks[0]?.idempotencyKey;
+    expect(sequenceZeroKey).toMatch(/^import-chunk:/);
+
+    await expect(
+      t.action(internal.quasar.submitImportChunkInternal, {
+        input: {
+          importJobId: job.importJobId,
+          batch,
+          sequence: 1,
+          idempotencyKey: sequenceZeroKey,
+          expectedChunkCount: 2,
+          completeJob: true,
+        },
+      }),
+    ).rejects.toThrow(/idempotencyKey does not match/);
+
+    const changedBatch = {
+      ...batch,
+      sessions: batch.sessions.map((session) => ({
+        ...session,
+        events: session.events.map((event) => ({
+          ...event,
+          contentText: `${event.contentText} changed`,
+        })),
+      })),
+    };
+    await expect(
+      t.action(internal.quasar.submitImportChunkInternal, {
+        input: {
+          importJobId: job.importJobId,
+          batch: changedBatch,
+          sequence: 0,
+          idempotencyKey: sequenceZeroKey,
+          expectedChunkCount: 2,
+        },
+      }),
+    ).rejects.toThrow(/idempotencyKey does not match/);
+
+    const otherJob = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { batch, sourceIdentityKey: "source:other-job", expectedChunkCount: 1 },
+    });
+    await expect(
+      t.action(internal.quasar.submitImportChunkInternal, {
+        input: {
+          importJobId: otherJob.importJobId,
+          batch,
+          sequence: 0,
+          idempotencyKey: sequenceZeroKey,
+          expectedChunkCount: 1,
+          completeJob: true,
+        },
+      }),
+    ).rejects.toThrow(/idempotencyKey does not match/);
+  });
+
   test("cancelled import jobs stop claiming pending chunks", async () => {
     const t = setup();
     const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
