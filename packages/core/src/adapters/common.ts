@@ -45,11 +45,10 @@ type BuildSessionArgs = {
   readonly projectPath?: string;
   readonly gitRemote?: string;
   readonly packageName?: string;
-  readonly rawMetadata?: NativeValue;
   readonly events: (Omit<
     SessionEvent,
     "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey" | "contentBlocks"
-  > & { readonly contentBlocks?: readonly ContentBlock[] })[];
+  > & { readonly contentBlocks?: readonly ContentBlock[]; readonly contentSource?: NativeValue })[];
   readonly toolCalls?: Omit<
     ToolCall,
     "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
@@ -518,7 +517,7 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
   const id = `${args.provider}:${args.machine.machineId}:${stableWideHash(
     `${args.nativeSessionId}:${args.sourcePath}`,
   )}`;
-  const events = args.events.map((event) => ({
+  const events = args.events.map(({ contentBlocks, contentSource, ...event }) => ({
     ...event,
     sessionId: id,
     machineId: args.machine.machineId,
@@ -526,13 +525,13 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
     agentName: args.agentName,
     projectIdentityKey: projectIdentity.projectIdentityKey,
     contentBlocks: [
-      ...(event.contentBlocks ??
+      ...(contentBlocks ??
         contentBlocksFromNative(
           args.provider,
           args.machine.machineId,
           args.sourcePath,
           event.id,
-          event.content ?? event.contentText,
+          contentSource ?? event.contentText,
         )),
     ],
   }));
@@ -587,7 +586,6 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
     ...(args.updatedAt !== undefined ? { updatedAt: args.updatedAt } : {}),
     sourceRoot: args.sourceRoot,
     sourcePath: args.sourcePath,
-    ...(args.rawMetadata !== undefined ? { rawMetadata: args.rawMetadata } : {}),
     events,
     toolCalls,
     sessionEdges,

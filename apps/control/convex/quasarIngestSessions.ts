@@ -55,7 +55,10 @@ const parseIngestBatch = (
   metadata: { importJobId?: string; importChunkId?: string } = {},
 ): ParsedIngestBatch => {
   const decoded = decodeBoundarySync(IngestBatchBoundary, value, "ingest batch");
-  const sanitized = toConvexSafeSessionIntelligenceBatch(decoded as unknown as CoreIngestBatch);
+  const sanitized = restoreIngestControlMetadata(
+    decoded,
+    toConvexSafeSessionIntelligenceBatch(toCoreIngestBatch(decoded)),
+  );
   const batch = decodeBoundarySync(IngestBatchBoundary, sanitized, "sanitized ingest batch");
   const machine = batch.machine;
   const sessions = batch.sessions;
@@ -80,6 +83,80 @@ const parseIngestBatch = (
     importChunkId: metadata.importChunkId,
   };
 };
+
+const restoreIngestControlMetadata = (
+  original: IngestBatchBoundary,
+  sanitized: CoreIngestBatch,
+): IngestBatchBoundary => ({
+  ...sanitized,
+  sessions: sanitized.sessions.map((session, index) => {
+    const control = original.sessions[index];
+    return {
+      ...session,
+      ...(control?.expectedEventIds !== undefined ? { expectedEventIds: control.expectedEventIds } : {}),
+      ...(control?.expectedToolCallIds !== undefined ? { expectedToolCallIds: control.expectedToolCallIds } : {}),
+      ...(control?.expectedContentBlockIds !== undefined
+        ? { expectedContentBlockIds: control.expectedContentBlockIds }
+        : {}),
+      ...(control?.expectedSessionEdgeIds !== undefined
+        ? { expectedSessionEdgeIds: control.expectedSessionEdgeIds }
+        : {}),
+      ...(control?.expectedUsageRecordIds !== undefined
+        ? { expectedUsageRecordIds: control.expectedUsageRecordIds }
+        : {}),
+      ...(control?.expectedArtifactIds !== undefined ? { expectedArtifactIds: control.expectedArtifactIds } : {}),
+      ...(control?.partialSession !== undefined ? { partialSession: control.partialSession } : {}),
+    };
+  }),
+});
+
+const toCoreIngestBatch = (batch: IngestBatchBoundary): CoreIngestBatch => ({
+  ...batch,
+  sessions: batch.sessions.map((session) => ({
+    ...session,
+    events: session.events.map((event) => ({
+      ...event,
+      sessionId: session.id,
+      machineId: session.machineId,
+      provider: session.provider,
+      agentName: session.agentName,
+      projectIdentityKey: session.projectIdentity.projectIdentityKey,
+    })),
+    toolCalls: session.toolCalls.map((toolCall) => ({
+      ...toolCall,
+      sessionId: session.id,
+      eventId: toolCall.eventId ?? `declared:${toolCall.id}`,
+      machineId: session.machineId,
+      provider: session.provider,
+      agentName: session.agentName,
+      projectIdentityKey: session.projectIdentity.projectIdentityKey,
+    })),
+    sessionEdges: session.sessionEdges.map((edge) => ({
+      ...edge,
+      sessionId: session.id,
+      machineId: session.machineId,
+      provider: session.provider,
+      agentName: session.agentName,
+      projectIdentityKey: session.projectIdentity.projectIdentityKey,
+    })),
+    usageRecords: session.usageRecords.map((usageRecord) => ({
+      ...usageRecord,
+      sessionId: session.id,
+      machineId: session.machineId,
+      provider: session.provider,
+      agentName: session.agentName,
+      projectIdentityKey: session.projectIdentity.projectIdentityKey,
+    })),
+    artifacts: session.artifacts.map((artifact) => ({
+      ...artifact,
+      sessionId: session.id,
+      machineId: session.machineId,
+      provider: session.provider,
+      agentName: session.agentName,
+      projectIdentityKey: session.projectIdentity.projectIdentityKey,
+    })),
+  })),
+});
 
 const importRunId = (
   machine: ParsedIngestBatch["machine"],
@@ -296,7 +373,6 @@ const buildSessionPatch = (input: {
   updatedAtNative: stringValue(input.sessionValue.updatedAt),
   sourceRoot: input.sessionValue.sourceRoot,
   sourcePath: input.sessionValue.sourcePath,
-  rawMetadata: redactSensitive(input.sessionValue.rawMetadata),
   eventCount: input.events.length,
   toolCallCount: countToolCallIds(input.sessionId, input.events, input.declaredIds),
   importRunId: input.batch.importRunId,
@@ -352,7 +428,6 @@ const sessionSearchDocument = (state: SessionIngestState): SearchDocumentUpsertI
   searchText: compactSearchText([
     state.sessionPatch.title,
     state.sessionPatch.nativeProjectKey,
-    state.sessionPatch.rawMetadata,
   ]),
   sourcePath: state.sessionPatch.sourcePath,
   sourceRef: { sessionId: state.sessionId },

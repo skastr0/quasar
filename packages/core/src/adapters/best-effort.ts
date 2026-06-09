@@ -73,8 +73,7 @@ export const contentFromRecord = (record: Record<string, unknown>) =>
   record.text ??
   record.message ??
   record.parts ??
-  record.delta ??
-  record;
+  record.delta;
 
 export const toolNameFromRecord = (record: Record<string, unknown>) => {
   if (stringValue(record.toolName) !== undefined) return stringValue(record.toolName);

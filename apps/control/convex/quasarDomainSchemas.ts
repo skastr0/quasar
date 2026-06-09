@@ -169,14 +169,12 @@ export const SessionEventBoundary = Schema.Struct({
   role: SessionRoleSchema,
   kind: SessionEventKindSchema,
   contentText: Schema.optional(Schema.String),
-  content: Schema.optional(Schema.Unknown),
   contentBlocks: Schema.optionalWith(Schema.Array(ContentBlockBoundary), {
     default: () => [],
   }),
   toolCallId: Schema.optional(Schema.String),
   parentEventId: Schema.optional(Schema.String),
   rawReference: RawReferenceBoundary,
-  raw: Schema.optional(Schema.Unknown),
 });
 export type SessionEventBoundary = typeof SessionEventBoundary.Type;
 
@@ -194,7 +192,6 @@ export const ToolCallBoundary = Schema.Struct({
   output: Schema.optional(Schema.Unknown),
   startedAt: Schema.optional(Schema.String),
   completedAt: Schema.optional(Schema.String),
-  raw: Schema.optional(Schema.Unknown),
 });
 export type ToolCallBoundary = typeof ToolCallBoundary.Type;
 
@@ -234,7 +231,6 @@ export const UsageRecordBoundary = Schema.Struct({
   totalTokens: Schema.optional(Schema.Number),
   cost: Schema.optional(Schema.Number),
   currency: Schema.optional(Schema.String),
-  raw: Schema.optional(Schema.Unknown),
 });
 export type UsageRecordBoundary = typeof UsageRecordBoundary.Type;
 
@@ -253,7 +249,6 @@ export const ArtifactBoundary = Schema.Struct({
   sourcePath: Schema.optional(Schema.String),
   sourceRef: Schema.optional(Schema.Unknown),
   metadata: Schema.optional(Schema.Unknown),
-  raw: Schema.optional(Schema.Unknown),
 });
 export type ArtifactBoundary = typeof ArtifactBoundary.Type;
 
@@ -270,7 +265,6 @@ export const IngestSessionBoundary = Schema.Struct({
   updatedAt: Schema.optional(Schema.String),
   sourceRoot: Schema.String,
   sourcePath: Schema.String,
-  rawMetadata: Schema.optional(Schema.Unknown),
   events: Schema.optionalWith(Schema.Array(SessionEventBoundary), {
     default: () => [],
   }),
@@ -328,16 +322,10 @@ export type ImportChunkStatusSchema = typeof ImportChunkStatusSchema.Type;
 export const IngestBatchBoundary = Schema.Struct({
   protocolVersion: Schema.Literal("quasar.ingest/v1"),
   machine: MachineIdentityBoundary,
-  sourceRoots: Schema.optionalWith(Schema.Array(SourceRootBoundary), {
-    default: () => [],
-  }),
-  sessions: Schema.optionalWith(Schema.Array(IngestSessionBoundary), {
-    default: () => [],
-  }),
-  diagnostics: Schema.optionalWith(Schema.Array(AdapterDiagnosticBoundary), {
-    default: () => [],
-  }),
-  generatedAt: Schema.optional(Schema.String),
+  sourceRoots: Schema.Array(SourceRootBoundary),
+  sessions: Schema.Array(IngestSessionBoundary),
+  diagnostics: Schema.Array(AdapterDiagnosticBoundary),
+  generatedAt: Schema.String,
 });
 export type IngestBatchBoundary = typeof IngestBatchBoundary.Type;
 

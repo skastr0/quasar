@@ -85,9 +85,38 @@ const sanitizeBoundaryBatch = (
 ): IngestBatchBoundaryValue =>
   decodeBoundarySync(
     IngestBatchBoundary,
-    toConvexSafeSessionIntelligenceBatch(batch as unknown as CoreIngestBatch),
+    restoreIngestControlMetadata(
+      batch,
+      toConvexSafeSessionIntelligenceBatch(batch as unknown as CoreIngestBatch),
+    ),
     `sanitized ${label}`,
   );
+
+const restoreIngestControlMetadata = (
+  original: IngestBatchBoundaryValue,
+  sanitized: CoreIngestBatch,
+): IngestBatchBoundaryValue => ({
+  ...sanitized,
+  sessions: sanitized.sessions.map((session, index) => {
+    const control = original.sessions[index];
+    return {
+      ...session,
+      ...(control?.expectedEventIds !== undefined ? { expectedEventIds: control.expectedEventIds } : {}),
+      ...(control?.expectedToolCallIds !== undefined ? { expectedToolCallIds: control.expectedToolCallIds } : {}),
+      ...(control?.expectedContentBlockIds !== undefined
+        ? { expectedContentBlockIds: control.expectedContentBlockIds }
+        : {}),
+      ...(control?.expectedSessionEdgeIds !== undefined
+        ? { expectedSessionEdgeIds: control.expectedSessionEdgeIds }
+        : {}),
+      ...(control?.expectedUsageRecordIds !== undefined
+        ? { expectedUsageRecordIds: control.expectedUsageRecordIds }
+        : {}),
+      ...(control?.expectedArtifactIds !== undefined ? { expectedArtifactIds: control.expectedArtifactIds } : {}),
+      ...(control?.partialSession !== undefined ? { partialSession: control.partialSession } : {}),
+    };
+  }),
+});
 
 export const startImportJobHandler = async (
   ctx: MutationCtx,

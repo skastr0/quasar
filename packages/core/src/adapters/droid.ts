@@ -85,7 +85,6 @@ const artifactFromRecord = (
       ...(path !== undefined ? { path } : {}),
       sourcePath,
       sourceRef: { eventId, index },
-      raw: record as NativeValue,
     },
   ];
 };
@@ -135,10 +134,9 @@ const buildDroidSession = (
       role: roleFromRecord(record),
       kind: kindFromRecord(record),
       contentText: compactText(content),
-      content,
+      contentSource: content,
       ...(toolCall !== undefined ? { toolCallId: toolCall.id } : {}),
       rawReference: { sourcePath: path, line: index + 1, nativeType: String(record.type ?? "jsonrpc") },
-      raw: value,
     };
   });
   return buildSession({
@@ -150,7 +148,6 @@ const buildDroidSession = (
     sourceRoot: root,
     sourcePath: path,
     projectPath: projectPathFromRecords(records),
-    rawMetadata: { sourcePath: path },
     events,
     toolCalls: [...toolCallsById.values()],
     usageRecords,

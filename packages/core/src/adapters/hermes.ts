@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, join } from "node:path";
 
 import type { Artifact, NormalizedSession, SessionEdge, SessionEventKind, ToolCall, UsageRecord } from "../schemas";
 import {
@@ -13,7 +13,6 @@ import {
   homePath,
   numberValue,
   parseJsonString,
-  readJsonFile,
   recordFrom,
   roleFrom,
   scopedId,
@@ -98,14 +97,6 @@ const hermesDbPath = (root: string | undefined) => {
   }
 };
 
-const hermesHomeFromRoot = (root: string) => {
-  try {
-    return statSync(root).isFile() ? dirname(root) : root;
-  } catch {
-    return root;
-  }
-};
-
 const readSessionRows = (db: HermesDatabase, limit: number | undefined) =>
   db.query("select * from sessions order by started_at desc limit ?").all(limit ?? 500) as HermesSessionRow[];
 
@@ -137,8 +128,6 @@ const parsedJsonField = (value: unknown): NativeValue | undefined => {
   if (parsed === undefined || parsed === null || parsed === "") return undefined;
   return parsed as NativeValue;
 };
-
-const parsedModelConfig = (session: HermesSessionRow) => parsedJsonField(session.model_config);
 
 const parsedReasoningFields = (message: HermesMessageRow) => ({
   reasoningDetails: parsedJsonField(message.reasoning_details),
@@ -266,11 +255,6 @@ const messageUsage = (
     model: stringValue(session.model),
     modelProvider: stringValue(session.billing_provider),
     totalTokens,
-    raw: {
-      table: "messages",
-      rowId: String(message.id ?? index),
-      token_count: totalTokens,
-    },
   };
 };
 
@@ -307,7 +291,6 @@ const sessionUsage = (
     totalTokens,
     cost,
     currency: cost === undefined ? undefined : "USD",
-    raw: session as NativeValue,
   };
 };
 
@@ -318,48 +301,12 @@ const sumNumbers = (values: readonly (number | undefined)[]) => {
     : present.reduce((sum, value) => sum + value, 0);
 };
 
-const routingEntriesBySession = (root: string) => {
-  const indexPath = join(hermesHomeFromRoot(root), "sessions", "sessions.json");
-  const index = readJsonFile(indexPath);
-  const entries = new Map<string, NativeValue[]>();
-  const push = (sessionId: string, entry: NativeValue) => {
-    const list = entries.get(sessionId) ?? [];
-    list.push(entry);
-    entries.set(sessionId, list);
-  };
-  const visit = (value: unknown, path: readonly string[]) => {
-    if (Array.isArray(value)) {
-      value.forEach((item, index) => visit(item, [...path, String(index)]));
-      return;
-    }
-    if (value === null || typeof value !== "object") {
-      if (typeof value === "string" && /session/i.test(path.at(-1) ?? "")) {
-        push(value, { key: path.join("."), session_id: value });
-      }
-      return;
-    }
-    const record = value as Record<string, unknown>;
-    const sessionId =
-      stringValue(record.session_id) ??
-      stringValue(record.sessionId) ??
-      stringValue(record.active_session_id) ??
-      stringValue(record.activeSessionId);
-    if (sessionId !== undefined) {
-      push(sessionId, { key: path.join("."), ...(record as Record<string, NativeValue | undefined>) });
-    }
-    for (const [key, child] of Object.entries(record)) visit(child, [...path, key]);
-  };
-  visit(index, []);
-  return entries;
-};
-
 const buildHermesSessionFromRows = (
   dbPath: string,
   root: string,
   options: AdapterOptions,
   session: HermesSessionRow,
   messages: readonly HermesMessageRow[],
-  routingIndex: ReadonlyMap<string, NativeValue[]>,
 ) => {
   const nativeSessionId = String(session.id ?? "");
   const machineId = options.machine.machineId;
@@ -395,7 +342,6 @@ const buildHermesSessionFromRows = (
         status: statusFromFinishReason(message.finish_reason),
         input: toolInputFromCall(call),
         startedAt: isoFromEpoch(message.timestamp),
-        raw: call as NativeValue,
       };
       toolCallsByNativeId.set(nativeToolId, toolCall);
       toolEventByNativeId.set(nativeToolId, eventId);
@@ -412,14 +358,12 @@ const buildHermesSessionFromRows = (
           eventId,
           toolName: stringValue(message.tool_name) ?? "hermes_tool",
           input: undefined,
-          raw: {},
         } satisfies HermesToolCallDraft);
       const completed = {
         ...resultToolCall,
         status: "completed",
         output: stringValue(message.content) ?? message.content,
         completedAt: isoFromEpoch(message.timestamp),
-        raw: { call: resultToolCall.raw, result: message } as NativeValue,
       };
       toolCallsByNativeId.set(resultNativeToolId, completed);
       eventToolCallId = completed.id;
@@ -445,11 +389,10 @@ const buildHermesSessionFromRows = (
       role: roleFrom(stringValue(message.role)),
       kind: messageKind(message, calls),
       contentText: compactText(content),
-      content,
+      contentSource: content,
       contentBlocks: messageBlocks(machineId, dbPath, eventId, message, calls),
       ...(eventToolCallId !== undefined ? { toolCallId: eventToolCallId } : {}),
       rawReference: { sourcePath: dbPath, table: "messages", rowId: nativeEventId, nativeType: "message" },
-      raw: message as NativeValue,
     };
   });
 
@@ -465,11 +408,6 @@ const buildHermesSessionFromRows = (
     sourceRoot: root,
     sourcePath: dbPath,
     projectPath: stringValue(session.cwd),
-    rawMetadata: {
-      ...session,
-      model_config: parsedModelConfig(session),
-      gateway_routing: routingIndex.get(nativeSessionId),
-    } as NativeValue,
     events,
     toolCalls: [...toolCallsByNativeId.values()],
     sessionEdges,
@@ -484,7 +422,6 @@ const readHermesWithBun = (
   root: string,
   options: AdapterOptions,
 ) => {
-  const routingIndex = routingEntriesBySession(root);
   return readSessionRows(db, options.limit).map((session) =>
     buildHermesSessionFromRows(
       dbPath,
@@ -492,7 +429,6 @@ const readHermesWithBun = (
       options,
       session,
       readMessageRows(db, String(session.id ?? "")),
-      routingIndex,
     ),
   );
 };
@@ -503,7 +439,6 @@ const readHermesWithCli = (
   root: string,
   options: AdapterOptions,
 ) => {
-  const routingIndex = routingEntriesBySession(root);
   return readSessionRowsCli(queryDbPath, options.limit).map((session) =>
     buildHermesSessionFromRows(
       sourceDbPath,
@@ -511,7 +446,6 @@ const readHermesWithCli = (
       options,
       session,
       readMessageRowsCli(queryDbPath, String(session.id ?? "")),
-      routingIndex,
     ),
   );
 };

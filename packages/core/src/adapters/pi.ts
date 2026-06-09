@@ -122,10 +122,9 @@ const buildPiSession = (
       role: roleFromRecord(record),
       kind: kindFromRecord(record),
       contentText: compactText(content),
-      content,
+      contentSource: content,
       ...(toolCall !== undefined ? { toolCallId: toolCall.id } : {}),
       rawReference: { sourcePath: path, nativeType: String(record.type ?? "event") },
-      raw: value,
     };
   });
   return buildSession({
@@ -137,7 +136,6 @@ const buildPiSession = (
     sourceRoot: root,
     sourcePath: path,
     projectPath: projectPathFromRecords(records),
-    rawMetadata: { sourcePath: path },
     events,
     toolCalls: [...toolCallsById.values()],
     sessionEdges,

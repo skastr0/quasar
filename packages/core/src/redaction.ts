@@ -49,36 +49,28 @@ export const sanitizeIngestBatchForTransport = (batch: IngestBatch): IngestBatch
   diagnostics: redactSensitive(batch.diagnostics) as IngestBatch["diagnostics"],
   sessions: batch.sessions.map((session) => ({
     ...session,
-    rawMetadata: redactSensitive(session.rawMetadata),
     events: session.events.map((event) => ({
       ...event,
       contentText:
         typeof event.contentText === "string"
           ? (redactSensitive(event.contentText) as string)
           : event.contentText,
-      content: redactSensitive(event.content),
       contentBlocks: redactSensitive(event.contentBlocks) as typeof event.contentBlocks,
-      raw: undefined,
     })),
     toolCalls: session.toolCalls.map((toolCall) => ({
       ...toolCall,
       input: redactSensitive(toolCall.input),
       output: redactSensitive(toolCall.output),
-      raw: undefined,
     })),
     sessionEdges: session.sessionEdges.map((edge) => ({
       ...edge,
       rawReference: redactSensitive(edge.rawReference),
       metadata: redactSensitive(edge.metadata),
     })),
-    usageRecords: session.usageRecords.map((usageRecord) => ({
-      ...usageRecord,
-      raw: undefined,
-    })),
+    usageRecords: session.usageRecords,
     artifacts: session.artifacts.map((artifact) => ({
       ...artifact,
       metadata: redactSensitive(artifact.metadata),
-      raw: undefined,
     })),
   })),
 });

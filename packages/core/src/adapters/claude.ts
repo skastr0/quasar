@@ -350,7 +350,7 @@ export const claudeAdapter: SessionAdapter = {
           ),
           kind: claudeKindFrom(type, blocks),
           contentText: compactText(content),
-          content,
+          contentSource: content,
           ...(toolCallId !== undefined ? { toolCallId } : {}),
           rawReference: { sourcePath: path, line: lineNumber, nativeType: type },
         };
@@ -364,14 +364,6 @@ export const claudeAdapter: SessionAdapter = {
         sourceRoot: projectsRoot,
         sourcePath: path,
         projectPath,
-        rawMetadata:
-          firstRecord === undefined
-            ? undefined
-            : {
-                ...(typeof firstRecord.cwd === "string" ? { cwd: firstRecord.cwd } : {}),
-                ...(typeof firstRecord.type === "string" ? { type: firstRecord.type } : {}),
-                ...(typeof firstRecord.uuid === "string" ? { uuid: firstRecord.uuid } : {}),
-              },
         events,
         toolCalls: [...toolCallsById.values()],
         sessionEdges: parentEdges,

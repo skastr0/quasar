@@ -368,7 +368,6 @@ const usageFromMessage = (
     cacheReadInputTokens: numberValue(cache.read),
     totalTokens,
     cost,
-    raw: { messageId, tokens, cost },
   };
 };
 
@@ -430,7 +429,7 @@ const eventFromMessage = (
       role,
       kind: parts.some((part) => toolNameFromPart(part) !== undefined) ? ("tool_call" as const) : ("message" as const),
       contentText: compactText(content as NativeValue),
-      content,
+      contentSource: content,
       rawReference: { sourcePath: dbPath, table: "message", rowId: message.id, nativeType: "message" },
     },
   };
@@ -502,7 +501,6 @@ const buildOpenCodeSessionFromRows = (
     sourceRoot: root,
     sourcePath: dbPath,
     projectPath: sessionRow.path ?? sessionRow.directory,
-    rawMetadata: sessionRow as unknown as NativeValue,
     events,
     toolCalls,
     sessionEdges,

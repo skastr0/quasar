@@ -1,6 +1,7 @@
 import { Effect, Schema } from "effect";
 
 import { stableWideHash } from "./hash";
+import { IngestBatch as IngestBatchSchema } from "./schemas";
 import type {
   Artifact,
   ContentBlock,
@@ -390,7 +391,9 @@ const sanitizeContentBlock = (block: ContentBlock): ContentBlock | undefined => 
   );
   const metadata = boundedValue(block.metadata, CONVEX_SAFE_INGEST_BUDGETS.metadataBytes);
   const next: ContentBlock = {
-    ...block,
+    id: block.id,
+    sequence: block.sequence,
+    kind: block.kind,
     path: path.value,
     uri: uri.value,
     mediaType: mediaType.value,
@@ -430,41 +433,97 @@ const fitContentBlockRecord = (block: ContentBlock): ContentBlock => {
 
 const sanitizeEvent = (event: SessionEvent): SessionEvent =>
   compactUndefined({
-    ...event,
+    id: event.id,
+    sessionId: event.sessionId,
+    nativeEventId: event.nativeEventId,
+    sequence: event.sequence,
+    timestamp: event.timestamp,
+    machineId: event.machineId,
+    provider: event.provider,
+    agentName: event.agentName,
+    projectIdentityKey: event.projectIdentityKey,
+    role: event.role,
+    kind: event.kind,
     contentText: boundedText(event.contentText, CONVEX_SAFE_INGEST_BUDGETS.contentTextBytes),
-    content: boundedValue(event.content, CONVEX_SAFE_INGEST_BUDGETS.metadataBytes),
     contentBlocks: event.contentBlocks.flatMap((block) => {
       const next = sanitizeContentBlock(block);
       return next === undefined ? [] : [next];
     }),
-    raw: undefined,
+    toolCallId: event.toolCallId,
+    parentEventId: event.parentEventId,
+    rawReference: event.rawReference,
   });
 
 const sanitizeToolCall = (toolCall: ToolCall): ToolCall =>
   compactUndefined({
-    ...toolCall,
+    id: toolCall.id,
+    sessionId: toolCall.sessionId,
+    eventId: toolCall.eventId,
+    machineId: toolCall.machineId,
+    provider: toolCall.provider,
+    agentName: toolCall.agentName,
+    projectIdentityKey: toolCall.projectIdentityKey,
+    toolName: toolCall.toolName,
+    status: toolCall.status,
     input: boundedValue(toolCall.input, CONVEX_SAFE_INGEST_BUDGETS.toolInputBytes),
     output: boundedValue(toolCall.output, CONVEX_SAFE_INGEST_BUDGETS.toolOutputBytes),
-    raw: undefined,
+    startedAt: toolCall.startedAt,
+    completedAt: toolCall.completedAt,
   });
 
 const sanitizeUsageRecord = (usageRecord: UsageRecord): UsageRecord =>
   compactUndefined({
-    ...usageRecord,
-    raw: undefined,
+    id: usageRecord.id,
+    sessionId: usageRecord.sessionId,
+    eventId: usageRecord.eventId,
+    machineId: usageRecord.machineId,
+    provider: usageRecord.provider,
+    agentName: usageRecord.agentName,
+    projectIdentityKey: usageRecord.projectIdentityKey,
+    timestamp: usageRecord.timestamp,
+    model: usageRecord.model,
+    modelProvider: usageRecord.modelProvider,
+    inputTokens: usageRecord.inputTokens,
+    outputTokens: usageRecord.outputTokens,
+    reasoningTokens: usageRecord.reasoningTokens,
+    cacheCreationInputTokens: usageRecord.cacheCreationInputTokens,
+    cacheReadInputTokens: usageRecord.cacheReadInputTokens,
+    totalTokens: usageRecord.totalTokens,
+    cost: usageRecord.cost,
+    currency: usageRecord.currency,
   });
 
 const sanitizeArtifact = (artifact: Artifact): Artifact =>
   compactUndefined({
-    ...artifact,
+    id: artifact.id,
+    sessionId: artifact.sessionId,
+    eventId: artifact.eventId,
+    machineId: artifact.machineId,
+    provider: artifact.provider,
+    agentName: artifact.agentName,
+    projectIdentityKey: artifact.projectIdentityKey,
+    kind: artifact.kind,
+    path: artifact.path,
+    uri: artifact.uri,
+    contentHash: artifact.contentHash,
+    sourcePath: artifact.sourcePath,
     sourceRef: boundedValue(artifact.sourceRef, CONVEX_SAFE_INGEST_BUDGETS.metadataBytes),
     metadata: boundedValue(artifact.metadata, CONVEX_SAFE_INGEST_BUDGETS.metadataBytes),
-    raw: undefined,
   });
 
 const sanitizeEdge = (edge: SessionEdge): SessionEdge =>
   compactUndefined({
-    ...edge,
+    id: edge.id,
+    sessionId: edge.sessionId,
+    machineId: edge.machineId,
+    provider: edge.provider,
+    agentName: edge.agentName,
+    projectIdentityKey: edge.projectIdentityKey,
+    kind: edge.kind,
+    fromEventId: edge.fromEventId,
+    toEventId: edge.toEventId,
+    fromId: edge.fromId,
+    toId: edge.toId,
     rawReference: boundedValue(edge.rawReference, CONVEX_SAFE_INGEST_BUDGETS.metadataBytes),
     metadata: boundedValue(edge.metadata, CONVEX_SAFE_INGEST_BUDGETS.metadataBytes),
   });
@@ -476,8 +535,18 @@ export const sanitizeSessionIntelligenceSession = (
   session: NormalizedSession,
 ): NormalizedSession =>
   compactUndefined({
-    ...session,
-    rawMetadata: boundedValue(session.rawMetadata, CONVEX_SAFE_INGEST_BUDGETS.metadataBytes),
+    id: session.id,
+    nativeSessionId: session.nativeSessionId,
+    provider: session.provider,
+    agentName: session.agentName,
+    machineId: session.machineId,
+    projectIdentity: session.projectIdentity,
+    nativeProjectKey: session.nativeProjectKey,
+    title: session.title,
+    startedAt: session.startedAt,
+    updatedAt: session.updatedAt,
+    sourceRoot: session.sourceRoot,
+    sourcePath: session.sourcePath,
     events: session.events.map(sanitizeEvent),
     toolCalls: session.toolCalls.map(sanitizeToolCall),
     sessionEdges: session.sessionEdges.map(sanitizeEdge),
@@ -561,5 +630,11 @@ export const assertConvexSafeSessionIntelligenceBatch = (
 export const assertConvexSafeSessionIntelligenceBatchEffect = (batch: IngestBatch) =>
   Effect.sync(() => assertConvexSafeSessionIntelligenceBatch(batch));
 
-export const toConvexSafeSessionIntelligenceBatch = (batch: IngestBatch): IngestBatch =>
-  assertConvexSafeSessionIntelligenceBatch(sanitizeSessionIntelligenceBatch(batch));
+const decodeIngestBatch = (value: unknown): IngestBatch =>
+  Schema.decodeUnknownSync(IngestBatchSchema)(value);
+
+export const toConvexSafeSessionIntelligenceBatch = (batch: IngestBatch): IngestBatch => {
+  const decoded = decodeIngestBatch(batch);
+  const sanitized = sanitizeSessionIntelligenceBatch(decoded);
+  return assertConvexSafeSessionIntelligenceBatch(decodeIngestBatch(sanitized));
+};
