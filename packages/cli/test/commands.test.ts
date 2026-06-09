@@ -9,6 +9,7 @@ import { describe, expect, test } from "vitest";
 
 import {
   buildIngestBatch,
+  CONVEX_SAFE_INGEST_BUDGETS,
   jsonByteLength,
   sanitizeIngestBatchForTransport,
   streamIngestBatches,
@@ -23,6 +24,7 @@ import {
   ingestBatchPayloadHash,
   ingestChunkIdempotencyKey,
   runIngestEffect,
+  sanitizeInspectionBatch,
   sanitizeUploadChunk,
 } from "../src/commands/ingest";
 
@@ -223,6 +225,44 @@ describe("CLI command graph", () => {
     expect(secondSession.events).toHaveLength(5);
     expect(secondSession.eventCount).toBe(55);
     expect(secondSession.expectedEventIds).toHaveLength(55);
+  }, 20_000);
+
+  test("sanitizes validate and dry-run batches through the Convex row contract", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-cli-pi-"));
+    writePiFixture(root, 1);
+    const hugeHostname = "cli-host-trash-".repeat(2_000);
+    const hugeRoot = `/Users/a/${"cli-source-root-trash/".repeat(2_000)}`;
+
+    const batch = await buildIngestBatch({
+      providers: ["pi"],
+      roots: { pi: root },
+      machine: {
+        machineId: "machine:test",
+        hostname: hugeHostname,
+        platform: "test",
+      },
+    });
+    const inspected = sanitizeInspectionBatch({
+      ...batch,
+      sourceRoots: [
+        {
+          provider: "pi",
+          adapterId: "pi:test",
+          rootPath: hugeRoot,
+          machineId: "machine:test",
+          discoveredAt: "2026-06-09T00:00:00.000Z",
+        },
+      ],
+    });
+
+    expect(jsonByteLength(inspected.machine)).toBeLessThanOrEqual(
+      CONVEX_SAFE_INGEST_BUDGETS.machineRecordBytes,
+    );
+    expect(jsonByteLength(inspected.sourceRoots[0])).toBeLessThanOrEqual(
+      CONVEX_SAFE_INGEST_BUDGETS.sourceRootRecordBytes,
+    );
+    expect(inspected.machine.hostname?.length).toBeLessThan(hugeHostname.length);
+    expect(inspected.sourceRoots[0]?.rootPath.length).toBeLessThan(hugeRoot.length);
   }, 20_000);
 
   test("hashes upload chunks after stable Convex-boundary sanitization", async () => {
