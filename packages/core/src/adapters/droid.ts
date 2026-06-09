@@ -4,6 +4,7 @@ import { basename } from "node:path";
 import type { SessionAdapter } from "./types";
 import type { Artifact, ToolCall, UsageRecord } from "../schemas";
 import {
+  bestEffortEventRecordLike,
   bestEffortToolCall,
   contentFromRecord,
   kindFromRecord,
@@ -20,6 +21,7 @@ import {
   eventIdFor,
   homePath,
   nativeSessionIdFromPath,
+  projectSessionNativeValue,
   readJsonFile,
   readJsonLines,
   recordFrom,
@@ -56,14 +58,17 @@ const captureLike = (path: string) => {
 };
 
 const recordsFromFile = (path: string) => {
-  if (path.endsWith(".jsonl") || path.endsWith(".jsonrpc")) return readJsonLines(path).map((line) => line.value);
-  const value = readJsonFile(path);
-  if (Array.isArray(value)) return value;
-  const record = recordFrom(value);
-  for (const key of ["events", "messages", "stream", "result"]) {
-    if (Array.isArray(record[key])) return record[key] as unknown[];
-  }
-  return Object.keys(record).length === 0 ? [] : [record];
+  const raw = (() => {
+    if (path.endsWith(".jsonl") || path.endsWith(".jsonrpc")) return readJsonLines(path).map((line) => line.value);
+    const value = readJsonFile(path);
+    if (Array.isArray(value)) return value;
+    const record = recordFrom(value);
+    for (const key of ["events", "messages", "stream", "result"]) {
+      if (Array.isArray(record[key])) return record[key] as unknown[];
+    }
+    return Object.keys(record).length === 0 ? [] : [record];
+  })();
+  return raw.map(recordFrom).filter(bestEffortEventRecordLike);
 };
 
 const artifactFromRecord = (
@@ -76,7 +81,8 @@ const artifactFromRecord = (
 ): DroidArtifactDraft[] => {
   const type = String(record.type ?? record.kind ?? "").toLowerCase();
   const path = typeof record.path === "string" ? record.path : typeof record.filePath === "string" ? record.filePath : undefined;
-  if (!type.includes("artifact") && !type.includes("diff") && !type.includes("patch") && path === undefined) return [];
+  if (!type.includes("artifact") && !type.includes("diff") && !type.includes("patch")) return [];
+  const metadata = projectSessionNativeValue(record.content ?? record.patch ?? record.diff);
   return [
     {
       id: artifactIdFor("droid", machineId, sourcePath, nativeSessionId, [eventId, index, type, path]),
@@ -85,6 +91,7 @@ const artifactFromRecord = (
       ...(path !== undefined ? { path } : {}),
       sourcePath,
       sourceRef: { eventId, index },
+      ...(metadata !== undefined ? { metadata } : {}),
     },
   ];
 };

@@ -4,6 +4,7 @@ import { basename, dirname, join } from "node:path";
 import type { SessionAdapter } from "./types";
 import type { Artifact, ToolCall, UsageRecord } from "../schemas";
 import {
+  bestEffortEventRecordLike,
   bestEffortToolCall,
   contentFromRecord,
   kindFromRecord,
@@ -41,10 +42,10 @@ type AntigravityArtifactDraft = Omit<
 
 const transcriptLike = (path: string) => {
   const name = basename(path).toLowerCase();
+  if (name.includes("hook") || /[\\/](hooks?|callbacks?)([\\/]|$)/i.test(path)) return false;
   return (
     name.endsWith(".jsonl") &&
     (name.includes("transcript") ||
-      name.includes("hook") ||
       name === "events.jsonl" ||
       name === "history.jsonl")
   );
@@ -71,7 +72,9 @@ const buildAntigravitySession = (
   root: string,
   options: Parameters<SessionAdapter["read"]>[0],
 ) => {
-  const lines = readJsonLines(path);
+  const lines = readJsonLines(path).filter(({ value }) =>
+    bestEffortEventRecordLike(recordFrom(value)),
+  );
   const nativeSessionId = nativeSessionIdFromPath(path);
   const toolCallsById = new Map<string, AntigravityToolCallDraft>();
   const usageRecords: AntigravityUsageDraft[] = [];
@@ -171,9 +174,13 @@ export const antigravityAdapter: SessionAdapter = {
       };
     }
     const files = statSync(root).isFile()
-      ? [root]
+      ? (transcriptLike(root) ? [root] : [])
       : collectFiles(root, transcriptLike, options.limit, options.skip);
-    const sessions = files.flatMap((path) => (readJsonLines(path).length === 0 ? [] : [buildAntigravitySession(path, root, options)]));
+    const sessions = files.flatMap((path) =>
+      readJsonLines(path).some(({ value }) => bestEffortEventRecordLike(recordFrom(value)))
+        ? [buildAntigravitySession(path, root, options)]
+        : [],
+    );
     return {
       sourceRoots: [sourceRoot("antigravity", antigravityAdapter.id, root, options.machine, options.now)],
       sessions,

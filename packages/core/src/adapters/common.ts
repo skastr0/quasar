@@ -318,6 +318,10 @@ export const contentBlocksFromNative = (
     ...(typeof record.toolName === "string" ? { toolName: record.toolName } : {}),
     ...(typeof record.callID === "string" ? { callId: record.callID } : {}),
     ...(typeof record.call_id === "string" ? { callId: record.call_id } : {}),
+    ...(record.patch !== undefined ? { patch: record.patch } : {}),
+    ...(record.diff !== undefined ? { diff: record.diff } : {}),
+    ...(record.patches !== undefined ? { patches: record.patches } : {}),
+    ...(record.diffs !== undefined ? { diffs: record.diffs } : {}),
   });
   const pushMediaOrFile = (record: Record<string, unknown>, type: string | undefined) => {
     const lowerType = type?.toLowerCase();

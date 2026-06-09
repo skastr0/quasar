@@ -40,6 +40,7 @@ import {
   stableWideHash,
   stableAdapters,
   streamIngestBatches,
+  toConvexSafeSessionIntelligenceBatch,
   type IngestBatch,
   type IngestManifest,
   type MachineIdentity,
@@ -128,7 +129,7 @@ const cleanupSourceSnapshot = (prepared: PreparedSourceSnapshot) =>
 
 const INGEST_GENERATION_SCHEMA_VERSION = "quasar.ingest-generation/v1";
 const INGEST_GENERATION_IDENTITY_VERSION = "quasar.ingest-generation-identity/v3";
-const STREAM_INGEST_UPLOAD_IDENTITY_VERSION = "quasar.stream-ingest/v3";
+const STREAM_INGEST_UPLOAD_IDENTITY_VERSION = "quasar.stream-ingest/v4";
 const DURABLE_SNAPSHOT_PROVIDERS = new Set<Provider>([
   "codex",
   "claude",
@@ -1253,7 +1254,7 @@ const planStreamedIngest = (
         for (const entry of snapshotIngestSourceManifest(batch)) {
           sourceBefore.set(sourceManifestKey(entry), entry);
         }
-        const chunks = chunkIngestBatch(batch, chunkOptions);
+        const chunks = chunkIngestBatch(batch, chunkOptions).map(sanitizeUploadChunk);
         validateChunkPayloads(chunks);
         for (const chunk of chunks) {
           chunkPayloadHashes.push(ingestBatchPayloadHash(chunk));
@@ -1451,7 +1452,7 @@ async function* streamChunkBatches(
 ): AsyncGenerator<IngestBatch> {
   for await (const batch of streamIngestBatches(streamOptions)) {
     for (const chunk of chunkIngestBatch(batch, chunkOptions)) {
-      yield chunk;
+      yield sanitizeUploadChunk(chunk);
     }
   }
 }
@@ -1641,6 +1642,51 @@ export const chunkIngestBatch = (
     }
   }
   return chunks.length === 0 ? [{ ...batch, sessions: [] }] : chunks;
+};
+
+const MAX_UPLOAD_SANITIZE_PASSES = 4;
+
+export const sanitizeUploadChunk = (chunk: IngestBatch): IngestBatch => {
+  let current = sanitizeUploadChunkOnce(chunk);
+  for (let pass = 1; pass < MAX_UPLOAD_SANITIZE_PASSES; pass += 1) {
+    const next = sanitizeUploadChunkOnce(current);
+    if (ingestBatchPayloadHash(next) === ingestBatchPayloadHash(current)) return current;
+    current = next;
+  }
+  return current;
+};
+
+const sanitizeUploadChunkOnce = (chunk: IngestBatch): IngestBatch => {
+  const sanitized = toConvexSafeSessionIntelligenceBatch(chunk);
+  return {
+    ...sanitized,
+    sessions: sanitized.sessions.map((session, index) => {
+      const control = chunk.sessions[index] as
+        | (NormalizedSession & SessionUploadControlMetadata)
+        | undefined;
+      return {
+        ...session,
+        ...(control?.expectedEventIds !== undefined ? { expectedEventIds: control.expectedEventIds } : {}),
+        ...(control?.expectedToolCallIds !== undefined
+          ? { expectedToolCallIds: control.expectedToolCallIds }
+          : {}),
+        ...(control?.expectedContentBlockIds !== undefined
+          ? { expectedContentBlockIds: control.expectedContentBlockIds }
+          : {}),
+        ...(control?.expectedSessionEdgeIds !== undefined
+          ? { expectedSessionEdgeIds: control.expectedSessionEdgeIds }
+          : {}),
+        ...(control?.expectedUsageRecordIds !== undefined
+          ? { expectedUsageRecordIds: control.expectedUsageRecordIds }
+          : {}),
+        ...(control?.expectedArtifactIds !== undefined
+          ? { expectedArtifactIds: control.expectedArtifactIds }
+          : {}),
+        ...(control?.partialSession !== undefined ? { partialSession: control.partialSession } : {}),
+        ...(control?.deferCleanup !== undefined ? { deferCleanup: control.deferCleanup } : {}),
+      } as NormalizedSession;
+    }),
+  };
 };
 
 const normalizeChunkOptions = (
@@ -1833,6 +1879,11 @@ type SessionCleanupMetadata = {
   readonly expectedSessionEdgeIds?: readonly string[];
   readonly expectedUsageRecordIds?: readonly string[];
   readonly expectedArtifactIds?: readonly string[];
+};
+
+type SessionUploadControlMetadata = SessionCleanupMetadata & {
+  readonly partialSession?: boolean;
+  readonly deferCleanup?: boolean;
 };
 
 const inspectCommand = Command.make("inspect", {}, () =>

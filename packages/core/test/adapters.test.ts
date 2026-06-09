@@ -656,6 +656,201 @@ describe("adapter ingestion", () => {
     expect(encoded).not.toContain("hermes-huge-reasoning-trash");
   });
 
+  test("rejects Pi provider state files while preserving explicit event and tool patches", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-pi-trash-"));
+    writeFileSync(
+      join(root, "state.json"),
+      JSON.stringify({
+        providerUi: "pi-state-provider-trash",
+        summary: { diffs: ["pi-state-summary-diff-trash"] },
+      }),
+    );
+    writeFileSync(
+      join(root, "cache.json"),
+      JSON.stringify({ viewState: "pi-cache-view-trash" }),
+    );
+
+    const emptyBatch = await buildIngestBatch({
+      providers: ["pi"],
+      roots: { pi: root },
+      machine,
+    });
+    expect(emptyBatch.sessions).toHaveLength(0);
+
+    writeJsonl(join(root, "session.jsonl"), [
+      {
+        id: "p1",
+        role: "assistant",
+        content: {
+          text: "pi answer",
+          patch: "@@ real pi event patch",
+          providerUi: "pi-event-ui-trash",
+          summary: { diffs: ["pi-event-summary-diff-trash"] },
+        },
+      },
+      {
+        id: "p2",
+        role: "assistant",
+        content: "not a tool call",
+        total: 3,
+        cost: 1,
+        input: { patch: "pi-generic-input-trash" },
+        output: { patch: "pi-generic-output-trash", providerUi: "pi-generic-output-ui-trash" },
+      },
+      {
+        id: "p-state",
+        type: "state_delta",
+        providerUi: "pi-state-delta-provider-trash",
+      },
+      {
+        id: "p-usage",
+        type: "usage",
+        total: 3,
+      },
+      {
+        id: "p3",
+        type: "tool",
+        tool: "bash",
+        input: { command: "pwd", patch: "@@ real pi tool patch", providerUi: "pi-tool-ui-trash" },
+        output: { text: "/repo", patch: "@@ real pi tool output patch", providerUi: "pi-tool-output-ui-trash" },
+      },
+    ]);
+
+    const batch = await buildIngestBatch({
+      providers: ["pi"],
+      roots: { pi: root },
+      machine,
+    });
+    const encoded = JSON.stringify(batch);
+
+    assertAdapterContract(batch, "pi");
+    expect(batch.sessions).toHaveLength(1);
+    expect(batch.sessions[0]?.toolCalls).toHaveLength(1);
+    expect(batch.sessions[0]?.usageRecords).toHaveLength(1);
+    expect(batch.sessions[0]?.usageRecords[0]?.totalTokens).toBe(3);
+    expect(encoded).toContain("@@ real pi event patch");
+    expect(encoded).toContain("@@ real pi tool patch");
+    expect(encoded).toContain("@@ real pi tool output patch");
+    expect(encoded).not.toContain("pi-state-provider-trash");
+    expect(encoded).not.toContain("pi-state-summary-diff-trash");
+    expect(encoded).not.toContain("pi-cache-view-trash");
+    expect(encoded).not.toContain("pi-event-ui-trash");
+    expect(encoded).not.toContain("pi-event-summary-diff-trash");
+    expect(encoded).not.toContain("pi-generic-input-trash");
+    expect(encoded).not.toContain("pi-generic-output-trash");
+    expect(encoded).not.toContain("pi-generic-output-ui-trash");
+    expect(encoded).not.toContain("pi-state-delta-provider-trash");
+    expect(encoded).not.toContain("pi-tool-output-ui-trash");
+  });
+
+  test("does not promote Amp content arrays with output fields into tool calls", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-amp-content-"));
+    const threads = join(root, "threads");
+    mkdirSync(threads, { recursive: true });
+    writeFileSync(
+      join(threads, "T-content.json"),
+      JSON.stringify({
+        id: "T-content",
+        cwd: "/Users/a/Projects/quasar",
+        messages: [
+          {
+            id: "a1",
+            role: "assistant",
+            content: [
+              {
+                type: "text",
+                name: "renderPanel",
+                text: "amp answer",
+                output: { providerUi: "amp-content-output-trash" },
+                providerUi: "amp-content-ui-trash",
+              },
+            ],
+            toolCalls: [
+              {
+                type: "tool",
+                name: "bash",
+                input: { command: "pwd" },
+                output: "/repo",
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const batch = await buildIngestBatch({
+      providers: ["amp"],
+      roots: { amp: root },
+      machine,
+    });
+    const encoded = JSON.stringify(batch);
+
+    assertAdapterContract(batch, "amp");
+    expect(batch.sessions[0]?.toolCalls).toHaveLength(1);
+    expect(batch.sessions[0]?.toolCalls[0]?.toolName).toBe("bash");
+    expect(encoded).toContain("amp answer");
+    expect(encoded).not.toContain("amp-content-output-trash");
+    expect(encoded).not.toContain("amp-content-ui-trash");
+  });
+
+  test("only creates Droid artifacts for explicit artifact, patch, or diff records", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-droid-artifacts-"));
+    const captures = join(root, "captures");
+    mkdirSync(captures, { recursive: true });
+    writeJsonl(join(captures, "stream.jsonl"), [
+      {
+        id: "d1",
+        role: "assistant",
+        content: "ordinary message with a source path",
+        path: "/Users/a/Projects/quasar/src/index.ts",
+      },
+      {
+        id: "d2",
+        type: "diff",
+        path: "/Users/a/Projects/quasar/src/index.ts",
+        content: { patch: "@@ real droid patch", providerUi: "droid-diff-ui-trash" },
+      },
+    ]);
+
+    const batch = await buildIngestBatch({
+      providers: ["droid"],
+      roots: { droid: root },
+      machine,
+    });
+    const encoded = JSON.stringify(batch);
+
+    assertAdapterContract(batch, "droid");
+    expect(batch.sessions[0]?.artifacts).toHaveLength(1);
+    expect(batch.sessions[0]?.artifacts[0]?.kind).toBe("diff");
+    expect(encoded).toContain("@@ real droid patch");
+    expect(encoded).not.toContain("droid-diff-ui-trash");
+  });
+
+  test("skips Antigravity hook logs while ingesting transcript records", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-antigravity-hooks-"));
+    const sessionDir = join(root, "s1");
+    mkdirSync(sessionDir, { recursive: true });
+    writeJsonl(join(sessionDir, "hook.jsonl"), [
+      { id: "hook1", role: "user", content: "antigravity hook trash", providerUi: "antigravity-hook-ui-trash" },
+    ]);
+    writeJsonl(join(sessionDir, "transcript.jsonl"), [
+      { id: "ag1", role: "user", content: "real antigravity transcript", cwd: "/Users/a/Projects/quasar" },
+    ]);
+
+    const batch = await buildIngestBatch({
+      providers: ["antigravity"],
+      roots: { antigravity: root },
+      machine,
+    });
+    const encoded = JSON.stringify(batch);
+
+    assertAdapterContract(batch, "antigravity");
+    expect(batch.sessions).toHaveLength(1);
+    expect(encoded).toContain("real antigravity transcript");
+    expect(encoded).not.toContain("antigravity hook trash");
+    expect(encoded).not.toContain("antigravity-hook-ui-trash");
+  });
+
   test("flushes streamed sessions before later adapter failures", async () => {
     const originalStream = codexAdapter.stream;
     const adapter = codexAdapter as {

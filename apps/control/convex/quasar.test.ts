@@ -990,24 +990,40 @@ describe("quasar ingestion and search", () => {
     const searchText = compactSearchText({
       visible: "real session intelligence",
       providerCache: "provider cache trash",
+      providerUi: "provider ui trash",
+      summaryDiffs: ["flat summary diff trash"],
+      workspaceState: "flat workspace state trash",
       summary: {
         text: "human-readable summary",
         state: "summary state trash",
+        uiState: "summary ui state trash",
+        providerUi: "summary provider ui trash",
         providerState: "summary provider state trash",
         diffs: ["summary diff trash"],
       },
       workspace: {
         snapshot: "workspace snapshot trash",
+        cache: "workspace cache trash",
+        state: "workspace state trash",
+        providerUi: "workspace provider ui trash",
       },
     });
 
     expect(searchText).toContain("real session intelligence");
     expect(searchText).toContain("human-readable summary");
     expect(searchText).not.toContain("provider cache trash");
+    expect(searchText).not.toContain("provider ui trash");
+    expect(searchText).not.toContain("flat summary diff trash");
+    expect(searchText).not.toContain("flat workspace state trash");
     expect(searchText).not.toContain("summary state trash");
+    expect(searchText).not.toContain("summary ui state trash");
+    expect(searchText).not.toContain("summary provider ui trash");
     expect(searchText).not.toContain("summary provider state trash");
     expect(searchText).not.toContain("summary diff trash");
     expect(searchText).not.toContain("workspace snapshot trash");
+    expect(searchText).not.toContain("workspace cache trash");
+    expect(searchText).not.toContain("workspace state trash");
+    expect(searchText).not.toContain("workspace provider ui trash");
   });
 
   test("keeps tool diff and patch payloads in compacted search text", () => {

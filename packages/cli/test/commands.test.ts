@@ -23,6 +23,7 @@ import {
   ingestBatchPayloadHash,
   ingestChunkIdempotencyKey,
   runIngestEffect,
+  sanitizeUploadChunk,
 } from "../src/commands/ingest";
 
 const testDir = dirname(fileURLToPath(import.meta.url));
@@ -87,7 +88,7 @@ describe("CLI command graph", () => {
   test("runs source discovery with a session skip window", async () => {
     const root = mkdtempSync(join(tmpdir(), "quasar-cli-pi-"));
     for (const name of ["a", "b", "c"]) {
-      writeJsonl(join(root, `${name}.jsonl`), [
+      writeJsonl(join(root, `session-${name}.jsonl`), [
         {
           id: name,
           role: "user",
@@ -222,6 +223,49 @@ describe("CLI command graph", () => {
     expect(secondSession.events).toHaveLength(5);
     expect(secondSession.eventCount).toBe(55);
     expect(secondSession.expectedEventIds).toHaveLength(55);
+  }, 20_000);
+
+  test("hashes upload chunks after stable Convex-boundary sanitization", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-cli-pi-"));
+    writePiFixture(root, 1);
+
+    const batch = sanitizeIngestBatchForTransport(
+      await buildIngestBatch({
+        providers: ["pi"],
+        roots: { pi: root },
+        machine: testMachine,
+      }),
+    );
+    const [chunk] = chunkIngestBatch(batch);
+    expect(chunk).toBeDefined();
+    const omittedLargeText = JSON.stringify({
+      __quasarOmitted: { reason: "object_byte_budget", byteLength: 16_966 },
+      content: "already-omitted-upload-content".repeat(700),
+    });
+    const uploadChunk = {
+      ...chunk!,
+      sessions: chunk!.sessions.map((session) => ({
+        ...session,
+        events: session.events.map((event) => ({
+          ...event,
+          contentBlocks: [
+            {
+              id: `${event.id}:block:large`,
+              sequence: 0,
+              kind: "text" as const,
+              text: omittedLargeText,
+            },
+          ],
+        })),
+      })),
+    };
+
+    const sanitized = sanitizeUploadChunk(uploadChunk);
+    const sanitizedAgain = sanitizeUploadChunk(sanitized);
+
+    expect(ingestBatchPayloadHash(uploadChunk)).not.toBe(ingestBatchPayloadHash(sanitized));
+    expect(ingestBatchPayloadHash(sanitizedAgain)).toBe(ingestBatchPayloadHash(sanitized));
+    expect(JSON.stringify(sanitized)).toContain("__quasarOmitted");
   }, 20_000);
 
   test("chunks ingest sessions by graph operation budget", async () => {
@@ -715,7 +759,7 @@ describe("CLI command graph", () => {
         ...chunkIngestBatch(plannedBatch, {
           maxEventsPerChunk: 5,
           maxOperationsPerChunk: 120,
-        }).map(ingestBatchPayloadHash),
+        }).map(sanitizeUploadChunk).map(ingestBatchPayloadHash),
       );
     }
     const previousChunkDelay = process.env.QUASAR_INGEST_CHUNK_DELAY_MS;
@@ -933,7 +977,7 @@ describe("CLI command graph", () => {
     const plannedHashes = chunkIngestBatch(plannedBatch, {
       maxEventsPerChunk: 5,
       maxOperationsPerChunk: 120,
-    }).map(ingestBatchPayloadHash);
+    }).map(sanitizeUploadChunk).map(ingestBatchPayloadHash);
     const previousChunkDelay = process.env.QUASAR_INGEST_CHUNK_DELAY_MS;
     const previousMaxEvents = process.env.QUASAR_INGEST_MAX_EVENTS_PER_CHUNK;
     const previousUploadGroupSize = process.env.QUASAR_INGEST_UPLOAD_GROUP_SIZE;
@@ -1047,7 +1091,7 @@ describe("CLI command graph", () => {
     const plannedHashes = chunkIngestBatch(plannedBatch, {
       maxEventsPerChunk: 5,
       maxOperationsPerChunk: 120,
-    }).map(ingestBatchPayloadHash);
+    }).map(sanitizeUploadChunk).map(ingestBatchPayloadHash);
     const previousChunkDelay = process.env.QUASAR_INGEST_CHUNK_DELAY_MS;
     const previousMaxEvents = process.env.QUASAR_INGEST_MAX_EVENTS_PER_CHUNK;
     const previousUploadGroupSize = process.env.QUASAR_INGEST_UPLOAD_GROUP_SIZE;
