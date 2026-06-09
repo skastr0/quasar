@@ -50,7 +50,6 @@ const buildAmpSessionFromRecords = (
   nativeProjectKey: string | undefined,
   title: string | undefined,
   records: readonly unknown[],
-  rawMetadata: NativeValue | undefined,
 ) => {
   const toolCallsById = new Map<string, AmpToolCallDraft>();
   const usageRecords: AmpUsageDraft[] = [];
@@ -119,10 +118,9 @@ const buildAmpSessionFromRecords = (
       role: roleFromRecord(record),
       kind: kindFromRecord(record),
       contentText: compactText(content),
-      content,
+      contentSource: content,
       ...(toolCall !== undefined ? { toolCallId: toolCall.id } : {}),
       rawReference: { sourcePath, nativeType: String(record.type ?? "message") },
-      raw: value,
     };
   });
   return buildSession({
@@ -135,7 +133,6 @@ const buildAmpSessionFromRecords = (
     sourceRoot: sourceRootPath,
     sourcePath,
     projectPath: nativeProjectKey,
-    rawMetadata,
     events,
     toolCalls: [...toolCallsById.values()],
     sessionEdges,
@@ -200,7 +197,6 @@ export const ampAdapter: SessionAdapter = {
           typeof thread.cwd === "string" ? thread.cwd : undefined,
           typeof thread.title === "string" ? thread.title : undefined,
           messages,
-          thread as NativeValue,
         ),
       ];
     });
@@ -219,7 +215,6 @@ export const ampAdapter: SessionAdapter = {
               undefined,
               "Amp history",
               historyLines.map((line) => line.value),
-              { source: "history.jsonl" },
             ),
           ];
     const sessions = [...threadSessions, ...historySession];

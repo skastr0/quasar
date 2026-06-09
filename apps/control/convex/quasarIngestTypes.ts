@@ -45,7 +45,6 @@ export type SessionPatch = {
   updatedAtNative?: string;
   sourceRoot: string;
   sourcePath: string;
-  rawMetadata: unknown;
   eventCount: number;
   toolCallCount: number;
   importRunId: string;
@@ -69,12 +68,10 @@ export type EventPatch = {
   role: SessionRoleSchema;
   kind: SessionEventKindSchema;
   contentText?: string;
-  content: unknown;
   contentBlocks?: unknown[];
   toolCallId?: string;
   parentEventId?: string;
   rawReference: unknown;
-  raw: undefined;
   importRunId: string;
   importJobId?: string;
   importChunkId?: string;

@@ -128,7 +128,6 @@ const upsertCodexToolCall = (
   eventId: string,
   timestamp: string | undefined,
   payload: CodexRecord,
-  raw: NativeValue | undefined,
 ) => {
   const payloadType = payloadTypeFrom(payload);
   const callId = callIdFromPayload(payload);
@@ -150,7 +149,6 @@ const upsertCodexToolCall = (
       ...(existing?.output !== undefined ? { output: existing.output } : {}),
       ...(timestamp !== undefined ? { startedAt: timestamp } : {}),
       ...(existing?.completedAt !== undefined ? { completedAt: existing.completedAt } : {}),
-      ...(raw !== undefined ? { raw } : {}),
     });
     return id;
   }
@@ -165,7 +163,6 @@ const upsertCodexToolCall = (
       output: payload.output,
       ...(existing?.startedAt !== undefined ? { startedAt: existing.startedAt } : {}),
       ...(timestamp !== undefined ? { completedAt: timestamp } : {}),
-      ...(raw !== undefined ? { raw } : {}),
     });
     return id;
   }
@@ -180,7 +177,6 @@ const codexUsageRecord = (
   sequence: number,
   timestamp: string | undefined,
   payload: CodexRecord,
-  raw: NativeValue | undefined,
 ): CodexUsageDraft | undefined => {
   if (payloadTypeFrom(payload) !== "token_count") return undefined;
   const info = recordFrom(payload.info);
@@ -235,7 +231,6 @@ const codexUsageRecord = (
     cacheCreationInputTokens,
     cacheReadInputTokens,
     totalTokens,
-    ...(raw !== undefined ? { raw } : {}),
   };
 };
 
@@ -327,7 +322,6 @@ export const codexAdapter: SessionAdapter = {
           eventId,
           timestamp,
           payloadRecord,
-          payloadValue as NativeValue | undefined,
         );
         const usageRecord = codexUsageRecord(
           options.machine.machineId,
@@ -337,7 +331,6 @@ export const codexAdapter: SessionAdapter = {
           index,
           timestamp,
           payloadRecord,
-          payloadValue as NativeValue | undefined,
         );
         if (usageRecord !== undefined) usageRecords.push(usageRecord);
         return {
@@ -348,14 +341,13 @@ export const codexAdapter: SessionAdapter = {
           role,
           kind,
           contentText: compactText(payloadValue as NativeValue | undefined),
-          content: payloadValue,
+          contentSource: payloadValue as NativeValue | undefined,
           ...(toolCallId !== undefined ? { toolCallId } : {}),
           rawReference: {
             sourcePath: path,
             line: lineNumber,
             nativeType: codexNativeType(nativeType, payloadType),
           },
-          raw: value,
         };
       });
 
@@ -368,7 +360,6 @@ export const codexAdapter: SessionAdapter = {
         sourceRoot: sessionsRoot,
         sourcePath: path,
         projectPath,
-        rawMetadata: sessionMeta as NativeValue | undefined,
         events,
         toolCalls: [...toolCallsById.values()],
         usageRecords,

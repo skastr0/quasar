@@ -141,7 +141,6 @@ export const UsageRecord = Schema.Struct({
   totalTokens: Schema.optional(Schema.Number),
   cost: Schema.optional(Schema.Number),
   currency: Schema.optional(Schema.String),
-  raw: Schema.optional(Schema.Unknown),
 });
 export type UsageRecord = typeof UsageRecord.Type;
 
@@ -160,7 +159,6 @@ export const Artifact = Schema.Struct({
   sourcePath: Schema.optional(Schema.String),
   sourceRef: Schema.optional(Schema.Unknown),
   metadata: Schema.optional(Schema.Unknown),
-  raw: Schema.optional(Schema.Unknown),
 });
 export type Artifact = typeof Artifact.Type;
 
@@ -230,7 +228,6 @@ export const ToolCall = Schema.Struct({
   output: Schema.optional(Schema.Unknown),
   startedAt: Schema.optional(Schema.String),
   completedAt: Schema.optional(Schema.String),
-  raw: Schema.optional(Schema.Unknown),
 });
 export type ToolCall = typeof ToolCall.Type;
 
@@ -247,12 +244,10 @@ export const SessionEvent = Schema.Struct({
   role: SessionRole,
   kind: SessionEventKind,
   contentText: Schema.optional(Schema.String),
-  content: Schema.optional(Schema.Unknown),
   contentBlocks: Schema.Array(ContentBlock),
   toolCallId: Schema.optional(Schema.String),
   parentEventId: Schema.optional(Schema.String),
   rawReference: RawReference,
-  raw: Schema.optional(Schema.Unknown),
 });
 export type SessionEvent = typeof SessionEvent.Type;
 
@@ -269,7 +264,6 @@ export const NormalizedSession = Schema.Struct({
   updatedAt: Schema.optional(Schema.String),
   sourceRoot: Schema.String,
   sourcePath: Schema.String,
-  rawMetadata: Schema.optional(Schema.Unknown),
   events: Schema.Array(SessionEvent),
   toolCalls: Schema.Array(ToolCall),
   sessionEdges: Schema.Array(SessionEdge),

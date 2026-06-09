@@ -1,9 +1,8 @@
 export const extractToolName = (event: {
-  readonly content?: unknown;
-  readonly raw?: unknown;
+  readonly contentText?: unknown;
   readonly kind: string;
 }) => {
-  const candidates = [event.content, event.raw];
+  const candidates = [parseContentTextRecord(event.contentText)];
   for (const candidate of candidates) {
     const name = toolNameFromRecord(candidate);
     if (name !== undefined) return name;
@@ -39,8 +38,7 @@ export const normalizeToolCallId = (
   }
   const toolName = extractToolName({
     kind: String(event.kind ?? ""),
-    content: event.content,
-    raw: event.raw,
+    contentText: event.contentText,
   });
   if (event.kind === "tool_result") {
     return lastToolCallByName.get(toolName) ?? `tool:${sessionId}:${toolName}`;
@@ -52,3 +50,12 @@ export const normalizeToolCallId = (
 
 export const isToolEventKind = (kind: string) =>
   kind === "tool_call" || kind === "tool_result";
+
+const parseContentTextRecord = (value: unknown) => {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return value;
+  }
+};

@@ -27,17 +27,16 @@ const upsertSessionEvent = async (
 ) => {
   const eventId = event.id;
   const kindValue = event.kind;
-  const safeContent = redactSensitive(event.content);
   const normalizedToolCallId = isToolEventKind(kindValue)
     ? normalizeToolCallId(state.sessionId, event, eventId, state.lastToolCallByName)
     : undefined;
   if (normalizedToolCallId !== undefined) state.keepToolCallIds.add(normalizedToolCallId);
 
-  const eventPatch = buildEventPatch(state, event, eventId, safeContent, normalizedToolCallId);
+  const eventPatch = buildEventPatch(state, event, eventId, normalizedToolCallId);
   await writeSessionEvent(ctx, state, eventPatch);
-  await upsertSearchDocument(ctx, eventSearchDocument(state, event, eventPatch, safeContent));
+  await upsertSearchDocument(ctx, eventSearchDocument(state, event, eventPatch));
   if (isToolEventKind(String(eventPatch.kind))) {
-    await upsertToolCallFromEvent(ctx, state, event, eventPatch, safeContent);
+    await upsertToolCallFromEvent(ctx, state, event, eventPatch);
   }
 };
 
@@ -58,7 +57,6 @@ const buildEventPatch = (
   state: SessionIngestState,
   event: SessionEventBoundary,
   eventId: string,
-  safeContent: unknown,
   normalizedToolCallId: string | undefined,
 ): EventPatch => ({
   eventId,
@@ -77,12 +75,10 @@ const buildEventPatch = (
     typeof event.contentText === "string"
       ? (redactSensitive(event.contentText) as string)
       : undefined,
-  content: safeContent,
   contentBlocks: undefined,
   toolCallId: normalizedToolCallId,
   parentEventId: typeof event.parentEventId === "string" ? event.parentEventId : undefined,
   rawReference: event.rawReference ?? {},
-  raw: undefined,
   importRunId: state.batch.importRunId,
   importJobId: state.batch.importJobId,
   importChunkId: state.batch.importChunkId,
@@ -93,11 +89,10 @@ const eventSearchDocument = (
   state: SessionIngestState,
   event: SessionEventBoundary,
   eventPatch: EventPatch,
-  safeContent: unknown,
 ): SearchDocumentUpsertInput => {
   const toolBacked = isToolBackedEvent(eventPatch);
   const canonicalText = compactSearchText(eventPatch.contentText);
-  const metadata = toolBacked ? toolMetadata(safeContent) : eventContentMetadata(safeContent);
+  const metadata = eventContentMetadata(event);
   const summary = toolBacked
     ? compactSearchText([eventPatch.kind, metadata])
     : safeSummary(canonicalText, metadata);
@@ -137,42 +132,13 @@ const eventSearchDocument = (
 const isToolBackedEvent = (eventPatch: EventPatch) =>
   isToolEventKind(String(eventPatch.kind)) || eventPatch.role === "tool";
 
-const toolMetadata = (value: unknown): unknown => {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "object") {
-    const text = typeof value === "string" ? value : String(value);
-    return { type: typeof value, length: text.length, hash: wideHash(text) };
-  }
-  if (Array.isArray(value)) {
-    return { type: "array", length: value.length, hash: wideHash(compactSearchText(value)) };
-  }
-  const record = value as Record<string, unknown>;
-  const keys = Object.keys(record).sort();
-  const extracted = Object.fromEntries(
-    keys
-      .filter((key) => /^(name|toolName|path|file|filename|cwd|uri|url|sourcePath|targetPath)$/i.test(key))
-      .map((key) => [key, record[key]]),
-  );
-  return { type: "object", keyCount: keys.length, ...extracted, hash: wideHash(compactSearchText(value)) };
-};
-
-const eventContentMetadata = (value: unknown): unknown => {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "object") {
-    const text = typeof value === "string" ? value : String(value);
-    return { type: typeof value, length: text.length, hash: wideHash(text) };
-  }
-  if (Array.isArray(value)) {
-    return { type: "array", length: value.length, hash: wideHash(compactSearchText(value)) };
-  }
-  const record = value as Record<string, unknown>;
-  const keys = Object.keys(record).sort();
-  const extracted = Object.fromEntries(
-    keys
-      .filter((key) => /^(type|name|toolName|path|file|filename|cwd|uri|url|sourcePath|targetPath)$/i.test(key))
-      .map((key) => [key, record[key]]),
-  );
-  return { type: "object", keyCount: keys.length, ...extracted, hash: wideHash(compactSearchText(value)) };
+const eventContentMetadata = (event: SessionEventBoundary): unknown => {
+  const blockKinds = [...new Set(event.contentBlocks.map((block) => block.kind))].sort();
+  return {
+    contentBlockCount: event.contentBlocks.length,
+    ...(blockKinds.length > 0 ? { contentBlockKinds: blockKinds } : {}),
+    rawReferenceHash: wideHash(compactSearchText(event.rawReference)),
+  };
 };
 
 const eventEmbeddingEligible = (

@@ -13,14 +13,10 @@ export const upsertToolCallFromEvent = async (
   state: SessionIngestState,
   event: SessionEventBoundary,
   eventPatch: EventPatch,
-  safeContent: unknown,
 ) => {
   const toolCallId = eventPatch.toolCallId ?? `tool:${eventPatch.eventId}`;
-  const toolName = extractToolName({
-    kind: event.kind,
-    content: safeContent,
-    raw: undefined,
-  });
+  const safeContent = eventPatch.contentText;
+  const toolName = extractToolName({ kind: event.kind, contentText: safeContent });
   const existingTool = await findToolCall(ctx, toolCallId);
   const toolPatch = eventToolPatch(state, eventPatch, toolCallId, toolName, safeContent, existingTool);
   if (existingTool === null) await ctx.db.insert("toolCalls", { ...toolPatch, createdAt: state.batch.now });
@@ -59,7 +55,6 @@ const eventToolPatch = (
   output: eventPatch.kind === "tool_result" ? safeContent : existingTool?.output,
   startedAt: eventPatch.kind === "tool_call" ? eventPatch.timestamp : existingTool?.startedAt,
   completedAt: eventPatch.kind === "tool_result" ? eventPatch.timestamp : existingTool?.completedAt,
-  raw: undefined,
   importRunId: state.batch.importRunId,
   importJobId: state.batch.importJobId,
   importChunkId: state.batch.importChunkId,
@@ -158,7 +153,6 @@ const declaredToolPatch = (
   output: redactSensitive(toolCall.output),
   startedAt: typeof toolCall.startedAt === "string" ? toolCall.startedAt : undefined,
   completedAt: typeof toolCall.completedAt === "string" ? toolCall.completedAt : undefined,
-  raw: undefined,
   importRunId: state.batch.importRunId,
   importJobId: state.batch.importJobId,
   importChunkId: state.batch.importChunkId,

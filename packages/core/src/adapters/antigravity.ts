@@ -109,10 +109,9 @@ const buildAntigravitySession = (
       role: roleFromRecord(record),
       kind: kindFromRecord(record),
       contentText: compactText(content),
-      content,
+      contentSource: content,
       ...(toolCall !== undefined ? { toolCallId: toolCall.id } : {}),
       rawReference: { sourcePath: path, line: lineNumber, nativeType: String(record.type ?? "transcript") },
-      raw: value,
     };
   });
   const artifacts: AntigravityArtifactDraft[] = artifactFilesForTranscript(path, options.limit).map((artifactPath, index) => ({
@@ -131,7 +130,6 @@ const buildAntigravitySession = (
     sourceRoot: root,
     sourcePath: path,
     projectPath: projectPathFromLines(lines.map((line) => line.value)),
-    rawMetadata: { transcriptPath: path },
     events,
     toolCalls: [...toolCallsById.values()],
     usageRecords,

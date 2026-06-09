@@ -92,7 +92,6 @@ const grokToolCall = (
     output: state.output ?? record.output ?? record.result,
     ...(timestamp !== undefined ? { startedAt: timestamp } : {}),
     ...(status === "completed" && timestamp !== undefined ? { completedAt: timestamp } : {}),
-    raw: record as NativeValue,
   };
 };
 
@@ -137,7 +136,6 @@ const grokArtifacts = (
           timestamp: record.timestamp,
           sessionDir,
         },
-        raw: record as NativeValue,
       } satisfies GrokArtifactDraft,
     ];
   });
@@ -217,10 +215,9 @@ export const grokAdapter: SessionAdapter = {
             role: roleFrom(typeof record.type === "string" ? record.type : undefined),
             kind: grokKind(record),
             contentText: compactText(record.content as NativeValue | undefined),
-            content: record.content,
+            contentSource: record.content as NativeValue | undefined,
             ...(toolCallId !== undefined ? { toolCallId } : {}),
             rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: type },
-            raw: value,
           };
         }),
         ...eventLines.map(({ value, lineNumber }, index) => {
@@ -242,14 +239,13 @@ export const grokAdapter: SessionAdapter = {
             role: "unknown" as const,
             kind: grokKind(record),
             contentText: compactText(record as NativeValue),
-            content: record,
+            contentSource: record as NativeValue,
             ...(toolCallId !== undefined ? { toolCallId } : {}),
             rawReference: {
               sourcePath: eventPath,
               line: lineNumber,
               nativeType: type,
             },
-            raw: value,
           };
         }),
         ...updateLines.map(({ value, lineNumber }, index) => {
@@ -270,10 +266,9 @@ export const grokAdapter: SessionAdapter = {
             role: "system" as const,
             kind: grokKind(record),
             contentText: compactText(record as NativeValue),
-            content: record,
+            contentSource: record as NativeValue,
             ...(toolCallId !== undefined ? { toolCallId } : {}),
             rawReference: { sourcePath: updatePath, line: lineNumber, nativeType: type },
-            raw: value,
           };
         }),
       ];
@@ -290,7 +285,6 @@ export const grokAdapter: SessionAdapter = {
         sourceRoot: sessionsRoot,
         sourcePath: sessionDir,
         projectPath,
-        rawMetadata: summary as NativeValue | undefined,
         events,
         toolCalls: [...toolCallsById.values()],
         artifacts: existsSync(hunkPath)

@@ -261,7 +261,6 @@ const upsertUsageRecords = async (
       totalTokens: numberValue(safeUsageRecord.totalTokens),
       cost: numberValue(safeUsageRecord.cost),
       currency: stringValue(safeUsageRecord.currency),
-      raw: safeUsageRecord.raw,
       importRunId: state.batch.importRunId,
       importJobId: state.batch.importJobId,
       importChunkId: state.batch.importChunkId,
@@ -302,7 +301,6 @@ const upsertArtifacts = async (
       sourcePath: stringValue(safeArtifact.sourcePath),
       sourceRef: safeArtifact.sourceRef,
       metadata: safeArtifact.metadata,
-      raw: safeArtifact.raw,
       importRunId: state.batch.importRunId,
       importJobId: state.batch.importJobId,
       importChunkId: state.batch.importChunkId,
@@ -314,7 +312,7 @@ const upsertArtifacts = async (
       .unique();
     if (existing === null) await ctx.db.insert("artifacts", { ...patch, createdAt: state.batch.now });
     else await ctx.db.patch(existing._id, patch);
-    await upsertSearchDocument(ctx, artifactSearchDocument(state, patch, safeArtifact));
+    await upsertSearchDocument(ctx, artifactSearchDocument(state, patch));
   }
 };
 
@@ -330,9 +328,7 @@ const artifactSearchDocument = (
     sourcePath?: string;
     sourceRef?: unknown;
     metadata?: unknown;
-    raw?: unknown;
   },
-  safeArtifact: Record<string, unknown>,
 ): SearchDocumentUpsertInput => ({
   searchDocumentId: `artifact:${artifactPatch.artifactId}`,
   sourceTable: "artifacts",
@@ -344,8 +340,8 @@ const artifactSearchDocument = (
   provider: state.providerValue,
   agentName: state.agentName,
   title: artifactPatch.kind,
-  summary: compactSearchText(artifactMetadata(artifactPatch, safeArtifact)),
-  searchText: compactSearchText(artifactMetadata(artifactPatch, safeArtifact)),
+  summary: compactSearchText(artifactMetadata(artifactPatch)),
+  searchText: compactSearchText(artifactMetadata(artifactPatch)),
   sourcePath: artifactPatch.sourcePath ?? artifactPatch.path ?? state.sessionPatch.sourcePath,
   sourceRef: {
     sessionId: state.sessionId,
@@ -372,9 +368,7 @@ const artifactMetadata = (
     contentHash?: string;
     sourceRef?: unknown;
     metadata?: unknown;
-    raw?: unknown;
   },
-  safeArtifact: Record<string, unknown>,
 ) => ({
   kind: artifactPatch.kind,
   path: artifactPatch.path,
@@ -382,7 +376,6 @@ const artifactMetadata = (
   contentHash: artifactPatch.contentHash,
   sourceRefHash: wideHash(compactSearchText(artifactPatch.sourceRef)),
   metadataHash: wideHash(compactSearchText(artifactPatch.metadata)),
-  rawHash: wideHash(compactSearchText(safeArtifact.raw)),
 });
 
 export const cleanupMissingGraphRows = async (

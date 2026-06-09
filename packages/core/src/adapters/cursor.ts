@@ -4,7 +4,7 @@ import { basename, dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 
 import type { SessionAdapter } from "./types";
-import type { Artifact, ToolCall, UsageRecord } from "../schemas";
+import type { Artifact, NormalizedSession, ToolCall, UsageRecord } from "../schemas";
 import {
   bestEffortToolCall,
   contentFromRecord,
@@ -12,6 +12,7 @@ import {
   nativeIdFromRecord,
   roleFromRecord,
   timestampFromRecord,
+  toolNameFromRecord,
   usageFromRecord,
 } from "./best-effort";
 import {
@@ -24,6 +25,7 @@ import {
   parseJsonString,
   recordFrom,
   sourceRoot,
+  stringValue,
   type NativeValue,
 } from "./common";
 
@@ -140,20 +142,35 @@ const expandCursorValue = (
   row: Record<string, unknown>,
 ): Record<string, unknown>[] => {
   const record = recordFrom(value);
+  const ref = cursorReference(table, key, row);
   if (Array.isArray(value)) {
-    return value.map(recordFrom).filter(cursorRecordLike).map((item) => ({ ...item, _cursor: { table, key, row } }));
+    return value
+      .map(recordFrom)
+      .map((item) => ({ ...item, _cursor: ref }))
+      .filter(cursorRecordLike);
   }
   for (const nestedKey of ["messages", "conversation", "bubbles", "composerMessages", "items"]) {
     if (Array.isArray(record[nestedKey])) {
       return (record[nestedKey] as unknown[])
         .map(recordFrom)
-        .filter(cursorRecordLike)
-        .map((item) => ({ ...item, _cursor: { table, key, row } }));
+        .map((item) => ({ ...item, _cursor: ref }))
+        .filter(cursorRecordLike);
     }
   }
-  const enriched = { ...record, _cursor: { table, key, row } };
+  const enriched = { ...record, _cursor: ref };
   return cursorRecordLike(enriched) ? [enriched] : [];
 };
+
+const cursorReference = (table: string, key: string, row: Record<string, unknown>) => ({
+  table,
+  key: stringValue(row.key) ?? stringValue(row.name) ?? key,
+  rowId:
+    stringValue(row.id) ??
+    stringValue(row._id) ??
+    stringValue(row.key) ??
+    stringValue(row.name) ??
+    stringValue(row.type),
+});
 
 const cursorRecordLike = (record: Record<string, unknown>) => {
   const cursor = recordFrom(record._cursor);
@@ -173,6 +190,46 @@ const cursorRecordLike = (record: Record<string, unknown>) => {
     .map((value) => String(value ?? "").toLowerCase())
     .join(" ");
   return /(chat|composer|bubble|conversation|message|tool|diff|patch|ai|cursor)/.test(text);
+};
+
+const cursorContentFromRecord = (record: Record<string, unknown>): NativeValue | undefined => {
+  const direct = contentFromRecord(record);
+  if (direct !== undefined) return direct as NativeValue;
+
+  const toolName = toolNameFromRecord(record);
+  if (toolName !== undefined || record.input !== undefined || record.output !== undefined) {
+    return {
+      type: "tool",
+      ...(toolName !== undefined ? { toolName } : {}),
+      ...(record.input !== undefined ? { input: record.input as NativeValue } : {}),
+      ...(record.output !== undefined ? { output: record.output as NativeValue } : {}),
+    };
+  }
+
+  const diff = stringValue(record.diff);
+  if (diff !== undefined) {
+    return {
+      type: "diff",
+      ...(stringValue(record.path) !== undefined ? { path: stringValue(record.path) } : {}),
+      diff,
+    };
+  }
+
+  const patch = stringValue(record.patch);
+  if (patch !== undefined) {
+    return {
+      type: "patch",
+      ...(stringValue(record.path) !== undefined ? { path: stringValue(record.path) } : {}),
+      patch,
+    };
+  }
+
+  return undefined;
+};
+
+const cursorRecordId = (record: Record<string, unknown>, fallback: unknown) => {
+  const cursor = recordFrom(record._cursor);
+  return nativeIdFromRecord(record, stringValue(cursor.rowId) ?? fallback);
 };
 
 const artifactFromRecord = (
@@ -201,7 +258,6 @@ const artifactFromRecord = (
       ...(path !== undefined ? { path } : {}),
       sourcePath: dbPath,
       sourceRef: record._cursor,
-      raw: record as NativeValue,
     },
   ];
 };
@@ -235,7 +291,7 @@ const buildCursorSession = async (
   const usageRecords: CursorUsageDraft[] = [];
   const artifacts: CursorArtifactDraft[] = [];
   const events = records.map((record, index) => {
-    const nativeEventId = nativeIdFromRecord(record, index);
+    const nativeEventId = cursorRecordId(record, index);
     const eventId = eventIdFor("cursor", options.machine.machineId, dbPath, index, nativeEventId);
     const toolCall = bestEffortToolCall(
       "cursor",
@@ -259,7 +315,7 @@ const buildCursorSession = async (
     );
     if (usageRecord !== undefined) usageRecords.push(usageRecord);
     artifacts.push(...artifactFromRecord(options.machine.machineId, dbPath, nativeSessionId, eventId, record, index));
-    const content = contentFromRecord(record) as NativeValue;
+    const content = cursorContentFromRecord(record);
     return {
       id: eventId,
       nativeEventId,
@@ -268,10 +324,9 @@ const buildCursorSession = async (
       role: roleFromRecord(record),
       kind: kindFromRecord(record),
       contentText: compactText(content),
-      content,
+      contentSource: content,
       ...(toolCall !== undefined ? { toolCallId: toolCall.id } : {}),
       rawReference: { sourcePath: dbPath, rowId: nativeEventId, nativeType: "sqlite" },
-      raw: record,
     };
   });
   return buildSession({
@@ -283,7 +338,6 @@ const buildCursorSession = async (
     sourceRoot: root,
     sourcePath: dbPath,
     projectPath: projectPathFromRecords(records),
-    rawMetadata: { dbPath },
     events,
     toolCalls: [...toolCallsById.values()],
     usageRecords,
@@ -325,9 +379,11 @@ export const cursorAdapter: SessionAdapter = {
       };
     }
     const files = statSync(root).isFile() ? [root] : collectFiles(root, cursorDbLike, options.limit);
-    const sessions = (await Promise.all(files.map((path) => buildCursorSession(path, root, options)))).filter(
-      (session): session is NonNullable<typeof session> => session !== undefined,
-    );
+    const sessions: NormalizedSession[] = [];
+    for (const path of files) {
+      const session = await buildCursorSession(path, root, options);
+      if (session !== undefined) sessions.push(session);
+    }
     return {
       sourceRoots: [sourceRoot("cursor", cursorAdapter.id, root, options.machine, options.now)],
       sessions,

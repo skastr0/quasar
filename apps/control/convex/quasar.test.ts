@@ -120,8 +120,8 @@ const toolPairBatch = (path: string, machineId: string) => ({
           sequence: 0,
           role: "assistant",
           kind: "tool_call",
+          toolCallId: `tool:${machineId}:read-file`,
           contentText: "Read file",
-          content: { name: "read_file", path: "src/index.ts" },
         },
         {
           ...testBatch(path, machineId).sessions[0].events[0],
@@ -129,11 +129,20 @@ const toolPairBatch = (path: string, machineId: string) => ({
           sequence: 1,
           role: "tool",
           kind: "tool_result",
+          toolCallId: `tool:${machineId}:read-file`,
           contentText: "Read file result",
-          content: { name: "read_file", output: "done" },
         },
       ],
-      toolCalls: [],
+      toolCalls: [
+        {
+          id: `tool:${machineId}:read-file`,
+          eventId: `event:${machineId}:tool-call`,
+          toolName: "read_file",
+          status: "completed",
+          input: { path: "src/index.ts" },
+          output: "done",
+        },
+      ],
     },
   ],
 });
@@ -166,7 +175,6 @@ const graphBatch = (path: string, machineId: string) => ({
           kind: "tool_call",
           toolCallId: `tool:${machineId}:graph`,
           contentText: "Run graph tool",
-          content: { name: "exec_command", cmd: "pwd" },
           contentBlocks: [
             {
               id: `block:${machineId}:2`,
@@ -682,8 +690,8 @@ describe("quasar ingestion and search", () => {
     expect(tools.items).toHaveLength(1);
     expect(tools.items[0]?.toolName).toBe("read_file");
     expect(tools.items[0]?.status).toBe("completed");
-    expect(tools.items[0]?.input).toEqual({ name: "read_file", path: "src/index.ts" });
-    expect(tools.items[0]?.output).toEqual({ name: "read_file", output: "done" });
+    expect(tools.items[0]?.input).toEqual({ path: "src/index.ts" });
+    expect(tools.items[0]?.output).toBe("done");
     const toolSearchDocs = await t.query(internal.quasar.fetchSearchDocumentsInternal, {
       searchDocumentIds: [`tool:${tools.items[0]?.toolCallId}`],
     });

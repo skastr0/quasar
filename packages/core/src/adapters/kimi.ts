@@ -84,7 +84,6 @@ const artifactFromRecord = (
       sourcePath,
       sourceRef: { eventId, index },
       metadata: { title: record.title, status: record.status },
-      raw: record as NativeValue,
     },
   ];
 };
@@ -158,10 +157,9 @@ const buildKimiSession = (
       role: roleFromRecord(record),
       kind: kindFromRecord(record),
       contentText: compactText(content),
-      content,
+      contentSource: content,
       ...(toolCall !== undefined ? { toolCallId: toolCall.id } : {}),
       rawReference: { sourcePath: wirePath, line: index + 1, nativeType: String(record.type ?? "wire") },
-      raw: value,
     };
   });
   const projectPath =
@@ -180,7 +178,6 @@ const buildKimiSession = (
     sourceRoot: root,
     sourcePath: wirePath,
     projectPath,
-    rawMetadata: { indexRecord, state } as NativeValue,
     events,
     toolCalls: [...toolCallsById.values()],
     sessionEdges,

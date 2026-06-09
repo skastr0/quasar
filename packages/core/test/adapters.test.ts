@@ -164,7 +164,7 @@ describe("adapter ingestion", () => {
     const claude = sessionsByProvider.get("claude")!;
     expect(claude.toolCalls[0]).toMatchObject({ toolName: "Read", status: "completed" });
     expect(JSON.stringify(claude.toolCalls[0]?.output)).toContain("quasar");
-    expect(JSON.stringify(claude.events[2]?.content)).toContain("quasar");
+    expect(JSON.stringify(claude.events[2]?.contentBlocks)).toContain("quasar");
     expect(claude.sessionEdges.some((edge) => edge.kind === "parent")).toBe(true);
     expect(claude.usageRecords[0]?.inputTokens).toBe(3);
     expect(claude.events[1]?.contentBlocks.map((block) => block.kind)).toEqual(
@@ -211,11 +211,7 @@ describe("adapter ingestion", () => {
     expect(hermes.events[1]?.contentBlocks.map((block) => block.kind)).toEqual(
       expect.arrayContaining(["text", "thinking"]),
     );
-    expect(hermes.rawMetadata).toMatchObject({
-      gateway_routing: expect.arrayContaining([
-        expect.objectContaining({ session_id: "h1", source: "telegram" }),
-      ]),
-    });
+    expect(hasOwn(hermes, "rawMetadata")).toBe(false);
 
     const antigravity = sessionsByProvider.get("antigravity")!;
     expect(antigravity.artifacts[0]).toMatchObject({ kind: "file" });
@@ -273,6 +269,7 @@ const assertAdapterContract = (batch: IngestBatch, provider: Provider) => {
   expect(encoded, provider).not.toContain('"raw":');
 
   for (const session of batch.sessions) {
+    expect(hasOwn(session, "rawMetadata"), `${provider} session ${session.id}`).toBe(false);
     expect(
       jsonByteLength({
         ...session,

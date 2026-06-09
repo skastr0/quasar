@@ -71,7 +71,6 @@ describe("redaction", () => {
               role: "assistant",
               kind: "message",
               contentText: `Bearer should-not-leak ${googleKeyFixture}`,
-              content: `Bearer should-not-leak ${googleKeyFixture}`,
               contentBlocks: [],
               rawReference: { sourcePath: "/tmp/session.jsonl" },
             },
@@ -88,7 +87,7 @@ describe("redaction", () => {
     expect(event.contentText).toContain("Bearer [redacted]");
     expect(event.contentText).not.toContain("should-not-leak");
     expect(event.contentText).not.toContain("AIza");
-    expect(event.content).toContain("Bearer [redacted]");
+    expect(Object.hasOwn(event, "content")).toBe(false);
   });
 
   test("redacts common free-text secret shapes", () => {
