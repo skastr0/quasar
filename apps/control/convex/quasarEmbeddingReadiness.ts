@@ -104,57 +104,33 @@ const readinessRows = async (
   args: Partial<SearchArgs> & { importJobId?: string },
 ): Promise<ReadinessAggregateRow[]> => {
   if (args.importJobId !== undefined) {
-    const rows: ReadinessAggregateRow[] = [];
-    let cursor: string | null = null;
-    do {
-      const page = await ctx.db
-        .query("embeddingReadiness")
-        .withIndex("by_job", (q) => q.eq("importJobId", args.importJobId))
-        .paginate({ cursor, numItems: READINESS_PAGE_SIZE });
-      rows.push(...page.page);
-      cursor = page.isDone ? null : page.continueCursor;
-    } while (cursor !== null);
-    return rows;
+    return await ctx.db
+      .query("embeddingReadiness")
+      .withIndex("by_job", (q) => q.eq("importJobId", args.importJobId))
+      .take(READINESS_TAKE_LIMIT);
   }
   if (args.projectIdentityKey !== undefined) {
-    const rows: ReadinessAggregateRow[] = [];
-    let cursor: string | null = null;
-    do {
-      const page = await ctx.db
-        .query("embeddingReadiness")
-        .withIndex("by_project", (q) =>
-          q.eq("canonicalProjectIdentityKey", args.projectIdentityKey!),
-        )
-        .paginate({ cursor, numItems: READINESS_PAGE_SIZE });
-      rows.push(...page.page);
-      cursor = page.isDone ? null : page.continueCursor;
-    } while (cursor !== null);
-    return rows;
+    return await ctx.db
+      .query("embeddingReadiness")
+      .withIndex("by_project", (q) =>
+        q.eq("canonicalProjectIdentityKey", args.projectIdentityKey!),
+      )
+      .take(READINESS_TAKE_LIMIT);
   }
   if (args.provider !== undefined) {
-    const rows: ReadinessAggregateRow[] = [];
-    let cursor: string | null = null;
-    do {
-      const page = await ctx.db
-        .query("embeddingReadiness")
-        .withIndex("by_provider", (q) => q.eq("provider", args.provider!))
-        .paginate({ cursor, numItems: READINESS_PAGE_SIZE });
-      rows.push(...page.page);
-      cursor = page.isDone ? null : page.continueCursor;
-    } while (cursor !== null);
-    return rows;
+    return await ctx.db
+      .query("embeddingReadiness")
+      .withIndex("by_provider", (q) => q.eq("provider", args.provider!))
+      .take(READINESS_TAKE_LIMIT);
   }
   const rows: ReadinessAggregateRow[] = [];
   for (const state of ["pending", "syncing", "ready", "skipped", "failed", "dead_letter"] as const) {
-    let cursor: string | null = null;
-    do {
-      const page = await ctx.db
+    rows.push(
+      ...(await ctx.db
         .query("embeddingReadiness")
         .withIndex("by_state", (q) => q.eq("ragSyncState", state))
-        .paginate({ cursor, numItems: READINESS_PAGE_SIZE });
-      rows.push(...page.page);
-      cursor = page.isDone ? null : page.continueCursor;
-    } while (cursor !== null);
+        .take(READINESS_TAKE_LIMIT)),
+    );
   }
   return rows;
 };
@@ -165,26 +141,10 @@ const documentReadinessForDateRange = async (
 ) => {
   const fromMs = dateBound(args.from);
   const toMs = dateBound(args.to);
-  const rows: SearchDocument[] = [];
-  let cursor: string | null = null;
-  do {
-    const page: {
-      readonly page: SearchDocument[];
-      readonly isDone: boolean;
-      readonly continueCursor: string;
-    } =
-      args.projectIdentityKey === undefined
-        ? await queryDocumentsByOccurredAt(ctx, fromMs, toMs, cursor)
-        : await queryProjectDocumentsByOccurredAt(
-            ctx,
-            args.projectIdentityKey,
-            fromMs,
-            toMs,
-            cursor,
-          );
-    rows.push(...page.page);
-    cursor = page.isDone ? null : page.continueCursor;
-  } while (cursor !== null);
+  const rows: SearchDocument[] =
+    args.projectIdentityKey === undefined
+      ? await queryDocumentsByOccurredAt(ctx, fromMs, toMs)
+      : await queryProjectDocumentsByOccurredAt(ctx, args.projectIdentityKey, fromMs, toMs);
   return readinessCounts(
     rows
       .filter((row) =>
@@ -206,30 +166,29 @@ const queryDocumentsByOccurredAt = async (
   ctx: QueryCtx,
   fromMs: number | undefined,
   toMs: number | undefined,
-  cursor: string | null,
 ) => {
   if (fromMs !== undefined && toMs !== undefined) {
     return await ctx.db
       .query("searchDocuments")
       .withIndex("by_occurredAt", (q) => q.gte("occurredAt", fromMs).lte("occurredAt", toMs))
-      .paginate({ cursor, numItems: READINESS_PAGE_SIZE });
+      .take(READINESS_TAKE_LIMIT);
   }
   if (fromMs !== undefined) {
     return await ctx.db
       .query("searchDocuments")
       .withIndex("by_occurredAt", (q) => q.gte("occurredAt", fromMs))
-      .paginate({ cursor, numItems: READINESS_PAGE_SIZE });
+      .take(READINESS_TAKE_LIMIT);
   }
   if (toMs !== undefined) {
     return await ctx.db
       .query("searchDocuments")
       .withIndex("by_occurredAt", (q) => q.lte("occurredAt", toMs))
-      .paginate({ cursor, numItems: READINESS_PAGE_SIZE });
+      .take(READINESS_TAKE_LIMIT);
   }
   return await ctx.db
     .query("searchDocuments")
     .withIndex("by_occurredAt")
-    .paginate({ cursor, numItems: READINESS_PAGE_SIZE });
+    .take(READINESS_TAKE_LIMIT);
 };
 
 const queryProjectDocumentsByOccurredAt = async (
@@ -237,15 +196,17 @@ const queryProjectDocumentsByOccurredAt = async (
   projectIdentityKey: string,
   fromMs: number | undefined,
   toMs: number | undefined,
-  cursor: string | null,
 ) => {
   if (fromMs !== undefined && toMs !== undefined) {
     return await ctx.db
       .query("searchDocuments")
       .withIndex("by_project_occurredAt", (q) =>
-        q.eq("canonicalProjectIdentityKey", projectIdentityKey).gte("occurredAt", fromMs).lte("occurredAt", toMs),
+        q
+          .eq("canonicalProjectIdentityKey", projectIdentityKey)
+          .gte("occurredAt", fromMs)
+          .lte("occurredAt", toMs),
       )
-      .paginate({ cursor, numItems: READINESS_PAGE_SIZE });
+      .take(READINESS_TAKE_LIMIT);
   }
   if (fromMs !== undefined) {
     return await ctx.db
@@ -253,7 +214,7 @@ const queryProjectDocumentsByOccurredAt = async (
       .withIndex("by_project_occurredAt", (q) =>
         q.eq("canonicalProjectIdentityKey", projectIdentityKey).gte("occurredAt", fromMs),
       )
-      .paginate({ cursor, numItems: READINESS_PAGE_SIZE });
+      .take(READINESS_TAKE_LIMIT);
   }
   if (toMs !== undefined) {
     return await ctx.db
@@ -261,12 +222,12 @@ const queryProjectDocumentsByOccurredAt = async (
       .withIndex("by_project_occurredAt", (q) =>
         q.eq("canonicalProjectIdentityKey", projectIdentityKey).lte("occurredAt", toMs),
       )
-      .paginate({ cursor, numItems: READINESS_PAGE_SIZE });
+      .take(READINESS_TAKE_LIMIT);
   }
   return await ctx.db
     .query("searchDocuments")
     .withIndex("by_project_occurredAt", (q) => q.eq("canonicalProjectIdentityKey", projectIdentityKey))
-    .paginate({ cursor, numItems: READINESS_PAGE_SIZE });
+    .take(READINESS_TAKE_LIMIT);
 };
 
 const dateBound = (value: string | undefined) => {
@@ -326,4 +287,4 @@ const aggregateKeyFor = (doc: ReadinessDoc) => {
   ].join("\u001f");
 };
 
-const READINESS_PAGE_SIZE = 1000;
+const READINESS_TAKE_LIMIT = 5000;

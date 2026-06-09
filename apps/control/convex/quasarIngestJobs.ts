@@ -3,6 +3,7 @@ import type { Doc } from "./_generated/dataModel";
 import type { ActionCtx, MutationCtx, QueryCtx } from "./_generated/server";
 import {
   decodeBoundarySync,
+  type AdapterDiagnosticBoundary,
   ReadImportJobInput,
   type SourceRootBoundary,
   StartImportJobInput,
@@ -17,7 +18,10 @@ import { sanitizeIngestBoundaryBatch } from "./quasarIngestContract";
 import { readinessCounts } from "./quasarEmbeddingReadiness";
 import { redactSensitive, wideHash } from "./quasarText";
 import { stableCanonicalJsonHash } from "@skastr0/quasar-core/hash";
-import { SESSION_INTELLIGENCE_CONTRACT_VERSION } from "@skastr0/quasar-core/session-intelligence";
+import {
+  sanitizeSessionIntelligenceDiagnostics,
+  SESSION_INTELLIGENCE_CONTRACT_VERSION,
+} from "@skastr0/quasar-core/session-intelligence";
 
 type ImportJobStatus = "queued" | "running" | "succeeded" | "partial_failure" | "failed";
 type ImportChunkStatus = "pending" | "running" | "succeeded" | "failed" | "dead_letter";
@@ -72,7 +76,7 @@ type IngestManifest = {
   readonly generatedAt?: string;
   readonly sourceRoots: readonly SourceRootBoundary[];
   readonly sessions: readonly IngestManifestSession[];
-  readonly diagnostics: readonly unknown[];
+  readonly diagnostics: readonly AdapterDiagnosticBoundary[];
   readonly sessionCount: number;
   readonly eventCount: number;
   readonly toolCallCount: number;
@@ -170,7 +174,7 @@ export const startImportJobHandler = async (
     succeededPrefixCount: 0,
     failedChunkCount: 0,
     terminalChunkSequenceSum: 0,
-    diagnostics: redactSensitive(manifest.diagnostics) as unknown[],
+    diagnostics: sanitizeDiagnosticsForStorage(manifest.diagnostics),
     startedAt: now,
     createdAt: now,
     updatedAt: now,
@@ -1159,7 +1163,7 @@ const manifestFromBoundary = (manifest: IngestManifestBoundary): IngestManifest 
   generatedAt: manifest.generatedAt,
   sourceRoots: manifest.sourceRoots,
   sessions: manifest.sessions,
-  diagnostics: manifest.diagnostics,
+  diagnostics: sanitizeDiagnosticsForStorage(manifest.diagnostics),
   sessionCount: manifest.sessionCount,
   eventCount: manifest.eventCount,
   toolCallCount: manifest.toolCallCount,
@@ -1190,7 +1194,7 @@ const manifestFromBatch = (batch: IngestBatchBoundaryValue): IngestManifest => {
       usageRecordCount: session.usageRecords.length,
       artifactCount: session.artifacts.length,
     })),
-    diagnostics: batch.diagnostics,
+    diagnostics: sanitizeDiagnosticsForStorage(batch.diagnostics),
     sessionCount: summary.sessionCount,
     eventCount: summary.eventCount,
     toolCallCount: summary.toolCallCount,
@@ -1200,6 +1204,13 @@ const manifestFromBatch = (batch: IngestBatchBoundaryValue): IngestManifest => {
     artifactCount: summary.artifactCount,
   };
 };
+
+const sanitizeDiagnosticsForStorage = (
+  diagnostics: readonly IngestManifestBoundary["diagnostics"][number][],
+) =>
+  redactSensitive(
+    sanitizeSessionIntelligenceDiagnostics(diagnostics),
+  ) as AdapterDiagnosticBoundary[];
 
 const importJobIdempotencyKey = (
   manifest: IngestManifest,

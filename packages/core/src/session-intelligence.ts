@@ -29,6 +29,7 @@ export const SessionIntelligenceBudgets = Schema.Struct({
   usageRecordBytes: Schema.Number,
   artifactRecordBytes: Schema.Number,
   edgeRecordBytes: Schema.Number,
+  diagnosticRecordBytes: Schema.Number,
 });
 export type SessionIntelligenceBudgets = typeof SessionIntelligenceBudgets.Type;
 
@@ -44,6 +45,7 @@ export const CONVEX_SAFE_INGEST_BUDGETS = {
   usageRecordBytes: 32 * 1024,
   artifactRecordBytes: 64 * 1024,
   edgeRecordBytes: 32 * 1024,
+  diagnosticRecordBytes: 32 * 1024,
 } satisfies SessionIntelligenceBudgets;
 
 export class ConvexShapeViolationError extends Error {
@@ -97,6 +99,9 @@ const ESCAPED_CONTROL_CHARS = /\\u00(?:0[0-9a-f]|1[0-9a-f]|7f)/gi;
 const REPLACEMENT_CHAR = /\ufffd/g;
 const CONTENT_BLOCK_LOCATOR_BYTES = 2 * 1024;
 const CONTENT_BLOCK_MEDIA_TYPE_BYTES = 256;
+const DIAGNOSTIC_MESSAGE_BYTES = 4 * 1024;
+const RAW_REFERENCE_SOURCE_PATH_BYTES = 2 * 1024;
+const RAW_REFERENCE_FIELD_BYTES = 512;
 const TOOL_RESULT_PATCH_KEY = /^(diff|diffs|patch|patches)$/i;
 
 type BoundedValueOptions = {
@@ -419,6 +424,52 @@ const boundedMediaType = (value: string | undefined) => {
   return { value };
 };
 
+const boundedLocatorText = (value: string | undefined, maxBytes: number) =>
+  boundedText(value, maxBytes);
+
+const sanitizeRawReference = (rawReference: SessionEvent["rawReference"]): SessionEvent["rawReference"] =>
+  compactUndefined({
+    sourcePath:
+      boundedLocatorText(rawReference.sourcePath, RAW_REFERENCE_SOURCE_PATH_BYTES) ??
+      "[omitted:sourcePath]",
+    line: rawReference.line,
+    table: boundedLocatorText(rawReference.table, RAW_REFERENCE_FIELD_BYTES),
+    rowId: boundedLocatorText(rawReference.rowId, RAW_REFERENCE_FIELD_BYTES),
+    nativeType: boundedLocatorText(rawReference.nativeType, RAW_REFERENCE_FIELD_BYTES),
+  });
+
+const sanitizeDiagnostic = (diagnostic: IngestBatch["diagnostics"][number]) =>
+  fitDiagnosticRecord(
+    compactUndefined({
+      adapterId: boundedLocatorText(diagnostic.adapterId, RAW_REFERENCE_FIELD_BYTES) ?? diagnostic.adapterId,
+      provider: diagnostic.provider,
+      status: diagnostic.status,
+      parserConfidence: diagnostic.parserConfidence,
+      rootPath: boundedLocatorText(diagnostic.rootPath, RAW_REFERENCE_SOURCE_PATH_BYTES),
+      message: boundedText(diagnostic.message, DIAGNOSTIC_MESSAGE_BYTES) ?? "",
+      details: boundedValue(diagnostic.details, CONVEX_SAFE_INGEST_BUDGETS.metadataBytes),
+    }),
+  );
+
+const fitDiagnosticRecord = (
+  diagnostic: IngestBatch["diagnostics"][number],
+): IngestBatch["diagnostics"][number] => {
+  if (jsonByteLength(diagnostic) <= CONVEX_SAFE_INGEST_BUDGETS.diagnosticRecordBytes) {
+    return diagnostic;
+  }
+  return compactUndefined({
+    ...diagnostic,
+    details:
+      diagnostic.details === undefined
+        ? undefined
+        : omittedRecordValue(diagnostic.details, "diagnostic_details_budget"),
+  });
+};
+
+export const sanitizeSessionIntelligenceDiagnostics = (
+  diagnostics: readonly IngestBatch["diagnostics"][number][],
+) => diagnostics.map(sanitizeDiagnostic);
+
 const mergeContentBlockMetadata = (
   metadata: unknown,
   omissions: readonly ReturnType<typeof omittedStringValue>[],
@@ -518,7 +569,7 @@ const sanitizeEvent = (event: SessionEvent): SessionEvent =>
       : [],
     toolCallId: event.toolCallId,
     parentEventId: event.parentEventId,
-    rawReference: event.rawReference,
+    rawReference: sanitizeRawReference(event.rawReference),
   });
 
 const sanitizeToolCall = (toolCall: ToolCall): ToolCall =>
@@ -668,6 +719,7 @@ export const sanitizeSessionIntelligenceSession = (
 export const sanitizeSessionIntelligenceBatch = (batch: IngestBatch): IngestBatch => ({
   ...batch,
   sessions: batch.sessions.map(sanitizeSessionIntelligenceSession),
+  diagnostics: sanitizeSessionIntelligenceDiagnostics(batch.diagnostics),
 });
 
 const assertRecordBudget = (path: string, value: unknown, maxBytes: number) => {
@@ -735,6 +787,13 @@ export const assertConvexSafeSessionIntelligenceBatch = (
       );
     }
   }
+  batch.diagnostics.forEach((diagnostic, index) => {
+    assertRecordBudget(
+      `diagnostics.${index}`,
+      diagnostic,
+      CONVEX_SAFE_INGEST_BUDGETS.diagnosticRecordBytes,
+    );
+  });
   return batch;
 };
 

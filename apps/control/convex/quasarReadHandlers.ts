@@ -1,12 +1,15 @@
 import type { Doc } from "./_generated/dataModel";
 import type { QueryCtx } from "./_generated/server";
+import { wideHash } from "./quasarText";
 import { boundedLimit } from "./quasarValues";
 
 const SESSION_VIEW_LIMIT = 500;
 const FILTER_SCAN_MULTIPLIER = 20;
 
 export const listImportRunsHandler = async (ctx: QueryCtx) =>
-  await ctx.db.query("importRuns").withIndex("by_createdAt").order("desc").take(50);
+  (await ctx.db.query("importRuns").withIndex("by_createdAt").order("desc").take(50)).map(
+    publicImportRun,
+  );
 
 export const listSessionsHandler = async (
   ctx: QueryCtx,
@@ -235,14 +238,21 @@ export const readSessionHandler = async (
       ? left.sequence - right.sequence
       : left.eventId.localeCompare(right.eventId),
   );
+  const publicSession = publicSessionDetail(session);
+  const publicEvents = orderedEvents.map(publicSessionEvent);
+  const publicBlocks = orderedBlocks.map(publicContentBlock);
+  const publicEdges = sessionEdges.map(publicSessionEdge);
+  const publicToolCalls = toolCalls.map(publicToolCall);
+  const publicUsageRecords = usageRecords.map(publicUsageRecord);
+  const publicArtifacts = artifacts.map(publicArtifact);
   return {
-    session,
-    events: orderedEvents,
-    contentBlocks: orderedBlocks,
-    sessionEdges,
-    toolCalls,
-    usageRecords,
-    artifacts,
+    session: publicSession,
+    events: publicEvents,
+    contentBlocks: publicBlocks,
+    sessionEdges: publicEdges,
+    toolCalls: publicToolCalls,
+    usageRecords: publicUsageRecords,
+    artifacts: publicArtifacts,
     pagination: {
       bounded: true,
       limit,
@@ -259,9 +269,9 @@ export const readSessionHandler = async (
       artifacts: pageCursor(artifactPage),
     },
     views: {
-      chronological: materializeChronologicalView(orderedEvents, orderedBlocks),
-      branch: materializeBranchView(orderedEvents, sessionEdges, args.leafEventId),
-      toolExpanded: materializeToolExpandedView(orderedEvents, toolCalls),
+      chronological: materializeChronologicalView(publicEvents, publicBlocks),
+      branch: materializeBranchView(publicEvents, publicEdges, args.leafEventId),
+      toolExpanded: materializeToolExpandedView(publicEvents, publicToolCalls),
       selected: args.view ?? "chronological",
     },
   };
@@ -272,9 +282,223 @@ const pageCursor = (page: { isDone: boolean; continueCursor: string }) => ({
   continueCursor: page.continueCursor,
 });
 
+type PublicSessionEvent = ReturnType<typeof publicSessionEvent>;
+type PublicContentBlock = ReturnType<typeof publicContentBlock>;
+type PublicSessionEdge = ReturnType<typeof publicSessionEdge>;
+type PublicToolCall = ReturnType<typeof publicToolCall>;
+
+function publicImportRun(run: Doc<"importRuns">) {
+  return {
+    importRunId: run.importRunId,
+    machineId: run.machineId,
+    status: run.status,
+    sourceRootCount: run.sourceRootCount,
+    sessionCount: run.sessionCount,
+    eventCount: run.eventCount,
+    toolCallCount: run.toolCallCount,
+    contentBlockCount: run.contentBlockCount,
+    sessionEdgeCount: run.sessionEdgeCount,
+    usageRecordCount: run.usageRecordCount,
+    artifactCount: run.artifactCount,
+    diagnostics: run.diagnostics,
+    error: run.error,
+    importJobId: run.importJobId,
+    createdAt: run.createdAt,
+    updatedAt: run.updatedAt,
+  };
+}
+
+function publicSessionDetail(session: Doc<"sessions">) {
+  return {
+    sessionId: session.sessionId,
+    nativeSessionId: session.nativeSessionId,
+    provider: session.provider,
+    agentName: session.agentName,
+    machineId: session.machineId,
+    projectIdentityKey: session.projectIdentityKey,
+    canonicalProjectIdentityKey: session.canonicalProjectIdentityKey,
+    nativeProjectKey: session.nativeProjectKey,
+    title: session.title,
+    startedAt: session.startedAt,
+    updatedAtNative: session.updatedAtNative,
+    sourceRoot: session.sourceRoot,
+    sourcePath: session.sourcePath,
+    eventCount: session.eventCount,
+    toolCallCount: session.toolCallCount,
+    importRunId: session.importRunId,
+    importJobId: session.importJobId,
+    importChunkId: session.importChunkId,
+    ingestState: session.ingestState,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+  };
+}
+
+function publicSessionEvent(event: Doc<"sessionEvents">) {
+  return {
+    eventId: event.eventId,
+    sessionId: event.sessionId,
+    nativeEventId: event.nativeEventId,
+    sequence: event.sequence,
+    timestamp: event.timestamp,
+    machineId: event.machineId,
+    provider: event.provider,
+    agentName: event.agentName,
+    projectIdentityKey: event.projectIdentityKey,
+    canonicalProjectIdentityKey: event.canonicalProjectIdentityKey,
+    role: event.role,
+    kind: event.kind,
+    contentText: event.contentText,
+    toolCallId: event.toolCallId,
+    parentEventId: event.parentEventId,
+    rawReference: event.rawReference,
+    importRunId: event.importRunId,
+    importJobId: event.importJobId,
+    importChunkId: event.importChunkId,
+    createdAt: event.createdAt,
+    updatedAt: event.updatedAt,
+  };
+}
+
+function publicContentBlock(block: Doc<"contentBlocks">) {
+  return {
+    blockId: block.blockId,
+    eventId: block.eventId,
+    sessionId: block.sessionId,
+    sequence: block.sequence,
+    machineId: block.machineId,
+    provider: block.provider,
+    agentName: block.agentName,
+    projectIdentityKey: block.projectIdentityKey,
+    canonicalProjectIdentityKey: block.canonicalProjectIdentityKey,
+    kind: block.kind,
+    text: block.text,
+    markdown: block.markdown,
+    thinking: block.thinking,
+    path: block.path,
+    uri: block.uri,
+    mediaType: block.mediaType,
+    valueHash: hashPublicPayload(block.value),
+    metadataHash: hashPublicPayload(block.metadata),
+    importRunId: block.importRunId,
+    importJobId: block.importJobId,
+    importChunkId: block.importChunkId,
+    createdAt: block.createdAt,
+    updatedAt: block.updatedAt,
+  };
+}
+
+function publicSessionEdge(edge: Doc<"sessionEdges">) {
+  return {
+    edgeId: edge.edgeId,
+    sessionId: edge.sessionId,
+    machineId: edge.machineId,
+    provider: edge.provider,
+    agentName: edge.agentName,
+    projectIdentityKey: edge.projectIdentityKey,
+    canonicalProjectIdentityKey: edge.canonicalProjectIdentityKey,
+    kind: edge.kind,
+    fromEventId: edge.fromEventId,
+    toEventId: edge.toEventId,
+    fromId: edge.fromId,
+    toId: edge.toId,
+    rawReferenceHash: hashPublicPayload(edge.rawReference),
+    metadataHash: hashPublicPayload(edge.metadata),
+    importRunId: edge.importRunId,
+    importJobId: edge.importJobId,
+    importChunkId: edge.importChunkId,
+    createdAt: edge.createdAt,
+    updatedAt: edge.updatedAt,
+  };
+}
+
+function publicToolCall(toolCall: Doc<"toolCalls">) {
+  return {
+    toolCallId: toolCall.toolCallId,
+    sessionId: toolCall.sessionId,
+    eventId: toolCall.eventId,
+    machineId: toolCall.machineId,
+    provider: toolCall.provider,
+    agentName: toolCall.agentName,
+    projectIdentityKey: toolCall.projectIdentityKey,
+    canonicalProjectIdentityKey: toolCall.canonicalProjectIdentityKey,
+    toolName: toolCall.toolName,
+    status: toolCall.status,
+    input: toolCall.input,
+    output: toolCall.output,
+    inputHash: hashPublicPayload(toolCall.input),
+    outputHash: hashPublicPayload(toolCall.output),
+    startedAt: toolCall.startedAt,
+    completedAt: toolCall.completedAt,
+    importRunId: toolCall.importRunId,
+    importJobId: toolCall.importJobId,
+    importChunkId: toolCall.importChunkId,
+    createdAt: toolCall.createdAt,
+    updatedAt: toolCall.updatedAt,
+  };
+}
+
+function publicUsageRecord(usage: Doc<"usageRecords">) {
+  return {
+    usageId: usage.usageId,
+    sessionId: usage.sessionId,
+    eventId: usage.eventId,
+    machineId: usage.machineId,
+    provider: usage.provider,
+    agentName: usage.agentName,
+    projectIdentityKey: usage.projectIdentityKey,
+    canonicalProjectIdentityKey: usage.canonicalProjectIdentityKey,
+    timestamp: usage.timestamp,
+    model: usage.model,
+    modelProvider: usage.modelProvider,
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    reasoningTokens: usage.reasoningTokens,
+    cacheCreationInputTokens: usage.cacheCreationInputTokens,
+    cacheReadInputTokens: usage.cacheReadInputTokens,
+    totalTokens: usage.totalTokens,
+    cost: usage.cost,
+    currency: usage.currency,
+    importRunId: usage.importRunId,
+    importJobId: usage.importJobId,
+    importChunkId: usage.importChunkId,
+    createdAt: usage.createdAt,
+    updatedAt: usage.updatedAt,
+  };
+}
+
+function publicArtifact(artifact: Doc<"artifacts">) {
+  return {
+    artifactId: artifact.artifactId,
+    sessionId: artifact.sessionId,
+    eventId: artifact.eventId,
+    machineId: artifact.machineId,
+    provider: artifact.provider,
+    agentName: artifact.agentName,
+    projectIdentityKey: artifact.projectIdentityKey,
+    canonicalProjectIdentityKey: artifact.canonicalProjectIdentityKey,
+    kind: artifact.kind,
+    path: artifact.path,
+    uri: artifact.uri,
+    contentHash: artifact.contentHash,
+    sourcePath: artifact.sourcePath,
+    sourceRefHash: hashPublicPayload(artifact.sourceRef),
+    metadataHash: hashPublicPayload(artifact.metadata),
+    importRunId: artifact.importRunId,
+    importJobId: artifact.importJobId,
+    importChunkId: artifact.importChunkId,
+    createdAt: artifact.createdAt,
+    updatedAt: artifact.updatedAt,
+  };
+}
+
+function hashPublicPayload(value: unknown) {
+  return value === undefined ? undefined : `hash:${wideHash(JSON.stringify(value))}`;
+}
+
 const materializeChronologicalView = (
-  events: Doc<"sessionEvents">[],
-  contentBlocks: Doc<"contentBlocks">[],
+  events: PublicSessionEvent[],
+  contentBlocks: PublicContentBlock[],
 ) => {
   const blocksByEvent = groupBy(contentBlocks, (block) => block.eventId);
   return events.map((event) => ({
@@ -290,8 +514,8 @@ const materializeChronologicalView = (
 };
 
 const materializeBranchView = (
-  events: Doc<"sessionEvents">[],
-  edges: Doc<"sessionEdges">[],
+  events: PublicSessionEvent[],
+  edges: PublicSessionEdge[],
   requestedLeafEventId: string | undefined,
 ) => {
   const eventsById = new Map(events.map((event) => [event.eventId, event]));
@@ -314,7 +538,7 @@ const materializeBranchView = (
   }
   const leafEventId = requestedLeafEventId ?? events.at(-1)?.eventId;
   if (leafEventId === undefined) return [];
-  const path: Doc<"sessionEvents">[] = [];
+  const path: PublicSessionEvent[] = [];
   const seen = new Set<string>();
   let current: string | undefined = leafEventId;
   while (current !== undefined && !seen.has(current)) {
@@ -328,8 +552,8 @@ const materializeBranchView = (
 };
 
 const materializeToolExpandedView = (
-  events: Doc<"sessionEvents">[],
-  toolCalls: Doc<"toolCalls">[],
+  events: PublicSessionEvent[],
+  toolCalls: PublicToolCall[],
 ) => {
   const byToolCallId = new Map(toolCalls.map((toolCall) => [toolCall.toolCallId, toolCall]));
   const byEventId = groupBy(toolCalls, (toolCall) => toolCall.eventId);
@@ -375,14 +599,14 @@ export const listToolCallsHandler = async (
       .withIndex("by_toolCallId", (q) => q.eq("toolCallId", args.toolCallId!))
       .take(boundedScanLimit(limit));
     return {
-      items: filterToolCalls(rows, args),
+      items: filterToolCalls(rows, args).map(publicToolCall),
       isDone: true,
       continueCursor: "",
     };
   }
   const page = await toolCallPage(ctx, args, limit);
   return {
-    items: page.page.filter((toolCall) => matchesToolCallFilters(toolCall, args)),
+    items: page.page.filter((toolCall) => matchesToolCallFilters(toolCall, args)).map(publicToolCall),
     isDone: page.isDone,
     continueCursor: page.continueCursor,
   };
