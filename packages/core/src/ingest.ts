@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 
 import { stableWideHash } from "./hash";
 import { allAdapters, readAdapters, stableAdapters } from "./adapters/registry";
-import type { AdapterReadResult } from "./adapters/types";
+import type { AdapterDiscoverOptions, AdapterReadResult, SessionAdapter } from "./adapters/types";
 import type {
   IngestBatch,
   IngestManifest,
@@ -99,6 +99,15 @@ export async function* streamIngestBatches(
     return;
   }
   for (const adapter of adapters) {
+    if (adapter.stream !== undefined) {
+      yield* streamAdapterBatches(adapter, {
+        machine,
+        now,
+        roots: options.roots,
+        limit: options.limit,
+      });
+      continue;
+    }
     const result = await adapter.read({
       machine,
       now,
@@ -112,6 +121,45 @@ export async function* streamIngestBatches(
       sessions: result.sessions,
       diagnostics: result.diagnostics,
       generatedAt: now,
+    });
+  }
+}
+
+async function* streamAdapterBatches(
+  adapter: SessionAdapter,
+  options: AdapterDiscoverOptions,
+): AsyncGenerator<IngestBatch> {
+  if (adapter.stream === undefined) return;
+  for await (const item of adapter.stream(options)) {
+    if (item.type === "sourceRoot") {
+      yield toConvexSafeSessionIntelligenceBatch({
+        protocolVersion: "quasar.ingest/v1",
+        machine: options.machine,
+        sourceRoots: [item.sourceRoot],
+        sessions: [],
+        diagnostics: [],
+        generatedAt: options.now,
+      });
+      continue;
+    }
+    if (item.type === "diagnostic") {
+      yield toConvexSafeSessionIntelligenceBatch({
+        protocolVersion: "quasar.ingest/v1",
+        machine: options.machine,
+        sourceRoots: [],
+        sessions: [],
+        diagnostics: [item.diagnostic],
+        generatedAt: options.now,
+      });
+      continue;
+    }
+    yield toConvexSafeSessionIntelligenceBatch({
+      protocolVersion: "quasar.ingest/v1",
+      machine: options.machine,
+      sourceRoots: [],
+      sessions: [item.session],
+      diagnostics: [],
+      generatedAt: options.now,
     });
   }
 }

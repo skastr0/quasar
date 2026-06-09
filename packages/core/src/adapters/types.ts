@@ -19,6 +19,25 @@ export interface AdapterReadResult {
   readonly diagnostics: AdapterDiagnostic[];
 }
 
+export type AdapterStreamItem =
+  | { readonly type: "sourceRoot"; readonly sourceRoot: SourceRoot }
+  | { readonly type: "session"; readonly session: NormalizedSession }
+  | { readonly type: "diagnostic"; readonly diagnostic: AdapterDiagnostic };
+
+export const collectAdapterStream = async (
+  stream: AsyncIterable<AdapterStreamItem>,
+): Promise<AdapterReadResult> => {
+  const sourceRoots: SourceRoot[] = [];
+  const sessions: NormalizedSession[] = [];
+  const diagnostics: AdapterDiagnostic[] = [];
+  for await (const item of stream) {
+    if (item.type === "sourceRoot") sourceRoots.push(item.sourceRoot);
+    else if (item.type === "session") sessions.push(item.session);
+    else diagnostics.push(item.diagnostic);
+  }
+  return { sourceRoots, sessions, diagnostics };
+};
+
 export interface SessionAdapter {
   readonly id: string;
   readonly provider: Provider;
@@ -26,4 +45,5 @@ export interface SessionAdapter {
   readonly stable: boolean;
   readonly defaultRoot: () => string | undefined;
   readonly read: (options: AdapterDiscoverOptions) => Promise<AdapterReadResult>;
+  readonly stream?: (options: AdapterDiscoverOptions) => AsyncIterable<AdapterStreamItem>;
 }

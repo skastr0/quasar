@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 
 import { describe, expect, test } from "vitest";
 
-import { buildIngestBatch } from "../src/ingest";
+import { codexAdapter } from "../src/adapters/codex";
+import type { AdapterDiscoverOptions, AdapterStreamItem } from "../src/adapters/types";
+import { buildIngestBatch, streamIngestBatches } from "../src/ingest";
 import {
   CONVEX_SAFE_INGEST_BUDGETS,
   assertConvexSafeSessionIntelligenceBatch,
@@ -220,6 +222,124 @@ describe("adapter ingestion", () => {
     expect(cursor.toolCalls[0]?.toolName).toBe("read_file");
     expect(cursor.artifacts[0]?.kind).toBe("diff");
   }, 15_000);
+
+  test("streams converted adapter sessions as bounded batches", async () => {
+    const fixtures = await makeAllAdapterFixtures();
+    const roots = {
+      codex: fixtures.codex,
+      claude: fixtures.claude,
+      opencode: fixtures.opencode,
+      hermes: fixtures.hermes,
+    };
+    const streamed = [];
+    for await (const batch of streamIngestBatches({
+      providers: ["codex", "claude", "opencode", "hermes"],
+      roots,
+      machine,
+    })) {
+      assertConvexSafeSessionIntelligenceBatch(batch);
+      streamed.push(batch);
+    }
+    const sessionBatches = streamed.filter((batch) => batch.sessions.length > 0);
+    const aggregate = await buildIngestBatch({
+      providers: ["codex", "claude", "opencode", "hermes"],
+      roots,
+      machine,
+    });
+
+    expect(sessionBatches).toHaveLength(aggregate.sessions.length);
+    expect(sessionBatches.every((batch) => batch.sessions.length === 1)).toBe(true);
+    expect(
+      sessionBatches.every(
+        (batch) => batch.sourceRoots.length === 0 && batch.diagnostics.length === 0,
+      ),
+    ).toBe(true);
+    expect(
+      streamed.every(
+        (batch) =>
+          batch.sessions.length > 0 ||
+          batch.sourceRoots.length > 0 ||
+          batch.diagnostics.length > 0,
+      ),
+    ).toBe(true);
+    expect(sessionBatches.map((batch) => batch.sessions[0]?.provider)).toEqual(
+      aggregate.sessions.map((session) => session.provider),
+    );
+    expect(streamed.flatMap((batch) => batch.sourceRoots).map((root) => root.provider)).toEqual([
+      "codex",
+      "claude",
+      "opencode",
+      "hermes",
+    ]);
+    expect(streamed.flatMap((batch) => batch.diagnostics).map((diagnostic) => diagnostic.provider)).toEqual([
+      "codex",
+      "claude",
+      "opencode",
+      "hermes",
+    ]);
+  }, 15_000);
+
+  test("flushes streamed sessions before later adapter failures", async () => {
+    const originalStream = codexAdapter.stream;
+    const adapter = codexAdapter as {
+      stream?: (options: AdapterDiscoverOptions) => AsyncIterable<AdapterStreamItem>;
+    };
+    const session: NormalizedSession = {
+      id: "codex:session:stream-test",
+      nativeSessionId: "stream-test",
+      provider: "codex",
+      agentName: "codex",
+      machineId: machine.machineId,
+      projectIdentity: {
+        projectIdentityKey: "project:stream-test",
+        displayName: "stream-test",
+        confidence: "low",
+        signals: [],
+      },
+      sourceRoot: "/tmp/quasar-stream-test",
+      sourcePath: "/tmp/quasar-stream-test/session.jsonl",
+      events: [],
+      toolCalls: [],
+      sessionEdges: [],
+      usageRecords: [],
+      artifacts: [],
+    };
+
+    adapter.stream = async function* (options) {
+      yield {
+        type: "sourceRoot",
+        sourceRoot: {
+          provider: "codex",
+          adapterId: codexAdapter.id,
+          rootPath: session.sourceRoot,
+          machineId: options.machine.machineId,
+          discoveredAt: options.now,
+        },
+      };
+      yield { type: "session", session };
+      throw new Error("adapter failure after yielded session");
+    };
+
+    try {
+      const iterator = streamIngestBatches({
+        providers: ["codex"],
+        machine,
+        generatedAt: "2026-06-09T00:00:00.000Z",
+      })[Symbol.asyncIterator]();
+
+      const rootBatch = await iterator.next();
+      expect(rootBatch.done).toBe(false);
+      expect(rootBatch.value.sourceRoots).toHaveLength(1);
+
+      const sessionBatch = await iterator.next();
+      expect(sessionBatch.done).toBe(false);
+      expect(sessionBatch.value.sessions.map((item: NormalizedSession) => item.id)).toEqual([session.id]);
+
+      await expect(iterator.next()).rejects.toThrow("adapter failure after yielded session");
+    } finally {
+      adapter.stream = originalStream;
+    }
+  });
 
   test("scopes graph IDs by machine for the same native source path", async () => {
     const root = makeKimiFixture();
