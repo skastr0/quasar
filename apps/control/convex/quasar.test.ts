@@ -1293,6 +1293,44 @@ describe("quasar ingestion and search", () => {
     expect(retry).toMatchObject({ status: "queued", chunkCount: 0, attemptNumber: 1 });
   });
 
+  test("stale running import jobs fail closed and allocate a fresh attempt", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const sourceIdentityKey = "source:stale-running";
+    const job = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { batch, sourceIdentityKey, expectedChunkCount: 2 },
+    });
+    await t.run(async (ctx) => {
+      const row = await ctx.db
+        .query("importJobs")
+        .withIndex("by_importJobId", (q) => q.eq("importJobId", job.importJobId))
+        .unique();
+      if (row === null) throw new Error("Import job was not found.");
+      await ctx.db.patch(row._id, {
+        status: "running",
+        chunkCount: 1,
+        uploadedChunkCount: 1,
+        succeededChunkCount: 1,
+        succeededPrefixCount: 1,
+        updatedAt: Date.now() - 10 * 60_000,
+      });
+    });
+
+    const retry = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { batch, sourceIdentityKey, expectedChunkCount: 2 },
+    });
+    const oldStatus = await t.query(internal.quasar.readImportJobInternal, {
+      input: { importJobId: job.importJobId },
+    });
+
+    expect(retry.importJobId).not.toBe(job.importJobId);
+    expect(retry).toMatchObject({ status: "queued", chunkCount: 0, attemptNumber: 1 });
+    expect(oldStatus?.job).toMatchObject({
+      status: "failed",
+      error: "Import job attempt became stale before completion.",
+    });
+  });
+
   test("succeeded import jobs remain idempotent by source identity", async () => {
     const t = setup();
     const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
