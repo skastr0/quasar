@@ -10,7 +10,6 @@ import {
   jsonByteLength,
   manifestFromBatch,
   QuasarApiPaths,
-  snapshotConfiguredSourceRoots,
   snapshotIngestSourceManifest,
   stableJsonHash,
   type IngestBatch,
@@ -57,12 +56,6 @@ const buildBatchEffect = (input: string | undefined) =>
 const buildBatchWithSourceSnapshotEffect = (input: string | undefined) =>
   Effect.gen(function* () {
     const options = yield* loadOptions(input);
-    const before = snapshotConfiguredSourceRoots({
-      providers: options.providers,
-      includeExperimental: options.includeExperimental,
-      limit: options.limit,
-      roots: options.roots,
-    });
     const batch = yield* Effect.tryPromise({
       try: () =>
         buildIngestBatch({
@@ -73,6 +66,7 @@ const buildBatchWithSourceSnapshotEffect = (input: string | undefined) =>
         }),
       catch: (error) => (error instanceof Error ? error : new Error(String(error))),
     });
+    const before = snapshotIngestSourceManifest(batch);
     return { options, before, batch };
   });
 
@@ -142,12 +136,16 @@ const planCommand = Command.make("plan", { input: inputArg }, ({ input }) =>
 );
 
 type IngestRequestClient = typeof requestJson;
+const IngestRequestClientSchema = Schema.instanceOf(Function);
 
 export const runIngestEffect = (
   input: string | undefined,
   requestClient: IngestRequestClient = requestJson,
 ) =>
   Effect.gen(function* () {
+    const client = (yield* Schema.decodeUnknown(IngestRequestClientSchema)(
+      requestClient,
+    )) as IngestRequestClient;
     const { options, before, batch: rawBatch } = yield* buildBatchWithSourceSnapshotEffect(input);
     const batch = sanitizeIngestBatchForTransport(rawBatch);
     if (options.dryRun === true) {
@@ -165,7 +163,7 @@ export const runIngestEffect = (
     }
     const chunks = chunkIngestBatch(batch, chunkOptionsFromEnv());
     validateChunkPayloads(chunks);
-    const job = yield* requestClient({
+    const job = yield* client({
       method: "POST",
       path: QuasarApiPaths.ingestJobs,
       body: {
@@ -193,7 +191,7 @@ export const runIngestEffect = (
         `bulk upload group ending at chunk ${group.at(-1)?.index ?? 0}`,
       );
       results.push(
-        yield* requestClient({
+        yield* client({
           method: "POST",
           path: QuasarApiPaths.ingestJobChunksBulk,
           body: requestBody,
@@ -204,7 +202,7 @@ export const runIngestEffect = (
         yield* Effect.sleep(Duration.millis(chunkDelayMs));
       }
     }
-    const status = yield* readImportJob(job.importJobId, requestClient);
+    const status = yield* readImportJob(job.importJobId, client);
     const after = snapshotIngestSourceManifest(batch);
     return {
       ...summarizeBatch(batch),
