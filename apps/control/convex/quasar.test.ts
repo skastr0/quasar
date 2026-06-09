@@ -7,6 +7,8 @@ import { describe, expect, test } from "vitest";
 
 import schema from "./schema";
 import { internal } from "./_generated/api";
+import { decodeBoundarySync, IngestBatchBoundary } from "./quasarDomainSchemas";
+import { sanitizeIngestBoundaryBatch } from "./quasarIngestContract";
 import { compactSearchText } from "./quasarText";
 
 const modules = import.meta.glob("./**/*.ts");
@@ -284,6 +286,24 @@ const setup = () => {
 };
 
 describe("quasar ingestion and search", () => {
+  test("rejects oversized cleanup metadata restored after sanitization", () => {
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const oversized = {
+      ...batch,
+      sessions: [
+        {
+          ...batch.sessions[0]!,
+          expectedEventIds: Array.from({ length: 60_000 }, (_, index) => `event:${index}`),
+        },
+      ],
+    };
+    const decoded = decodeBoundarySync(IngestBatchBoundary, oversized, "oversized test batch");
+
+    expect(() => sanitizeIngestBoundaryBatch(decoded, "oversized test batch")).toThrow(
+      /expectedEventIds.*maximum/,
+    );
+  });
+
   test("reports semantic search as unavailable when embeddings are unconfigured", async () => {
     const keys = ["GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY"] as const;
     const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));

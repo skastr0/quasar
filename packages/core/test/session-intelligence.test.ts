@@ -40,6 +40,31 @@ const baseBatch = (overrides: Partial<IngestBatch["sessions"][number]> = {}): In
 });
 
 describe("session intelligence contract", () => {
+  test("rejects non-convex event ordering before ingest", () => {
+    const batch = baseBatch({
+      events: [
+        {
+          id: "event:bad-sequence",
+          sessionId: "session:test",
+          sequence: -1,
+          machineId: "machine:test",
+          provider: "opencode",
+          agentName: "opencode",
+          projectIdentityKey: "project:test",
+          role: "user",
+          kind: "message",
+          contentText: "invalid event",
+          contentBlocks: [],
+          rawReference: { sourcePath: "/tmp/opencode.db" },
+        },
+      ],
+    });
+
+    expect(() => toConvexSafeSessionIntelligenceBatch(batch)).toThrow(
+      /non-negative integer/,
+    );
+  });
+
   test("keeps OpenCode-style summary diffs out of Convex-shaped event content", () => {
     const vendorFile = "not-session-intelligence\n".repeat(30_000);
     const event = {

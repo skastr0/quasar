@@ -2,18 +2,30 @@ import { Schema } from "effect";
 
 import { Provider, SearchRequest } from "@skastr0/quasar-core";
 
+const NonNegativeInteger = Schema.Number.pipe(
+  Schema.filter((value) => Number.isInteger(value) && value >= 0, {
+    message: () => "Expected a non-negative integer",
+  }),
+);
+
+const PositiveInteger = Schema.Number.pipe(
+  Schema.filter((value) => Number.isInteger(value) && value > 0, {
+    message: () => "Expected a positive integer",
+  }),
+);
+
 export const IngestOptions = Schema.Struct({
   providers: Schema.optional(Schema.Array(Provider)),
   includeExperimental: Schema.optional(Schema.Boolean),
-  limit: Schema.optional(Schema.Number),
+  limit: Schema.optional(PositiveInteger),
   roots: Schema.optional(Schema.partial(Schema.Record({ key: Provider, value: Schema.String }))),
   logicalRoots: Schema.optional(Schema.partial(Schema.Record({ key: Provider, value: Schema.String }))),
   snapshotSources: Schema.optional(Schema.Boolean),
-  maxUploadChunks: Schema.optional(Schema.Number),
-  drainPollIntervalMs: Schema.optional(Schema.Number),
-  drainTimeoutMs: Schema.optional(Schema.Number),
-  drainRescheduleIntervalMs: Schema.optional(Schema.Number),
-  inFlightHighWatermark: Schema.optional(Schema.Number),
+  maxUploadChunks: Schema.optional(PositiveInteger),
+  drainPollIntervalMs: Schema.optional(PositiveInteger),
+  drainTimeoutMs: Schema.optional(NonNegativeInteger),
+  drainRescheduleIntervalMs: Schema.optional(PositiveInteger),
+  inFlightHighWatermark: Schema.optional(NonNegativeInteger),
   dryRun: Schema.optional(Schema.Boolean),
 });
 export type IngestOptions = typeof IngestOptions.Type;
@@ -38,7 +50,7 @@ export const ToolCallReadInput = Schema.Struct({
   provider: Schema.optional(Provider),
   agentName: Schema.optional(Schema.String),
   toolName: Schema.optional(Schema.String),
-  limit: Schema.optional(Schema.Number),
+  limit: Schema.optional(PositiveInteger),
 });
 
 export const SearchInput = SearchRequest;

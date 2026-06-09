@@ -67,6 +67,23 @@ describe("CLI command graph", () => {
     expect(envelope.data.sourceSafetyReport.sourceMutations).toHaveLength(0);
   }, 20_000);
 
+  test("rejects loose ingest option numbers at the CLI boundary", async () => {
+    const result = await runCli([
+      "ingest",
+      "run",
+      JSON.stringify({ providers: ["pi"], limit: 0, dryRun: true }),
+    ], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        QUASAR_HOME: mkdtempSync(join(tmpdir(), "quasar-cli-home-")),
+      },
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Expected a positive integer");
+  }, 20_000);
+
   test("chunks large ingest sessions with final expected-id cleanup metadata", async () => {
     const root = mkdtempSync(join(tmpdir(), "quasar-cli-pi-"));
     writePiFixture(root, 55);

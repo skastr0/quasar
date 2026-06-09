@@ -1,6 +1,4 @@
 import type { MutationCtx } from "./_generated/server";
-import type { IngestBatch as CoreIngestBatch } from "../../../packages/core/src/schemas";
-import { toConvexSafeSessionIntelligenceBatch } from "../../../packages/core/src/session-intelligence";
 import {
   cleanupMissingSessionRows,
   upsertSessionEvents,
@@ -22,6 +20,7 @@ import {
   type SessionEventBoundary,
   type ToolCallBoundary,
 } from "./quasarDomainSchemas";
+import { sanitizeIngestBoundaryBatch } from "./quasarIngestContract";
 import { ensureAgent, ensureMachine, upsertProjectIdentity } from "./quasarProjectHandlers";
 import { upsertSearchDocument } from "./quasarSearchDocuments";
 import type { SearchDocumentUpsertInput } from "./quasarSearchTypes";
@@ -55,11 +54,7 @@ const parseIngestBatch = (
   metadata: { importJobId?: string; importChunkId?: string } = {},
 ): ParsedIngestBatch => {
   const decoded = decodeBoundarySync(IngestBatchBoundary, value, "ingest batch");
-  const sanitized = restoreIngestControlMetadata(
-    decoded,
-    toConvexSafeSessionIntelligenceBatch(toCoreIngestBatch(decoded)),
-  );
-  const batch = decodeBoundarySync(IngestBatchBoundary, sanitized, "sanitized ingest batch");
+  const batch = sanitizeIngestBoundaryBatch(decoded, "ingest batch");
   const machine = batch.machine;
   const sessions = batch.sessions;
   const sourceRoots = batch.sourceRoots;
@@ -83,81 +78,6 @@ const parseIngestBatch = (
     importChunkId: metadata.importChunkId,
   };
 };
-
-const restoreIngestControlMetadata = (
-  original: IngestBatchBoundary,
-  sanitized: CoreIngestBatch,
-): IngestBatchBoundary => ({
-  ...sanitized,
-  sessions: sanitized.sessions.map((session, index) => {
-    const control = original.sessions[index];
-    return {
-      ...session,
-      ...(control?.expectedEventIds !== undefined ? { expectedEventIds: control.expectedEventIds } : {}),
-      ...(control?.expectedToolCallIds !== undefined ? { expectedToolCallIds: control.expectedToolCallIds } : {}),
-      ...(control?.expectedContentBlockIds !== undefined
-        ? { expectedContentBlockIds: control.expectedContentBlockIds }
-        : {}),
-      ...(control?.expectedSessionEdgeIds !== undefined
-        ? { expectedSessionEdgeIds: control.expectedSessionEdgeIds }
-        : {}),
-      ...(control?.expectedUsageRecordIds !== undefined
-        ? { expectedUsageRecordIds: control.expectedUsageRecordIds }
-        : {}),
-      ...(control?.expectedArtifactIds !== undefined ? { expectedArtifactIds: control.expectedArtifactIds } : {}),
-      ...(control?.partialSession !== undefined ? { partialSession: control.partialSession } : {}),
-      ...(control?.deferCleanup !== undefined ? { deferCleanup: control.deferCleanup } : {}),
-    };
-  }),
-});
-
-const toCoreIngestBatch = (batch: IngestBatchBoundary): CoreIngestBatch => ({
-  ...batch,
-  sessions: batch.sessions.map((session) => ({
-    ...session,
-    events: session.events.map((event) => ({
-      ...event,
-      sessionId: session.id,
-      machineId: session.machineId,
-      provider: session.provider,
-      agentName: session.agentName,
-      projectIdentityKey: session.projectIdentity.projectIdentityKey,
-    })),
-    toolCalls: session.toolCalls.map((toolCall) => ({
-      ...toolCall,
-      sessionId: session.id,
-      eventId: toolCall.eventId ?? `declared:${toolCall.id}`,
-      machineId: session.machineId,
-      provider: session.provider,
-      agentName: session.agentName,
-      projectIdentityKey: session.projectIdentity.projectIdentityKey,
-    })),
-    sessionEdges: session.sessionEdges.map((edge) => ({
-      ...edge,
-      sessionId: session.id,
-      machineId: session.machineId,
-      provider: session.provider,
-      agentName: session.agentName,
-      projectIdentityKey: session.projectIdentity.projectIdentityKey,
-    })),
-    usageRecords: session.usageRecords.map((usageRecord) => ({
-      ...usageRecord,
-      sessionId: session.id,
-      machineId: session.machineId,
-      provider: session.provider,
-      agentName: session.agentName,
-      projectIdentityKey: session.projectIdentity.projectIdentityKey,
-    })),
-    artifacts: session.artifacts.map((artifact) => ({
-      ...artifact,
-      sessionId: session.id,
-      machineId: session.machineId,
-      provider: session.provider,
-      agentName: session.agentName,
-      projectIdentityKey: session.projectIdentity.projectIdentityKey,
-    })),
-  })),
-});
 
 const importRunId = (
   machine: ParsedIngestBatch["machine"],
