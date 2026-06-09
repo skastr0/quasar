@@ -76,6 +76,7 @@ export const ingestBatchInternal = internalMutation({
     batch: v.any(),
     importJobId: v.optional(v.string()),
     importChunkId: v.optional(v.string()),
+    leaseToken: v.optional(v.string()),
   },
   handler: ingestBatchHandler,
 });

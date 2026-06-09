@@ -480,6 +480,7 @@ export const processImportJobChunksHandler = async (
           batch: claim.batch,
           importJobId: claim.importJobId,
           importChunkId: claim.chunkId,
+          leaseToken: claim.leaseToken,
         });
         await ctx.runMutation(internal.quasar.markImportChunkSucceededInternal, {
           importJobId: claim.importJobId,
@@ -487,11 +488,12 @@ export const processImportJobChunksHandler = async (
           leaseToken: claim.leaseToken,
         });
       } catch (error) {
+        const failure = importChunkWorkerFailure(error);
         await ctx.runMutation(internal.quasar.markImportChunkFailedInternal, {
           importJobId: claim.importJobId,
           chunkId: claim.chunkId,
           leaseToken: claim.leaseToken,
-          error: error instanceof Error ? error.message : String(error),
+          error: failure.error,
         });
       }
     }
@@ -597,6 +599,17 @@ export const markImportChunkSucceededHandler = async (
   if (chunk === null) throw new Error("Import chunk was not found.");
   const stale = staleChunkClaim(chunk, args.importJobId, args.leaseToken);
   if (stale !== null) return stale;
+  const job = await findImportJob(ctx, args.importJobId);
+  if (job === null || isClosedImportJob(job)) {
+    await releaseChunkForClosedJob(ctx, chunk, job?.error ?? "Import job closed before chunk completed.", now);
+    return {
+      importJobId: args.importJobId,
+      chunkId: args.chunkId,
+      status: "dead_letter" as const,
+      jobStatus: job?.status ?? "failed",
+      stale: true,
+    };
+  }
   const oldStatus = chunk.status;
   await ctx.db.patch(chunk._id, {
     status: "succeeded",
@@ -633,6 +646,11 @@ export const markImportChunkFailedHandler = async (
   const chunk = await findImportChunk(ctx, args.chunkId);
   if (chunk === null) return;
   if (staleChunkClaim(chunk, args.importJobId, args.leaseToken) !== null) return;
+  const job = await findImportJob(ctx, args.importJobId);
+  if (job === null || isClosedImportJob(job)) {
+    await releaseChunkForClosedJob(ctx, chunk, job?.error ?? args.error, now);
+    return;
+  }
   const maxAttempts = chunk.maxAttempts ?? IMPORT_CHUNK_MAX_ATTEMPTS;
   const exhausted = chunk.attempts >= maxAttempts;
   const nextStatus: ImportChunkStatus = exhausted ? "dead_letter" : "pending";
@@ -1113,6 +1131,31 @@ const markChunkTerminalFailure = async (
       now,
     });
   }
+};
+
+const releaseChunkForClosedJob = async (
+  ctx: MutationCtx,
+  chunk: Doc<"importChunks">,
+  error: string,
+  now: number,
+) => {
+  await ctx.db.patch(chunk._id, {
+    status: "dead_letter",
+    error,
+    completedAt: now,
+    leaseExpiresAt: undefined,
+    leaseToken: undefined,
+    payloadStoredAt: undefined,
+    updatedAt: now,
+  });
+  await deleteChunkPayload(ctx, chunk.chunkId);
+};
+
+const importChunkWorkerFailure = (error: unknown) => {
+  if (error instanceof Error) {
+    return { error: `${error.name}: ${error.message}` };
+  }
+  return { error: `NonError: ${String(error)}` };
 };
 
 const upsertImportShards = async (

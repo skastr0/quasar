@@ -37,7 +37,7 @@ const MAX_DIRECT_INGEST_OPERATIONS = 35;
 
 export const ingestBatchHandler = async (
   ctx: MutationCtx,
-  args: { batch: unknown; importJobId?: string; importChunkId?: string },
+  args: { batch: unknown; importJobId?: string; importChunkId?: string; leaseToken?: string },
 ): Promise<IngestBatchResult> => {
   const batch = parseIngestBatch(args.batch, {
     importJobId: args.importJobId,
@@ -45,6 +45,13 @@ export const ingestBatchHandler = async (
   });
   if (args.importJobId === undefined && args.importChunkId === undefined) {
     assertDirectBatchAdmission(batch);
+  } else {
+    await assertActiveImportChunkClaim(ctx, {
+      importJobId: args.importJobId,
+      importChunkId: args.importChunkId,
+      leaseToken: args.leaseToken,
+      now: Date.now(),
+    });
   }
   await ensureMachine(ctx, batch.machine);
   await upsertImportRun(ctx, batch);
@@ -56,6 +63,44 @@ export const ingestBatchHandler = async (
 
   return importRunSummary(batch);
 };
+
+const assertActiveImportChunkClaim = async (
+  ctx: MutationCtx,
+  input: { importJobId?: string; importChunkId?: string; leaseToken?: string; now: number },
+) => {
+  if (
+    input.importJobId === undefined ||
+    input.importChunkId === undefined ||
+    input.leaseToken === undefined
+  ) {
+    throw new Error("Import chunk ingest requires an active job, chunk, and lease token.");
+  }
+  const { importJobId, importChunkId, leaseToken } = input;
+  const job = await ctx.db
+    .query("importJobs")
+    .withIndex("by_importJobId", (q) => q.eq("importJobId", importJobId))
+    .unique();
+  if (job === null || isClosedImportJobStatus(job.status) || job.completedAt !== undefined) {
+    throw new Error("Import job is closed; claimed chunk ingest is no longer active.");
+  }
+  const chunk = await ctx.db
+    .query("importChunks")
+    .withIndex("by_chunkId", (q) => q.eq("chunkId", importChunkId))
+    .unique();
+  if (
+    chunk === null ||
+    chunk.importJobId !== importJobId ||
+    chunk.status !== "running" ||
+    chunk.leaseToken !== leaseToken ||
+    chunk.leaseExpiresAt === undefined ||
+    chunk.leaseExpiresAt <= input.now
+  ) {
+    throw new Error("Import chunk claim is no longer active.");
+  }
+};
+
+const isClosedImportJobStatus = (status: string) =>
+  status === "failed" || status === "partial_failure" || status === "succeeded";
 
 const parseIngestBatch = (
   value: unknown,
