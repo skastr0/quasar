@@ -146,6 +146,7 @@ const INGEST_GENERATION_IDENTITY_VERSION = "quasar.ingest-generation-identity/v5
 const INGEST_CHUNK_LEDGER_FORMAT = "quasar.ingest-chunks-jsonl/v1";
 const INGEST_CHUNK_LEDGER_FILENAME = "chunks.ndjson";
 const MAX_INGEST_MANIFEST_SESSION_SAMPLES = 25;
+const INGEST_MEMORY_PRESSURE_GC_RSS_BYTES = 512 * 1024 * 1024;
 const DURABLE_SNAPSHOT_PROVIDERS = new Set<Provider>([
   "codex",
   "claude",
@@ -1175,14 +1176,42 @@ const drainPublicResult = (result: DrainResult) => ({
 const importJobDrainSummary = (status: ImportJobStatusSnapshot) => {
   const job = status.job;
   const uploaded = jobNumber(job, "uploadedChunkCount") ?? jobNumber(job, "chunkCount") ?? 0;
-  const succeeded = jobNumber(job, "succeededChunkCount") ?? 0;
-  const failed = jobNumber(job, "failedChunkCount") ?? 0;
-  const terminal = succeeded + failed;
+  const terminal = jobNumber(job, "terminalChunkCount") ??
+    ((jobNumber(job, "succeededChunkCount") ?? 0) + (jobNumber(job, "failedChunkCount") ?? 0));
   return {
     inFlightChunkCount: Math.max(0, uploaded - terminal),
     uploadedChunkCount: uploaded,
     terminalChunkCount: terminal,
   };
+};
+
+const importJobUploadSummary = (status: ImportJobStatusSnapshot) => {
+  const job = status.job;
+  const expected = jobNumber(job, "expectedChunkCount");
+  const uploaded = jobNumber(job, "uploadedChunkCount") ?? jobNumber(job, "chunkCount") ?? 0;
+  const terminal = jobNumber(job, "terminalChunkCount") ??
+    ((jobNumber(job, "succeededChunkCount") ?? 0) + (jobNumber(job, "failedChunkCount") ?? 0));
+  const inFlight = jobNumber(job, "inFlightChunkCount") ?? Math.max(0, uploaded - terminal);
+  const missing = expected === undefined ? undefined : Math.max(0, expected - uploaded);
+  const uploadComplete = expected !== undefined && uploaded >= expected;
+  return {
+    expectedChunkCount: expected,
+    uploadedChunkCount: uploaded,
+    terminalChunkCount: terminal,
+    inFlightChunkCount: inFlight,
+    uploadComplete,
+    uploadIncomplete: expected !== undefined && !uploadComplete,
+    ...(missing !== undefined ? { missingUploadChunkCount: missing } : {}),
+  };
+};
+
+export const isIdleUploadIncompleteImportJob = (status: {
+  readonly job: unknown;
+  readonly jobStatus: string;
+}) => {
+  if (isFinalJobStatus(status.jobStatus)) return false;
+  const uploadStatus = importJobUploadSummary(status as ImportJobStatusSnapshot);
+  return uploadStatus.uploadIncomplete && uploadStatus.inFlightChunkCount <= 0;
 };
 
 const jobNumber = (job: unknown, key: string) => {
@@ -1380,6 +1409,7 @@ const runPreparedIngest = (input: {
       chunks: plannedChunks,
     });
     const after = resnapshotSourceManifestEntries(plan.sourceBefore);
+    const uploadStatus = importJobUploadSummary(status);
     return {
       ...summaryFromManifest(plan.manifest),
       importJobId: job.importJobId,
@@ -1391,6 +1421,7 @@ const runPreparedIngest = (input: {
       uploadGroupCount: upload.uploadGroupCount,
       uploadComplete: upload.uploadComplete,
       uploadStoppedEarly: upload.uploadStoppedEarly,
+      uploadStatus,
       drain: {
         ...(preUploadDrain !== undefined ? { beforeUpload: drainPublicResult(preUploadDrain) } : {}),
         ...(postUploadDrain !== undefined ? { afterUpload: drainPublicResult(postUploadDrain) } : {}),
@@ -1558,6 +1589,7 @@ const planStreamedIngest = (
             payloadHash,
           );
         }
+        releaseIngestMemoryPressure();
       }
       const plannedManifest: IngestManifest = manifest;
       return {
@@ -1611,6 +1643,7 @@ const writeStreamedIngestLedger = (
           byteLength += Buffer.byteLength(line, "utf8");
           chunkCount += 1;
         }
+        releaseIngestMemoryPressure();
       }
       const plannedManifest: IngestManifest = manifest;
       const plan: StreamIngestPlan = {
@@ -1874,6 +1907,7 @@ async function* streamChunkItems(
       yield { chunk, index, payloadHash: ingestBatchPayloadHash(chunk) };
       index += 1;
     }
+    releaseIngestMemoryPressure();
   }
 }
 
@@ -2096,6 +2130,14 @@ const assertJsonBudget = (value: unknown, maxBytes: number, label: string) => {
   if (bytes > maxBytes) {
     throw new Error(`${label} is ${bytes} bytes; maximum is ${maxBytes} bytes.`);
   }
+};
+
+const releaseIngestMemoryPressure = () => {
+  if (process.memoryUsage().rss < INGEST_MEMORY_PRESSURE_GC_RSS_BYTES) return;
+  const maybeBun = globalThis as typeof globalThis & {
+    readonly Bun?: { readonly gc?: (force?: boolean) => void };
+  };
+  maybeBun.Bun?.gc?.(true);
 };
 
 export const ingestJobIdempotencyKey = (
@@ -2508,7 +2550,13 @@ const waitCommand = Command.make("wait", { input: requiredInputArg }, ({ input }
       const startedAt = Date.now();
       while (true) {
         const status = yield* readImportJob(options.importJobId, requestJson, { limit: 1 });
-        if (isFinalJobStatus(status.jobStatus)) return { timedOut: false, ...status };
+        const uploadStatus = importJobUploadSummary(status);
+        if (isFinalJobStatus(status.jobStatus)) {
+          return { timedOut: false, uploadStatus, ...status };
+        }
+        if (isIdleUploadIncompleteImportJob(status)) {
+          return { timedOut: false, uploadIncomplete: true, uploadStatus, ...status };
+        }
         if (Date.now() - startedAt >= timeoutMs) return { timedOut: true, ...status };
         yield* Effect.sleep(Duration.millis(pollIntervalMs));
       }

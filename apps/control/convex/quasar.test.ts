@@ -925,6 +925,40 @@ describe("quasar ingestion and search", () => {
     ).rejects.toThrow(/idempotencyKey does not match/);
   });
 
+  test("import job status separates incomplete upload from worker in-flight work", async () => {
+    const t = setup();
+    const batch = testBatch("/Users/a/Projects/quasar", "machine:a");
+    const job = await t.mutation(internal.quasar.startImportJobInternal, {
+      input: { batch, expectedChunkCount: 2 },
+    });
+    await t.action(internal.quasar.submitImportChunkInternal, {
+      input: {
+        importJobId: job.importJobId,
+        batch,
+        sequence: 0,
+        expectedChunkCount: 2,
+      },
+    });
+    await t.action(internal.quasar.processImportJobChunksInternal, {
+      importJobId: job.importJobId,
+      limit: 1,
+    });
+
+    const status = await t.query(internal.quasar.readImportJobInternal, {
+      input: { importJobId: job.importJobId, limit: 1 },
+    });
+
+    expect(status?.job).toMatchObject({
+      status: "running",
+      expectedChunkCount: 2,
+      uploadedChunkCount: 1,
+      terminalChunkCount: 1,
+      inFlightChunkCount: 0,
+      uploadComplete: false,
+      missingUploadChunkCount: 1,
+    });
+  });
+
   test("cancelled import jobs stop claiming pending chunks", async () => {
     const t = setup();
     const batch = testBatch("/Users/a/Projects/quasar", "machine:a");

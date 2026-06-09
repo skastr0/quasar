@@ -24,6 +24,7 @@ import {
   chunkIngestBatch,
   ingestBatchPayloadHash,
   ingestChunkIdempotencyKey,
+  isIdleUploadIncompleteImportJob,
   runIngestEffect,
   sanitizeInspectionBatch,
   sanitizeUploadChunk,
@@ -804,6 +805,42 @@ describe("CLI command graph", () => {
     );
   }, 20_000);
 
+  test("classifies idle incomplete uploads without waiting for worker drain", () => {
+    expect(
+      isIdleUploadIncompleteImportJob({
+        jobStatus: "running",
+        job: {
+          expectedChunkCount: 40_301,
+          uploadedChunkCount: 300,
+          terminalChunkCount: 300,
+          inFlightChunkCount: 0,
+        },
+      }),
+    ).toBe(true);
+    expect(
+      isIdleUploadIncompleteImportJob({
+        jobStatus: "running",
+        job: {
+          expectedChunkCount: 40_301,
+          uploadedChunkCount: 300,
+          terminalChunkCount: 299,
+          inFlightChunkCount: 1,
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isIdleUploadIncompleteImportJob({
+        jobStatus: "succeeded",
+        job: {
+          expectedChunkCount: 300,
+          uploadedChunkCount: 300,
+          terminalChunkCount: 300,
+          inFlightChunkCount: 0,
+        },
+      }),
+    ).toBe(false);
+  });
+
   test("does not upload when a previous slice is still draining", async () => {
     const root = mkdtempSync(join(tmpdir(), "quasar-cli-pi-"));
     writePiFixture(root, 12);
@@ -1429,10 +1466,12 @@ describe("CLI command graph", () => {
     process.env.QUASAR_INGEST_MAX_EVENTS_PER_CHUNK = "5";
     process.env.QUASAR_INGEST_UPLOAD_GROUP_SIZE = "1";
     const requests: Array<{ method: string; path: string; body?: unknown }> = [];
+    let expectedChunkCount = 0;
     const requestClient = ((spec: { method: string; path: string; body?: unknown }) => {
       requests.push({ method: spec.method, path: spec.path, body: spec.body });
       if (spec.method === "POST" && spec.path === "/api/ingest/jobs") {
         const record = spec.body as Record<string, unknown>;
+        expectedChunkCount = Number(record.expectedChunkCount);
         return Effect.succeed({
           importJobId: "job:slice",
           status: "running",
@@ -1459,7 +1498,16 @@ describe("CLI command graph", () => {
       }
       if (spec.method === "GET" && spec.path === "/api/ingest/jobs") {
         return Effect.succeed({
-          job: { importJobId: "job:slice", status: "running" },
+          job: {
+            importJobId: "job:slice",
+            status: "running",
+            expectedChunkCount,
+            uploadedChunkCount: 2,
+            terminalChunkCount: 2,
+            inFlightChunkCount: 0,
+            uploadComplete: false,
+            missingUploadChunkCount: expectedChunkCount - 2,
+          },
           chunks: [],
           failures: [],
           readiness: {
@@ -1486,6 +1534,14 @@ describe("CLI command graph", () => {
       uploadedThisRunCount: number;
       uploadComplete: boolean;
       uploadStoppedEarly: boolean;
+      uploadStatus: {
+        uploadIncomplete: boolean;
+        uploadComplete: boolean;
+        uploadedChunkCount: number;
+        terminalChunkCount: number;
+        inFlightChunkCount: number;
+        missingUploadChunkCount: number;
+      };
     };
     let runResult: SliceResult | undefined;
     try {
@@ -1525,6 +1581,14 @@ describe("CLI command graph", () => {
     expect(runResult?.uploadedThisRunCount).toBe(2);
     expect(runResult?.uploadComplete).toBe(false);
     expect(runResult?.uploadStoppedEarly).toBe(true);
+    expect(runResult?.uploadStatus).toMatchObject({
+      uploadIncomplete: true,
+      uploadComplete: false,
+      uploadedChunkCount: 2,
+      terminalChunkCount: 2,
+      inFlightChunkCount: 0,
+      missingUploadChunkCount: 1,
+    });
   }, 20_000);
 
   test("aborts non-dry-run ingest when sources change between planning and upload", async () => {
