@@ -187,6 +187,57 @@ describe("adapter ingestion", () => {
     expect(session.events[0]?.contentBlocks[0]?.id).toContain("codex:block:machine:test:");
   });
 
+  test("applies deterministic skip windows to file-backed adapters", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-codex-window-"));
+    const sessionDir = join(root, "sessions", "2026", "06", "03");
+    mkdirSync(sessionDir, { recursive: true });
+    for (const name of ["a", "b", "c"]) {
+      writeJsonl(join(sessionDir, `rollout-2026-06-03T00-00-00-${name}.jsonl`), [
+        { type: "session_meta", payload: { cwd: "/Users/a/Projects/quasar" } },
+        { type: "response_item", payload: { type: "user_message", content: `hello ${name}` } },
+      ]);
+    }
+
+    const firstWindow = await buildIngestBatch({
+      providers: ["codex"],
+      roots: { codex: root },
+      machine,
+      limit: 1,
+    });
+    const secondWindow = await buildIngestBatch({
+      providers: ["codex"],
+      roots: { codex: root },
+      machine,
+      limit: 1,
+      skip: 1,
+    });
+
+    expect(firstWindow.sessions).toHaveLength(1);
+    expect(secondWindow.sessions).toHaveLength(1);
+    expect(firstWindow.sessions[0]?.nativeSessionId).toContain("-a");
+    expect(secondWindow.sessions[0]?.nativeSessionId).toContain("-b");
+  });
+
+  test("applies deterministic skip windows to sqlite-backed adapters", async () => {
+    const root = await makeOpenCodeWindowFixture();
+    const firstWindow = await buildIngestBatch({
+      providers: ["opencode"],
+      roots: { opencode: root },
+      machine,
+      limit: 1,
+    });
+    const secondWindow = await buildIngestBatch({
+      providers: ["opencode"],
+      roots: { opencode: root },
+      machine,
+      limit: 1,
+      skip: 1,
+    });
+
+    expect(firstWindow.sessions.map((session) => session.nativeSessionId)).toEqual(["s-new"]);
+    expect(secondWindow.sessions.map((session) => session.nativeSessionId)).toEqual(["s-mid"]);
+  });
+
   test("reads graph fixtures for all local adapters", async () => {
     const fixtures = await makeAllAdapterFixtures();
     const sessionsByProvider = new Map<Provider, NormalizedSession>();
@@ -630,6 +681,26 @@ const makeOpenCodeFixture = async () => {
       `insert into message values ('m1', 's1', 1, ${sql(JSON.stringify({ role: "assistant", tokens: { total: 12, input: 5, output: 7 }, modelID: "gpt-test", providerID: "openai" }))});`,
       `insert into message values ('m2', 's1', 2, ${sql(JSON.stringify({ parentID: "m1", role: "user", content: "thanks", summary: { cache: { state: "opencode-provider-cache-trash" }, state: { view: "opencode-provider-state-trash" }, diffs: [{ file: "node_modules/typescript/lib/typescript.js", after: nativeDiffTrash }] } }))});`,
       `insert into part values ('p1', 's1', 'm1', 1, ${sql(JSON.stringify({ type: "tool", tool: "bash", callID: "call1", state: { status: "completed", input: { command: "pwd", patch: "@@ real opencode tool patch", providerUi: "opencode-tool-ui-trash" }, output: { text: "/repo", patch: "@@ real opencode output patch", providerUi: "opencode-tool-ui-trash" } } }))});`,
+    ].join("\n"),
+  ]);
+  return root;
+};
+
+const makeOpenCodeWindowFixture = async () => {
+  const root = mkdtempSync(join(tmpdir(), "quasar-window-opencode-"));
+  const dbPath = join(root, "opencode.db");
+  execFileSync("sqlite3", [
+    dbPath,
+    [
+      "create table session (id text, title text, directory text, path text, time_created integer, time_updated integer);",
+      "create table message (id text, session_id text, time_created integer, data text);",
+      "create table part (id text, session_id text, message_id text, time_created integer, data text);",
+      `insert into session values ('s-old', 'old', '/Users/a/Projects/quasar', '/Users/a/Projects/quasar', 1, 10);`,
+      `insert into session values ('s-mid', 'mid', '/Users/a/Projects/quasar', '/Users/a/Projects/quasar', 2, 20);`,
+      `insert into session values ('s-new', 'new', '/Users/a/Projects/quasar', '/Users/a/Projects/quasar', 3, 30);`,
+      `insert into message values ('m-old', 's-old', 1, ${sql(JSON.stringify({ role: "user", content: "old" }))});`,
+      `insert into message values ('m-mid', 's-mid', 2, ${sql(JSON.stringify({ role: "user", content: "mid" }))});`,
+      `insert into message values ('m-new', 's-new', 3, ${sql(JSON.stringify({ role: "user", content: "new" }))});`,
     ].join("\n"),
   ]);
   return root;

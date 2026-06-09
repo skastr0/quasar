@@ -24,6 +24,7 @@ export const IngestOptions = Schema.Struct({
   providers: Schema.optional(Schema.Array(Provider)),
   includeExperimental: Schema.optional(Schema.Boolean),
   limit: Schema.optional(PositiveInteger),
+  skip: Schema.optional(NonNegativeInteger),
   roots: Schema.optional(Schema.partial(Schema.Record({ key: Provider, value: Schema.String }))),
   logicalRoots: Schema.optional(Schema.partial(Schema.Record({ key: Provider, value: Schema.String }))),
   snapshotSources: Schema.optional(Schema.Boolean),

@@ -181,7 +181,12 @@ export const ampAdapter: SessionAdapter = {
     }
 
     const threadRoot = join(root, "threads");
-    const threadFiles = collectFiles(threadRoot, (path) => path.endsWith(".json"), options.limit);
+    const threadFiles = collectFiles(
+      threadRoot,
+      (path) => path.endsWith(".json"),
+      options.limit,
+      options.skip,
+    );
     const threadSessions = threadFiles.flatMap((path) => {
       if (/secrets|auth|token|credential/i.test(path)) return [];
       const thread = recordFrom(readJsonFile(path));

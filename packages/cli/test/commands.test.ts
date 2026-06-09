@@ -84,6 +84,41 @@ describe("CLI command graph", () => {
     expect(result.stderr).toContain("Expected a positive integer");
   }, 20_000);
 
+  test("runs source discovery with a session skip window", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-cli-pi-"));
+    for (const name of ["a", "b", "c"]) {
+      writeJsonl(join(root, `${name}.jsonl`), [
+        {
+          id: name,
+          role: "user",
+          content: `message ${name}`,
+          cwd: "/Users/a/Projects/quasar",
+        },
+      ]);
+    }
+
+    const result = await runCli([
+      "sources",
+      "discover",
+      JSON.stringify({ providers: ["pi"], roots: { pi: root }, limit: 1, skip: 1 }),
+    ], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        QUASAR_HOME: mkdtempSync(join(tmpdir(), "quasar-cli-home-")),
+      },
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    const envelope = JSON.parse(result.stdout) as {
+      ok: true;
+      data: { sessionCount: number; eventCount: number };
+    };
+    expect(envelope.ok).toBe(true);
+    expect(envelope.data.sessionCount).toBe(1);
+    expect(envelope.data.eventCount).toBe(1);
+  }, 20_000);
+
   test("chunks large ingest sessions with final expected-id cleanup metadata", async () => {
     const root = mkdtempSync(join(tmpdir(), "quasar-cli-pi-"));
     writePiFixture(root, 55);

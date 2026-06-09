@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import { Args, Command } from "@effect/cli";
 import { Duration, Effect, Schema } from "effect";
@@ -79,6 +79,7 @@ type PreparedSourceSnapshot = {
   readonly providers?: readonly Provider[];
   readonly includeExperimental?: boolean;
   readonly limit?: number;
+  readonly skip?: number;
   readonly generatedAt?: string;
   readonly plan?: StreamIngestPlan;
   readonly generation?: {
@@ -126,7 +127,7 @@ const cleanupSourceSnapshot = (prepared: PreparedSourceSnapshot) =>
   });
 
 const INGEST_GENERATION_SCHEMA_VERSION = "quasar.ingest-generation/v1";
-const INGEST_GENERATION_IDENTITY_VERSION = "quasar.ingest-generation-identity/v2";
+const INGEST_GENERATION_IDENTITY_VERSION = "quasar.ingest-generation-identity/v3";
 const STREAM_INGEST_UPLOAD_IDENTITY_VERSION = "quasar.stream-ingest/v3";
 const DURABLE_SNAPSHOT_PROVIDERS = new Set<Provider>([
   "codex",
@@ -134,10 +135,17 @@ const DURABLE_SNAPSHOT_PROVIDERS = new Set<Provider>([
   "hermes",
   "opencode",
 ]);
+const OPENCODE_DB_FILENAMES = ["opencode-local.db", "opencode.db"] as const;
 
 const PersistedPositiveInteger = Schema.Number.pipe(
   Schema.filter((value) => Number.isInteger(value) && value > 0, {
     message: () => "Expected a positive integer",
+  }),
+);
+
+const PersistedNonNegativeInteger = Schema.Number.pipe(
+  Schema.filter((value) => Number.isInteger(value) && value >= 0, {
+    message: () => "Expected a non-negative integer",
   }),
 );
 
@@ -153,6 +161,7 @@ const IngestGenerationIntent = Schema.Struct({
   providers: Schema.Array(ProviderSchema),
   includeExperimental: Schema.Boolean,
   limit: Schema.optional(PersistedPositiveInteger),
+  skip: Schema.optional(PersistedNonNegativeInteger),
   roots: Schema.partial(Schema.Record({ key: ProviderSchema, value: Schema.String })),
   logicalRoots: Schema.partial(Schema.Record({ key: ProviderSchema, value: Schema.String })),
   chunkOptions: IngestGenerationChunkOptions,
@@ -283,6 +292,7 @@ const ingestGenerationIntent = (
     providers: adapters.map((adapter) => adapter.provider),
     includeExperimental: options.includeExperimental === true,
     ...(options.limit !== undefined ? { limit: options.limit } : {}),
+    ...(options.skip !== undefined ? { skip: options.skip } : {}),
     roots,
     logicalRoots,
     chunkOptions,
@@ -316,7 +326,7 @@ const canSnapshotDurableProviderSource = (provider: Provider, root: string) => {
     case "hermes":
       return sqliteDbPathForRoot(root, "state.db") !== undefined;
     case "opencode":
-      return existsSync(join(root, "opencode.db"));
+      return opencodeDbPathForRoot(root) !== undefined;
     default:
       return false;
   }
@@ -416,6 +426,7 @@ const createPersistedIngestGeneration = (input: {
         providers: input.intent.providers,
         includeExperimental: input.intent.includeExperimental,
         limit: input.intent.limit,
+        skip: input.intent.skip,
         roots: tempSnapshot.roots,
         logicalRoots: tempSnapshot.logicalRoots,
         machine: input.machine,
@@ -495,6 +506,7 @@ const preparedSourceFromGeneration = (
     providers: generation.intent.providers,
     includeExperimental: generation.intent.includeExperimental,
     limit: generation.intent.limit,
+    skip: generation.intent.skip,
     generatedAt: generation.generatedAt,
     plan: {
       manifest: generation.plan.manifest,
@@ -587,10 +599,10 @@ const snapshotProviderSource = (
       return snapshotProviderRoot;
     }
     case "opencode": {
-      const sourceDbPath = join(originalRoot, "opencode.db");
-      if (!existsSync(sourceDbPath)) return undefined;
+      const sourceDbPath = opencodeDbPathForRoot(originalRoot);
+      if (sourceDbPath === undefined) return undefined;
       const snapshotProviderRoot = join(snapshotRoot, "opencode");
-      snapshotSqliteDatabase(sourceDbPath, join(snapshotProviderRoot, "opencode.db"));
+      snapshotSqliteDatabase(sourceDbPath, join(snapshotProviderRoot, basename(sourceDbPath)));
       return snapshotProviderRoot;
     }
     default:
@@ -620,6 +632,19 @@ const sqliteDbPathForRoot = (root: string, filename: string) => {
   }
   const dbPath = join(root, filename);
   return existsSync(dbPath) ? dbPath : undefined;
+};
+
+const opencodeDbPathForRoot = (root: string) => {
+  try {
+    if (statSync(root).isFile()) return root;
+  } catch {
+    return undefined;
+  }
+  for (const filename of OPENCODE_DB_FILENAMES) {
+    const dbPath = join(root, filename);
+    if (existsSync(dbPath)) return dbPath;
+  }
+  return undefined;
 };
 
 const snapshotSqliteDatabase = (sourceDbPath: string, destinationDbPath: string) => {
@@ -659,6 +684,7 @@ const buildBatchEffect = (input: string | undefined) =>
             providers: options.providers,
             includeExperimental: options.includeExperimental,
             limit: options.limit,
+            skip: options.skip,
             roots: prepared.roots,
             logicalRoots: prepared.logicalRoots,
           }),
@@ -677,6 +703,7 @@ const buildBatchWithSourceSnapshotEffect = (input: string | undefined) =>
             providers: options.providers,
             includeExperimental: options.includeExperimental,
             limit: options.limit,
+            skip: options.skip,
             roots: prepared.roots,
             logicalRoots: prepared.logicalRoots,
           });
@@ -689,6 +716,37 @@ const buildBatchWithSourceSnapshotEffect = (input: string | undefined) =>
       });
     });
     return { options, before, batch };
+  });
+
+const buildStreamedPlanEffect = (input: string | undefined) =>
+  Effect.gen(function* () {
+    const options = yield* loadOptions(input);
+    const machine = loadMachineIdentity();
+    const generatedAt = new Date().toISOString();
+    const chunkOptions = chunkOptionsFromEnv();
+    return yield* withPreparedSourceSnapshot(options, (prepared) =>
+      planStreamedIngest(
+        {
+          providers: options.providers,
+          includeExperimental: options.includeExperimental,
+          limit: options.limit,
+          skip: options.skip,
+          roots: prepared.roots,
+          logicalRoots: prepared.logicalRoots,
+          machine,
+          generatedAt,
+        },
+        chunkOptions,
+      ).pipe(
+        Effect.map((plan) => ({
+          plan,
+          selection: {
+            ...(options.limit !== undefined ? { limit: options.limit } : {}),
+            ...(options.skip !== undefined ? { skip: options.skip } : {}),
+          },
+        })),
+      )
+    );
   });
 
 const readImportJob = (
@@ -998,6 +1056,7 @@ const runPreparedIngest = (input: {
       providers: input.prepared.providers ?? input.options.providers,
       includeExperimental: input.prepared.includeExperimental ?? input.options.includeExperimental,
       limit: input.prepared.limit ?? input.options.limit,
+      skip: input.prepared.skip ?? input.options.skip,
       roots: input.prepared.roots,
       logicalRoots: input.prepared.logicalRoots,
       machine: streamMachine,

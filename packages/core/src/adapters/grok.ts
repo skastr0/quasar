@@ -231,6 +231,7 @@ export const grokAdapter: SessionAdapter = {
       sessionsRoot,
       (path) => path.endsWith("chat_history.jsonl"),
       options.limit,
+      options.skip,
     );
     const rootRecord = sourceRoot("grok", grokAdapter.id, sessionsRoot, options.machine, options.now);
     const sessions = files.map((chatPath) => {

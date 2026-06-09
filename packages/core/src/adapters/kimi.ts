@@ -212,7 +212,12 @@ export const kimiAdapter: SessionAdapter = {
     }
     const indexById = indexEntries(root);
     const state = readJsonFile(join(root, "state.json"));
-    const wireFiles = collectFiles(root, (path) => path.endsWith("wire.jsonl"), options.limit);
+    const wireFiles = collectFiles(
+      root,
+      (path) => path.endsWith("wire.jsonl"),
+      options.limit,
+      options.skip,
+    );
     const sessions = wireFiles.map((path) => buildKimiSession(path, root, options, indexById, state));
     return {
       sourceRoots: [sourceRoot("kimi", kimiAdapter.id, root, options.machine, options.now)],

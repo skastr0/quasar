@@ -12,6 +12,7 @@ export interface AdapterDiscoverOptions {
   readonly roots?: Partial<Record<Provider, string>>;
   readonly logicalRoots?: Partial<Record<Provider, string>>;
   readonly limit?: number;
+  readonly skip?: number;
 }
 
 export interface AdapterReadResult {
