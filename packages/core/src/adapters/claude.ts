@@ -42,6 +42,64 @@ type ClaudeEdgeDraft = Omit<
 const contentArray = (message: Record<string, unknown> | undefined) =>
   Array.isArray(message?.content) ? (message.content as unknown[]) : [];
 
+const claudeContentProjection = (
+  message: Record<string, unknown> | undefined,
+  record: Record<string, unknown>,
+): NativeValue => {
+  if (typeof message?.content === "string") return message.content;
+  const blocks = contentArray(message);
+  if (blocks.length > 0) {
+    return blocks.flatMap((blockValue) => {
+      const block = recordFrom(blockValue);
+      const type = typeof block.type === "string" ? block.type : undefined;
+      if (type === "text" && typeof block.text === "string") {
+        return [{ type, text: block.text } as NativeValue];
+      }
+      if (type === "thinking" && typeof block.thinking === "string") {
+        return [{ type, thinking: block.thinking } as NativeValue];
+      }
+      if (type === "tool_use") {
+        return [
+          {
+            type,
+            ...(typeof block.id === "string" ? { id: block.id } : {}),
+            ...(typeof block.name === "string" ? { name: block.name } : {}),
+            ...(block.input !== undefined ? { input: block.input as NativeValue } : {}),
+          } as NativeValue,
+        ];
+      }
+      if (type === "tool_result") {
+        return [
+          {
+            type,
+            ...(typeof block.tool_use_id === "string" ? { tool_use_id: block.tool_use_id } : {}),
+            ...(typeof block.content === "string" ? { content: block.content } : {}),
+          } as NativeValue,
+        ];
+      }
+      if (type === "image") {
+        return [
+          {
+            type,
+            ...(typeof block.media_type === "string" ? { media_type: block.media_type } : {}),
+          } as NativeValue,
+        ];
+      }
+      if (type === "file") {
+        return [
+          {
+            type,
+            ...(typeof block.file_path === "string" ? { file_path: block.file_path } : {}),
+            ...(typeof block.media_type === "string" ? { media_type: block.media_type } : {}),
+          } as NativeValue,
+        ];
+      }
+      return [];
+    });
+  }
+  return record.content as NativeValue | undefined ?? {};
+};
+
 const toolCallIdFor = (machineId: string, sourcePath: string, nativeToolId: string) =>
   scopedId("claude", machineId, sourcePath, "tool", nativeToolId);
 
@@ -70,7 +128,6 @@ const upsertClaudeToolCalls = (
         ...(existing?.output !== undefined ? { output: existing.output } : {}),
         ...(timestamp !== undefined ? { startedAt: timestamp } : {}),
         ...(existing?.completedAt !== undefined ? { completedAt: existing.completedAt } : {}),
-        raw: block,
       });
       eventToolCallId = id;
       continue;
@@ -87,7 +144,6 @@ const upsertClaudeToolCalls = (
         output: block.content,
         ...(existing?.startedAt !== undefined ? { startedAt: existing.startedAt } : {}),
         ...(timestamp !== undefined ? { completedAt: timestamp } : {}),
-        raw: block,
       });
       eventToolCallId = id;
     }
@@ -134,7 +190,6 @@ const claudeUsageRecord = (
     cacheCreationInputTokens,
     cacheReadInputTokens,
     totalTokens: sumNumbers([inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens]),
-    raw: usage,
   };
 };
 
@@ -194,7 +249,7 @@ export const claudeAdapter: SessionAdapter = {
           record.message !== null && typeof record.message === "object"
             ? (record.message as Record<string, unknown>)
             : undefined;
-        const content = (message?.content ?? record) as NativeValue;
+        const content = claudeContentProjection(message, record);
         const nativeEventId = typeof record.uuid === "string" ? record.uuid : undefined;
         const eventId = eventIdFor("claude", options.machine.machineId, path, index, nativeEventId ?? lineNumber);
         if (nativeEventId !== undefined) nativeUuidToEventId.set(nativeEventId, eventId);
@@ -245,7 +300,6 @@ export const claudeAdapter: SessionAdapter = {
           content,
           ...(toolCallId !== undefined ? { toolCallId } : {}),
           rawReference: { sourcePath: path, line: lineNumber, nativeType: type },
-          raw: value,
         };
       });
       return buildSession({
@@ -257,7 +311,14 @@ export const claudeAdapter: SessionAdapter = {
         sourceRoot: projectsRoot,
         sourcePath: path,
         projectPath,
-        rawMetadata: firstRecord as NativeValue | undefined,
+        rawMetadata:
+          firstRecord === undefined
+            ? undefined
+            : {
+                ...(typeof firstRecord.cwd === "string" ? { cwd: firstRecord.cwd } : {}),
+                ...(typeof firstRecord.type === "string" ? { type: firstRecord.type } : {}),
+                ...(typeof firstRecord.uuid === "string" ? { uuid: firstRecord.uuid } : {}),
+              },
         events,
         toolCalls: [...toolCallsById.values()],
         sessionEdges: parentEdges,

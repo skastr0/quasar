@@ -4,6 +4,7 @@ import { basename, dirname, join } from "node:path";
 import { stableJsonHash, stableWideHash } from "../hash";
 import { resolveProjectIdentity } from "../project-normalization";
 import { redactSensitive } from "../redaction";
+import { sanitizeSessionIntelligenceSession } from "../session-intelligence";
 import type {
   Artifact,
   ContentBlock,
@@ -265,6 +266,15 @@ export const contentBlocksFromNative = (
       ...(metadata !== undefined ? { metadata } : {}),
     });
   };
+  const metadataFor = (record: Record<string, unknown>, type: string | undefined) => ({
+    ...(type !== undefined ? { nativeType: type } : {}),
+    ...(typeof record.id === "string" ? { nativeId: record.id } : {}),
+    ...(typeof record.name === "string" ? { name: record.name } : {}),
+    ...(typeof record.tool === "string" ? { toolName: record.tool } : {}),
+    ...(typeof record.toolName === "string" ? { toolName: record.toolName } : {}),
+    ...(typeof record.callID === "string" ? { callId: record.callID } : {}),
+    ...(typeof record.call_id === "string" ? { callId: record.call_id } : {}),
+  });
   const pushMediaOrFile = (record: Record<string, unknown>, type: string | undefined) => {
     const lowerType = type?.toLowerCase();
     const path =
@@ -293,8 +303,7 @@ export const contentBlocksFromNative = (
         ...(path !== undefined ? { path } : {}),
         ...(uri !== undefined ? { uri } : {}),
         ...(mediaType !== undefined ? { mediaType } : {}),
-        value: record.image ?? record.data ?? record.source,
-        metadata: record,
+        metadata: metadataFor(record, type),
       });
       return true;
     }
@@ -309,8 +318,7 @@ export const contentBlocksFromNative = (
         ...(path !== undefined ? { path } : {}),
         ...(uri !== undefined ? { uri } : {}),
         ...(mediaType !== undefined ? { mediaType } : {}),
-        value: record.file ?? record.data ?? record.content,
-        metadata: record,
+        metadata: metadataFor(record, type),
       });
       return true;
     }
@@ -339,19 +347,18 @@ export const contentBlocksFromNative = (
       stringValue(record.thinking) ??
       stringValue(record.markdown);
     if (text !== undefined) {
-      if (type === "thinking" || record.thinking !== undefined) pushText("thinking", text, record);
-      else if (type === "markdown" || record.markdown !== undefined) pushText("markdown", text, record);
-      else pushText("text", text, record);
-      if (pushedMediaOrFile || record.value !== undefined || record.json !== undefined) {
-        pushBlock({ kind: "json", value: record, metadata: { nativeType: type } });
-      }
+      const metadata = metadataFor(record, type);
+      if (type === "thinking" || record.thinking !== undefined) pushText("thinking", text, metadata);
+      else if (type === "markdown" || record.markdown !== undefined) pushText("markdown", text, metadata);
+      else pushText("text", text, metadata);
       return;
     }
     if (record.content !== undefined) visit(record.content);
     if (record.parts !== undefined) visit(record.parts);
     if (record.message !== undefined) visit(record.message);
     if (blocks.length === before && !pushedMediaOrFile) {
-      pushBlock({ kind: "json", value: record, metadata: type !== undefined ? { nativeType: type } : undefined });
+      const text = compactText(record as NativeValue);
+      if (text !== undefined) pushText("text", text, metadataFor(record, type));
     }
   };
   visit(value);
@@ -559,7 +566,7 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
     projectIdentityKey: projectIdentity.projectIdentityKey,
   }));
 
-  return {
+  return sanitizeSessionIntelligenceSession({
     id,
     nativeSessionId: args.nativeSessionId,
     provider: args.provider,
@@ -580,7 +587,7 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
     sessionEdges,
     usageRecords,
     artifacts,
-  };
+  });
 };
 
 export const eventIdFor = (
