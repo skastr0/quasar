@@ -518,7 +518,7 @@ export const runIngestEffect = (
           chunkDelayMs,
           progress: progressOptionsFromEnv(),
         });
-        if (upload.uploadComplete) {
+        if (upload.uploadedThisRunCount > 0 || upload.uploadComplete) {
           yield* ensureImportWorkerScheduled(job.importJobId, client);
         }
         const status = yield* readImportJob(job.importJobId, client, { limit: 0 });
@@ -912,6 +912,7 @@ const bulkUploadRequestBody = (
 ) => ({
   importJobId,
   expectedChunkCount: plan.expectedChunkCount,
+  scheduleWorker: false,
   chunks: group.map(({ chunk, index }) => ({
     batch: chunk,
     sequence: index,
