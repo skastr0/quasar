@@ -1,7 +1,21 @@
+import { execFileSync } from "node:child_process";
+import {
+  copyFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+
 import { Args, Command } from "@effect/cli";
 import { Duration, Effect, Schema } from "effect";
 
 import {
+  allAdapters,
   buildIngestBatch,
   createSourceSafetyReport,
   ImportJobStartResponse,
@@ -14,11 +28,13 @@ import {
   resnapshotSourceManifestEntries,
   snapshotIngestSourceManifest,
   stableJsonHash,
+  stableAdapters,
   streamIngestBatches,
   type IngestBatch,
   type IngestManifest,
   type MachineIdentity,
   type NormalizedSession,
+  type Provider,
   type SourceManifestEntry,
   type StreamIngestBatchOptions,
   sanitizeIngestBatchForTransport,
@@ -45,46 +61,228 @@ const toUndefined = <A>(value: { _tag: "Some"; value: A } | { _tag: "None" }) =>
 const loadOptions = (input: string | undefined) =>
   loadOptionalJsonInput(IngestOptions, input, {});
 
+type PreparedSourceSnapshot = {
+  readonly roots?: Partial<Record<Provider, string>>;
+  readonly logicalRoots?: Partial<Record<Provider, string>>;
+  readonly sourceSnapshot: {
+    readonly enabled: boolean;
+    readonly rootPath?: string;
+    readonly copiedProviders: readonly Provider[];
+  };
+};
+
+const withPreparedSourceSnapshot = <A, E, R>(
+  options: IngestOptions,
+  use: (prepared: PreparedSourceSnapshot) => Effect.Effect<A, E, R>,
+): Effect.Effect<A, E | Error, R> =>
+  Effect.gen(function* () {
+    const prepared = yield* prepareSourceSnapshot(options);
+    try {
+      return yield* use(prepared);
+    } finally {
+      yield* cleanupSourceSnapshot(prepared);
+    }
+  });
+
+const prepareSourceSnapshot = (options: IngestOptions) =>
+  Effect.try({
+    try: () => prepareSourceSnapshotSync(options),
+    catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+  });
+
+const cleanupSourceSnapshot = (prepared: PreparedSourceSnapshot) =>
+  Effect.sync(() => {
+    const rootPath = prepared.sourceSnapshot.rootPath;
+    if (rootPath === undefined) return;
+    try {
+      rmSync(rootPath, { recursive: true, force: true });
+    } catch {
+      // Best-effort cleanup for a temp directory created by this process.
+    }
+  });
+
+const prepareSourceSnapshotSync = (options: IngestOptions): PreparedSourceSnapshot => {
+  if (options.snapshotSources !== true) {
+    return {
+      roots: options.roots,
+      logicalRoots: options.logicalRoots,
+      sourceSnapshot: { enabled: false, copiedProviders: [] },
+    };
+  }
+
+  const snapshotRoot = mkdtempSync(join(tmpdir(), "quasar-ingest-snapshot-"));
+  const roots: Partial<Record<Provider, string>> = { ...(options.roots ?? {}) };
+  const logicalRoots: Partial<Record<Provider, string>> = { ...(options.logicalRoots ?? {}) };
+  const copiedProviders: Provider[] = [];
+  const adapters = (options.includeExperimental === true ? allAdapters : stableAdapters).filter(
+    (adapter) =>
+      options.providers === undefined || options.providers.includes(adapter.provider),
+  );
+
+  for (const adapter of adapters) {
+    const provider = adapter.provider;
+    const originalRoot = options.roots?.[provider] ?? adapter.defaultRoot();
+    if (originalRoot === undefined) continue;
+    const snapshotProviderRoot = snapshotProviderSource(
+      provider,
+      originalRoot,
+      snapshotRoot,
+    );
+    if (snapshotProviderRoot === undefined) continue;
+    roots[provider] = snapshotProviderRoot;
+    logicalRoots[provider] = options.logicalRoots?.[provider] ?? originalRoot;
+    copiedProviders.push(provider);
+  }
+
+  return {
+    roots,
+    logicalRoots,
+    sourceSnapshot: { enabled: true, rootPath: snapshotRoot, copiedProviders },
+  };
+};
+
+const snapshotProviderSource = (
+  provider: Provider,
+  originalRoot: string,
+  snapshotRoot: string,
+) => {
+  switch (provider) {
+    case "codex":
+      return snapshotDirectoryProvider(
+        join(originalRoot, "sessions"),
+        join(snapshotRoot, "codex"),
+        "sessions",
+      );
+    case "claude":
+      return snapshotDirectoryProvider(
+        join(originalRoot, "projects"),
+        join(snapshotRoot, "claude"),
+        "projects",
+      );
+    case "hermes": {
+      const sourceDbPath = sqliteDbPathForRoot(originalRoot, "state.db");
+      if (sourceDbPath === undefined) return undefined;
+      const snapshotProviderRoot = join(snapshotRoot, "hermes");
+      snapshotSqliteDatabase(sourceDbPath, join(snapshotProviderRoot, "state.db"));
+      return snapshotProviderRoot;
+    }
+    case "opencode": {
+      const sourceDbPath = join(originalRoot, "opencode.db");
+      if (!existsSync(sourceDbPath)) return undefined;
+      const snapshotProviderRoot = join(snapshotRoot, "opencode");
+      snapshotSqliteDatabase(sourceDbPath, join(snapshotProviderRoot, "opencode.db"));
+      return snapshotProviderRoot;
+    }
+    default:
+      return undefined;
+  }
+};
+
+const snapshotDirectoryProvider = (
+  sourceDirectory: string,
+  snapshotProviderRoot: string,
+  childName: string,
+) => {
+  if (!isDirectory(sourceDirectory)) return undefined;
+  mkdirSync(snapshotProviderRoot, { recursive: true });
+  cpSync(sourceDirectory, join(snapshotProviderRoot, childName), {
+    recursive: true,
+    force: true,
+  });
+  return snapshotProviderRoot;
+};
+
+const sqliteDbPathForRoot = (root: string, filename: string) => {
+  try {
+    if (statSync(root).isFile()) return root;
+  } catch {
+    return undefined;
+  }
+  const dbPath = join(root, filename);
+  return existsSync(dbPath) ? dbPath : undefined;
+};
+
+const snapshotSqliteDatabase = (sourceDbPath: string, destinationDbPath: string) => {
+  mkdirSync(dirname(destinationDbPath), { recursive: true });
+  try {
+    execFileSync("sqlite3", [
+      sourceDbPath,
+      `.backup ${sqliteDotCommandQuote(destinationDbPath)}`,
+    ], { stdio: "pipe" });
+    return;
+  } catch {
+    copyFileSync(sourceDbPath, destinationDbPath);
+    for (const suffix of ["-wal", "-shm"]) {
+      const source = `${sourceDbPath}${suffix}`;
+      if (existsSync(source)) copyFileSync(source, `${destinationDbPath}${suffix}`);
+    }
+  }
+};
+
+const sqliteDotCommandQuote = (value: string) => `'${value.replaceAll("'", "''")}'`;
+
+const isDirectory = (path: string) => {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+};
+
 const buildBatchEffect = (input: string | undefined) =>
   Effect.gen(function* () {
     const options = yield* loadOptions(input);
-    return yield* Effect.tryPromise({
-      try: () =>
-        buildIngestBatch({
-          providers: options.providers,
-          includeExperimental: options.includeExperimental,
-          limit: options.limit,
-          roots: options.roots,
-        }),
-      catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+    return yield* withPreparedSourceSnapshot(options, (prepared) => {
+      return Effect.tryPromise({
+        try: () =>
+          buildIngestBatch({
+            providers: options.providers,
+            includeExperimental: options.includeExperimental,
+            limit: options.limit,
+            roots: prepared.roots,
+            logicalRoots: prepared.logicalRoots,
+          }),
+        catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+      });
     });
   });
 
 const buildBatchWithSourceSnapshotEffect = (input: string | undefined) =>
   Effect.gen(function* () {
     const options = yield* loadOptions(input);
-    const batch = yield* Effect.tryPromise({
-      try: () =>
-        buildIngestBatch({
-          providers: options.providers,
-          includeExperimental: options.includeExperimental,
-          limit: options.limit,
-          roots: options.roots,
-        }),
-      catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+    const { before, batch } = yield* withPreparedSourceSnapshot(options, (prepared) => {
+      return Effect.tryPromise({
+        try: async () => {
+          const batch = await buildIngestBatch({
+            providers: options.providers,
+            includeExperimental: options.includeExperimental,
+            limit: options.limit,
+            roots: prepared.roots,
+            logicalRoots: prepared.logicalRoots,
+          });
+          return {
+            before: snapshotIngestSourceManifest(batch),
+            batch,
+          };
+        },
+        catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+      });
     });
-    const before = snapshotIngestSourceManifest(batch);
     return { options, before, batch };
   });
 
 const readImportJob = (
   importJobId: string,
   requestClient: IngestRequestClient = requestJson,
+  options: { readonly limit?: number } = {},
 ) =>
   requestClient({
     method: "GET",
     path: QuasarApiPaths.ingestJobs,
-    query: { importJobId },
+    query: {
+      importJobId,
+      ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+    },
     responseSchema: ImportJobStatusResponse,
   }).pipe(
     Effect.map((status) => ({
@@ -171,55 +369,68 @@ export const runIngestEffect = (
     }
     const machine = loadMachineIdentity();
     const generatedAt = new Date().toISOString();
-    const streamOptions = {
-      providers: options.providers,
-      includeExperimental: options.includeExperimental,
-      limit: options.limit,
-      roots: options.roots,
-      machine,
-      generatedAt,
-    };
-    const chunkOptions = chunkOptionsFromEnv();
-    const plan = yield* planStreamedIngest(streamOptions, chunkOptions);
-    const job = yield* client({
-      method: "POST",
-      path: QuasarApiPaths.ingestJobs,
-      body: {
-        manifest: plan.manifest,
-        idempotencyKey: plan.idempotencyKey,
-        expectedChunkCount: plan.expectedChunkCount,
-      },
-      responseSchema: ImportJobStartResponse,
-    });
-    const chunkDelayMs = envPositiveInteger(
-      "QUASAR_INGEST_CHUNK_DELAY_MS",
-      DEFAULT_CHUNK_DELAY_MS,
-    );
-    const upload = yield* uploadStreamedIngest({
-      streamOptions,
-      chunkOptions,
-      plan,
-      client,
-      importJobId: job.importJobId,
-      uploadGroupSize: uploadGroupSizeFromEnv(),
-      chunkDelayMs,
-    });
-    const status = yield* readImportJob(job.importJobId, client);
-    const after = resnapshotSourceManifestEntries(plan.sourceBefore);
-    return {
-      ...summaryFromManifest(plan.manifest),
-      importJobId: job.importJobId,
-      jobStatus: status.jobStatus,
-      chunkCount: plan.expectedChunkCount,
-      uploadedChunkCount: upload.uploadedChunkCount,
-      uploadGroupCount: upload.uploadGroupCount,
-      status,
-      sourceSafetyReport: createSourceSafetyReport({
-        before: plan.sourceBefore,
-        after,
-        quasarStateWrites: true,
+    return yield* withPreparedSourceSnapshot(options, (prepared) =>
+      Effect.gen(function* () {
+        const streamOptions = {
+          providers: options.providers,
+          includeExperimental: options.includeExperimental,
+          limit: options.limit,
+          roots: prepared.roots,
+          logicalRoots: prepared.logicalRoots,
+          machine,
+          generatedAt,
+        };
+        const chunkOptions = chunkOptionsFromEnv();
+        const plan = yield* planStreamedIngest(streamOptions, chunkOptions);
+        const job = yield* client({
+          method: "POST",
+          path: QuasarApiPaths.ingestJobs,
+          body: {
+            manifest: plan.manifest,
+            idempotencyKey: plan.idempotencyKey,
+            expectedChunkCount: plan.expectedChunkCount,
+          },
+          responseSchema: ImportJobStartResponse,
+        });
+        const chunkDelayMs = envPositiveInteger(
+          "QUASAR_INGEST_CHUNK_DELAY_MS",
+          DEFAULT_CHUNK_DELAY_MS,
+        );
+        const upload = yield* uploadStreamedIngest({
+          streamOptions,
+          chunkOptions,
+          plan,
+          client,
+          importJobId: job.importJobId,
+          resumeUploadedChunkCount: job.chunkCount,
+          uploadGroupSize: uploadGroupSizeFromEnv(),
+          maxUploadChunksPerRun: maxUploadChunksFromOptions(options),
+          chunkDelayMs,
+          progress: progressOptionsFromEnv(),
+        });
+        const status = yield* readImportJob(job.importJobId, client, { limit: 0 });
+        const after = resnapshotSourceManifestEntries(plan.sourceBefore);
+        return {
+          ...summaryFromManifest(plan.manifest),
+          importJobId: job.importJobId,
+          jobStatus: status.jobStatus,
+          chunkCount: plan.expectedChunkCount,
+          uploadedChunkCount: upload.uploadedChunkCount,
+          uploadedThisRunCount: upload.uploadedThisRunCount,
+          skippedUploadedChunkCount: upload.skippedUploadedChunkCount,
+          uploadGroupCount: upload.uploadGroupCount,
+          uploadComplete: upload.uploadComplete,
+          uploadStoppedEarly: upload.uploadStoppedEarly,
+          status,
+          sourceSnapshot: prepared.sourceSnapshot,
+          sourceSafetyReport: createSourceSafetyReport({
+            before: plan.sourceBefore,
+            after,
+            quasarStateWrites: true,
+          }),
+        };
       }),
-    };
+    );
   });
 
 const runCommand = Command.make("run", { input: inputArg }, ({ input }) =>
@@ -254,6 +465,10 @@ const uploadGroupSizeFromEnv = () =>
     1,
     envPositiveInteger("QUASAR_INGEST_UPLOAD_GROUP_SIZE", DEFAULT_UPLOAD_GROUP_SIZE),
   );
+
+const maxUploadChunksFromOptions = (options: IngestOptions) =>
+  positiveIntegerOrUndefined(options.maxUploadChunks) ??
+  envOptionalPositiveInteger("QUASAR_INGEST_MAX_UPLOAD_CHUNKS");
 
 type StreamIngestOptions = StreamIngestBatchOptions & {
   readonly machine: MachineIdentity;
@@ -322,16 +537,43 @@ const uploadStreamedIngest = (input: {
   readonly plan: StreamIngestPlan;
   readonly client: IngestRequestClient;
   readonly importJobId: string;
+  readonly resumeUploadedChunkCount: number;
   readonly uploadGroupSize: number;
+  readonly maxUploadChunksPerRun?: number;
   readonly chunkDelayMs: number;
+  readonly progress: UploadProgressOptions;
 }) =>
   Effect.gen(function* () {
     const iterator = streamChunkBatches(input.streamOptions, input.chunkOptions)[Symbol.asyncIterator]();
     let group: Array<{ chunk: IngestBatch; index: number }> = [];
-    let uploadedChunkCount = 0;
+    const skippedUploadedChunkCount = Math.min(
+      Math.max(0, input.resumeUploadedChunkCount),
+      input.plan.expectedChunkCount,
+    );
+    let uploadedThisRunCount = 0;
+    let uploadedChunkCount = skippedUploadedChunkCount;
     let uploadGroupCount = 0;
+    let uploadStoppedEarly = false;
     let index = 0;
+    yield* emitUploadProgress(input, uploadedChunkCount, uploadGroupCount);
+    if (skippedUploadedChunkCount >= input.plan.expectedChunkCount) {
+      return {
+        uploadedChunkCount,
+        uploadedThisRunCount,
+        skippedUploadedChunkCount,
+        uploadGroupCount,
+        uploadComplete: true,
+        uploadStoppedEarly: false,
+      };
+    }
     while (true) {
+      if (
+        input.maxUploadChunksPerRun !== undefined &&
+        uploadedThisRunCount + group.length >= input.maxUploadChunksPerRun
+      ) {
+        uploadStoppedEarly = true;
+        break;
+      }
       const next = yield* Effect.tryPromise({
         try: () => iterator.next(),
         catch: (error) => (error instanceof Error ? error : new Error(String(error))),
@@ -344,6 +586,10 @@ const uploadStreamedIngest = (input: {
       if (expectedHash !== actualHash) {
         throw new Error(`ingest source changed between planning and upload at chunk ${index}`);
       }
+      if (index < skippedUploadedChunkCount) {
+        index += 1;
+        continue;
+      }
       const item = { chunk, index };
       const candidate = [...group, item];
       const nextBytes = jsonByteLength(
@@ -354,8 +600,10 @@ const uploadStreamedIngest = (input: {
         (group.length >= input.uploadGroupSize || nextBytes > MAX_BULK_UPLOAD_BODY_BYTES)
       ) {
         yield* uploadChunkGroup(input, group);
+        uploadedThisRunCount += group.length;
         uploadedChunkCount += group.length;
         uploadGroupCount += 1;
+        yield* emitUploadProgress(input, uploadedChunkCount, uploadGroupCount);
         group = [item];
       } else {
         group = candidate;
@@ -364,15 +612,70 @@ const uploadStreamedIngest = (input: {
     }
     if (group.length > 0) {
       yield* uploadChunkGroup(input, group);
+      uploadedThisRunCount += group.length;
       uploadedChunkCount += group.length;
       uploadGroupCount += 1;
+      yield* emitUploadProgress(input, uploadedChunkCount, uploadGroupCount, {
+        force: uploadStoppedEarly,
+      });
     }
-    if (index !== input.plan.expectedChunkCount) {
+    if (!uploadStoppedEarly && index !== input.plan.expectedChunkCount) {
       throw new Error(
         `ingest planned ${input.plan.expectedChunkCount} chunks but uploaded ${index}`,
       );
     }
-    return { uploadedChunkCount, uploadGroupCount };
+    return {
+      uploadedChunkCount,
+      uploadedThisRunCount,
+      skippedUploadedChunkCount,
+      uploadGroupCount,
+      uploadComplete: uploadedChunkCount >= input.plan.expectedChunkCount,
+      uploadStoppedEarly,
+    };
+  });
+
+type UploadProgressOptions = {
+  readonly enabled: boolean;
+  readonly intervalChunks: number;
+};
+
+const progressOptionsFromEnv = (): UploadProgressOptions => ({
+  enabled: process.env.QUASAR_INGEST_PROGRESS === "1",
+  intervalChunks: Math.max(
+    1,
+    envPositiveInteger("QUASAR_INGEST_PROGRESS_INTERVAL", 100),
+  ),
+});
+
+const emitUploadProgress = (
+  input: {
+    readonly importJobId: string;
+    readonly plan: StreamIngestPlan;
+    readonly progress: UploadProgressOptions;
+  },
+  uploadedChunkCount: number,
+  uploadGroupCount: number,
+  options: { readonly force?: boolean } = {},
+) =>
+  Effect.sync(() => {
+    if (!input.progress.enabled) return;
+    const complete = uploadedChunkCount >= input.plan.expectedChunkCount;
+    const resumed = uploadGroupCount === 0 && uploadedChunkCount > 0;
+    if (
+      options.force !== true &&
+      !complete &&
+      !resumed &&
+      uploadedChunkCount % input.progress.intervalChunks !== 0
+    ) return;
+    process.stderr.write(
+      `${JSON.stringify({
+        event: "quasar.ingest.upload_progress",
+        importJobId: input.importJobId,
+        uploadedChunkCount,
+        expectedChunkCount: input.plan.expectedChunkCount,
+        uploadGroupCount,
+      })}\n`,
+    );
   });
 
 const uploadChunkGroup = (
@@ -476,6 +779,12 @@ const streamedIngestJobIdempotencyKey = (
 const manifestIdentityFromManifest = (manifest: IngestManifest) => ({
   ...manifest,
   generatedAt: undefined,
+  sourceRoots: manifest.sourceRoots.map(sourceRootIdentity),
+});
+
+const sourceRootIdentity = (root: IngestManifest["sourceRoots"][number]) => ({
+  ...root,
+  discoveredAt: undefined,
 });
 
 const sourceManifestKey = (entry: SourceManifestEntry) => `${entry.role}:${entry.path}`;
@@ -528,6 +837,7 @@ export const ingestJobIdempotencyKey = (
 const batchPayloadIdentity = (batch: IngestBatch) => ({
   ...batch,
   generatedAt: undefined,
+  sourceRoots: batch.sourceRoots.map(sourceRootIdentity),
 });
 
 const envPositiveInteger = (name: string, fallback: number) => {
@@ -535,6 +845,13 @@ const envPositiveInteger = (name: string, fallback: number) => {
   if (raw === undefined || raw.trim().length === 0) return fallback;
   const value = Number.parseInt(raw, 10);
   return Number.isFinite(value) && value >= 0 ? value : fallback;
+};
+
+const envOptionalPositiveInteger = (name: string) => {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim().length === 0) return undefined;
+  const value = Number.parseInt(raw, 10);
+  return Number.isFinite(value) && value > 0 ? value : undefined;
 };
 
 export const chunkIngestBatch = (
@@ -546,7 +863,12 @@ export const chunkIngestBatch = (
   for (const session of batch.sessions) {
     const sessionChunks = chunkSession(session, chunkOptions);
     for (const sessionChunk of sessionChunks) {
-      chunks.push({ ...batch, sessions: [sessionChunk] });
+      const chunk = { ...batch, sessions: [sessionChunk] };
+      chunks.push(
+        jsonByteLength(chunk) > MAX_UPLOAD_CHUNK_BATCH_BYTES
+          ? { ...batch, sessions: [sessionWithDeferredCleanup(sessionChunk)] }
+          : chunk,
+      );
     }
   }
   return chunks.length === 0 ? [{ ...batch, sessions: [] }] : chunks;
@@ -569,6 +891,11 @@ const positiveInteger = (value: number | undefined, fallback: number) =>
   value !== undefined && Number.isFinite(value) && value > 0
     ? Math.floor(value)
     : fallback;
+
+const positiveIntegerOrUndefined = (value: number | undefined) =>
+  value !== undefined && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : undefined;
 
 const chunkSession = (
   session: NormalizedSession,
@@ -677,11 +1004,27 @@ const edgeBelongsToChunk = (
 const sessionWithExpectedIds = (
   session: NormalizedSession & { partialSession?: boolean },
   fullSession: NormalizedSession = session,
-) =>
-  ({
+) => {
+  if (session.partialSession === true) {
+    return {
+      ...session,
+      eventCount: fullSession.events.length,
+      toolCallCount: fullSession.toolCalls.length,
+      contentBlockCount: fullSession.events.reduce((sum, event) => sum + event.contentBlocks.length, 0),
+      sessionEdgeCount: fullSession.sessionEdges.length,
+      usageRecordCount: fullSession.usageRecords.length,
+      artifactCount: fullSession.artifacts.length,
+      partialSession: true,
+    } as NormalizedSession;
+  }
+  return {
     ...session,
     eventCount: fullSession.events.length,
     toolCallCount: fullSession.toolCalls.length,
+    contentBlockCount: fullSession.events.reduce((sum, event) => sum + event.contentBlocks.length, 0),
+    sessionEdgeCount: fullSession.sessionEdges.length,
+    usageRecordCount: fullSession.usageRecords.length,
+    artifactCount: fullSession.artifacts.length,
     expectedEventIds: fullSession.events.map((event) => event.id),
     expectedToolCallIds: fullSession.toolCalls.map((toolCall) => toolCall.id),
     expectedContentBlockIds: fullSession.events.flatMap((event) =>
@@ -690,8 +1033,33 @@ const sessionWithExpectedIds = (
     expectedSessionEdgeIds: fullSession.sessionEdges.map((edge) => edge.id),
     expectedUsageRecordIds: fullSession.usageRecords.map((usageRecord) => usageRecord.id),
     expectedArtifactIds: fullSession.artifacts.map((artifact) => artifact.id),
-    ...(session.partialSession === true ? { partialSession: true } : {}),
-  }) as NormalizedSession;
+  } as NormalizedSession;
+};
+
+const sessionWithDeferredCleanup = (session: NormalizedSession) => {
+  const {
+    expectedEventIds: _expectedEventIds,
+    expectedToolCallIds: _expectedToolCallIds,
+    expectedContentBlockIds: _expectedContentBlockIds,
+    expectedSessionEdgeIds: _expectedSessionEdgeIds,
+    expectedUsageRecordIds: _expectedUsageRecordIds,
+    expectedArtifactIds: _expectedArtifactIds,
+    ...rest
+  } = session as NormalizedSession & SessionCleanupMetadata;
+  return {
+    ...rest,
+    deferCleanup: true,
+  } as NormalizedSession;
+};
+
+type SessionCleanupMetadata = {
+  readonly expectedEventIds?: readonly string[];
+  readonly expectedToolCallIds?: readonly string[];
+  readonly expectedContentBlockIds?: readonly string[];
+  readonly expectedSessionEdgeIds?: readonly string[];
+  readonly expectedUsageRecordIds?: readonly string[];
+  readonly expectedArtifactIds?: readonly string[];
+};
 
 const inspectCommand = Command.make("inspect", {}, () =>
   executeJsonCommand(
@@ -713,7 +1081,7 @@ const waitCommand = Command.make("wait", { input: requiredInputArg }, ({ input }
       const timeoutMs = positiveInteger(options.timeoutMs, 10 * 60_000);
       const startedAt = Date.now();
       while (true) {
-        const status = yield* readImportJob(options.importJobId);
+        const status = yield* readImportJob(options.importJobId, requestJson, { limit: 1 });
         if (isFinalJobStatus(status.jobStatus)) return { timedOut: false, ...status };
         if (Date.now() - startedAt >= timeoutMs) return { timedOut: true, ...status };
         yield* Effect.sleep(Duration.millis(pollIntervalMs));

@@ -10,6 +10,7 @@ export interface AdapterDiscoverOptions {
   readonly machine: MachineIdentity;
   readonly now: string;
   readonly roots?: Partial<Record<Provider, string>>;
+  readonly logicalRoots?: Partial<Record<Provider, string>>;
   readonly limit?: number;
 }
 

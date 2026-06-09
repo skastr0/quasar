@@ -12,6 +12,7 @@ import {
   edgeIdFor,
   eventIdFor,
   homePath,
+  logicalRootFor,
   numberValue,
   recordFrom,
   scopedId,
@@ -23,7 +24,7 @@ import {
 const maybeDatabase = async (path: string) => {
   try {
     const { Database } = await import("bun:sqlite");
-    return new Database(path, { readonly: true });
+    return new Database(path);
   } catch {
     return undefined;
   }
@@ -219,9 +220,15 @@ const parseMessageData = (message: OpenCodeMessageRow) => {
 const summaryMetadata = (value: unknown): NativeValue | undefined => {
   const summary = recordFrom(value);
   if (Object.keys(summary).length === 0) return undefined;
+  const allowed = new Set(["text", "content", "message", "title"]);
   return Object.fromEntries(
     Object.entries(summary)
-      .filter(([key]) => !/diffs?|patches?|snapshots?|checkpoint/i.test(key))
+      .filter(([key]) => allowed.has(key))
+      .filter(([, item]) =>
+        typeof item === "string" ||
+        typeof item === "number" ||
+        typeof item === "boolean"
+      )
       .filter(([, item]) => item !== undefined),
   ) as NativeValue;
 };
@@ -542,8 +549,10 @@ const copyDatabaseForRead = (dbPath: string) => {
 async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterStreamItem> {
   const root = options.roots?.opencode ?? opencodeAdapter.defaultRoot();
   const dbPath = root === undefined ? undefined : join(root, "opencode.db");
+  const logicalRoot = root === undefined ? undefined : logicalRootFor("opencode", root, options);
+  const logicalDbPath = logicalRoot === undefined ? undefined : join(logicalRoot, "opencode.db");
   if (root === undefined || dbPath === undefined || !existsSync(dbPath)) {
-    for (const diagnostic of missingDatabaseResult(root).diagnostics) {
+    for (const diagnostic of missingDatabaseResult(logicalRoot ?? root).diagnostics) {
       yield { type: "diagnostic", diagnostic };
     }
     return;
@@ -561,13 +570,13 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
       }
       yield {
         type: "sourceRoot",
-        sourceRoot: sourceRoot("opencode", opencodeAdapter.id, root, options.machine, options.now),
+        sourceRoot: sourceRoot("opencode", opencodeAdapter.id, logicalRoot ?? root, options.machine, options.now),
       };
       let sessionCount = 0;
       for (const row of rows) {
         yield {
           type: "session",
-          session: buildOpenCodeSessionCli(tempDb.path, dbPath, root, options, row),
+          session: buildOpenCodeSessionCli(tempDb.path, logicalDbPath ?? dbPath, logicalRoot ?? root, options, row),
         };
         sessionCount += 1;
       }
@@ -578,7 +587,7 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
           provider: "opencode" as const,
           status: "available" as const,
           parserConfidence: "observed" as const,
-          rootPath: dbPath,
+          rootPath: logicalDbPath ?? dbPath,
           message: `Discovered ${sessionCount} OpenCode session(s) via sqlite3 fallback.`,
         },
       };
@@ -590,13 +599,13 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
   try {
     yield {
       type: "sourceRoot",
-      sourceRoot: sourceRoot("opencode", opencodeAdapter.id, root, options.machine, options.now),
+      sourceRoot: sourceRoot("opencode", opencodeAdapter.id, logicalRoot ?? root, options.machine, options.now),
     };
     let sessionCount = 0;
     for (const row of readSessionRows(db, options.limit)) {
       yield {
         type: "session",
-        session: buildOpenCodeSession(db, dbPath, root, options, row),
+        session: buildOpenCodeSession(db, logicalDbPath ?? dbPath, logicalRoot ?? root, options, row),
       };
       sessionCount += 1;
     }
@@ -607,7 +616,7 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
         provider: "opencode" as const,
         status: sessionCount > 0 ? ("available" as const) : ("no_data_found" as const),
         parserConfidence: "observed" as const,
-        rootPath: dbPath,
+        rootPath: logicalDbPath ?? dbPath,
         message: `Discovered ${sessionCount} OpenCode session(s).`,
       },
     };

@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 
 import { stableJsonHash, stableWideHash } from "../hash";
 import { resolveProjectIdentity } from "../project-normalization";
@@ -22,6 +22,7 @@ import type {
   ToolCall,
   UsageRecord,
 } from "../schemas";
+import type { AdapterDiscoverOptions } from "./types";
 
 export type NativeValue =
   | string
@@ -505,6 +506,18 @@ export const sourceRoot = (
   machineId: machine.machineId,
   discoveredAt: now,
 });
+
+export const logicalRootFor = (
+  provider: Provider,
+  physicalRoot: string,
+  options: Pick<AdapterDiscoverOptions, "logicalRoots">,
+) => options.logicalRoots?.[provider] ?? physicalRoot;
+
+export const logicalPathFor = (
+  physicalPath: string,
+  physicalRoot: string,
+  logicalRoot: string,
+) => (physicalRoot === logicalRoot ? physicalPath : join(logicalRoot, relative(physicalRoot, physicalPath)));
 
 export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
   const args = parseBuildSessionArgs(input);

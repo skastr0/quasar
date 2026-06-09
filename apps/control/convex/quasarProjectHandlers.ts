@@ -28,7 +28,7 @@ export const ensureMachine = async (
     updatedAt: now,
   };
   if (existing === null) await ctx.db.insert("machines", { ...patch, createdAt: now });
-  else await ctx.db.patch(existing._id, patch);
+  else if (!patchMatches(existing, patch, ["updatedAt"])) await ctx.db.patch(existing._id, patch);
 };
 
 export const ensureAgent = async (
@@ -51,8 +51,6 @@ export const ensureAgent = async (
       createdAt: now,
       updatedAt: now,
     });
-  } else {
-    await ctx.db.patch(existing._id, { updatedAt: now });
   }
 };
 
@@ -65,9 +63,13 @@ export const upsertProjectIdentity = async (
   const existing = await findProjectIdentity(ctx, key);
   const canonicalProjectIdentityKey = existing?.canonicalProjectIdentityKey ?? key;
   const patch = projectIdentityPatch(project, key, canonicalProjectIdentityKey, now);
-  if (existing === null) await ctx.db.insert("projectIdentities", { ...patch, createdAt: now });
-  else await ctx.db.patch(existing._id, patch);
-  await upsertProjectSearchDocument(ctx, project, patch, key, canonicalProjectIdentityKey, now);
+  if (existing === null) {
+    await ctx.db.insert("projectIdentities", { ...patch, createdAt: now });
+    await upsertProjectSearchDocument(ctx, project, patch, key, canonicalProjectIdentityKey, now);
+  } else if (!patchMatches(existing, patch, ["updatedAt"])) {
+    await ctx.db.patch(existing._id, patch);
+    await upsertProjectSearchDocument(ctx, project, patch, key, canonicalProjectIdentityKey, now);
+  }
   return canonicalProjectIdentityKey;
 };
 
@@ -282,5 +284,19 @@ export const listProjectsHandler = async (
 
 const stringValue = (value: unknown) =>
   typeof value === "string" ? value : undefined;
+
+const patchMatches = (
+  existing: Record<string, unknown>,
+  patch: Record<string, unknown>,
+  ignoredKeys: readonly string[] = [],
+) =>
+  Object.entries(patch).every(([key, value]) =>
+    ignoredKeys.includes(key) ? true : valueMatches(existing[key], value),
+  );
+
+const valueMatches = (left: unknown, right: unknown) =>
+  Array.isArray(left) || Array.isArray(right)
+    ? JSON.stringify(left ?? null) === JSON.stringify(right ?? null)
+    : left === right;
 
 const PROJECT_ALIAS_REPOINT_LIMIT = 500;

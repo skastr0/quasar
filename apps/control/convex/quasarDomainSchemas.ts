@@ -280,6 +280,12 @@ export const IngestSessionBoundary = Schema.Struct({
   artifacts: Schema.optionalWith(Schema.Array(ArtifactBoundary), {
     default: () => [],
   }),
+  eventCount: Schema.optional(Schema.Number),
+  toolCallCount: Schema.optional(Schema.Number),
+  contentBlockCount: Schema.optional(Schema.Number),
+  sessionEdgeCount: Schema.optional(Schema.Number),
+  usageRecordCount: Schema.optional(Schema.Number),
+  artifactCount: Schema.optional(Schema.Number),
   expectedEventIds: Schema.optional(Schema.Array(Schema.String)),
   expectedToolCallIds: Schema.optional(Schema.Array(Schema.String)),
   expectedContentBlockIds: Schema.optional(Schema.Array(Schema.String)),
@@ -287,6 +293,7 @@ export const IngestSessionBoundary = Schema.Struct({
   expectedUsageRecordIds: Schema.optional(Schema.Array(Schema.String)),
   expectedArtifactIds: Schema.optional(Schema.Array(Schema.String)),
   partialSession: Schema.optional(Schema.Boolean),
+  deferCleanup: Schema.optional(Schema.Boolean),
 });
 export type IngestSessionBoundary = typeof IngestSessionBoundary.Type;
 

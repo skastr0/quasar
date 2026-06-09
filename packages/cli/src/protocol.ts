@@ -7,6 +7,9 @@ export const IngestOptions = Schema.Struct({
   includeExperimental: Schema.optional(Schema.Boolean),
   limit: Schema.optional(Schema.Number),
   roots: Schema.optional(Schema.partial(Schema.Record({ key: Provider, value: Schema.String }))),
+  logicalRoots: Schema.optional(Schema.partial(Schema.Record({ key: Provider, value: Schema.String }))),
+  snapshotSources: Schema.optional(Schema.Boolean),
+  maxUploadChunks: Schema.optional(Schema.Number),
   dryRun: Schema.optional(Schema.Boolean),
 });
 export type IngestOptions = typeof IngestOptions.Type;

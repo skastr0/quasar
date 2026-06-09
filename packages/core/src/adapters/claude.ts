@@ -11,6 +11,8 @@ import {
   eventIdFor,
   homePath,
   kindFromNative,
+  logicalPathFor,
+  logicalRootFor,
   nativeSessionIdFromPath,
   numberValue,
   parentDirectoryName,
@@ -256,11 +258,12 @@ const sumNumbers = (values: readonly (number | undefined)[]) => {
 
 const buildClaudeSessionFromFile = (
   path: string,
-  projectsRoot: string,
+  sourcePath: string,
+  logicalProjectsRoot: string,
   options: AdapterOptions,
 ) => {
   const lines = readJsonLines(path);
-  const projectKey = parentDirectoryName(path);
+  const projectKey = parentDirectoryName(sourcePath);
   const firstRecord = lines[0]?.value as Record<string, unknown> | undefined;
   const projectPath =
     typeof firstRecord?.cwd === "string"
@@ -282,17 +285,17 @@ const buildClaudeSessionFromFile = (
         : undefined;
     const content = claudeContentProjection(message, record);
     const nativeEventId = typeof record.uuid === "string" ? record.uuid : undefined;
-    const eventId = eventIdFor("claude", options.machine.machineId, path, index, nativeEventId ?? lineNumber);
+    const eventId = eventIdFor("claude", options.machine.machineId, sourcePath, index, nativeEventId ?? lineNumber);
     if (nativeEventId !== undefined) nativeUuidToEventId.set(nativeEventId, eventId);
     const parentUuid = typeof record.parentUuid === "string" ? record.parentUuid : undefined;
     if (parentUuid !== undefined) {
       const parentEventId = nativeUuidToEventId.get(parentUuid);
       parentEdges.push({
-        id: edgeIdFor("claude", options.machine.machineId, path, "parent", parentUuid, nativeEventId ?? eventId),
+        id: edgeIdFor("claude", options.machine.machineId, sourcePath, "parent", parentUuid, nativeEventId ?? eventId),
         kind: "parent",
         ...(parentEventId !== undefined ? { fromEventId: parentEventId } : { fromId: parentUuid }),
         toEventId: eventId,
-        rawReference: { sourcePath: path, line: lineNumber, nativeType: "parentUuid" },
+        rawReference: { sourcePath, line: lineNumber, nativeType: "parentUuid" },
       });
     }
     const timestamp =
@@ -301,15 +304,15 @@ const buildClaudeSessionFromFile = (
     const toolCallId = upsertClaudeToolCalls(
       toolCallsById,
       options.machine.machineId,
-      path,
+      sourcePath,
       eventId,
       timestamp,
       blocks,
     );
     const usageRecord = claudeUsageRecord(
       options.machine.machineId,
-      path,
-      nativeSessionIdFromPath(path),
+      sourcePath,
+      nativeSessionIdFromPath(sourcePath),
       eventId,
       index,
       timestamp,
@@ -330,17 +333,17 @@ const buildClaudeSessionFromFile = (
       contentText: compactText(content),
       contentSource: content,
       ...(toolCallId !== undefined ? { toolCallId } : {}),
-      rawReference: { sourcePath: path, line: lineNumber, nativeType: type },
+      rawReference: { sourcePath, line: lineNumber, nativeType: type },
     };
   });
   return buildSession({
     provider: "claude",
     agentName: "claude-code",
     machine: options.machine,
-    nativeSessionId: nativeSessionIdFromPath(path),
+    nativeSessionId: nativeSessionIdFromPath(sourcePath),
     nativeProjectKey: projectKey,
-    sourceRoot: projectsRoot,
-    sourcePath: path,
+    sourceRoot: logicalProjectsRoot,
+    sourcePath,
     projectPath,
     events,
     toolCalls: [...toolCallsById.values()],
@@ -366,17 +369,24 @@ async function* streamClaude(options: AdapterOptions) {
     return;
   }
   const projectsRoot = join(root, "projects");
+  const logicalRoot = logicalRootFor("claude", root, options);
+  const logicalProjectsRoot = join(logicalRoot, "projects");
   const files = collectFiles(projectsRoot, (path) => path.endsWith(".jsonl"), options.limit);
   yield {
     type: "sourceRoot" as const,
-    sourceRoot: sourceRoot("claude", claudeAdapter.id, projectsRoot, options.machine, options.now),
+    sourceRoot: sourceRoot("claude", claudeAdapter.id, logicalProjectsRoot, options.machine, options.now),
   };
   let sessionCount = 0;
   for (const path of files) {
     sessionCount += 1;
     yield {
       type: "session" as const,
-      session: buildClaudeSessionFromFile(path, projectsRoot, options),
+      session: buildClaudeSessionFromFile(
+        path,
+        logicalPathFor(path, projectsRoot, logicalProjectsRoot),
+        logicalProjectsRoot,
+        options,
+      ),
     };
   }
   yield {
@@ -386,7 +396,7 @@ async function* streamClaude(options: AdapterOptions) {
       provider: "claude" as const,
       status: sessionCount > 0 ? ("available" as const) : ("no_data_found" as const),
       parserConfidence: "observed" as const,
-      rootPath: projectsRoot,
+      rootPath: logicalProjectsRoot,
       message: `Discovered ${sessionCount} Claude session(s).`,
     },
   };

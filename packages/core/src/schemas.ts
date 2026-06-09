@@ -269,6 +269,12 @@ export const NormalizedSession = Schema.Struct({
   sessionEdges: Schema.Array(SessionEdge),
   usageRecords: Schema.Array(UsageRecord),
   artifacts: Schema.Array(Artifact),
+  eventCount: Schema.optional(Schema.Number),
+  toolCallCount: Schema.optional(Schema.Number),
+  contentBlockCount: Schema.optional(Schema.Number),
+  sessionEdgeCount: Schema.optional(Schema.Number),
+  usageRecordCount: Schema.optional(Schema.Number),
+  artifactCount: Schema.optional(Schema.Number),
 });
 export type NormalizedSession = typeof NormalizedSession.Type;
 
