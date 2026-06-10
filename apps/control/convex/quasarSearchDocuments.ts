@@ -48,7 +48,7 @@ export const searchDocumentRagContentHash = (doc: {
     ].join("\u001f"),
   )}`;
 
-export const EMBEDDING_POLICY_VERSION = "quasar-narrative-v1";
+export const EMBEDDING_POLICY_VERSION = "quasar-narrative-v2";
 export const EMBEDDING_CHUNKER_VERSION = "convex-rag-default-v1";
 
 export const scheduleSearchDocumentRagSync = async (
@@ -256,7 +256,11 @@ const embeddingEligibility = (
       ? { eligible: false, skipReason: "empty_text" }
       : { eligible: true };
   }
-  if (input.family === "sessionEvents" && input.kind === "message" && input.role === "user") {
+  if (
+    input.family === "sessionEvents" &&
+    input.kind === "message" &&
+    (input.role === "user" || input.role === "assistant")
+  ) {
     return searchText.trim().length === 0
       ? { eligible: false, skipReason: "empty_text" }
       : { eligible: true };
