@@ -4,5 +4,6 @@ export * from "./project-normalization";
 export * from "./machine";
 export * from "./redaction";
 export * from "./api-paths";
+export * from "./records";
 export * from "./adapters/types";
 export * from "./adapters/registry";

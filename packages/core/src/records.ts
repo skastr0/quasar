@@ -1,0 +1,467 @@
+import { Effect, Schema } from "effect";
+
+import { stableCanonicalJsonHash } from "./hash";
+import {
+  Artifact,
+  ContentBlockKind,
+  MachineIdentity,
+  ProjectResolution,
+  Provider,
+  RawReference,
+  SessionEdge,
+  SessionEventKind,
+  SessionRole,
+  SourceRoot,
+  ToolCall,
+  UsageRecord,
+  type NormalizedSession,
+} from "./schemas";
+
+const NonNegativeInteger = Schema.Number.pipe(
+  Schema.filter((value) => Number.isInteger(value) && value >= 0, {
+    message: () => "Expected a non-negative integer",
+  }),
+);
+
+export const RECORD_PROTOCOL = "quasar-records/v1" as const;
+
+export const RecordLimits = Schema.Struct({
+  maxRecordBytes: NonNegativeInteger,
+  maxEnvelopeBytes: NonNegativeInteger,
+  maxRecordsPerEnvelope: NonNegativeInteger,
+});
+export type RecordLimits = typeof RecordLimits.Type;
+
+export const RECORD_LIMITS: RecordLimits = {
+  maxRecordBytes: 32 * 1024,
+  maxEnvelopeBytes: 480 * 1024,
+  maxRecordsPerEnvelope: 200,
+};
+
+export const SessionRecord = Schema.Struct({
+  id: Schema.String,
+  nativeSessionId: Schema.String,
+  provider: Provider,
+  agentName: Schema.String,
+  machineId: Schema.String,
+  projectIdentity: ProjectResolution,
+  nativeProjectKey: Schema.optional(Schema.String),
+  title: Schema.optional(Schema.String),
+  startedAt: Schema.optional(Schema.String),
+  updatedAt: Schema.optional(Schema.String),
+  sourceRoot: Schema.String,
+  sourcePath: Schema.String,
+  eventCount: NonNegativeInteger,
+  toolCallCount: NonNegativeInteger,
+  contentBlockCount: NonNegativeInteger,
+  sessionEdgeCount: NonNegativeInteger,
+  usageRecordCount: NonNegativeInteger,
+  artifactCount: NonNegativeInteger,
+});
+export type SessionRecord = typeof SessionRecord.Type;
+
+export const EventRecord = Schema.Struct({
+  id: Schema.String,
+  sessionId: Schema.String,
+  nativeEventId: Schema.optional(Schema.String),
+  sequence: NonNegativeInteger,
+  timestamp: Schema.optional(Schema.String),
+  machineId: Schema.String,
+  provider: Provider,
+  agentName: Schema.String,
+  projectIdentityKey: Schema.String,
+  role: SessionRole,
+  kind: SessionEventKind,
+  contentText: Schema.optional(Schema.String),
+  toolCallId: Schema.optional(Schema.String),
+  parentEventId: Schema.optional(Schema.String),
+  rawReference: RawReference,
+});
+export type EventRecord = typeof EventRecord.Type;
+
+export const ContentBlockRecord = Schema.Struct({
+  id: Schema.String,
+  eventId: Schema.String,
+  sessionId: Schema.String,
+  machineId: Schema.String,
+  provider: Provider,
+  agentName: Schema.String,
+  projectIdentityKey: Schema.String,
+  sequence: NonNegativeInteger,
+  kind: ContentBlockKind,
+  text: Schema.optional(Schema.String),
+  markdown: Schema.optional(Schema.String),
+  thinking: Schema.optional(Schema.String),
+  path: Schema.optional(Schema.String),
+  uri: Schema.optional(Schema.String),
+  mediaType: Schema.optional(Schema.String),
+  value: Schema.optional(Schema.Unknown),
+  metadata: Schema.optional(Schema.Unknown),
+});
+export type ContentBlockRecord = typeof ContentBlockRecord.Type;
+
+export const IngestRecordType = Schema.Literal(
+  "session",
+  "event",
+  "content_block",
+  "tool_call",
+  "usage",
+  "artifact",
+  "edge",
+  "source_root",
+  "tombstone",
+);
+export type IngestRecordType = typeof IngestRecordType.Type;
+
+export const TombstoneRecordType = Schema.Literal(
+  "session",
+  "event",
+  "content_block",
+  "tool_call",
+  "usage",
+  "artifact",
+  "edge",
+  "source_root",
+);
+export type TombstoneRecordType = typeof TombstoneRecordType.Type;
+
+export const TombstoneRecord = Schema.Struct({
+  recordType: TombstoneRecordType,
+  recordId: Schema.String,
+});
+export type TombstoneRecord = typeof TombstoneRecord.Type;
+
+export const IngestRecord = Schema.Union(
+  Schema.Struct({ type: Schema.Literal("session"), record: SessionRecord }),
+  Schema.Struct({ type: Schema.Literal("event"), record: EventRecord }),
+  Schema.Struct({ type: Schema.Literal("content_block"), record: ContentBlockRecord }),
+  Schema.Struct({ type: Schema.Literal("tool_call"), record: ToolCall }),
+  Schema.Struct({ type: Schema.Literal("usage"), record: UsageRecord }),
+  Schema.Struct({ type: Schema.Literal("artifact"), record: Artifact }),
+  Schema.Struct({ type: Schema.Literal("edge"), record: SessionEdge }),
+  Schema.Struct({ type: Schema.Literal("source_root"), record: SourceRoot }),
+  Schema.Struct({ type: Schema.Literal("tombstone"), record: TombstoneRecord }),
+);
+export type IngestRecord = typeof IngestRecord.Type;
+
+export const RecordEnvelope = Schema.Struct({
+  protocol: Schema.Literal(RECORD_PROTOCOL),
+  machine: MachineIdentity,
+  records: Schema.Array(IngestRecord),
+});
+export type RecordEnvelope = typeof RecordEnvelope.Type;
+
+export const IngestRecordsResponse = Schema.Struct({
+  protocol: Schema.Literal(RECORD_PROTOCOL),
+  applied: NonNegativeInteger,
+  unchanged: NonNegativeInteger,
+  tombstoned: NonNegativeInteger,
+  backpressure: Schema.Struct({
+    outboxDepth: NonNegativeInteger,
+    retryAfterMs: Schema.Union(NonNegativeInteger, Schema.Null),
+  }),
+  limits: RecordLimits,
+});
+export type IngestRecordsResponse = typeof IngestRecordsResponse.Type;
+
+export class RecordContractError extends Schema.TaggedError<RecordContractError>()(
+  "RecordContractError",
+  {
+    reason: Schema.Literal(
+      "invalid_envelope",
+      "invalid_limits",
+      "record_too_large",
+      "envelope_too_large",
+    ),
+    message: Schema.String,
+    recordId: Schema.optional(Schema.String),
+  },
+) {}
+
+export type PackRecordEnvelopesInput = {
+  readonly machine: MachineIdentity;
+  readonly records: Iterable<IngestRecord>;
+  readonly limits?: Partial<RecordLimits>;
+};
+
+const textEncoder = new TextEncoder();
+const CLAMPED_FIELDS = new Set(["input", "output", "value", "metadata"]);
+
+const wireBytesOf = (value: unknown) => {
+  const serialized = JSON.stringify(value);
+  return textEncoder.encode(serialized === undefined ? "undefined" : serialized).byteLength;
+};
+
+export const recordWireBytes = (record: IngestRecord) => wireBytesOf(record);
+
+const sourceRootRecordId = (record: SourceRoot) =>
+  `source_root:${record.provider}:${record.machineId}:${stableCanonicalJsonHash([
+    record.adapterId,
+    record.rootPath,
+  ])}`;
+
+export const recordId = (record: IngestRecord): string => {
+  switch (record.type) {
+    case "source_root":
+      return sourceRootRecordId(record.record);
+    case "tombstone":
+      return record.record.recordId;
+    default:
+      return record.record.id;
+  }
+};
+
+export const recordContentHash = (record: IngestRecord) =>
+  stableCanonicalJsonHash(clampOversizedRecord(record));
+
+type TruncationMarker = {
+  readonly truncated: true;
+  readonly bytes: number;
+};
+
+const isObject = (value: unknown): value is { readonly [key: string]: unknown } =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const isTruncationMarker = (value: unknown): value is TruncationMarker =>
+  isObject(value) && value.truncated === true && typeof value.bytes === "number";
+
+const truncationMarkerFor = (value: unknown): TruncationMarker => ({
+  truncated: true,
+  bytes: wireBytesOf(value),
+});
+
+const clampValue = (value: unknown, key?: string): unknown => {
+  if (key !== undefined && CLAMPED_FIELDS.has(key)) {
+    return isTruncationMarker(value) ? value : truncationMarkerFor(value);
+  }
+  if (Array.isArray(value)) return value.map((item) => clampValue(item));
+  if (!isObject(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([entryKey, entryValue]) => [
+      entryKey,
+      clampValue(entryValue, entryKey),
+    ]),
+  );
+};
+
+export const clampOversizedRecord = <A extends IngestRecord>(
+  record: A,
+  limits: RecordLimits = RECORD_LIMITS,
+): A => {
+  if (recordWireBytes(record) <= limits.maxRecordBytes) return record;
+  return clampValue(record) as A;
+};
+
+export const sessionToRecords = (session: NormalizedSession): IngestRecord[] => {
+  const {
+    events,
+    toolCalls,
+    sessionEdges,
+    usageRecords,
+    artifacts,
+    eventCount,
+    toolCallCount,
+    contentBlockCount,
+    sessionEdgeCount,
+    usageRecordCount,
+    artifactCount,
+    ...sessionRecord
+  } = session;
+  const childContentBlockCount = events.reduce(
+    (total, event) => total + event.contentBlocks.length,
+    0,
+  );
+
+  return [
+    {
+      type: "session",
+      record: {
+        ...sessionRecord,
+        eventCount: eventCount ?? events.length,
+        toolCallCount: toolCallCount ?? toolCalls.length,
+        contentBlockCount: contentBlockCount ?? childContentBlockCount,
+        sessionEdgeCount: sessionEdgeCount ?? sessionEdges.length,
+        usageRecordCount: usageRecordCount ?? usageRecords.length,
+        artifactCount: artifactCount ?? artifacts.length,
+      },
+    },
+    ...events.map(({ contentBlocks: _contentBlocks, ...event }) => ({
+      type: "event" as const,
+      record: event,
+    })),
+    ...events.flatMap((event) =>
+      event.contentBlocks.map((contentBlock) => ({
+        type: "content_block" as const,
+        record: {
+          ...contentBlock,
+          eventId: event.id,
+          sessionId: event.sessionId,
+          machineId: event.machineId,
+          provider: event.provider,
+          agentName: event.agentName,
+          projectIdentityKey: event.projectIdentityKey,
+        },
+      })),
+    ),
+    ...toolCalls.map((record) => ({ type: "tool_call" as const, record })),
+    ...usageRecords.map((record) => ({ type: "usage" as const, record })),
+    ...sessionEdges.map((record) => ({ type: "edge" as const, record })),
+    ...artifacts.map((record) => ({ type: "artifact" as const, record })),
+  ];
+};
+
+const resolveLimits = (limits: Partial<RecordLimits> | undefined): RecordLimits => ({
+  ...RECORD_LIMITS,
+  ...limits,
+});
+
+const limitsAreValid = (limits: RecordLimits) =>
+  limits.maxRecordBytes > 0 &&
+  limits.maxEnvelopeBytes > 0 &&
+  limits.maxRecordsPerEnvelope > 0;
+
+const envelopeWireBytes = (envelope: RecordEnvelope) => wireBytesOf(envelope);
+
+const parseErrorMessage = (error: unknown) =>
+  error instanceof Error ? error.message : String(error);
+
+export const validateRecordEnvelope = (
+  envelope: RecordEnvelope,
+  inputLimits?: Partial<RecordLimits>,
+): Effect.Effect<RecordEnvelope, RecordContractError> =>
+  Effect.gen(function* () {
+    const limits = resolveLimits(inputLimits);
+    if (!limitsAreValid(limits)) {
+      return yield* Effect.fail(
+        new RecordContractError({
+          reason: "invalid_limits",
+          message: "Record envelope limits must be positive.",
+        }),
+      );
+    }
+
+    const records = envelope.records.map((record) => clampOversizedRecord(record, limits));
+    if (records.length > limits.maxRecordsPerEnvelope) {
+      return yield* Effect.fail(
+        new RecordContractError({
+          reason: "envelope_too_large",
+          message: "Record envelope exceeds maxRecordsPerEnvelope.",
+        }),
+      );
+    }
+
+    const normalizedEnvelope: RecordEnvelope = { ...envelope, records };
+    if (envelopeWireBytes(normalizedEnvelope) > limits.maxEnvelopeBytes) {
+      return yield* Effect.fail(
+        new RecordContractError({
+          reason: "envelope_too_large",
+          message: "Record envelope exceeds maxEnvelopeBytes.",
+        }),
+      );
+    }
+
+    for (const record of records) {
+      if (recordWireBytes(record) > limits.maxRecordBytes) {
+        return yield* Effect.fail(
+          new RecordContractError({
+            reason: "record_too_large",
+            message: `Record ${recordId(record)} exceeds maxRecordBytes after clamping.`,
+            recordId: recordId(record),
+          }),
+        );
+      }
+    }
+
+    return normalizedEnvelope;
+  });
+
+export const decodeRecordEnvelope = (
+  value: unknown,
+  limits?: Partial<RecordLimits>,
+): Effect.Effect<RecordEnvelope, RecordContractError> =>
+  Schema.decodeUnknown(RecordEnvelope)(value).pipe(
+    Effect.mapError(
+      (error) =>
+        new RecordContractError({
+          reason: "invalid_envelope",
+          message: parseErrorMessage(error),
+        }),
+    ),
+    Effect.flatMap((envelope) => validateRecordEnvelope(envelope, limits)),
+  );
+
+export const packRecordEnvelopes = ({
+  machine,
+  records,
+  limits: inputLimits,
+}: PackRecordEnvelopesInput): Effect.Effect<RecordEnvelope[], RecordContractError> =>
+  Effect.gen(function* () {
+    const limits = resolveLimits(inputLimits);
+    if (!limitsAreValid(limits)) {
+      return yield* Effect.fail(
+        new RecordContractError({
+          reason: "invalid_limits",
+          message: "Record envelope limits must be positive.",
+        }),
+      );
+    }
+
+    const envelopes: RecordEnvelope[] = [];
+    let pendingRecords: IngestRecord[] = [];
+    const flushPending = () => {
+      if (pendingRecords.length === 0) return;
+      envelopes.push({
+        protocol: RECORD_PROTOCOL,
+        machine,
+        records: pendingRecords,
+      });
+      pendingRecords = [];
+    };
+
+    for (const inputRecord of records) {
+      const record = clampOversizedRecord(inputRecord, limits);
+      const itemBytes = recordWireBytes(record);
+      if (itemBytes > limits.maxRecordBytes) {
+        return yield* Effect.fail(
+          new RecordContractError({
+            reason: "record_too_large",
+            message: `Record ${recordId(record)} exceeds maxRecordBytes after clamping.`,
+            recordId: recordId(record),
+          }),
+        );
+      }
+
+      const candidateRecords = [...pendingRecords, record];
+      const candidate: RecordEnvelope = {
+        protocol: RECORD_PROTOCOL,
+        machine,
+        records: candidateRecords,
+      };
+      const candidateTooLarge =
+        candidateRecords.length > limits.maxRecordsPerEnvelope ||
+        envelopeWireBytes(candidate) > limits.maxEnvelopeBytes;
+
+      if (pendingRecords.length > 0 && candidateTooLarge) {
+        flushPending();
+      }
+
+      const nextCandidate: RecordEnvelope = {
+        protocol: RECORD_PROTOCOL,
+        machine,
+        records: [...pendingRecords, record],
+      };
+      if (envelopeWireBytes(nextCandidate) > limits.maxEnvelopeBytes) {
+        return yield* Effect.fail(
+          new RecordContractError({
+            reason: "envelope_too_large",
+            message: `Record ${recordId(record)} cannot fit within maxEnvelopeBytes.`,
+            recordId: recordId(record),
+          }),
+        );
+      }
+      pendingRecords = [...pendingRecords, record];
+    }
+
+    flushPending();
+    return envelopes;
+  });
