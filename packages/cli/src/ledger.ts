@@ -45,8 +45,20 @@ export type StaleRecord = {
   readonly contentHash: string;
 };
 
+export type PendingRecord = StaleRecord;
+
+export type SourceFileListing = SourceFileUnit & {
+  readonly fileId: number;
+  readonly fingerprint: UnitFingerprint;
+  readonly scanSeq: number;
+  readonly completedSeq: number;
+};
+
 type SourceFileEntry = {
   readonly id: number;
+  readonly provider: Provider;
+  readonly adapter_id: string;
+  readonly source_path: string;
   readonly size: number | null;
   readonly mtime_ms: number | null;
   readonly scan_seq: number;
@@ -70,6 +82,18 @@ type ColumnEntry = {
 
 const SCHEMA_VERSION = "1";
 const sqliteStorageSuffix = ["WITHOUT", String.fromCharCode(82, 79, 87, 73, 68)].join(" ");
+const recordTypes: readonly IngestRecordType[] = [
+  "session",
+  "event",
+  "content_block",
+  "tool_call",
+  "usage",
+  "artifact",
+  "edge",
+  "source_root",
+  "tombstone",
+];
+const recordTypeSql = recordTypes.map((type) => `'${type}'`).join(", ");
 
 const ledgerPath = () => join(quasarHome(), "ledger.sqlite");
 
@@ -77,6 +101,31 @@ const nullableNumber = (value: number | undefined) => value ?? null;
 
 const sameNullableNumber = (left: number | null, right: number | undefined) =>
   left === nullableNumber(right);
+
+const hasStableFingerprint = (fingerprint: UnitFingerprint) =>
+  fingerprint.size !== undefined || fingerprint.mtimeMs !== undefined;
+
+const isRecordType = (value: string): value is IngestRecordType =>
+  recordTypes.includes(value as IngestRecordType);
+
+const pathUnderRoot = (sourcePath: string, rootPath: string) => {
+  const root = rootPath.replace(/\/+$/, "");
+  if (root.length === 0 || root === "/") return sourcePath.startsWith("/");
+  return sourcePath === root || sourcePath.startsWith(`${root}/`);
+};
+
+const sourceFileListing = (entry: SourceFileEntry): SourceFileListing => ({
+  provider: entry.provider,
+  adapterId: entry.adapter_id,
+  sourcePath: entry.source_path,
+  fileId: entry.id,
+  fingerprint: {
+    ...(entry.size !== null ? { size: entry.size } : {}),
+    ...(entry.mtime_ms !== null ? { mtimeMs: entry.mtime_ms } : {}),
+  },
+  scanSeq: entry.scan_seq,
+  completedSeq: entry.completed_seq,
+});
 
 const asLedgerError = (operation: string, cause: unknown) =>
   new LedgerError({
@@ -93,6 +142,7 @@ export class IngestLedger {
         const path = options.path ?? ledgerPath();
         mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
         const db = new Database(path);
+        db.exec("PRAGMA foreign_keys = ON");
         db.exec("PRAGMA journal_mode = WAL");
         db.exec("PRAGMA synchronous = NORMAL");
         createSchema(db);
@@ -113,7 +163,7 @@ export class IngestLedger {
     return this.write("upsertSourceFile", () => {
       const existing = this.db
         .prepare(
-          `select id, size, mtime_ms, scan_seq, completed_seq
+          `select id, provider, adapter_id, source_path, size, mtime_ms, scan_seq, completed_seq
            from source_files
            where provider = ? and adapter_id = ? and source_path = ?`,
         )
@@ -138,6 +188,7 @@ export class IngestLedger {
       }
 
       const fingerprintMatches =
+        hasStableFingerprint(fingerprint) &&
         sameNullableNumber(existing.size, fingerprint.size) &&
         sameNullableNumber(existing.mtime_ms, fingerprint.mtimeMs);
       const complete = existing.completed_seq === existing.scan_seq;
@@ -174,6 +225,12 @@ export class IngestLedger {
     scanSeq: number,
   ) {
     return this.write("recordDerivedRecord", () => {
+      if (!isRecordType(recordType)) {
+        return new LedgerError({
+          operation: "recordDerivedRecord",
+          message: `Unknown record type: ${recordType}`,
+        });
+      }
       const existing = this.recordEntry(fileId, recordId);
       if (existing === null) {
         this.db
@@ -218,11 +275,6 @@ export class IngestLedger {
           )
           .run(record.hash, fileId, record.recordId);
       }
-      if (records.length > 0) {
-        this.db
-          .prepare("update source_files set last_ingested_at = ? where id = ?")
-          .run(new Date().toISOString(), fileId);
-      }
       return undefined;
     });
   }
@@ -238,6 +290,26 @@ export class IngestLedger {
              order by record_id`,
           )
           .all(fileId, scanSeq) as RecordEntry[]
+      ).map((entry) => ({
+        recordId: entry.record_id,
+        recordType: entry.record_type,
+        contentHash: entry.content_hash,
+      })),
+    );
+  }
+
+  pendingRecords(fileId: number) {
+    return this.read("pendingRecords", () =>
+      (
+        this.db
+          .prepare(
+            `select record_id, record_type, content_hash
+             from records
+             where source_file_id = ?
+               and (acked_hash is null or acked_hash <> content_hash)
+             order by record_id`,
+          )
+          .all(fileId) as RecordEntry[]
       ).map((entry) => ({
         recordId: entry.record_id,
         recordType: entry.record_type,
@@ -276,16 +348,20 @@ export class IngestLedger {
     });
   }
 
-  filesUnderRoot(provider: Provider, rootPath: string) {
+  filesUnderRoot(provider: Provider, adapterId: string, rootPath: string) {
     return this.read("filesUnderRoot", () =>
-      this.db
-        .prepare(
-          `select id, size, mtime_ms, scan_seq, completed_seq
+      (
+        this.db
+          .prepare(
+            `select id, provider, adapter_id, source_path, size, mtime_ms, scan_seq, completed_seq
            from source_files
-           where provider = ? and source_path like ?
+           where provider = ? and adapter_id = ?
            order by source_path`,
-        )
-        .all(provider, `${rootPath}%`) as SourceFileEntry[],
+          )
+          .all(provider, adapterId) as SourceFileEntry[]
+      )
+        .filter((entry) => pathUnderRoot(entry.source_path, rootPath))
+        .map(sourceFileListing),
     );
   }
 
@@ -315,7 +391,7 @@ export class IngestLedger {
   private sourceFileByIdentity(unit: SourceFileUnit) {
     const entry = this.db
       .prepare(
-        `select id, size, mtime_ms, scan_seq, completed_seq
+        `select id, provider, adapter_id, source_path, size, mtime_ms, scan_seq, completed_seq
          from source_files
          where provider = ? and adapter_id = ? and source_path = ?`,
       )
@@ -323,6 +399,9 @@ export class IngestLedger {
     if (entry !== null) return entry;
     return {
       id: -1,
+      provider: unit.provider,
+      adapter_id: unit.adapterId,
+      source_path: unit.sourcePath,
       size: null,
       mtime_ms: null,
       scan_seq: 0,
@@ -386,14 +465,13 @@ const createSchema = (db: Database) => {
       mtime_ms real,
       scan_seq integer not null default 0,
       completed_seq integer not null default 0,
-      last_ingested_at text,
       unique(provider, adapter_id, source_path)
     );
 
     create table if not exists records (
       source_file_id integer not null,
       record_id text not null,
-      record_type text not null,
+      record_type text not null check (record_type in (${recordTypeSql})),
       content_hash text not null,
       acked_hash text,
       seen_seq integer not null,
