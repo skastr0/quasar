@@ -241,6 +241,9 @@ type TruncationMarker = {
   readonly bytes: number;
 };
 
+type EventIngestRecord = Extract<IngestRecord, { readonly type: "event" }>;
+type ContentBlockIngestRecord = Extract<IngestRecord, { readonly type: "content_block" }>;
+
 const isObject = (value: unknown): value is { readonly [key: string]: unknown } =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -255,6 +258,75 @@ const truncationMarkerFor = (value: unknown): TruncationMarker => ({
 const clampPayload = (value: unknown) =>
   isTruncationMarker(value) ? value : truncationMarkerFor(value);
 
+const stringBytes = (value: string) => textEncoder.encode(value).byteLength;
+
+const truncatedString = (value: string, retainedLength: number) =>
+  `${value.slice(0, retainedLength)}\n[truncated bytes=${stringBytes(value)}]`;
+
+const clampStringRecordField = <A extends IngestRecord>(
+  record: A,
+  value: string | undefined,
+  setValue: (value: string) => A,
+  limits: RecordLimits,
+): A => {
+  if (value === undefined) return record;
+  const bytes = wireBytesOf(record);
+  if (bytes === undefined || bytes <= limits.maxRecordBytes) return record;
+
+  let best = setValue(truncatedString(value, 0));
+  let low = 0;
+  let high = value.length;
+
+  while (low <= high) {
+    const retainedLength = Math.floor((low + high) / 2);
+    const candidate = setValue(truncatedString(value, retainedLength));
+    const candidateBytes = wireBytesOf(candidate);
+    if (candidateBytes !== undefined && candidateBytes <= limits.maxRecordBytes) {
+      best = candidate;
+      low = retainedLength + 1;
+    } else {
+      high = retainedLength - 1;
+    }
+  }
+
+  return best;
+};
+
+const clampEventText = (
+  record: EventIngestRecord,
+  limits: RecordLimits,
+): EventIngestRecord =>
+  clampStringRecordField(
+    record,
+    record.record.contentText,
+    (contentText) => ({
+      ...record,
+      record: {
+        ...record.record,
+        contentText,
+      },
+    }),
+    limits,
+  );
+
+const clampContentBlockText = (
+  record: ContentBlockIngestRecord,
+  field: "text" | "markdown" | "thinking",
+  limits: RecordLimits,
+): ContentBlockIngestRecord =>
+  clampStringRecordField(
+    record,
+    record.record[field],
+    (value) => ({
+      ...record,
+      record: {
+        ...record.record,
+        [field]: value,
+      },
+    }),
+    limits,
+  );
+
 export const clampOversizedRecord = <A extends IngestRecord>(
   record: A,
   limits: RecordLimits = RECORD_LIMITS,
@@ -262,8 +334,14 @@ export const clampOversizedRecord = <A extends IngestRecord>(
   const bytes = wireBytesOf(record);
   if (bytes === undefined || bytes <= limits.maxRecordBytes) return record;
   switch (record.type) {
+    case "event":
+      return clampEventText(record, limits) as A;
     case "content_block":
-      return {
+      return [
+        "text" as const,
+        "markdown" as const,
+        "thinking" as const,
+      ].reduce((next, field) => clampContentBlockText(next, field, limits), {
         ...record,
         record: {
           ...record.record,
@@ -274,7 +352,7 @@ export const clampOversizedRecord = <A extends IngestRecord>(
             ? { metadata: clampPayload(record.record.metadata) }
             : {}),
         },
-      } as A;
+      } as ContentBlockIngestRecord) as A;
     case "tool_call":
       return {
         ...record,

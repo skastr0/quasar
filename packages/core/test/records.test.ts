@@ -198,6 +198,85 @@ describe("ingest records", () => {
     expect(recordWireBytes(packed)).toBeLessThanOrEqual(limits.maxRecordBytes);
   });
 
+  test("clamps oversized event text deterministically before hashing", async () => {
+    const record = sessionToRecords(makeSession()).find(
+      (candidate): candidate is Extract<IngestRecord, { type: "event" }> =>
+        candidate.type === "event",
+    );
+    expect(record).toBeDefined();
+    const limits = {
+      maxRecordBytes: 1_024,
+      maxEnvelopeBytes: 4_096,
+      maxRecordsPerEnvelope: 10,
+    };
+    const oversized = {
+      ...record!,
+      record: {
+        ...record!.record,
+        contentText: "event text ".repeat(1_000),
+      },
+    } as IngestRecord;
+
+    const clamped = clampOversizedRecord(oversized, limits);
+    expect(clamped).toEqual(clampOversizedRecord(clamped, limits));
+    expect(recordWireBytes(clamped)).toBeLessThanOrEqual(limits.maxRecordBytes);
+    expect(recordContentHash(oversized, limits)).toBe(recordContentHash(clamped, limits));
+    expect(clamped).toMatchObject({
+      type: "event",
+      record: {
+        contentText: expect.stringContaining("[truncated bytes="),
+      },
+    });
+
+    const [envelope] = await Effect.runPromise(
+      packRecordEnvelopes({ machine, records: [oversized], limits }),
+    );
+    expect(envelope!.records[0]).toEqual(clamped);
+  });
+
+  test("clamps oversized content block text fields as strings", () => {
+    const limits = {
+      maxRecordBytes: 1_536,
+      maxEnvelopeBytes: 4_096,
+      maxRecordsPerEnvelope: 10,
+    };
+    const oversized = {
+      type: "content_block",
+      record: {
+        id: "content-block-large",
+        eventId: "event-large",
+        sessionId: "session-large",
+        machineId: machine.machineId,
+        provider: "codex",
+        agentName: "codex",
+        projectIdentityKey: "project:test",
+        sequence: 0,
+        kind: "text",
+        text: "plain text ".repeat(1_000),
+        markdown: "markdown text ".repeat(1_000),
+        thinking: "thinking text ".repeat(1_000),
+      },
+    } as IngestRecord;
+
+    const clamped = clampOversizedRecord(oversized, limits);
+
+    expect(clamped).toEqual(clampOversizedRecord(clamped, limits));
+    expect(recordWireBytes(clamped)).toBeLessThanOrEqual(limits.maxRecordBytes);
+    expect(clamped).toMatchObject({
+      type: "content_block",
+      record: {
+        text: expect.stringContaining("[truncated bytes="),
+        markdown: expect.stringContaining("[truncated bytes="),
+        thinking: expect.stringContaining("[truncated bytes="),
+      },
+    });
+    const contentBlock = clamped.type === "content_block" ? clamped.record : undefined;
+    expect(contentBlock).toBeDefined();
+    expect(typeof contentBlock?.text).toBe("string");
+    expect(typeof contentBlock?.markdown).toBe("string");
+    expect(typeof contentBlock?.thinking).toBe("string");
+  });
+
   test("packs envelopes within protocol limits", async () => {
     const records = Array.from({ length: RECORD_LIMITS.maxRecordsPerEnvelope + 5 }, (_, index) => ({
       type: "source_root" as const,
