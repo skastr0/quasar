@@ -205,6 +205,11 @@ export class IngestLedger {
         sameNullableNumber(existing.mtime_ms, fingerprint.mtimeMs);
       const complete = existing.completed_seq === existing.scan_seq;
       if (fingerprintMatches && complete) {
+        if (unit.physicalPath !== undefined && unit.physicalPath !== existing.physical_path) {
+          this.db
+            .prepare("update source_files set physical_path = ? where id = ?")
+            .run(unit.physicalPath, existing.id);
+        }
         return {
           fileId: existing.id,
           scanSeq: existing.scan_seq,

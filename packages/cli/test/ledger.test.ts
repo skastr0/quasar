@@ -93,6 +93,29 @@ describe("ingest ledger", () => {
     });
   });
 
+  test("refreshes physical path evidence for skipped complete files", async () => {
+    const db = await openLedger();
+    const first = await run(db.upsertSourceFile(unit, fingerprintA));
+    await run(db.markFileComplete(first.fileId, first.scanSeq, fingerprintA));
+
+    const movedUnit = {
+      ...unit,
+      physicalPath: "/tmp/quasar-ledger/moved-session-a.jsonl",
+    };
+    expect(await run(db.upsertSourceFile(movedUnit, fingerprintA))).toMatchObject({
+      fileId: first.fileId,
+      scanSeq: first.scanSeq,
+      changed: false,
+    });
+
+    expect(await run(db.filesUnderRoot("codex", "codex-jsonl", "/fixtures/codex"))).toEqual([
+      expect.objectContaining({
+        fileId: first.fileId,
+        physicalPath: movedUnit.physicalPath,
+      }),
+    ]);
+  });
+
   test("does not skip when the fingerprint is empty", async () => {
     const db = await openLedger();
     const first = await run(db.upsertSourceFile(unit, {}));
