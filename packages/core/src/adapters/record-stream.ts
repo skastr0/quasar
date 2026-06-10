@@ -97,6 +97,7 @@ async function* bridgeRecordStream(
   let activeFingerprint: UnitFingerprint | undefined;
   let activeShouldProcess = false;
   let activeComplete = true;
+  let rootComplete = true;
 
   const flushUnit = async function* () {
     if (activeUnit === undefined || activeFingerprint === undefined) return;
@@ -117,6 +118,7 @@ async function* bridgeRecordStream(
       activeShouldProcess = await shouldProcessSourceUnit(options, unit, fingerprint);
     } catch (cause) {
       activeComplete = false;
+      rootComplete = false;
       yield diagnosticFromError(adapter, unit, "Record stream source-unit predicate failed.", cause);
     }
   };
@@ -153,7 +155,7 @@ async function* bridgeRecordStream(
 
   yield* flushUnit();
   for (const root of roots.values()) {
-    yield { type: "rootScanned" as const, root, complete: true };
+    yield { type: "rootScanned" as const, root, complete: rootComplete };
   }
 }
 
