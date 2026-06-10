@@ -355,35 +355,64 @@ const upsertSessionRecord = async (
   await upsertSearchDocument(ctx, sessionSearchDocument(record, canonicalProjectIdentityKey, now));
 };
 
+const missingParent = (message: string): Promise<never> => Promise.reject(new Error(message));
+
+const sessionIdentityFor = async (ctx: MutationCtx, sessionId: string) => {
+  const session = await ctx.db
+    .query("sessions")
+    .withIndex("by_sessionId", (q) => q.eq("sessionId", sessionId))
+    .unique();
+  if (session === null) return await missingParent(`Missing session parent for ${sessionId}.`);
+  return session;
+};
+
+const eventIdentityFor = async (ctx: MutationCtx, eventId: string) => {
+  const event = await ctx.db
+    .query("sessionEvents")
+    .withIndex("by_eventId", (q) => q.eq("eventId", eventId))
+    .unique();
+  if (event === null) return await missingParent(`Missing event parent for ${eventId}.`);
+  return event;
+};
+
+const eventReference = (
+  sessionSourcePath: string,
+  rawReference: Extract<LiveRecord, { type: "event" }>["record"]["rawReference"],
+) => ({
+  sourcePath: sessionSourcePath,
+  ...(rawReference?.line !== undefined ? { line: rawReference.line } : {}),
+  ...(rawReference?.table !== undefined ? { table: rawReference.table } : {}),
+  ...(rawReference?.nativeType !== undefined ? { nativeType: rawReference.nativeType } : {}),
+});
+
 const upsertEventRecord = async (
   ctx: MutationCtx,
   record: Extract<LiveRecord, { type: "event" }>["record"],
   now: number,
 ) => {
-  await ensureMachine(ctx, { machineId: record.machineId });
-  await ensureAgent(ctx, record.provider, record.agentName);
-  const canonicalProjectIdentityKey = await ensureProjectKey(ctx, record.projectIdentityKey);
+  const session = await sessionIdentityFor(ctx, record.sessionId);
+  const rawReference = eventReference(session.sourcePath, record.rawReference);
   const patch = {
     eventId: record.id,
     sessionId: record.sessionId,
     nativeEventId: record.nativeEventId,
     sequence: record.sequence,
     timestamp: record.timestamp,
-    machineId: record.machineId,
-    provider: record.provider,
-    agentName: record.agentName,
-    projectIdentityKey: record.projectIdentityKey,
-    canonicalProjectIdentityKey,
+    machineId: session.machineId,
+    provider: session.provider,
+    agentName: session.agentName,
+    projectIdentityKey: session.projectIdentityKey,
+    canonicalProjectIdentityKey: session.canonicalProjectIdentityKey,
     role: record.role,
     kind: record.kind,
     contentText: record.contentText,
     toolCallId: record.toolCallId,
     parentEventId: record.parentEventId,
-    rawReference: record.rawReference,
+    rawReference,
     updatedAt: now,
   };
   await upsertByIndex(ctx, "sessionEvents", "by_eventId", "eventId", record.id, patch, now);
-  await upsertSearchDocument(ctx, eventSearchDocument(record, canonicalProjectIdentityKey, now));
+  await upsertSearchDocument(ctx, eventSearchDocument(record, session, rawReference, now));
 };
 
 const upsertContentBlockRecord = async (
@@ -391,19 +420,17 @@ const upsertContentBlockRecord = async (
   record: Extract<LiveRecord, { type: "content_block" }>["record"],
   now: number,
 ) => {
-  await ensureMachine(ctx, { machineId: record.machineId });
-  await ensureAgent(ctx, record.provider, record.agentName);
-  const canonicalProjectIdentityKey = await ensureProjectKey(ctx, record.projectIdentityKey);
+  const event = await eventIdentityFor(ctx, record.eventId);
   const patch = {
     blockId: record.id,
     eventId: record.eventId,
-    sessionId: record.sessionId,
+    sessionId: event.sessionId,
     sequence: record.sequence,
-    machineId: record.machineId,
-    provider: record.provider,
-    agentName: record.agentName,
-    projectIdentityKey: record.projectIdentityKey,
-    canonicalProjectIdentityKey,
+    machineId: event.machineId,
+    provider: event.provider,
+    agentName: event.agentName,
+    projectIdentityKey: event.projectIdentityKey,
+    canonicalProjectIdentityKey: event.canonicalProjectIdentityKey,
     kind: record.kind,
     text: record.text,
     markdown: record.markdown,
@@ -423,18 +450,16 @@ const upsertToolCallRecord = async (
   record: Extract<LiveRecord, { type: "tool_call" }>["record"],
   now: number,
 ) => {
-  await ensureMachine(ctx, { machineId: record.machineId });
-  await ensureAgent(ctx, record.provider, record.agentName);
-  const canonicalProjectIdentityKey = await ensureProjectKey(ctx, record.projectIdentityKey);
+  const session = await sessionIdentityFor(ctx, record.sessionId);
   const patch = {
     toolCallId: record.id,
     sessionId: record.sessionId,
     eventId: record.eventId,
-    machineId: record.machineId,
-    provider: record.provider,
-    agentName: record.agentName,
-    projectIdentityKey: record.projectIdentityKey,
-    canonicalProjectIdentityKey,
+    machineId: session.machineId,
+    provider: session.provider,
+    agentName: session.agentName,
+    projectIdentityKey: session.projectIdentityKey,
+    canonicalProjectIdentityKey: session.canonicalProjectIdentityKey,
     toolName: record.toolName,
     status: record.status,
     input: record.input,
@@ -444,7 +469,7 @@ const upsertToolCallRecord = async (
     updatedAt: now,
   };
   await upsertByIndex(ctx, "toolCalls", "by_toolCallId", "toolCallId", record.id, patch, now);
-  await upsertSearchDocument(ctx, toolCallSearchDocument(record, canonicalProjectIdentityKey, now));
+  await upsertSearchDocument(ctx, toolCallSearchDocument(record, session, now));
 };
 
 const upsertUsageRecord = async (
@@ -452,18 +477,16 @@ const upsertUsageRecord = async (
   record: Extract<LiveRecord, { type: "usage" }>["record"],
   now: number,
 ) => {
-  await ensureMachine(ctx, { machineId: record.machineId });
-  await ensureAgent(ctx, record.provider, record.agentName);
-  const canonicalProjectIdentityKey = await ensureProjectKey(ctx, record.projectIdentityKey);
+  const session = await sessionIdentityFor(ctx, record.sessionId);
   const patch = {
     usageId: record.id,
     sessionId: record.sessionId,
     eventId: record.eventId,
-    machineId: record.machineId,
-    provider: record.provider,
-    agentName: record.agentName,
-    projectIdentityKey: record.projectIdentityKey,
-    canonicalProjectIdentityKey,
+    machineId: session.machineId,
+    provider: session.provider,
+    agentName: session.agentName,
+    projectIdentityKey: session.projectIdentityKey,
+    canonicalProjectIdentityKey: session.canonicalProjectIdentityKey,
     timestamp: record.timestamp,
     model: record.model,
     modelProvider: record.modelProvider,
@@ -485,18 +508,16 @@ const upsertArtifactRecord = async (
   record: Extract<LiveRecord, { type: "artifact" }>["record"],
   now: number,
 ) => {
-  await ensureMachine(ctx, { machineId: record.machineId });
-  await ensureAgent(ctx, record.provider, record.agentName);
-  const canonicalProjectIdentityKey = await ensureProjectKey(ctx, record.projectIdentityKey);
+  const session = await sessionIdentityFor(ctx, record.sessionId);
   const patch = {
     artifactId: record.id,
     sessionId: record.sessionId,
     eventId: record.eventId,
-    machineId: record.machineId,
-    provider: record.provider,
-    agentName: record.agentName,
-    projectIdentityKey: record.projectIdentityKey,
-    canonicalProjectIdentityKey,
+    machineId: session.machineId,
+    provider: session.provider,
+    agentName: session.agentName,
+    projectIdentityKey: session.projectIdentityKey,
+    canonicalProjectIdentityKey: session.canonicalProjectIdentityKey,
     kind: record.kind,
     path: record.path,
     uri: record.uri,
@@ -514,17 +535,15 @@ const upsertEdgeRecord = async (
   record: Extract<LiveRecord, { type: "edge" }>["record"],
   now: number,
 ) => {
-  await ensureMachine(ctx, { machineId: record.machineId });
-  await ensureAgent(ctx, record.provider, record.agentName);
-  const canonicalProjectIdentityKey = await ensureProjectKey(ctx, record.projectIdentityKey);
+  const session = await sessionIdentityFor(ctx, record.sessionId);
   const patch = {
     edgeId: record.id,
     sessionId: record.sessionId,
-    machineId: record.machineId,
-    provider: record.provider,
-    agentName: record.agentName,
-    projectIdentityKey: record.projectIdentityKey,
-    canonicalProjectIdentityKey,
+    machineId: session.machineId,
+    provider: session.provider,
+    agentName: session.agentName,
+    projectIdentityKey: session.projectIdentityKey,
+    canonicalProjectIdentityKey: session.canonicalProjectIdentityKey,
     kind: record.kind,
     fromEventId: record.fromEventId,
     toEventId: record.toEventId,
@@ -616,49 +635,50 @@ const sessionSearchDocument = (
 
 const eventSearchDocument = (
   record: Extract<LiveRecord, { type: "event" }>["record"],
-  canonicalProjectIdentityKey: string,
+  session: Awaited<ReturnType<typeof sessionIdentityFor>>,
+  rawReference: ReturnType<typeof eventReference>,
   now: number,
 ): SearchDocumentUpsertInput => ({
   searchDocumentId: searchDocumentIdForRecord("event", record.id),
   sourceTable: "sessionEvents",
   sourceId: record.id,
   family: "sessionEvents",
-  projectIdentityKey: record.projectIdentityKey,
-  canonicalProjectIdentityKey,
-  machineId: record.machineId,
-  provider: record.provider,
-  agentName: record.agentName,
+  projectIdentityKey: session.projectIdentityKey,
+  canonicalProjectIdentityKey: session.canonicalProjectIdentityKey,
+  machineId: session.machineId,
+  provider: session.provider,
+  agentName: session.agentName,
   role: record.role,
   kind: record.kind,
   title: titleFrom(record.contentText, `${record.role} ${record.kind}`, record.id),
-  summary: safeSummary(record.contentText, record.rawReference),
+  summary: safeSummary(record.contentText, rawReference),
   searchText: compactSearchText({
     role: record.role,
     kind: record.kind,
     contentText: record.contentText,
     toolCallId: record.toolCallId,
-    rawReference: record.rawReference,
+    rawReference,
   }),
-  sourcePath: record.rawReference.sourcePath,
-  sourceRef: record.rawReference,
+  sourcePath: rawReference.sourcePath,
+  sourceRef: rawReference,
   occurredAt: dateMillis(record.timestamp),
   sourceUpdatedAt: dateMillis(record.timestamp) ?? now,
 });
 
 const toolCallSearchDocument = (
   record: Extract<LiveRecord, { type: "tool_call" }>["record"],
-  canonicalProjectIdentityKey: string,
+  session: Awaited<ReturnType<typeof sessionIdentityFor>>,
   now: number,
 ): SearchDocumentUpsertInput => ({
   searchDocumentId: searchDocumentIdForRecord("tool_call", record.id),
   sourceTable: "toolCalls",
   sourceId: record.id,
   family: "toolCalls",
-  projectIdentityKey: record.projectIdentityKey,
-  canonicalProjectIdentityKey,
-  machineId: record.machineId,
-  provider: record.provider,
-  agentName: record.agentName,
+  projectIdentityKey: session.projectIdentityKey,
+  canonicalProjectIdentityKey: session.canonicalProjectIdentityKey,
+  machineId: session.machineId,
+  provider: session.provider,
+  agentName: session.agentName,
   kind: "tool_call",
   toolName: record.toolName,
   title: titleFrom(record.toolName, record.id),
@@ -785,14 +805,15 @@ const deleteSourceRecord = async (
 const machineIdForLiveRecord = (item: LiveRecord) => {
   switch (item.type) {
     case "session":
+    case "source_root":
+      return item.record.machineId;
     case "event":
     case "content_block":
     case "tool_call":
     case "usage":
     case "artifact":
     case "edge":
-    case "source_root":
-      return item.record.machineId;
+      return undefined;
   }
 };
 

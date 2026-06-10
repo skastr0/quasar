@@ -56,25 +56,16 @@ const eventRecord = {
   nativeEventId: "native-event:test",
   sequence: 0,
   timestamp: "2026-06-10T12:00:30.000Z",
-  machineId: machine.machineId,
-  provider: "codex" as const,
-  agentName: "codex",
-  projectIdentityKey,
   role: "user" as const,
   kind: "message" as const,
   contentText: "event search text",
-  rawReference: { sourcePath: sessionRecord.sourcePath, line: 1 },
+  rawReference: { line: 1 },
 };
 
 const contentBlockRecord = {
   id: "block:test",
   eventId: eventRecord.id,
-  sessionId: sessionRecord.id,
   sequence: 0,
-  machineId: machine.machineId,
-  provider: "codex" as const,
-  agentName: "codex",
-  projectIdentityKey,
   kind: "text" as const,
   text: "content block text",
 };
@@ -83,10 +74,6 @@ const toolCallRecord = {
   id: "tool:test",
   sessionId: sessionRecord.id,
   eventId: eventRecord.id,
-  machineId: machine.machineId,
-  provider: "codex" as const,
-  agentName: "codex",
-  projectIdentityKey,
   toolName: "read_file",
   status: "completed",
   input: { path: "README.md" },
@@ -96,10 +83,6 @@ const artifactRecord = {
   id: "artifact:test",
   sessionId: sessionRecord.id,
   eventId: eventRecord.id,
-  machineId: machine.machineId,
-  provider: "codex" as const,
-  agentName: "codex",
-  projectIdentityKey,
   kind: "file",
   path: "/tmp/artifact.txt",
   contentHash: "hash:test",
@@ -412,5 +395,24 @@ describe("record envelope ingest", () => {
     expect(state.sessions).toHaveLength(0);
     expect(state.searchDocuments).toHaveLength(0);
     expect(state.recordStates).toHaveLength(0);
+  });
+
+  test("compact child records fail closed without their parent", async () => {
+    const t = testBackend();
+
+    await expect(
+      t.mutation(async (ctx) =>
+        await apply(ctx as MutationCtx, envelope([{ type: "event", record: eventRecord }])),
+      ),
+    ).rejects.toMatchObject({ message: expect.stringContaining("Missing session parent") });
+
+    const state = await t.query(async (ctx) => ({
+      events: await ctx.db.query("sessionEvents").collect(),
+      recordStates: await ctx.db.query("recordStates").collect(),
+      searchDocuments: await ctx.db.query("searchDocuments").collect(),
+    }));
+    expect(state.events).toHaveLength(0);
+    expect(state.recordStates).toHaveLength(0);
+    expect(state.searchDocuments).toHaveLength(0);
   });
 });

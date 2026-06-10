@@ -139,6 +139,14 @@ describe("ingest records", () => {
       usageRecordCount: 1,
       artifactCount: 1,
     });
+    const event = records.find((record) => record.type === "event");
+    const tool = records.find((record) => record.type === "tool_call");
+    expect(event?.record).not.toHaveProperty("machineId");
+    expect(event?.record).not.toHaveProperty("provider");
+    expect(event?.record).not.toHaveProperty("projectIdentityKey");
+    expect(event?.record.rawReference).toEqual({ line: 1 });
+    expect(tool?.record).not.toHaveProperty("machineId");
+    expect(tool?.record).not.toHaveProperty("projectIdentityKey");
   });
 
   test("preserves content blocks that add information beyond event text", () => {
@@ -651,6 +659,58 @@ describe("ingest records", () => {
 
     expect(error._tag).toBe("RecordContractError");
     expect(error.reason).toBe("invalid_envelope");
+  });
+
+  test("fails closed on compacted child identity fields", async () => {
+    const event = sessionToRecords(makeSession()).find((record) => record.type === "event");
+    expect(event).toBeDefined();
+    const error = await Effect.runPromise(
+      Effect.flip(
+        decodeRecordEnvelope({
+          protocol: RECORD_PROTOCOL,
+          machine,
+          records: [
+            {
+              ...event,
+              record: {
+                ...event!.record,
+                machineId: machine.machineId,
+              },
+            },
+          ],
+        }),
+      ),
+    );
+
+    expect(error._tag).toBe("RecordContractError");
+    expect(error.reason).toBe("invalid_envelope");
+    expect(error.message).toContain("machineId");
+  });
+
+  test("fails closed on per-event source paths", async () => {
+    const event = sessionToRecords(makeSession()).find((record) => record.type === "event");
+    expect(event).toBeDefined();
+    const error = await Effect.runPromise(
+      Effect.flip(
+        decodeRecordEnvelope({
+          protocol: RECORD_PROTOCOL,
+          machine,
+          records: [
+            {
+              ...event,
+              record: {
+                ...event!.record,
+                rawReference: { sourcePath },
+              },
+            },
+          ],
+        }),
+      ),
+    );
+
+    expect(error._tag).toBe("RecordContractError");
+    expect(error.reason).toBe("invalid_envelope");
+    expect(error.message).toContain("rawReference.sourcePath");
   });
 
   test("fails typed on non JSON payloads", async () => {

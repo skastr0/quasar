@@ -2,18 +2,13 @@ import { Effect, Schema } from "effect";
 
 import { stableCanonicalJsonHash } from "./hash";
 import {
-  Artifact,
   ContentBlockKind,
   MachineIdentity,
   ProjectResolution,
   Provider,
-  RawReference,
-  SessionEdge,
   SessionEventKind,
   SessionRole,
   SourceRoot,
-  ToolCall,
-  UsageRecord,
   type NormalizedSession,
 } from "./schemas";
 
@@ -26,6 +21,12 @@ const NonNegativeInteger = Schema.Number.pipe(
 const PositiveInteger = Schema.Number.pipe(
   Schema.filter((value) => Number.isInteger(value) && value > 0, {
     message: () => "Expected a positive integer",
+  }),
+);
+
+const NonNegativeNumber = Schema.Number.pipe(
+  Schema.filter((value) => Number.isFinite(value) && value >= 0, {
+    message: () => "Expected a non-negative finite number",
   }),
 );
 
@@ -72,27 +73,24 @@ export const EventRecord = Schema.Struct({
   nativeEventId: Schema.optional(Schema.String),
   sequence: NonNegativeInteger,
   timestamp: Schema.optional(Schema.String),
-  machineId: Schema.String,
-  provider: Provider,
-  agentName: Schema.String,
-  projectIdentityKey: Schema.String,
   role: SessionRole,
   kind: SessionEventKind,
   contentText: Schema.optional(Schema.String),
   toolCallId: Schema.optional(Schema.String),
   parentEventId: Schema.optional(Schema.String),
-  rawReference: RawReference,
+  rawReference: Schema.optional(
+    Schema.Struct({
+      line: Schema.optional(PositiveInteger),
+      table: Schema.optional(Schema.String),
+      nativeType: Schema.optional(Schema.String),
+    }),
+  ),
 });
 export type EventRecord = typeof EventRecord.Type;
 
 export const ContentBlockRecord = Schema.Struct({
   id: Schema.String,
   eventId: Schema.String,
-  sessionId: Schema.String,
-  machineId: Schema.String,
-  provider: Provider,
-  agentName: Schema.String,
-  projectIdentityKey: Schema.String,
   sequence: NonNegativeInteger,
   kind: ContentBlockKind,
   text: Schema.optional(Schema.String),
@@ -105,6 +103,72 @@ export const ContentBlockRecord = Schema.Struct({
   metadata: Schema.optional(Schema.Unknown),
 });
 export type ContentBlockRecord = typeof ContentBlockRecord.Type;
+
+export const ToolCallRecord = Schema.Struct({
+  id: Schema.String,
+  sessionId: Schema.String,
+  eventId: Schema.String,
+  toolName: Schema.String,
+  status: Schema.optional(Schema.String),
+  input: Schema.optional(Schema.Unknown),
+  output: Schema.optional(Schema.Unknown),
+  startedAt: Schema.optional(Schema.String),
+  completedAt: Schema.optional(Schema.String),
+});
+export type ToolCallRecord = typeof ToolCallRecord.Type;
+
+export const UsageIngestRecord = Schema.Struct({
+  id: Schema.String,
+  sessionId: Schema.String,
+  eventId: Schema.optional(Schema.String),
+  timestamp: Schema.optional(Schema.String),
+  model: Schema.optional(Schema.String),
+  modelProvider: Schema.optional(Schema.String),
+  inputTokens: Schema.optional(NonNegativeInteger),
+  outputTokens: Schema.optional(NonNegativeInteger),
+  reasoningTokens: Schema.optional(NonNegativeInteger),
+  cacheCreationInputTokens: Schema.optional(NonNegativeInteger),
+  cacheReadInputTokens: Schema.optional(NonNegativeInteger),
+  totalTokens: Schema.optional(NonNegativeInteger),
+  cost: Schema.optional(NonNegativeNumber),
+  currency: Schema.optional(Schema.String),
+});
+export type UsageIngestRecord = typeof UsageIngestRecord.Type;
+
+export const ArtifactRecord = Schema.Struct({
+  id: Schema.String,
+  sessionId: Schema.String,
+  eventId: Schema.optional(Schema.String),
+  kind: Schema.String,
+  path: Schema.optional(Schema.String),
+  uri: Schema.optional(Schema.String),
+  contentHash: Schema.optional(Schema.String),
+  sourcePath: Schema.optional(Schema.String),
+  sourceRef: Schema.optional(Schema.Unknown),
+  metadata: Schema.optional(Schema.Unknown),
+});
+export type ArtifactRecord = typeof ArtifactRecord.Type;
+
+export const EdgeRecord = Schema.Struct({
+  id: Schema.String,
+  sessionId: Schema.String,
+  kind: Schema.Literal(
+    "next",
+    "parent",
+    "tool_result_for",
+    "forked_from",
+    "subagent_of",
+    "compacted_into",
+    "artifact_of",
+  ),
+  fromEventId: Schema.optional(Schema.String),
+  toEventId: Schema.optional(Schema.String),
+  fromId: Schema.optional(Schema.String),
+  toId: Schema.optional(Schema.String),
+  rawReference: Schema.optional(Schema.Unknown),
+  metadata: Schema.optional(Schema.Unknown),
+});
+export type EdgeRecord = typeof EdgeRecord.Type;
 
 export const IngestRecordType = Schema.Literal(
   "session",
@@ -141,10 +205,10 @@ export const IngestRecord = Schema.Union(
   Schema.Struct({ type: Schema.Literal("session"), record: SessionRecord }),
   Schema.Struct({ type: Schema.Literal("event"), record: EventRecord }),
   Schema.Struct({ type: Schema.Literal("content_block"), record: ContentBlockRecord }),
-  Schema.Struct({ type: Schema.Literal("tool_call"), record: ToolCall }),
-  Schema.Struct({ type: Schema.Literal("usage"), record: UsageRecord }),
-  Schema.Struct({ type: Schema.Literal("artifact"), record: Artifact }),
-  Schema.Struct({ type: Schema.Literal("edge"), record: SessionEdge }),
+  Schema.Struct({ type: Schema.Literal("tool_call"), record: ToolCallRecord }),
+  Schema.Struct({ type: Schema.Literal("usage"), record: UsageIngestRecord }),
+  Schema.Struct({ type: Schema.Literal("artifact"), record: ArtifactRecord }),
+  Schema.Struct({ type: Schema.Literal("edge"), record: EdgeRecord }),
   Schema.Struct({ type: Schema.Literal("source_root"), record: SourceRoot }),
   Schema.Struct({ type: Schema.Literal("tombstone"), record: TombstoneRecord }),
 );
@@ -246,6 +310,46 @@ type ContentBlockIngestRecord = Extract<IngestRecord, { readonly type: "content_
 
 const isObject = (value: unknown): value is { readonly [key: string]: unknown } =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+
+const legacyChildFields = {
+  event: ["machineId", "provider", "agentName", "projectIdentityKey"],
+  content_block: ["sessionId", "machineId", "provider", "agentName", "projectIdentityKey"],
+  tool_call: ["machineId", "provider", "agentName", "projectIdentityKey"],
+  usage: ["machineId", "provider", "agentName", "projectIdentityKey"],
+  artifact: ["machineId", "provider", "agentName", "projectIdentityKey"],
+  edge: ["machineId", "provider", "agentName", "projectIdentityKey"],
+} as const;
+
+const legacyChildFieldError = (type: string, key: string, index: number) =>
+  new RecordContractError({
+    reason: "invalid_envelope",
+    message: `Record ${index} (${type}) carries compacted legacy field ${key}.`,
+  });
+
+const findLegacyChildFieldError = (value: unknown): RecordContractError | undefined => {
+  if (!isObject(value) || !Array.isArray(value.records)) return undefined;
+  for (const [index, item] of value.records.entries()) {
+    if (!isObject(item) || typeof item.type !== "string" || !isObject(item.record)) continue;
+    const keys = legacyChildFields[item.type as keyof typeof legacyChildFields];
+    if (keys === undefined) continue;
+    for (const key of keys) {
+      if (Object.hasOwn(item.record, key)) return legacyChildFieldError(item.type, key, index);
+    }
+    if (
+      item.type === "event" &&
+      isObject(item.record.rawReference) &&
+      Object.hasOwn(item.record.rawReference, "sourcePath")
+    ) {
+      return legacyChildFieldError(item.type, "rawReference.sourcePath", index);
+    }
+  }
+  return undefined;
+};
+
+const rejectLegacyChildFields = (value: unknown): Effect.Effect<void, RecordContractError> => {
+  const error = findLegacyChildFieldError(value);
+  return error === undefined ? Effect.void : Effect.fail(error);
+};
 
 const isTruncationMarker = (value: unknown): value is TruncationMarker =>
   isObject(value) && value.truncated === true && typeof value.bytes === "number";
@@ -451,6 +555,17 @@ const recordWithoutDerivableText = (
     ? omitContentBlockText(record)
     : record;
 
+const compactEventReference = (
+  rawReference: NormalizedSession["events"][number]["rawReference"],
+): EventRecord["rawReference"] => {
+  const reference = {
+    ...(rawReference.line !== undefined ? { line: rawReference.line } : {}),
+    ...(rawReference.table !== undefined ? { table: rawReference.table } : {}),
+    ...(rawReference.nativeType !== undefined ? { nativeType: rawReference.nativeType } : {}),
+  };
+  return Object.keys(reference).length === 0 ? undefined : reference;
+};
+
 export const sessionToRecords = (session: NormalizedSession): IngestRecord[] => {
   const {
     events,
@@ -474,11 +589,6 @@ export const sessionToRecords = (session: NormalizedSession): IngestRecord[] => 
           contentBlock: {
             ...contentBlock,
             eventId: event.id,
-            sessionId: event.sessionId,
-            machineId: event.machineId,
-            provider: event.provider,
-            agentName: event.agentName,
-            projectIdentityKey: event.projectIdentityKey,
           },
         }))
         .filter(({ event, contentBlock }) => !onlyDuplicatesEventText(event, contentBlock)),
@@ -500,18 +610,55 @@ export const sessionToRecords = (session: NormalizedSession): IngestRecord[] => 
         artifactCount: artifactCount ?? artifacts.length,
       },
     },
-    ...events.map(({ contentBlocks: _contentBlocks, ...event }) => ({
+    ...events.map(({
+      contentBlocks: _contentBlocks,
+      machineId: _machineId,
+      provider: _provider,
+      agentName: _agentName,
+      projectIdentityKey: _projectIdentityKey,
+      rawReference,
+      ...event
+    }) => ({
       type: "event" as const,
-      record: event,
+      record: {
+        ...event,
+        ...(compactEventReference(rawReference) !== undefined
+          ? { rawReference: compactEventReference(rawReference) }
+          : {}),
+      },
     })),
     ...contentBlockRecords.map(({ contentBlock }) => ({
       type: "content_block" as const,
       record: contentBlock,
     })),
-    ...toolCalls.map((record) => ({ type: "tool_call" as const, record })),
-    ...usageRecords.map((record) => ({ type: "usage" as const, record })),
-    ...sessionEdges.map((record) => ({ type: "edge" as const, record })),
-    ...artifacts.map((record) => ({ type: "artifact" as const, record })),
+    ...toolCalls.map(({
+      machineId: _machineId,
+      provider: _provider,
+      agentName: _agentName,
+      projectIdentityKey: _projectIdentityKey,
+      ...record
+    }) => ({ type: "tool_call" as const, record })),
+    ...usageRecords.map(({
+      machineId: _machineId,
+      provider: _provider,
+      agentName: _agentName,
+      projectIdentityKey: _projectIdentityKey,
+      ...record
+    }) => ({ type: "usage" as const, record })),
+    ...sessionEdges.map(({
+      machineId: _machineId,
+      provider: _provider,
+      agentName: _agentName,
+      projectIdentityKey: _projectIdentityKey,
+      ...record
+    }) => ({ type: "edge" as const, record })),
+    ...artifacts.map(({
+      machineId: _machineId,
+      provider: _provider,
+      agentName: _agentName,
+      projectIdentityKey: _projectIdentityKey,
+      ...record
+    }) => ({ type: "artifact" as const, record })),
   ];
 };
 
@@ -602,13 +749,17 @@ export const decodeRecordEnvelope = (
   value: unknown,
   limits?: Partial<RecordLimits>,
 ): Effect.Effect<RecordEnvelope, RecordContractError> =>
-  Schema.decodeUnknown(RecordEnvelope)(value).pipe(
-    Effect.mapError(
-      (error) =>
-        new RecordContractError({
-          reason: "invalid_envelope",
-          message: parseErrorMessage(error),
-        }),
+  rejectLegacyChildFields(value).pipe(
+    Effect.flatMap(() =>
+      Schema.decodeUnknown(RecordEnvelope)(value).pipe(
+        Effect.mapError(
+          (error) =>
+            new RecordContractError({
+              reason: "invalid_envelope",
+              message: parseErrorMessage(error),
+            }),
+        ),
+      ),
     ),
     Effect.flatMap((envelope) => enforceRecordEnvelopeLimits(envelope, limits)),
   );
