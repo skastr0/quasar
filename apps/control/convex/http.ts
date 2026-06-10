@@ -12,10 +12,6 @@ import { serverEmbeddingsConfigured } from "./quasarRag";
 
 const http = httpRouter();
 const DEFAULT_JSON_BODY_LIMIT_BYTES = 512 * 1024;
-const INGEST_BATCH_JSON_BODY_LIMIT_BYTES = 768 * 1024;
-const INGEST_JOB_JSON_BODY_LIMIT_BYTES = 3_500_000;
-const INGEST_CHUNK_JSON_BODY_LIMIT_BYTES = 1 * 1024 * 1024;
-const INGEST_BULK_JSON_BODY_LIMIT_BYTES = 3_500_000;
 const textEncoder = new TextEncoder();
 
 const corsHeaders = () => ({
@@ -128,12 +124,6 @@ const handleMutation = (fn: (ctx: ActionCtx, req: Request) => Promise<Response>)
   });
 
 for (const path of [
-  quasarApiPaths.ingestBatches,
-  quasarApiPaths.ingestJobs,
-  quasarApiPaths.ingestJobsSchedule,
-  quasarApiPaths.ingestJobsCancel,
-  quasarApiPaths.ingestJobChunks,
-  quasarApiPaths.ingestJobChunksBulk,
   quasarApiPaths.embeddingControl,
   "/api/projects",
   "/api/projects/alias",
@@ -143,7 +133,6 @@ for (const path of [
   "/api/search/semantic",
   "/api/search/fusion",
   "/api/tool-calls",
-  "/api/import-runs",
   "/api/capabilities",
   "/api/health",
 ]) {
@@ -173,9 +162,7 @@ http.route({
     json({
       protocolVersion: "quasar-api/v1",
       ingestion: {
-        batch: true,
-        jobs: true,
-        idempotent: true,
+        recordStream: false,
         nativeHistoryWrites: false,
       },
       search: {
@@ -187,101 +174,6 @@ http.route({
         acceptsClientEmbeddings: false,
       },
     }),
-  ),
-});
-
-http.route({
-  path: quasarApiPaths.ingestJobs,
-  method: "POST",
-  handler: handleMutation(async (ctx, req) =>
-    json(
-      await ctx.runMutation(internal.quasar.startImportJobInternal, {
-        input: await readJson(req, INGEST_JOB_JSON_BODY_LIMIT_BYTES),
-      }),
-    ),
-  ),
-});
-
-http.route({
-  path: quasarApiPaths.ingestJobs,
-  method: "GET",
-  handler: handle(async (ctx, req) => {
-    const url = new URL(req.url);
-    const importJobId = url.searchParams.get("importJobId");
-    if (importJobId === null) {
-      return json(
-        await ctx.runQuery(internal.quasar.listImportJobsInternal, {
-          limit: optionalNumberParam(url, "limit"),
-        }),
-      );
-    }
-    const job = await ctx.runQuery(internal.quasar.readImportJobInternal, {
-      input: {
-        importJobId,
-        chunkCursor: url.searchParams.get("chunkCursor"),
-        failureCursor: url.searchParams.get("failureCursor"),
-        limit: optionalNumberParam(url, "limit"),
-      },
-    });
-    return job === null ? json({ error: "not found" }, 404) : json(job);
-  }),
-});
-
-http.route({
-  path: quasarApiPaths.ingestJobsSchedule,
-  method: "POST",
-  handler: handleMutation(async (ctx, req) => {
-    const input = await readJson(req, 16 * 1024);
-    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
-    const importJobId = typeof record.importJobId === "string" ? record.importJobId : undefined;
-    if (importJobId === undefined) return json({ error: "importJobId is required" }, 400);
-    await ctx.runMutation(internal.quasar.scheduleImportWorkerInternal, {
-      importJobId,
-      delayMs: 0,
-    });
-    return json({ importJobId, scheduled: true });
-  }),
-});
-
-http.route({
-  path: quasarApiPaths.ingestJobsCancel,
-  method: "POST",
-  handler: handleMutation(async (ctx, req) => {
-    const input = await readJson(req, 16 * 1024);
-    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
-    const importJobId = typeof record.importJobId === "string" ? record.importJobId : undefined;
-    const reason = typeof record.reason === "string" ? record.reason : undefined;
-    if (importJobId === undefined) return json({ error: "importJobId is required" }, 400);
-    return json(
-      await ctx.runMutation(internal.quasar.cancelImportJobInternal, {
-        importJobId,
-        reason,
-      }),
-    );
-  }),
-});
-
-http.route({
-  path: quasarApiPaths.ingestJobChunks,
-  method: "POST",
-  handler: handleMutation(async (ctx, req) =>
-    json(
-      await ctx.runAction(internal.quasar.submitImportChunkInternal, {
-        input: await readJson(req, INGEST_CHUNK_JSON_BODY_LIMIT_BYTES),
-      }),
-    ),
-  ),
-});
-
-http.route({
-  path: quasarApiPaths.ingestJobChunksBulk,
-  method: "POST",
-  handler: handleMutation(async (ctx, req) =>
-    json(
-      await ctx.runAction(internal.quasar.submitImportChunksInternal, {
-        input: await readJson(req, INGEST_BULK_JSON_BODY_LIMIT_BYTES),
-      }),
-    ),
   ),
 });
 
@@ -320,18 +212,6 @@ http.route({
         : undefined;
     return json({ control, retried, rebuilt });
   }),
-});
-
-http.route({
-  path: quasarApiPaths.ingestBatches,
-  method: "POST",
-  handler: handleMutation(async (ctx, req) =>
-    json(
-      await ctx.runMutation(internal.quasar.ingestBatchInternal, {
-        batch: await readJson(req, INGEST_BATCH_JSON_BODY_LIMIT_BYTES),
-      }),
-    ),
-  ),
 });
 
 http.route({
@@ -528,12 +408,6 @@ http.route({
   handler: handle(async (ctx, req) =>
     json(await ctx.runQuery(internal.quasar.listToolCallsInternal, (await readJson(req)) as never)),
   ),
-});
-
-http.route({
-  path: "/api/import-runs",
-  method: "GET",
-  handler: handle(async (ctx) => json(await ctx.runQuery(internal.quasar.listImportRunsInternal, {}))),
 });
 
 export default http;

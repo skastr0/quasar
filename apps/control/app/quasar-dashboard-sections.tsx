@@ -1,7 +1,4 @@
 import type {
-  ImportJobSummary,
-  ImportJobDetail,
-  ImportRunSummary,
   ProjectSummary,
   SearchMode,
   SessionBrowseFilters,
@@ -246,108 +243,6 @@ export function ProjectsPanel({ projects }: { projects: ProjectSummary[] }) {
     </div>
   );
 }
-
-export function ImportsPanel({
-  jobs,
-  runs,
-  selectedJob,
-  busy,
-  onSelectJob,
-  onLoadChunks,
-  onLoadFailures,
-}: {
-  jobs: ImportJobSummary[];
-  runs: ImportRunSummary[];
-  selectedJob: ImportJobDetail | null;
-  busy: boolean;
-  onSelectJob: (importJobId: string) => void;
-  onLoadChunks: () => void;
-  onLoadFailures: () => void;
-}) {
-  return (
-    <div className="panel wide">
-      <h2>Import Jobs</h2>
-      <div className="list">
-        {jobs.map((item) => {
-          const expected = item.job.expectedChunkCount ?? item.job.chunkCount;
-          return (
-            <div key={item.job.importJobId} className="import-job-row">
-              <strong>{item.job.status}</strong>
-              <span>
-                {item.job.succeededChunkCount}/{expected} chunks
-              </span>
-              <span>{item.job.failedChunkCount} failed</span>
-              <span>{item.job.sourceRootCount} roots</span>
-              <span>{item.job.sessionCount} sessions</span>
-              <span>{item.job.eventCount} events</span>
-              <span>{item.readiness.ready}/{item.readiness.total} embedded</span>
-              <small>{new Date(item.job.updatedAt).toLocaleString()}</small>
-              <button type="button" onClick={() => onSelectJob(item.job.importJobId)}>
-                Open
-              </button>
-            </div>
-          );
-        })}
-      </div>
-      {selectedJob === null ? null : (
-        <div className="job-detail">
-          <h2>Job Detail</h2>
-          <div className="graph-counts">
-            <span>{selectedJob.chunks.length} chunks shown</span>
-            <span>{selectedJob.failures.length} failures shown</span>
-            <span>{selectedJob.readiness.pending} pending</span>
-            <span>{selectedJob.readiness.failed} failed</span>
-            <span>{selectedJob.readiness.deadLetter ?? 0} dead-letter</span>
-            <span>{selectedJob.readiness.skipped} skipped</span>
-          </div>
-          <div className="table">
-            {selectedJob.chunks.map((chunk) => (
-              <div key={chunk.chunkId} className="chunk-row">
-                <span>{chunk.sequence}</span>
-                <strong>{chunk.status}</strong>
-                <span>{chunk.attempts} attempts</span>
-                <span>{chunk.eventCount} events</span>
-                <small>{chunk.error ?? chunk.chunkId}</small>
-              </div>
-            ))}
-          </div>
-          {selectedJob.pagination?.chunks?.isDone === false ? (
-            <button type="button" onClick={onLoadChunks} disabled={busy}>
-              Load More Chunks
-            </button>
-          ) : null}
-          <div className="table">
-            {selectedJob.failures.map((failure) => (
-              <div key={failure.failureId} className="failure-row">
-                <span>{failure.retryable ? "retryable" : "terminal"}</span>
-                <span>{failure.chunkId ?? "job"}</span>
-                <small>{failure.error}</small>
-              </div>
-            ))}
-          </div>
-          {selectedJob.pagination?.failures?.isDone === false ? (
-            <button type="button" onClick={onLoadFailures} disabled={busy}>
-              Load More Failures
-            </button>
-          ) : null}
-        </div>
-      )}
-      <h2>Legacy Runs</h2>
-      <div className="list">
-        {runs.map((run) => (
-          <div key={run.importRunId} className="row">
-            <strong>{run.status}</strong>
-            <span>{run.sessionCount} sessions</span>
-            <span>{run.contentBlockCount ?? 0} blocks</span>
-            <span>{run.artifactCount ?? 0} artifacts</span>
-            <small>{new Date(run.createdAt).toLocaleString()}</small>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 type RecentSessionsPanelProps = {
   sessions: SessionSummary[];
   sessionBusy: boolean;
@@ -373,7 +268,6 @@ export function RecentSessionsPanel({
             <span>{session.provider}</span>
             <span>{session.agentName}</span>
             <span>{session.eventCount} events</span>
-            <span>{session.ingestState ?? "unknown"}</span>
             <span>{session.projectIdentityKey}</span>
             <span>{session.machineId}</span>
             <small>{new Date(session.updatedAt).toLocaleString()}</small>

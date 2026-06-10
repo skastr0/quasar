@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import { compactText } from "../src/adapters/common";
-import { sanitizeIngestBatchForTransport, redactSensitive } from "../src/redaction";
+import { redactSensitive } from "../src/redaction";
 
 describe("redaction", () => {
   test("strips encrypted native payload fields before transport and indexing", () => {
@@ -36,58 +36,13 @@ describe("redaction", () => {
     expect(compactText("\\u0000".repeat(80))).toBe("[binary output omitted]");
   });
 
-  test("redacts string contentText before transport", () => {
+  test("redacts string content", () => {
     const googleKeyFixture = `AIza${"S".repeat(24)}`;
-    const batch = sanitizeIngestBatchForTransport({
-      protocolVersion: "quasar.ingest/v1",
-      machine: { machineId: "machine:test" },
-      sourceRoots: [],
-      diagnostics: [],
-      generatedAt: "2026-06-04T00:00:00.000Z",
-      sessions: [
-        {
-          id: "session:test",
-          nativeSessionId: "native:test",
-          provider: "codex",
-          agentName: "codex",
-          machineId: "machine:test",
-          projectIdentity: {
-            projectIdentityKey: "path:test",
-            displayName: "test",
-            confidence: "low",
-            signals: [],
-          },
-          sourceRoot: "/tmp",
-          sourcePath: "/tmp/session.jsonl",
-          events: [
-            {
-              id: "event:test",
-              sessionId: "session:test",
-              sequence: 0,
-              machineId: "machine:test",
-              provider: "codex",
-              agentName: "codex",
-              projectIdentityKey: "path:test",
-              role: "assistant",
-              kind: "message",
-              contentText: `Bearer should-not-leak ${googleKeyFixture}`,
-              contentBlocks: [],
-              rawReference: { sourcePath: "/tmp/session.jsonl" },
-            },
-          ],
-          toolCalls: [],
-          sessionEdges: [],
-          usageRecords: [],
-          artifacts: [],
-        },
-      ],
-    });
+    const text = redactSensitive(`Bearer should-not-leak ${googleKeyFixture}`);
 
-    const [event] = batch.sessions[0]!.events;
-    expect(event.contentText).toContain("Bearer [redacted]");
-    expect(event.contentText).not.toContain("should-not-leak");
-    expect(event.contentText).not.toContain("AIza");
-    expect(Object.hasOwn(event, "content")).toBe(false);
+    expect(text).toContain("Bearer [redacted]");
+    expect(text).not.toContain("should-not-leak");
+    expect(text).not.toContain("AIza");
   });
 
   test("redacts common free-text secret shapes", () => {

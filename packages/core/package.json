@@ -8,9 +8,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./hash": "./src/hash.ts",
-    "./ingest-identity": "./src/ingest-identity.ts",
-    "./schemas": "./src/schemas.ts",
-    "./session-intelligence": "./src/session-intelligence.ts"
+    "./machine": "./src/machine.ts",
+    "./schemas": "./src/schemas.ts"
   },
   "scripts": {
     "build": "tsc --noEmit",

@@ -6,13 +6,6 @@ import { Option, Schema } from "effect";
 import { stableJsonHash, stableWideHash } from "../hash";
 import { resolveProjectIdentity } from "../project-normalization";
 import { redactSensitive } from "../redaction";
-import {
-  compactSessionIntelligenceText,
-  projectSessionIntelligenceNativeValue,
-  projectSessionIntelligencePatchPayloadValue,
-  projectSessionIntelligenceToolPayloadValue,
-  sanitizeSessionIntelligenceSession,
-} from "../session-intelligence";
 import type {
   Artifact,
   ContentBlock,
@@ -56,6 +49,33 @@ const NativeProjectionInputSchema: Schema.Schema<NativeProjectionInput> = Schema
     ),
 );
 const UnknownRecordSchema = Schema.Record({ key: Schema.String, value: Schema.Unknown });
+const DROPPED_NATIVE_KEYS = new Set([
+  "diff",
+  "diffs",
+  "patch",
+  "patches",
+  "snapshot",
+  "snapshots",
+  "fullDiff",
+  "fileDiff",
+  "displayDiff",
+  "displayPatch",
+  "uiState",
+  "viewState",
+  "providerUi",
+  "provider_ui",
+  "displayOnly",
+  "display_only",
+  "cache",
+  "cached",
+  "state",
+  "raw",
+  "rawContent",
+  "encrypted_content",
+  "encryptedContent",
+  "ciphertext",
+  "cipherText",
+]);
 
 type BuildSessionArgs = {
   readonly provider: Provider;
@@ -142,7 +162,7 @@ export const projectSessionNativeValue = (value: unknown): NativeValue | undefin
     Schema.decodeUnknownOption(NativeProjectionInputSchema)(value),
     () => value,
   );
-  const projected = projectSessionIntelligenceNativeValue(decoded);
+  const projected = projectNativeValue(decoded);
   return projected === undefined ? undefined : (projected as NativeValue);
 };
 
@@ -151,7 +171,7 @@ export const projectSessionPatchNativeValue = (value: unknown): NativeValue | un
     Schema.decodeUnknownOption(NativeProjectionInputSchema)(value),
     () => value,
   );
-  const projected = projectSessionIntelligencePatchPayloadValue(decoded);
+  const projected = projectNativeValue(decoded);
   return projected === undefined ? undefined : (projected as NativeValue);
 };
 
@@ -160,7 +180,42 @@ export const projectToolPayloadNativeValue = (value: unknown): unknown => {
     Schema.decodeUnknownOption(NativeProjectionInputSchema)(value),
     () => value,
   );
-  return projectSessionIntelligenceToolPayloadValue(decoded);
+  return projectNativeValue(decoded);
+};
+
+const compactProjectedText = (value: string | undefined, maxLength = 4_000) => {
+  if (value === undefined) return undefined;
+  const compacted = compactString(value);
+  if (compacted === undefined) return undefined;
+  return compacted.length <= maxLength ? compacted : `${compacted.slice(0, maxLength)}...`;
+};
+
+const shouldDropNativeKey = (key: string) =>
+  DROPPED_NATIVE_KEYS.has(key) ||
+  /(?:^|_)(diff|patch|snapshot|ciphertext)(?:$|_)/i.test(key) ||
+  /encrypted[_-]?content/i.test(key);
+
+const projectNativeValue = (value: unknown): NativeValue | undefined => {
+  const redacted = redactSensitive(value);
+  if (redacted === undefined) return undefined;
+  if (redacted === null) return null;
+  if (typeof redacted === "string") return compactProjectedText(redacted);
+  if (typeof redacted === "number" || typeof redacted === "boolean") return redacted;
+  if (Array.isArray(redacted)) {
+    const items = redacted.flatMap((item) => {
+      const projected = projectNativeValue(item);
+      return projected === undefined ? [] : [projected];
+    });
+    return items.length === 0 ? undefined : items;
+  }
+  if (typeof redacted !== "object") return undefined;
+
+  const entries = Object.entries(redacted as Record<string, unknown>).flatMap(([key, item]) => {
+    if (shouldDropNativeKey(key)) return [];
+    const projected = projectNativeValue(item);
+    return projected === undefined ? [] : [[key, projected] as const];
+  });
+  return entries.length === 0 ? undefined : Object.fromEntries(entries);
 };
 
 export const collectFiles = (
@@ -196,7 +251,7 @@ export const collectFiles = (
 export const compactText = (value: NativeValue | undefined): string | undefined => {
   if (value === undefined || value === null) return undefined;
   if (typeof value === "string") {
-    const text = compactSessionIntelligenceText(compactString(value));
+    const text = compactProjectedText(compactString(value));
     return text === undefined ? undefined : (redactSensitive(text) as string);
   }
   if (Array.isArray(value)) {
@@ -207,13 +262,10 @@ export const compactText = (value: NativeValue | undefined): string | undefined 
     const record = value as Record<string, unknown>;
     if (typeof record.text === "string") return compactText(record.text);
     if (typeof record.content === "string") return compactText(record.content);
-    const projected = projectSessionIntelligenceNativeValue(redactSensitive(value));
+    const projected = projectNativeValue(value);
     if (projected === undefined) return undefined;
     try {
-      return compactSessionIntelligenceText(
-        JSON.stringify(projected),
-        4_000,
-      );
+      return compactProjectedText(JSON.stringify(projected), 4_000);
     } catch {
       return undefined;
     }
@@ -328,10 +380,6 @@ export const contentBlocksFromNative = (
     ...(typeof record.toolName === "string" ? { toolName: record.toolName } : {}),
     ...(typeof record.callID === "string" ? { callId: record.callID } : {}),
     ...(typeof record.call_id === "string" ? { callId: record.call_id } : {}),
-    ...(record.patch !== undefined ? { patch: record.patch } : {}),
-    ...(record.diff !== undefined ? { diff: record.diff } : {}),
-    ...(record.patches !== undefined ? { patches: record.patches } : {}),
-    ...(record.diffs !== undefined ? { diffs: record.diffs } : {}),
   });
   const pushMediaOrFile = (record: Record<string, unknown>, type: string | undefined) => {
     const lowerType = type?.toLowerCase();
@@ -666,7 +714,7 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
     projectIdentityKey: projectIdentity.projectIdentityKey,
   }));
 
-  return sanitizeSessionIntelligenceSession({
+  return {
     id,
     nativeSessionId: args.nativeSessionId,
     provider: args.provider,
@@ -686,7 +734,7 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
     sessionEdges,
     usageRecords,
     artifacts,
-  });
+  };
 };
 
 export const eventIdFor = (

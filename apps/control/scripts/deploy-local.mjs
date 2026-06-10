@@ -32,7 +32,6 @@ const localConvexUrl =
 for (const [command, args] of [
   ["bun", ["run", "test"]],
   ["bunx", ["tsc", "--noEmit"]],
-  ["bun", ["scripts/backup-local-convex.mjs"]],
 ]) {
   run(command, args);
 }

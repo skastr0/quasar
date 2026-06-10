@@ -6,11 +6,6 @@ import { boundedLimit } from "./quasarValues";
 const SESSION_VIEW_LIMIT = 500;
 const FILTER_SCAN_MULTIPLIER = 20;
 
-export const listImportRunsHandler = async (ctx: QueryCtx) =>
-  (await ctx.db.query("importRuns").withIndex("by_createdAt").order("desc").take(50)).map(
-    publicImportRun,
-  );
-
 export const listSessionsHandler = async (
   ctx: QueryCtx,
   args: {
@@ -35,8 +30,6 @@ export const listSessionsHandler = async (
       projectIdentityKey: session.canonicalProjectIdentityKey,
       eventCount: session.eventCount,
       updatedAt: session.updatedAt,
-      ingestState: session.ingestState,
-      importJobId: session.importJobId,
     })),
     isDone: page.isDone,
     continueCursor: page.continueCursor,
@@ -286,28 +279,6 @@ type PublicSessionEvent = ReturnType<typeof publicSessionEvent>;
 type PublicContentBlock = ReturnType<typeof publicContentBlock>;
 type PublicSessionEdge = ReturnType<typeof publicSessionEdge>;
 type PublicToolCall = ReturnType<typeof publicToolCall>;
-
-function publicImportRun(run: Doc<"importRuns">) {
-  return {
-    importRunId: run.importRunId,
-    machineId: run.machineId,
-    status: run.status,
-    sourceRootCount: run.sourceRootCount,
-    sessionCount: run.sessionCount,
-    eventCount: run.eventCount,
-    toolCallCount: run.toolCallCount,
-    contentBlockCount: run.contentBlockCount,
-    sessionEdgeCount: run.sessionEdgeCount,
-    usageRecordCount: run.usageRecordCount,
-    artifactCount: run.artifactCount,
-    diagnostics: run.diagnostics,
-    error: run.error,
-    importJobId: run.importJobId,
-    createdAt: run.createdAt,
-    updatedAt: run.updatedAt,
-  };
-}
-
 function publicSessionDetail(session: Doc<"sessions">) {
   return {
     sessionId: session.sessionId,
@@ -325,10 +296,6 @@ function publicSessionDetail(session: Doc<"sessions">) {
     sourcePath: session.sourcePath,
     eventCount: session.eventCount,
     toolCallCount: session.toolCallCount,
-    importRunId: session.importRunId,
-    importJobId: session.importJobId,
-    importChunkId: session.importChunkId,
-    ingestState: session.ingestState,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
   };
@@ -352,9 +319,6 @@ function publicSessionEvent(event: Doc<"sessionEvents">) {
     toolCallId: event.toolCallId,
     parentEventId: event.parentEventId,
     rawReference: event.rawReference,
-    importRunId: event.importRunId,
-    importJobId: event.importJobId,
-    importChunkId: event.importChunkId,
     createdAt: event.createdAt,
     updatedAt: event.updatedAt,
   };
@@ -380,9 +344,6 @@ function publicContentBlock(block: Doc<"contentBlocks">) {
     mediaType: block.mediaType,
     valueHash: hashPublicPayload(block.value),
     metadataHash: hashPublicPayload(block.metadata),
-    importRunId: block.importRunId,
-    importJobId: block.importJobId,
-    importChunkId: block.importChunkId,
     createdAt: block.createdAt,
     updatedAt: block.updatedAt,
   };
@@ -404,9 +365,6 @@ function publicSessionEdge(edge: Doc<"sessionEdges">) {
     toId: edge.toId,
     rawReferenceHash: hashPublicPayload(edge.rawReference),
     metadataHash: hashPublicPayload(edge.metadata),
-    importRunId: edge.importRunId,
-    importJobId: edge.importJobId,
-    importChunkId: edge.importChunkId,
     createdAt: edge.createdAt,
     updatedAt: edge.updatedAt,
   };
@@ -430,9 +388,6 @@ function publicToolCall(toolCall: Doc<"toolCalls">) {
     outputHash: hashPublicPayload(toolCall.output),
     startedAt: toolCall.startedAt,
     completedAt: toolCall.completedAt,
-    importRunId: toolCall.importRunId,
-    importJobId: toolCall.importJobId,
-    importChunkId: toolCall.importChunkId,
     createdAt: toolCall.createdAt,
     updatedAt: toolCall.updatedAt,
   };
@@ -459,9 +414,6 @@ function publicUsageRecord(usage: Doc<"usageRecords">) {
     totalTokens: usage.totalTokens,
     cost: usage.cost,
     currency: usage.currency,
-    importRunId: usage.importRunId,
-    importJobId: usage.importJobId,
-    importChunkId: usage.importChunkId,
     createdAt: usage.createdAt,
     updatedAt: usage.updatedAt,
   };
@@ -484,9 +436,6 @@ function publicArtifact(artifact: Doc<"artifacts">) {
     sourcePath: artifact.sourcePath,
     sourceRefHash: hashPublicPayload(artifact.sourceRef),
     metadataHash: hashPublicPayload(artifact.metadata),
-    importRunId: artifact.importRunId,
-    importJobId: artifact.importJobId,
-    importChunkId: artifact.importChunkId,
     createdAt: artifact.createdAt,
     updatedAt: artifact.updatedAt,
   };

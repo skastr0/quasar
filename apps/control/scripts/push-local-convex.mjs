@@ -7,7 +7,7 @@ const configPath = resolve(quasarConvexLocalRoot(), "config.json");
 const envPath = resolve(".env.local");
 
 if (!existsSync(configPath)) {
-  console.error(`Missing ${configPath}. Run bun run local:init or restore a Quasar local Convex backup.`);
+  console.error(`Missing ${configPath}. Run bun run local:init.`);
   process.exit(1);
 }
 

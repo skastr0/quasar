@@ -1,5 +1,3 @@
-import type { IngestBatch } from "./schemas";
-
 const REDACTED = "[redacted]";
 const SENSITIVE_KEY =
   /(authorization|password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|bearer|cookie|credential|private[_-]?key|encrypted[_-]?content|cipher[_-]?text)/i;
@@ -41,36 +39,3 @@ export const redactSensitive = (value: unknown, depth = 0): unknown => {
     ]),
   );
 };
-
-export const sanitizeIngestBatchForTransport = (batch: IngestBatch): IngestBatch => ({
-  ...batch,
-  machine: redactSensitive(batch.machine) as IngestBatch["machine"],
-  sourceRoots: redactSensitive(batch.sourceRoots) as IngestBatch["sourceRoots"],
-  diagnostics: redactSensitive(batch.diagnostics) as IngestBatch["diagnostics"],
-  sessions: batch.sessions.map((session) => ({
-    ...session,
-    events: session.events.map((event) => ({
-      ...event,
-      contentText:
-        typeof event.contentText === "string"
-          ? (redactSensitive(event.contentText) as string)
-          : event.contentText,
-      contentBlocks: redactSensitive(event.contentBlocks) as typeof event.contentBlocks,
-    })),
-    toolCalls: session.toolCalls.map((toolCall) => ({
-      ...toolCall,
-      input: redactSensitive(toolCall.input),
-      output: redactSensitive(toolCall.output),
-    })),
-    sessionEdges: session.sessionEdges.map((edge) => ({
-      ...edge,
-      rawReference: redactSensitive(edge.rawReference),
-      metadata: redactSensitive(edge.metadata),
-    })),
-    usageRecords: session.usageRecords,
-    artifacts: session.artifacts.map((artifact) => ({
-      ...artifact,
-      metadata: redactSensitive(artifact.metadata),
-    })),
-  })),
-});

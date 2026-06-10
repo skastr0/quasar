@@ -10,7 +10,7 @@
     "build": "next build",
     "start": "next start --port 5177 --hostname 127.0.0.1",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --fileParallelism=false",
+    "test": "vitest run --passWithNoTests --fileParallelism=false",
     "test:http-auth": "bun scripts/http-auth-smoke.mjs",
     "local:init": "bun scripts/initialize-local-convex.mjs",
     "local:backend": "bun scripts/start-local-convex.mjs",
@@ -20,13 +20,11 @@
     "local:publish": "bun run local:push && bun run local:build",
     "local:install-daemons": "bun scripts/install-launchd.mjs",
     "local:configure-tailscale": "bun scripts/configure-tailscale-serve.mjs",
-    "local:backup": "bun scripts/backup-local-convex.mjs",
     "local:env": "bun scripts/configure-convex-env.mjs",
     "deploy": "bun scripts/deploy-local.mjs"
   },
   "dependencies": {
     "@ai-sdk/google": "^3.0.75",
-    "@convex-dev/migrations": "^0.3.4",
     "@convex-dev/rag": "^0.7.4",
     "@convex-dev/workpool": "^0.4.7",
     "@skastr0/quasar-core": "workspace:*",

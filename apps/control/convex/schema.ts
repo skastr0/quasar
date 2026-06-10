@@ -17,20 +17,6 @@ const provider = v.union(
   v.literal("unknown"),
 );
 
-const adapterStatus = v.union(
-  v.literal("available"),
-  v.literal("no_data_found"),
-  v.literal("unsupported"),
-  v.literal("error"),
-);
-
-const parserConfidence = v.union(
-  v.literal("documented"),
-  v.literal("observed"),
-  v.literal("brittle"),
-  v.literal("capture-file"),
-);
-
 const confidence = v.union(
   v.literal("explicit"),
   v.literal("high"),
@@ -79,17 +65,6 @@ const rawReference = v.object({
   rowId: v.optional(v.string()),
   nativeType: v.optional(v.string()),
 });
-
-const adapterDiagnostic = v.object({
-  adapterId: v.string(),
-  provider,
-  status: adapterStatus,
-  parserConfidence: v.optional(parserConfidence),
-  rootPath: v.optional(v.string()),
-  message: v.string(),
-  details: v.optional(v.any()),
-});
-
 const sessionEdgeKind = v.union(
   v.literal("next"),
   v.literal("parent"),
@@ -116,28 +91,6 @@ const ragSyncState = v.union(
   v.literal("skipped"),
   v.literal("failed"),
   v.literal("dead_letter"),
-);
-
-const importJobStatus = v.union(
-  v.literal("queued"),
-  v.literal("running"),
-  v.literal("succeeded"),
-  v.literal("partial_failure"),
-  v.literal("failed"),
-);
-
-const importChunkStatus = v.union(
-  v.literal("pending"),
-  v.literal("running"),
-  v.literal("succeeded"),
-  v.literal("failed"),
-  v.literal("dead_letter"),
-);
-
-const sessionIngestState = v.union(
-  v.literal("partial"),
-  v.literal("complete"),
-  v.literal("failed"),
 );
 
 const embeddingOutboxStatus = v.union(
@@ -221,10 +174,6 @@ export default defineSchema({
     sourcePath: v.string(),
     eventCount: v.number(),
     toolCallCount: v.number(),
-    importRunId: v.string(),
-    importJobId: v.optional(v.string()),
-    importChunkId: v.optional(v.string()),
-    ingestState: v.optional(sessionIngestState),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -263,9 +212,6 @@ export default defineSchema({
     toolCallId: v.optional(v.string()),
     parentEventId: v.optional(v.string()),
     rawReference,
-    importRunId: v.string(),
-    importJobId: v.optional(v.string()),
-    importChunkId: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -294,9 +240,6 @@ export default defineSchema({
     mediaType: v.optional(v.string()),
     value: v.optional(v.any()),
     metadata: v.optional(v.any()),
-    importRunId: v.string(),
-    importJobId: v.optional(v.string()),
-    importChunkId: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -320,9 +263,6 @@ export default defineSchema({
     toId: v.optional(v.string()),
     rawReference: v.optional(v.any()),
     metadata: v.optional(v.any()),
-    importRunId: v.string(),
-    importJobId: v.optional(v.string()),
-    importChunkId: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -350,9 +290,6 @@ export default defineSchema({
     totalTokens: v.optional(v.number()),
     cost: v.optional(v.number()),
     currency: v.optional(v.string()),
-    importRunId: v.string(),
-    importJobId: v.optional(v.string()),
-    importChunkId: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -375,9 +312,6 @@ export default defineSchema({
     output: v.optional(v.any()),
     startedAt: v.optional(v.string()),
     completedAt: v.optional(v.string()),
-    importRunId: v.string(),
-    importJobId: v.optional(v.string()),
-    importChunkId: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -418,185 +352,12 @@ export default defineSchema({
     sourcePath: v.optional(v.string()),
     sourceRef: v.optional(v.any()),
     metadata: v.optional(v.any()),
-    importRunId: v.optional(v.string()),
-    importJobId: v.optional(v.string()),
-    importChunkId: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
     .index("by_artifactId", ["artifactId"])
     .index("by_sessionId", ["sessionId"])
     .index("by_project", ["canonicalProjectIdentityKey", "updatedAt"]),
-
-  importRuns: defineTable({
-    importRunId: v.string(),
-    machineId: v.string(),
-    status: v.union(v.literal("succeeded"), v.literal("partial_failure"), v.literal("failed")),
-    sourceRootCount: v.number(),
-    sessionCount: v.number(),
-    eventCount: v.number(),
-    toolCallCount: v.number(),
-    contentBlockCount: v.optional(v.number()),
-    sessionEdgeCount: v.optional(v.number()),
-    usageRecordCount: v.optional(v.number()),
-    artifactCount: v.optional(v.number()),
-    diagnostics: v.array(adapterDiagnostic),
-    error: v.optional(v.string()),
-    importJobId: v.optional(v.string()),
-    createdAt: v.number(),
-    updatedAt: v.number(),
-  })
-    .index("by_importRunId", ["importRunId"])
-    .index("by_createdAt", ["createdAt"])
-    .index("by_machineId", ["machineId"]),
-
-  importJobs: defineTable({
-    importJobId: v.string(),
-    idempotencyKey: v.string(),
-    planIdentityKey: v.optional(v.string()),
-    chunkPayloadFingerprint: v.optional(v.string()),
-    sourceIdentityKey: v.optional(v.string()),
-    attemptNumber: v.optional(v.number()),
-    machineId: v.string(),
-    status: importJobStatus,
-    generatedAt: v.optional(v.string()),
-    sourceRootCount: v.number(),
-    sessionCount: v.number(),
-    eventCount: v.number(),
-    toolCallCount: v.number(),
-    contentBlockCount: v.optional(v.number()),
-    sessionEdgeCount: v.optional(v.number()),
-    usageRecordCount: v.optional(v.number()),
-    artifactCount: v.optional(v.number()),
-    chunkCount: v.number(),
-    expectedChunkCount: v.optional(v.number()),
-    uploadedChunkCount: v.optional(v.number()),
-    succeededChunkCount: v.number(),
-    succeededPrefixCount: v.optional(v.number()),
-    failedChunkCount: v.number(),
-    terminalChunkSequenceSum: v.optional(v.number()),
-    diagnostics: v.array(adapterDiagnostic),
-    error: v.optional(v.string()),
-    workerLeaseExpiresAt: v.optional(v.number()),
-    workerLeaseToken: v.optional(v.string()),
-    startedAt: v.optional(v.number()),
-    completedAt: v.optional(v.number()),
-    createdAt: v.number(),
-    updatedAt: v.number(),
-  })
-    .index("by_importJobId", ["importJobId"])
-    .index("by_idempotencyKey", ["idempotencyKey"])
-    .index("by_sourceIdentity_attempt", ["sourceIdentityKey", "attemptNumber"])
-    .index("by_status", ["status", "updatedAt"])
-    .index("by_createdAt", ["createdAt"]),
-
-  importShards: defineTable({
-    shardId: v.string(),
-    importJobId: v.string(),
-    provider,
-    machineId: v.string(),
-    status: importJobStatus,
-    sessionCount: v.number(),
-    eventCount: v.number(),
-    createdAt: v.number(),
-    updatedAt: v.number(),
-  })
-    .index("by_shardId", ["shardId"])
-    .index("by_importJobId", ["importJobId"])
-    .index("by_job_provider", ["importJobId", "provider"]),
-
-  importChunks: defineTable({
-    chunkId: v.string(),
-    importJobId: v.string(),
-    idempotencyKey: v.string(),
-    sequence: v.number(),
-    status: importChunkStatus,
-    sessionCount: v.number(),
-    eventCount: v.number(),
-    toolCallCount: v.number(),
-    contentBlockCount: v.optional(v.number()),
-    sessionEdgeCount: v.optional(v.number()),
-    usageRecordCount: v.optional(v.number()),
-    artifactCount: v.optional(v.number()),
-    attempts: v.number(),
-    maxAttempts: v.optional(v.number()),
-    batch: v.optional(v.any()),
-    payloadHash: v.optional(v.string()),
-    payloadBytes: v.optional(v.number()),
-    error: v.optional(v.string()),
-    nextAttemptAt: v.optional(v.number()),
-    leaseExpiresAt: v.optional(v.number()),
-    leaseToken: v.optional(v.string()),
-    payloadStoredAt: v.optional(v.number()),
-    startedAt: v.optional(v.number()),
-    completedAt: v.optional(v.number()),
-    createdAt: v.number(),
-    updatedAt: v.number(),
-  })
-    .index("by_chunkId", ["chunkId"])
-    .index("by_idempotencyKey", ["idempotencyKey"])
-    .index("by_job_sequence", ["importJobId", "sequence"])
-    .index("by_importJobId", ["importJobId"])
-    .index("by_job_status", ["importJobId", "status"])
-    .index("by_job_status_sequence", ["importJobId", "status", "sequence"])
-    .index("by_job_status_nextAttempt", ["importJobId", "status", "nextAttemptAt"])
-    .index("by_job_status_lease", ["importJobId", "status", "leaseExpiresAt"])
-    .index("by_status_nextAttempt", ["status", "nextAttemptAt"])
-    .index("by_status_lease", ["status", "leaseExpiresAt"]),
-
-  importChunkPayloads: defineTable({
-    chunkId: v.string(),
-    importJobId: v.string(),
-    payloadHash: v.string(),
-    payloadBytes: v.number(),
-    batch: v.any(),
-    createdAt: v.number(),
-    updatedAt: v.number(),
-  })
-    .index("by_chunkId", ["chunkId"])
-    .index("by_importJobId", ["importJobId"]),
-
-  importWorkerLeases: defineTable({
-    importJobId: v.string(),
-    leaseToken: v.string(),
-    leaseExpiresAt: v.number(),
-    createdAt: v.number(),
-    updatedAt: v.number(),
-  })
-    .index("by_importJobId", ["importJobId"])
-    .index("by_leaseExpiresAt", ["leaseExpiresAt"]),
-
-  importCheckpoints: defineTable({
-    checkpointId: v.string(),
-    importJobId: v.string(),
-    chunkId: v.string(),
-    provider,
-    machineId: v.string(),
-    sessionId: v.optional(v.string()),
-    nativeRowId: v.optional(v.string()),
-    sequence: v.number(),
-    createdAt: v.number(),
-    updatedAt: v.number(),
-  })
-    .index("by_checkpointId", ["checkpointId"])
-    .index("by_importJobId", ["importJobId"])
-    .index("by_chunkId", ["chunkId"]),
-
-  importFailures: defineTable({
-    failureId: v.string(),
-    importJobId: v.string(),
-    chunkId: v.optional(v.string()),
-    provider: v.optional(provider),
-    machineId: v.optional(v.string()),
-    sessionId: v.optional(v.string()),
-    error: v.string(),
-    retryable: v.boolean(),
-    createdAt: v.number(),
-    updatedAt: v.number(),
-  })
-    .index("by_failureId", ["failureId"])
-    .index("by_importJobId", ["importJobId"])
-    .index("by_chunkId", ["chunkId"]),
 
   embeddingScopes: defineTable({
     embeddingScopeId: v.string(),
@@ -656,7 +417,6 @@ export default defineSchema({
 
   embeddingReadiness: defineTable({
     aggregateKey: v.string(),
-    importJobId: v.optional(v.string()),
     canonicalProjectIdentityKey: v.string(),
     machineId: v.optional(v.string()),
     provider: v.optional(provider),
@@ -670,7 +430,6 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index("by_aggregateKey", ["aggregateKey"])
-    .index("by_job", ["importJobId"])
     .index("by_project", ["canonicalProjectIdentityKey"])
     .index("by_provider", ["provider"])
     .index("by_family", ["family"])
@@ -713,8 +472,6 @@ export default defineSchema({
     ragSyncState: v.optional(ragSyncState),
     ragSyncedAt: v.optional(v.number()),
     ragError: v.optional(v.string()),
-    importJobId: v.optional(v.string()),
-    importChunkId: v.optional(v.string()),
     sourceUpdatedAt: v.number(),
     createdAt: v.number(),
     updatedAt: v.number(),
@@ -724,7 +481,6 @@ export default defineSchema({
     .index("by_project", ["canonicalProjectIdentityKey", "updatedAt"])
     .index("by_occurredAt", ["occurredAt"])
     .index("by_project_occurredAt", ["canonicalProjectIdentityKey", "occurredAt"])
-    .index("by_importJobId", ["importJobId", "updatedAt"])
     .index("by_ragSyncState", ["ragSyncState", "updatedAt"])
     .index("by_project_ragSyncState", ["canonicalProjectIdentityKey", "ragSyncState", "updatedAt"])
     .searchIndex("search_text", {
