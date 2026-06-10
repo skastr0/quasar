@@ -361,8 +361,8 @@ export class IngestLedger {
       } catch (cause) {
         try {
           this.db.exec("ROLLBACK");
-        } catch (_rollbackCause) {
-          // The original SQLite failure is the useful error.
+        } catch (rollbackCause) {
+          void rollbackCause;
         }
         return Effect.fail(asLedgerError(operation, cause));
       }
