@@ -2,8 +2,8 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { BunContext } from "@effect/platform-bun";
+import { afterEach, describe, expect, test } from "bun:test";
 import { Effect, Schema } from "effect";
-import { afterEach, describe, expect, test } from "vitest";
 
 import { loadJsonInput } from "../src/json";
 
