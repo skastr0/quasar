@@ -262,19 +262,15 @@ describe("ingest records", () => {
 
     expect(clamped).toEqual(clampOversizedRecord(clamped, limits));
     expect(recordWireBytes(clamped)).toBeLessThanOrEqual(limits.maxRecordBytes);
-    expect(clamped).toMatchObject({
-      type: "content_block",
-      record: {
-        text: expect.stringContaining("[truncated bytes="),
-        markdown: expect.stringContaining("[truncated bytes="),
-        thinking: expect.stringContaining("[truncated bytes="),
-      },
-    });
+    expect(clamped.type).toBe("content_block");
     const contentBlock = clamped.type === "content_block" ? clamped.record : undefined;
     expect(contentBlock).toBeDefined();
     expect(typeof contentBlock?.text).toBe("string");
     expect(typeof contentBlock?.markdown).toBe("string");
     expect(typeof contentBlock?.thinking).toBe("string");
+    expect(contentBlock?.text).toContain("[truncated bytes=");
+    expect(contentBlock?.markdown).toContain("[truncated bytes=");
+    expect(contentBlock?.thinking).toContain("[truncated bytes=");
   });
 
   test("packs envelopes within protocol limits", async () => {
