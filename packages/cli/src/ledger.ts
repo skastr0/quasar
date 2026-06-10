@@ -19,6 +19,7 @@ export type SourceFileUnit = {
   readonly provider: Provider;
   readonly adapterId: string;
   readonly sourcePath: string;
+  readonly physicalPath?: string;
 };
 
 export type UnitFingerprint = {
@@ -59,6 +60,7 @@ type SourceFileEntry = {
   readonly provider: Provider;
   readonly adapter_id: string;
   readonly source_path: string;
+  readonly physical_path: string | null;
   readonly size: number | null;
   readonly mtime_ms: number | null;
   readonly scan_seq: number;
@@ -71,6 +73,8 @@ type RecordEntry = {
   readonly content_hash: string;
   readonly acked_hash: string | null;
 };
+
+type RecordSummaryEntry = Omit<RecordEntry, "acked_hash">;
 
 type TableNameEntry = {
   readonly name: string;
@@ -118,6 +122,7 @@ const sourceFileListing = (entry: SourceFileEntry): SourceFileListing => ({
   provider: entry.provider,
   adapterId: entry.adapter_id,
   sourcePath: entry.source_path,
+  ...(entry.physical_path !== null ? { physicalPath: entry.physical_path } : {}),
   fileId: entry.id,
   fingerprint: {
     ...(entry.size !== null ? { size: entry.size } : {}),
@@ -125,6 +130,12 @@ const sourceFileListing = (entry: SourceFileEntry): SourceFileListing => ({
   },
   scanSeq: entry.scan_seq,
   completedSeq: entry.completed_seq,
+});
+
+const recordSummary = (entry: RecordSummaryEntry): StaleRecord => ({
+  recordId: entry.record_id,
+  recordType: entry.record_type,
+  contentHash: entry.content_hash,
 });
 
 const asLedgerError = (operation: string, cause: unknown) =>
@@ -163,7 +174,7 @@ export class IngestLedger {
     return this.write("upsertSourceFile", () => {
       const existing = this.db
         .prepare(
-          `select id, provider, adapter_id, source_path, size, mtime_ms, scan_seq, completed_seq
+          `select id, provider, adapter_id, source_path, physical_path, size, mtime_ms, scan_seq, completed_seq
            from source_files
            where provider = ? and adapter_id = ? and source_path = ?`,
         )
@@ -173,13 +184,14 @@ export class IngestLedger {
         this.db
           .prepare(
             `insert into source_files
-              (provider, adapter_id, source_path, size, mtime_ms, scan_seq, completed_seq)
-             values (?, ?, ?, ?, ?, 1, 0)`,
+              (provider, adapter_id, source_path, physical_path, size, mtime_ms, scan_seq, completed_seq)
+             values (?, ?, ?, ?, ?, ?, 1, 0)`,
           )
           .run(
             unit.provider,
             unit.adapterId,
             unit.sourcePath,
+            unit.physicalPath ?? null,
             nullableNumber(fingerprint.size),
             nullableNumber(fingerprint.mtimeMs),
           );
@@ -204,10 +216,11 @@ export class IngestLedger {
       this.db
         .prepare(
           `update source_files
-           set size = ?, mtime_ms = ?, scan_seq = ?
+           set physical_path = ?, size = ?, mtime_ms = ?, scan_seq = ?
            where id = ?`,
         )
         .run(
+          unit.physicalPath ?? existing.physical_path,
           nullableNumber(fingerprint.size),
           nullableNumber(fingerprint.mtimeMs),
           scanSeq,
@@ -280,41 +293,41 @@ export class IngestLedger {
   }
 
   staleRecords(fileId: number, scanSeq: number) {
-    return this.read("staleRecords", () =>
-      (
-        this.db
-          .prepare(
-            `select record_id, record_type, content_hash
-             from records
-             where source_file_id = ? and seen_seq < ?
-             order by record_id`,
-          )
-          .all(fileId, scanSeq) as RecordEntry[]
-      ).map((entry) => ({
-        recordId: entry.record_id,
-        recordType: entry.record_type,
-        contentHash: entry.content_hash,
-      })),
+    return this.recordSummaries(
+      "staleRecords",
+      "source_file_id = ? and seen_seq < ?",
+      [fileId, scanSeq],
     );
   }
 
   pendingRecords(fileId: number) {
-    return this.read("pendingRecords", () =>
+    return this.recordSummaries(
+      "pendingRecords",
+      "source_file_id = ? and (acked_hash is null or acked_hash <> content_hash)",
+      [fileId],
+    );
+  }
+
+  recordsForFile(fileId: number) {
+    return this.recordSummaries("recordsForFile", "source_file_id = ?", [fileId]);
+  }
+
+  private recordSummaries(
+    operation: string,
+    predicateSql: string,
+    params: readonly (number | string)[],
+  ) {
+    return this.read(operation, () =>
       (
         this.db
           .prepare(
             `select record_id, record_type, content_hash
              from records
-             where source_file_id = ?
-               and (acked_hash is null or acked_hash <> content_hash)
+             where ${predicateSql}
              order by record_id`,
           )
-          .all(fileId) as RecordEntry[]
-      ).map((entry) => ({
-        recordId: entry.record_id,
-        recordType: entry.record_type,
-        contentHash: entry.content_hash,
-      })),
+          .all(...params) as RecordSummaryEntry[]
+      ).map(recordSummary),
     );
   }
 
@@ -325,6 +338,13 @@ export class IngestLedger {
           .prepare("delete from records where source_file_id = ? and record_id = ?")
           .run(fileId, recordId);
       }
+      return undefined;
+    });
+  }
+
+  deleteSourceFile(fileId: number) {
+    return this.write("deleteSourceFile", () => {
+      this.db.prepare("delete from source_files where id = ?").run(fileId);
       return undefined;
     });
   }
@@ -353,7 +373,7 @@ export class IngestLedger {
       (
         this.db
           .prepare(
-            `select id, provider, adapter_id, source_path, size, mtime_ms, scan_seq, completed_seq
+            `select id, provider, adapter_id, source_path, physical_path, size, mtime_ms, scan_seq, completed_seq
            from source_files
            where provider = ? and adapter_id = ?
            order by source_path`,
@@ -391,7 +411,7 @@ export class IngestLedger {
   private sourceFileByIdentity(unit: SourceFileUnit) {
     const entry = this.db
       .prepare(
-        `select id, provider, adapter_id, source_path, size, mtime_ms, scan_seq, completed_seq
+        `select id, provider, adapter_id, source_path, physical_path, size, mtime_ms, scan_seq, completed_seq
          from source_files
          where provider = ? and adapter_id = ? and source_path = ?`,
       )
@@ -402,6 +422,7 @@ export class IngestLedger {
       provider: unit.provider,
       adapter_id: unit.adapterId,
       source_path: unit.sourcePath,
+      physical_path: unit.physicalPath ?? null,
       size: null,
       mtime_ms: null,
       scan_seq: 0,
@@ -461,6 +482,7 @@ const createSchema = (db: Database) => {
       provider text not null,
       adapter_id text not null,
       source_path text not null,
+      physical_path text,
       size integer,
       mtime_ms real,
       scan_seq integer not null default 0,
@@ -482,6 +504,16 @@ const createSchema = (db: Database) => {
     create index if not exists records_source_seen_idx
       on records(source_file_id, seen_seq);
   `);
+  migrateSourceFiles(db);
+};
+
+const migrateSourceFiles = (db: Database) => {
+  const columns = (db.prepare("pragma table_info(source_files)").all() as ColumnEntry[]).map(
+    (entry) => entry.name,
+  );
+  if (!columns.includes("physical_path")) {
+    db.exec("alter table source_files add column physical_path text");
+  }
 };
 
 const seedMeta = (db: Database, machineId: string) => {

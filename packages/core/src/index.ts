@@ -6,4 +6,5 @@ export * from "./redaction";
 export * from "./api-paths";
 export * from "./records";
 export * from "./adapters/types";
+export * from "./adapters/record-stream";
 export * from "./adapters/registry";
