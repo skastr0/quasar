@@ -84,6 +84,17 @@ const searchFamily = v.union(
   v.literal("projectIdentities"),
 );
 
+const ingestedRecordType = v.union(
+  v.literal("session"),
+  v.literal("event"),
+  v.literal("content_block"),
+  v.literal("tool_call"),
+  v.literal("usage"),
+  v.literal("artifact"),
+  v.literal("edge"),
+  v.literal("source_root"),
+);
+
 const ragSyncState = v.union(
   v.literal("pending"),
   v.literal("syncing"),
@@ -149,6 +160,7 @@ export default defineSchema({
     .index("by_targetProjectIdentityKey", ["targetProjectIdentityKey"]),
 
   sourceRoots: defineTable({
+    sourceRootId: v.optional(v.string()),
     provider,
     adapterId: v.string(),
     rootPath: v.string(),
@@ -156,7 +168,35 @@ export default defineSchema({
     discoveredAt: v.string(),
     createdAt: v.number(),
     updatedAt: v.number(),
-  }).index("by_machine_provider_root", ["machineId", "provider", "rootPath"]),
+  })
+    .index("by_sourceRootId", ["sourceRootId"])
+    .index("by_machine_provider_root", ["machineId", "provider", "rootPath"]),
+
+  recordStates: defineTable({
+    recordKey: v.string(),
+    recordType: ingestedRecordType,
+    recordId: v.string(),
+    machineId: v.string(),
+    contentHash: v.string(),
+    tombstoned: v.boolean(),
+    lastSeenAt: v.number(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_recordKey", ["recordKey"])
+    .index("by_updatedAt", ["updatedAt"]),
+
+  tombstones: defineTable({
+    recordKey: v.string(),
+    recordType: ingestedRecordType,
+    recordId: v.string(),
+    machineId: v.string(),
+    contentHash: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_recordKey", ["recordKey"])
+    .index("by_updatedAt", ["updatedAt"]),
 
   sessions: defineTable({
     sessionId: v.string(),
