@@ -561,12 +561,17 @@ class IngestRunState {
     pending: readonly PendingEnvelopeItem[],
   ) {
     const { live, tombstone } = envelopeCountFor(pending);
-    const acknowledgedLive = response.applied + response.unchanged;
-    if (acknowledgedLive !== live || response.tombstoned !== tombstone) {
+    const total = live + tombstone;
+    const acknowledged = response.applied + response.unchanged + response.tombstoned;
+    if (
+      acknowledged !== total ||
+      response.applied > live ||
+      response.tombstoned > tombstone
+    ) {
       return Effect.fail(
         new IngestRunError({
           reason: "response_count_mismatch",
-          message: `Ingest response acknowledged live=${acknowledgedLive}/${live} and tombstones=${response.tombstoned}/${tombstone}.`,
+          message: `Ingest response acknowledged total=${acknowledged}/${total}, applied=${response.applied}/${live}, tombstones=${response.tombstoned}/${tombstone}.`,
         }),
       );
     }
