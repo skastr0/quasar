@@ -10,7 +10,8 @@
     "./hash": "./src/hash.ts",
     "./machine": "./src/machine.ts",
     "./records": "./src/records.ts",
-    "./schemas": "./src/schemas.ts"
+    "./schemas": "./src/schemas.ts",
+    "./adapters/record-stream": "./src/adapters/record-stream.ts"
   },
   "scripts": {
     "build": "tsc --noEmit",
