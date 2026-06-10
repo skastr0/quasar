@@ -318,36 +318,6 @@ export const EmbeddingReadinessCounts = Schema.Struct({
 });
 export type EmbeddingReadinessCounts = typeof EmbeddingReadinessCounts.Type;
 
-export const SourceManifestEntry = Schema.Struct({
-  path: Schema.String,
-  role: Schema.Literal("source_root", "session_source"),
-  exists: Schema.Boolean,
-  kind: Schema.Literal("file", "directory", "missing", "other"),
-  size: Schema.optional(NonNegativeInteger),
-  mtimeMs: Schema.optional(NonNegativeNumber),
-  contentHash: Schema.optional(Schema.String),
-});
-export type SourceManifestEntry = typeof SourceManifestEntry.Type;
-
-export const SourceManifestChange = Schema.Struct({
-  path: Schema.String,
-  role: Schema.Literal("source_root", "session_source"),
-  before: Schema.optional(SourceManifestEntry),
-  after: Schema.optional(SourceManifestEntry),
-  changed: Schema.Boolean,
-});
-export type SourceManifestChange = typeof SourceManifestChange.Type;
-
-export const SourceSafetyReport = Schema.Struct({
-  sourceReadMode: Schema.Literal("read_only"),
-  quasarStateWrites: Schema.Boolean,
-  before: Schema.Array(SourceManifestEntry),
-  after: Schema.Array(SourceManifestEntry),
-  sourceMutations: Schema.Array(SourceManifestChange),
-  checkedAt: Schema.String,
-});
-export type SourceSafetyReport = typeof SourceSafetyReport.Type;
-
 export const SearchMode = Schema.Literal("text", "semantic", "fusion");
 export type SearchMode = typeof SearchMode.Type;
 
