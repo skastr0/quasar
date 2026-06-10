@@ -445,21 +445,62 @@ function hashPublicPayload(value: unknown) {
   return value === undefined ? undefined : `hash:${wideHash(JSON.stringify(value))}`;
 }
 
+const textForBlock = (block: PublicContentBlock) => {
+  if (block.kind === "text") return block.text;
+  if (block.kind === "markdown") return block.markdown;
+  if (block.kind === "thinking") return block.thinking;
+  return undefined;
+};
+
+const synthesizedTextBlockFor = (
+  event: PublicSessionEvent,
+  existing: readonly PublicContentBlock[],
+): PublicContentBlock | undefined => {
+  if (event.contentText === undefined) return undefined;
+  if (existing.some((block) => textForBlock(block) === event.contentText)) return undefined;
+  return {
+    blockId: `${event.eventId}:contentText`,
+    eventId: event.eventId,
+    sessionId: event.sessionId,
+    sequence: 0,
+    machineId: event.machineId,
+    provider: event.provider,
+    agentName: event.agentName,
+    projectIdentityKey: event.projectIdentityKey,
+    canonicalProjectIdentityKey: event.canonicalProjectIdentityKey,
+    kind: "text" as const,
+    text: event.contentText,
+    markdown: undefined,
+    thinking: undefined,
+    path: undefined,
+    uri: undefined,
+    mediaType: undefined,
+    valueHash: undefined,
+    metadataHash: undefined,
+    createdAt: event.createdAt,
+    updatedAt: event.updatedAt,
+  };
+};
+
 const materializeChronologicalView = (
   events: PublicSessionEvent[],
   contentBlocks: PublicContentBlock[],
 ) => {
   const blocksByEvent = groupBy(contentBlocks, (block) => block.eventId);
-  return events.map((event) => ({
-    eventId: event.eventId,
-    sequence: event.sequence,
-    timestamp: event.timestamp,
-    role: event.role,
-    kind: event.kind,
-    toolCallId: event.toolCallId,
-    contentText: event.contentText,
-    contentBlocks: blocksByEvent.get(event.eventId) ?? [],
-  }));
+  return events.map((event) => {
+    const existing = blocksByEvent.get(event.eventId) ?? [];
+    const synthesized = synthesizedTextBlockFor(event, existing);
+    return {
+      eventId: event.eventId,
+      sequence: event.sequence,
+      timestamp: event.timestamp,
+      role: event.role,
+      kind: event.kind,
+      toolCallId: event.toolCallId,
+      contentText: event.contentText,
+      contentBlocks: synthesized === undefined ? existing : [synthesized, ...existing],
+    };
+  });
 };
 
 const materializeBranchView = (

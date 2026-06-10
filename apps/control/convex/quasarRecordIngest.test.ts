@@ -7,6 +7,7 @@ import {
 
 import schema from "./schema";
 import { applyRecordEnvelopeHandler } from "./quasarRecordIngest";
+import { readSessionHandler } from "./quasarReadHandlers";
 import type { MutationCtx } from "./_generated/server";
 import { EMBEDDING_POLICY_VERSION } from "./quasarSearchDocuments";
 
@@ -196,6 +197,35 @@ describe("record envelope ingest", () => {
         .sort(),
     ).toEqual(["event:event:test", "session:session:test", "tool_call:tool:test"]);
     expect(state.embeddingOutbox.map((doc) => doc.searchDocumentId)).toEqual(["event:event:test"]);
+  });
+
+  test("synthesizes duplicate text content blocks when reading a session", async () => {
+    const t = testBackend();
+    await t.mutation(async (ctx) =>
+      await apply(
+        ctx as MutationCtx,
+        envelope([
+          { type: "session", record: { ...sessionRecord, eventCount: 1 } },
+          { type: "event", record: eventRecord },
+        ]),
+      ),
+    );
+
+    const state = await t.query(async (ctx) => ({
+      storedBlocks: await ctx.db.query("contentBlocks").collect(),
+      session: await readSessionHandler(ctx, { sessionId: sessionRecord.id }),
+    }));
+
+    expect(state.storedBlocks).toHaveLength(0);
+    expect(state.session?.contentBlocks).toHaveLength(0);
+    expect(state.session?.views.chronological[0]?.contentBlocks).toEqual([
+      expect.objectContaining({
+        blockId: `${eventRecord.id}:contentText`,
+        eventId: eventRecord.id,
+        kind: "text",
+        text: eventRecord.contentText,
+      }),
+    ]);
   });
 
   test("embeds assistant message events under the narrative policy", async () => {
