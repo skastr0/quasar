@@ -355,6 +355,61 @@ describe("ingest runner", () => {
     ]);
   });
 
+  test("accepts unchanged tombstone acknowledgments for idempotent resume", async () => {
+    const dir = await openTempDir();
+    const physicalPath = join(dir, "session-tombstone-resume.jsonl");
+    await writeFile(physicalPath, "{}\n");
+    const sourcePath = `${root.rootPath}/session-tombstone-resume.jsonl`;
+    const unit = makeUnit(sourcePath, physicalPath);
+    let mode: StreamMode = "present";
+    const adapter = makeAdapter(unit, eventRecord("event:tombstone-resume", sourcePath), () => mode);
+    const ledgerPath = join(dir, "ledger.sqlite");
+
+    await run(
+      runIngest(
+        { providers: ["codex"], dryRun: false },
+        { adapters: [adapter], ledgerPath, machine, sender: makeSender().sender },
+      ),
+    );
+    await unlink(physicalPath);
+    mode = "missing-complete";
+
+    const sender = makeSender({
+      responseForEnvelope: (envelope) =>
+        envelope.records.some((record) => record.type === "tombstone")
+          ? {
+              ...responseFor(envelope),
+              applied: 0,
+              unchanged: envelope.records.length,
+              tombstoned: 0,
+            }
+          : responseFor(envelope),
+    });
+    const report = await run(
+      runIngest(
+        { providers: ["codex"], dryRun: false },
+        { adapters: [adapter], ledgerPath, machine, sender: sender.sender },
+      ),
+    );
+
+    expect(report.envelopes.serverUnchanged).toBe(1);
+    expect(report.records.tombstoned).toBe(1);
+
+    const thirdSender = makeSender();
+    const third = await run(
+      runIngest(
+        { providers: ["codex"], dryRun: false },
+        { adapters: [adapter], ledgerPath, machine, sender: thirdSender.sender },
+      ),
+    );
+    expect(third.records.tombstoned).toBe(0);
+    expect(
+      thirdSender.envelopes
+        .flatMap((envelope) => envelope.records)
+        .filter((record) => record.type === "tombstone"),
+    ).toEqual([]);
+  });
+
   test("suppresses missing-file tombstones after fatal adapter diagnostics", async () => {
     const dir = await openTempDir();
     const physicalPath = join(dir, "session-diagnostic.jsonl");
