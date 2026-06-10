@@ -112,7 +112,9 @@ describe("ingest records", () => {
     const second = sessionToRecords(makeSession());
 
     expect(JSON.stringify(first)).toBe(JSON.stringify(second));
-    expect(first.map(recordContentHash)).toEqual(second.map(recordContentHash));
+    expect(first.map((record) => recordContentHash(record))).toEqual(
+      second.map((record) => recordContentHash(record)),
+    );
   });
 
   test("places the session record before its children", () => {
@@ -169,6 +171,33 @@ describe("ingest records", () => {
     });
   });
 
+  test("hashes the same normalized record that packing sends", async () => {
+    const record = sessionToRecords(makeSession()).find(
+      (candidate) => candidate.type === "tool_call",
+    );
+    expect(record).toBeDefined();
+    const limits = {
+      maxRecordBytes: 512,
+      maxEnvelopeBytes: 4_096,
+      maxRecordsPerEnvelope: 10,
+    };
+    const oversized = {
+      ...record,
+      record: {
+        ...record!.record,
+        input: { payload: "x".repeat(2_000) },
+      },
+    } as IngestRecord;
+
+    const [envelope] = await Effect.runPromise(
+      packRecordEnvelopes({ machine, records: [oversized], limits }),
+    );
+    const packed = envelope!.records[0]!;
+
+    expect(recordContentHash(oversized, limits)).toBe(recordContentHash(packed, limits));
+    expect(recordWireBytes(packed)).toBeLessThanOrEqual(limits.maxRecordBytes);
+  });
+
   test("packs envelopes within protocol limits", async () => {
     const records = Array.from({ length: RECORD_LIMITS.maxRecordsPerEnvelope + 5 }, (_, index) => ({
       type: "source_root" as const,
@@ -196,6 +225,64 @@ describe("ingest records", () => {
     }
   });
 
+  test("splits envelopes by byte cap", async () => {
+    const limits = {
+      maxRecordBytes: 2_048,
+      maxEnvelopeBytes: 700,
+      maxRecordsPerEnvelope: 100,
+    };
+    const records = Array.from({ length: 10 }, (_, index) => ({
+      type: "source_root" as const,
+      record: {
+        provider: "codex" as const,
+        adapterId: `codex-${index}`,
+        rootPath: `/fixtures/codex/${"x".repeat(120)}-${index}`,
+        machineId: machine.machineId,
+        discoveredAt: "2026-06-10T00:00:00.000Z",
+      },
+    }));
+
+    const envelopes = await Effect.runPromise(
+      packRecordEnvelopes({ machine, records, limits }),
+    );
+
+    expect(envelopes.length).toBeGreaterThan(1);
+    for (const envelope of envelopes) {
+      expect(envelope.records.length).toBeLessThan(limits.maxRecordsPerEnvelope);
+      expect(envelopeBytes(envelope)).toBeLessThanOrEqual(limits.maxEnvelopeBytes);
+    }
+  });
+
+  test("fails typed when one normalized record cannot fit an envelope", async () => {
+    const record = sessionToRecords(makeSession()).find(
+      (candidate) => candidate.type === "tool_call",
+    );
+    expect(record).toBeDefined();
+    const oversized = {
+      ...record,
+      record: {
+        ...record!.record,
+        input: { payload: "x".repeat(2_000) },
+      },
+    } as IngestRecord;
+    const error = await Effect.runPromise(
+      Effect.flip(
+        packRecordEnvelopes({
+          machine,
+          records: [oversized],
+          limits: {
+            maxRecordBytes: 1_024,
+            maxEnvelopeBytes: 120,
+            maxRecordsPerEnvelope: 10,
+          },
+        }),
+      ),
+    );
+
+    expect(error._tag).toBe("RecordContractError");
+    expect(error.reason).toBe("envelope_too_large");
+  });
+
   test("publishes the ingest records API path", () => {
     expect(QuasarApiPaths.ingestRecords).toBe("/api/ingest/records");
   });
@@ -213,6 +300,69 @@ describe("ingest records", () => {
 
     expect(error._tag).toBe("RecordContractError");
     expect(error.reason).toBe("invalid_envelope");
+  });
+
+  test("fails typed on non JSON payloads", async () => {
+    const record = sessionToRecords(makeSession()).find(
+      (candidate) => candidate.type === "tool_call",
+    );
+    expect(record).toBeDefined();
+    const invalid = {
+      ...record,
+      record: {
+        ...record!.record,
+        input: { count: 1n },
+      },
+    } as IngestRecord;
+    const error = await Effect.runPromise(
+      Effect.flip(packRecordEnvelopes({ machine, records: [invalid] })),
+    );
+
+    expect(error._tag).toBe("RecordContractError");
+    expect(error.reason).toBe("invalid_envelope");
+  });
+
+  test("does not clamp typed project identity values", async () => {
+    const record = sessionToRecords(makeSession()).find(
+      (candidate): candidate is Extract<IngestRecord, { type: "session" }> =>
+        candidate.type === "session",
+    );
+    expect(record).toBeDefined();
+    const oversized = {
+      ...record,
+      record: {
+        ...record!.record,
+        projectIdentity: {
+          ...record!.record.projectIdentity,
+          signals: [
+            {
+              kind: "path",
+              value: "x".repeat(1_000),
+              confidence: "low",
+            },
+          ],
+        },
+      },
+    } as IngestRecord;
+    const error = await Effect.runPromise(
+      Effect.flip(
+        decodeRecordEnvelope(
+          {
+            protocol: RECORD_PROTOCOL,
+            machine,
+            records: [oversized],
+          },
+          {
+            maxRecordBytes: 256,
+            maxEnvelopeBytes: 4_096,
+            maxRecordsPerEnvelope: 10,
+          },
+        ),
+      ),
+    );
+
+    expect(error._tag).toBe("RecordContractError");
+    expect(error.reason).toBe("record_too_large");
   });
 
   test("keeps deleted terminology out of the contract and test source", () => {

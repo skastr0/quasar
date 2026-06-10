@@ -23,12 +23,18 @@ const NonNegativeInteger = Schema.Number.pipe(
   }),
 );
 
+const PositiveInteger = Schema.Number.pipe(
+  Schema.filter((value) => Number.isInteger(value) && value > 0, {
+    message: () => "Expected a positive integer",
+  }),
+);
+
 export const RECORD_PROTOCOL = "quasar-records/v1" as const;
 
 export const RecordLimits = Schema.Struct({
-  maxRecordBytes: NonNegativeInteger,
-  maxEnvelopeBytes: NonNegativeInteger,
-  maxRecordsPerEnvelope: NonNegativeInteger,
+  maxRecordBytes: PositiveInteger,
+  maxEnvelopeBytes: PositiveInteger,
+  maxRecordsPerEnvelope: PositiveInteger,
 });
 export type RecordLimits = typeof RecordLimits.Type;
 
@@ -185,14 +191,15 @@ export type PackRecordEnvelopesInput = {
 };
 
 const textEncoder = new TextEncoder();
-const CLAMPED_FIELDS = new Set(["input", "output", "value", "metadata"]);
 
 const wireBytesOf = (value: unknown) => {
-  const serialized = JSON.stringify(value);
-  return textEncoder.encode(serialized === undefined ? "undefined" : serialized).byteLength;
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized === undefined ? undefined : textEncoder.encode(serialized).byteLength;
+  } catch (_error) {
+    return undefined;
+  }
 };
-
-export const recordWireBytes = (record: IngestRecord) => wireBytesOf(record);
 
 const sourceRootRecordId = (record: SourceRoot) =>
   `source_root:${record.provider}:${record.machineId}:${stableCanonicalJsonHash([
@@ -211,8 +218,23 @@ export const recordId = (record: IngestRecord): string => {
   }
 };
 
-export const recordContentHash = (record: IngestRecord) =>
-  stableCanonicalJsonHash(clampOversizedRecord(record));
+const recordWireFailure = (record: IngestRecord) =>
+  new RecordContractError({
+    reason: "invalid_envelope",
+    message: `Record ${recordId(record)} is not JSON serializable.`,
+    recordId: recordId(record),
+  });
+
+const envelopeWireFailure = () =>
+  new RecordContractError({
+    reason: "invalid_envelope",
+    message: "Record envelope is not JSON serializable.",
+  });
+
+export const recordWireBytes = (record: IngestRecord) => {
+  const bytes = wireBytesOf(record);
+  return bytes ?? Number.POSITIVE_INFINITY;
+};
 
 type TruncationMarker = {
   readonly truncated: true;
@@ -227,30 +249,85 @@ const isTruncationMarker = (value: unknown): value is TruncationMarker =>
 
 const truncationMarkerFor = (value: unknown): TruncationMarker => ({
   truncated: true,
-  bytes: wireBytesOf(value),
+  bytes: wireBytesOf(value) ?? 0,
 });
 
-const clampValue = (value: unknown, key?: string): unknown => {
-  if (key !== undefined && CLAMPED_FIELDS.has(key)) {
-    return isTruncationMarker(value) ? value : truncationMarkerFor(value);
-  }
-  if (Array.isArray(value)) return value.map((item) => clampValue(item));
-  if (!isObject(value)) return value;
-  return Object.fromEntries(
-    Object.entries(value).map(([entryKey, entryValue]) => [
-      entryKey,
-      clampValue(entryValue, entryKey),
-    ]),
-  );
-};
+const clampPayload = (value: unknown) =>
+  isTruncationMarker(value) ? value : truncationMarkerFor(value);
 
 export const clampOversizedRecord = <A extends IngestRecord>(
   record: A,
   limits: RecordLimits = RECORD_LIMITS,
 ): A => {
-  if (recordWireBytes(record) <= limits.maxRecordBytes) return record;
-  return clampValue(record) as A;
+  const bytes = wireBytesOf(record);
+  if (bytes === undefined || bytes <= limits.maxRecordBytes) return record;
+  switch (record.type) {
+    case "content_block":
+      return {
+        ...record,
+        record: {
+          ...record.record,
+          ...(record.record.value !== undefined
+            ? { value: clampPayload(record.record.value) }
+            : {}),
+          ...(record.record.metadata !== undefined
+            ? { metadata: clampPayload(record.record.metadata) }
+            : {}),
+        },
+      } as A;
+    case "tool_call":
+      return {
+        ...record,
+        record: {
+          ...record.record,
+          ...(record.record.input !== undefined
+            ? { input: clampPayload(record.record.input) }
+            : {}),
+          ...(record.record.output !== undefined
+            ? { output: clampPayload(record.record.output) }
+            : {}),
+        },
+      } as A;
+    case "artifact":
+      return {
+        ...record,
+        record: {
+          ...record.record,
+          ...(record.record.sourceRef !== undefined
+            ? { sourceRef: clampPayload(record.record.sourceRef) }
+            : {}),
+          ...(record.record.metadata !== undefined
+            ? { metadata: clampPayload(record.record.metadata) }
+            : {}),
+        },
+      } as A;
+    case "edge":
+      return {
+        ...record,
+        record: {
+          ...record.record,
+          ...(record.record.rawReference !== undefined
+            ? { rawReference: clampPayload(record.record.rawReference) }
+            : {}),
+          ...(record.record.metadata !== undefined
+            ? { metadata: clampPayload(record.record.metadata) }
+            : {}),
+        },
+      } as A;
+    default:
+      return record;
+  }
 };
+
+export const normalizeRecordForWire = <A extends IngestRecord>(
+  record: A,
+  limits: RecordLimits = RECORD_LIMITS,
+): A => clampOversizedRecord(record, limits);
+
+export const recordContentHash = (
+  record: IngestRecord,
+  limits: RecordLimits = RECORD_LIMITS,
+) => stableCanonicalJsonHash(normalizeRecordForWire(record, limits));
 
 export const sessionToRecords = (session: NormalizedSession): IngestRecord[] => {
   const {
@@ -320,7 +397,19 @@ const limitsAreValid = (limits: RecordLimits) =>
   limits.maxEnvelopeBytes > 0 &&
   limits.maxRecordsPerEnvelope > 0;
 
-const envelopeWireBytes = (envelope: RecordEnvelope) => wireBytesOf(envelope);
+const requireRecordWireBytes = (
+  record: IngestRecord,
+): Effect.Effect<number, RecordContractError> => {
+  const bytes = wireBytesOf(record);
+  return bytes === undefined ? Effect.fail(recordWireFailure(record)) : Effect.succeed(bytes);
+};
+
+const requireEnvelopeWireBytes = (
+  envelope: RecordEnvelope,
+): Effect.Effect<number, RecordContractError> => {
+  const bytes = wireBytesOf(envelope);
+  return bytes === undefined ? Effect.fail(envelopeWireFailure()) : Effect.succeed(bytes);
+};
 
 const parseErrorMessage = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
@@ -340,7 +429,11 @@ export const enforceRecordEnvelopeLimits = (
       );
     }
 
-    const records = envelope.records.map((record) => clampOversizedRecord(record, limits));
+    const records: IngestRecord[] = [];
+    for (const record of envelope.records) {
+      yield* requireRecordWireBytes(record);
+      records.push(normalizeRecordForWire(record, limits));
+    }
     if (records.length > limits.maxRecordsPerEnvelope) {
       return yield* Effect.fail(
         new RecordContractError({
@@ -351,7 +444,8 @@ export const enforceRecordEnvelopeLimits = (
     }
 
     const normalizedEnvelope: RecordEnvelope = { ...envelope, records };
-    if (envelopeWireBytes(normalizedEnvelope) > limits.maxEnvelopeBytes) {
+    const normalizedEnvelopeBytes = yield* requireEnvelopeWireBytes(normalizedEnvelope);
+    if (normalizedEnvelopeBytes > limits.maxEnvelopeBytes) {
       return yield* Effect.fail(
         new RecordContractError({
           reason: "envelope_too_large",
@@ -361,7 +455,8 @@ export const enforceRecordEnvelopeLimits = (
     }
 
     for (const record of records) {
-      if (recordWireBytes(record) > limits.maxRecordBytes) {
+      const recordBytes = yield* requireRecordWireBytes(record);
+      if (recordBytes > limits.maxRecordBytes) {
         return yield* Effect.fail(
           new RecordContractError({
             reason: "record_too_large",
@@ -419,8 +514,9 @@ export const packRecordEnvelopes = ({
     };
 
     for (const inputRecord of records) {
-      const record = clampOversizedRecord(inputRecord, limits);
-      const itemBytes = recordWireBytes(record);
+      yield* requireRecordWireBytes(inputRecord);
+      const record = normalizeRecordForWire(inputRecord, limits);
+      const itemBytes = yield* requireRecordWireBytes(record);
       if (itemBytes > limits.maxRecordBytes) {
         return yield* Effect.fail(
           new RecordContractError({
@@ -439,7 +535,7 @@ export const packRecordEnvelopes = ({
       };
       const candidateTooLarge =
         candidateRecords.length > limits.maxRecordsPerEnvelope ||
-        envelopeWireBytes(candidate) > limits.maxEnvelopeBytes;
+        (yield* requireEnvelopeWireBytes(candidate)) > limits.maxEnvelopeBytes;
 
       if (pendingRecords.length > 0 && candidateTooLarge) {
         flushPending();
@@ -450,7 +546,7 @@ export const packRecordEnvelopes = ({
         machine,
         records: [...pendingRecords, record],
       };
-      if (envelopeWireBytes(nextCandidate) > limits.maxEnvelopeBytes) {
+      if ((yield* requireEnvelopeWireBytes(nextCandidate)) > limits.maxEnvelopeBytes) {
         return yield* Effect.fail(
           new RecordContractError({
             reason: "envelope_too_large",
