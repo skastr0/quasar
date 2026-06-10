@@ -395,15 +395,24 @@ async function* streamClaude(options: AdapterOptions) {
   };
   let sessionCount = 0;
   for (const path of files) {
+    const sourcePath = logicalPathFor(path, projectsRoot, logicalProjectsRoot);
+    const session = buildClaudeSessionFromFile(
+      path,
+      sourcePath,
+      logicalProjectsRoot,
+      options,
+    );
     sessionCount += 1;
     yield {
       type: "session" as const,
-      session: buildClaudeSessionFromFile(
-        path,
-        logicalPathFor(path, projectsRoot, logicalProjectsRoot),
-        logicalProjectsRoot,
-        options,
-      ),
+      session,
+      sourceUnit: {
+        provider: "claude" as const,
+        adapterId: claudeAdapter.id,
+        rootPath: logicalProjectsRoot,
+        sourcePath,
+        physicalPath: path,
+      },
     };
   }
   yield {

@@ -1,7 +1,7 @@
 import { existsSync, statSync } from "node:fs";
 import { basename } from "node:path";
 
-import type { SessionAdapter } from "./types";
+import { collectAdapterStream, type AdapterStreamItem, type SessionAdapter } from "./types";
 import type { Artifact, ToolCall, UsageRecord } from "../schemas";
 import {
   bestEffortEventRecordLike,
@@ -37,6 +37,7 @@ type DroidUsageDraft = Omit<
   UsageRecord,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
 >;
+type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
 type DroidArtifactDraft = Omit<
   Artifact,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
@@ -180,48 +181,66 @@ const projectPathFromRecords = (records: readonly unknown[]) => {
   return undefined;
 };
 
+async function* streamDroid(options: AdapterOptions): AsyncGenerator<AdapterStreamItem> {
+  const root = options.roots?.droid ?? droidAdapter.defaultRoot();
+  if (root === undefined || !existsSync(root)) {
+    yield {
+      type: "diagnostic",
+      diagnostic: {
+        adapterId: droidAdapter.id,
+        provider: "droid",
+        status: "no_data_found",
+        parserConfidence: "capture-file",
+        message: "Factory/Droid root or capture file was not found.",
+        ...(root !== undefined ? { rootPath: root } : {}),
+      },
+    };
+    return;
+  }
+  const files = statSync(root).isFile()
+    ? [root]
+    : collectFiles(root, captureLike, options.limit, options.skip);
+  yield {
+    type: "sourceRoot",
+    sourceRoot: sourceRoot("droid", droidAdapter.id, root, options.machine, options.now),
+  };
+  let sessionCount = 0;
+  for (const path of files) {
+    if (recordsFromFile(path).length === 0) continue;
+    const session = buildDroidSession(path, root, options);
+    yield {
+      type: "session",
+      session,
+      sourceUnit: {
+        provider: "droid",
+        adapterId: droidAdapter.id,
+        rootPath: root,
+        sourcePath: session.sourcePath,
+        physicalPath: path,
+      },
+    };
+    sessionCount += 1;
+  }
+  yield {
+    type: "diagnostic",
+    diagnostic: {
+      adapterId: droidAdapter.id,
+      provider: "droid",
+      status: sessionCount > 0 ? "available" : "no_data_found",
+      parserConfidence: "capture-file",
+      rootPath: root,
+      message: `Discovered ${sessionCount} Factory/Droid session capture(s).`,
+      details: { searchedCaptureLikeFiles: files.length },
+    },
+  };
+}
+
 export const droidAdapter: SessionAdapter = {
   id: "factory-droid-local-captures",
   provider: "droid",
   displayName: "Factory Droid local captures",
   stable: true,
   defaultRoot: () => homePath(".factory"),
-  read: async (options) => {
-    const root = options.roots?.droid ?? droidAdapter.defaultRoot();
-    if (root === undefined || !existsSync(root)) {
-      return {
-        sourceRoots: [],
-        sessions: [],
-        diagnostics: [
-          {
-            adapterId: droidAdapter.id,
-            provider: "droid",
-            status: "no_data_found",
-            parserConfidence: "capture-file",
-            message: "Factory/Droid root or capture file was not found.",
-            ...(root !== undefined ? { rootPath: root } : {}),
-          },
-        ],
-      };
-    }
-    const files = statSync(root).isFile()
-      ? [root]
-      : collectFiles(root, captureLike, options.limit, options.skip);
-    const sessions = files.flatMap((path) => (recordsFromFile(path).length === 0 ? [] : [buildDroidSession(path, root, options)]));
-    return {
-      sourceRoots: [sourceRoot("droid", droidAdapter.id, root, options.machine, options.now)],
-      sessions,
-      diagnostics: [
-        {
-          adapterId: droidAdapter.id,
-          provider: "droid",
-          status: sessions.length > 0 ? "available" : "no_data_found",
-          parserConfidence: "capture-file",
-          rootPath: root,
-          message: `Discovered ${sessions.length} Factory/Droid session capture(s).`,
-          details: { searchedCaptureLikeFiles: files.length },
-        },
-      ],
-    };
-  },
+  read: async (options) => collectAdapterStream(streamDroid(options)),
+  stream: streamDroid,
 };

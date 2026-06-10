@@ -1,4 +1,4 @@
-import { createReadStream, existsSync, statSync, type Stats } from "node:fs";
+import { createReadStream, existsSync, readdirSync, statSync, type Stats } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
@@ -272,7 +272,24 @@ const emptyCodexSlice = (): CodexSessionSlice => ({
   sessionEdges: [],
 });
 
-async function* readCodexJsonLines(path: string) {
+class CodexJsonLineParseError extends Error {
+  readonly lineNumber: number;
+
+  constructor(path: string, lineNumber: number, cause: unknown) {
+    super(
+      `Failed to parse Codex JSONL record at ${path}:${lineNumber}: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+    );
+    this.name = "CodexJsonLineParseError";
+    this.lineNumber = lineNumber;
+  }
+}
+
+async function* readCodexJsonLines(
+  path: string,
+  options: { readonly strict?: boolean } = {},
+) {
   const lines = createInterface({
     input: createReadStream(path, { encoding: "utf8" }),
     crlfDelay: Infinity,
@@ -285,7 +302,10 @@ async function* readCodexJsonLines(path: string) {
     try {
       yield { value: JSON.parse(line) as unknown, lineNumber, recordIndex };
       recordIndex += 1;
-    } catch {
+    } catch (cause) {
+      if (options.strict === true) {
+        throw new CodexJsonLineParseError(path, lineNumber, cause);
+      }
       // Preserve best-effort behavior from readJsonLines.
     }
   }
@@ -313,6 +333,54 @@ const fileFingerprint = (stats: Pick<Stats, "size" | "mtimeMs">) => ({
   mtimeMs: stats.mtimeMs,
 });
 
+const parseFileWalkInput = (root: string, limit: number | undefined, skip: number | undefined) => {
+  const trimmedRoot = root.trim();
+  if (trimmedRoot.length === 0 || (limit !== undefined && limit <= 0)) return undefined;
+  return {
+    root: trimmedRoot,
+    limit: limit === undefined || !Number.isFinite(limit) ? Number.POSITIVE_INFINITY : Math.floor(limit),
+    skip: skip === undefined || !Number.isFinite(skip) || skip <= 0 ? 0 : Math.floor(skip),
+  };
+};
+
+function* walkFilesWithStats(
+  root: string,
+  predicate: (path: string) => boolean,
+  limit?: number,
+  skip?: number,
+): Generator<{ readonly path: string; readonly stats: Stats }> {
+  const input = parseFileWalkInput(root, limit, skip);
+  if (input === undefined || !existsSync(input.root)) return;
+  const walkInput = input;
+  let matched = 0;
+  let emitted = 0;
+
+  function* visit(path: string): Generator<{ readonly path: string; readonly stats: Stats }> {
+    if (emitted >= walkInput.limit) return;
+    let stats: Stats;
+    try {
+      stats = statSync(path);
+    } catch {
+      return;
+    }
+    if (stats.isDirectory()) {
+      for (const entry of readdirSync(path).sort()) {
+        yield* visit(join(path, entry));
+        if (emitted >= walkInput.limit) return;
+      }
+      return;
+    }
+    if (!predicate(path)) return;
+    if (matched >= walkInput.skip) {
+      emitted += 1;
+      yield { path, stats };
+    }
+    matched += 1;
+  }
+
+  yield* visit(walkInput.root);
+}
+
 const codexSourceUnit = (
   logicalSessionsRoot: string,
   sourcePath: string,
@@ -330,6 +398,7 @@ async function* streamCodexSessionFromFile(
   sourcePath: string,
   logicalSessionsRoot: string,
   options: AdapterOptions,
+  parseOptions: { readonly strictJsonLines?: boolean } = {},
 ): AsyncGenerator<NormalizedSession> {
   const nativeSessionId = nativeSessionIdFromPath(sourcePath);
   const toolCallsById = new Map<string, CodexToolCallDraft>();
@@ -372,7 +441,9 @@ async function* streamCodexSessionFromFile(
     };
   };
 
-  for await (const { value, lineNumber, recordIndex } of readCodexJsonLines(path)) {
+  for await (const { value, lineNumber, recordIndex } of readCodexJsonLines(path, {
+    strict: parseOptions.strictJsonLines,
+  })) {
     projectPath ??= projectPathFromSessionMeta(value);
     const record =
       typeof value === "object" && value !== null
@@ -534,12 +605,6 @@ async function* streamCodexRecords(
   const sessionsRoot = join(root, "sessions");
   const logicalRoot = logicalRootFor("codex", root, options);
   const logicalSessionsRoot = join(logicalRoot, "sessions");
-  const files = collectFiles(
-    sessionsRoot,
-    (path) => /rollout-.*\.jsonl$/.test(path),
-    options.limit,
-    options.skip,
-  );
   const rootRecord = sourceRoot(
     "codex",
     codexAdapter.id,
@@ -559,21 +624,38 @@ async function* streamCodexRecords(
   let processedUnitCount = 0;
   let skippedUnitCount = 0;
   let rootComplete = true;
-  for (const path of files) {
-    let stats;
-    try {
-      stats = statSync(path);
-    } catch (cause) {
-      void cause;
-      rootComplete = false;
-      continue;
-    }
+  for (const { path, stats } of walkFilesWithStats(
+    sessionsRoot,
+    (path) => /rollout-.*\.jsonl$/.test(path),
+    options.limit,
+    options.skip,
+  )) {
     const sourcePath = logicalPathFor(path, sessionsRoot, logicalSessionsRoot);
     const sourceUnit = codexSourceUnit(logicalSessionsRoot, sourcePath, path);
     const fingerprint = fileFingerprint(stats);
     discoveredUnitCount += 1;
     yield { type: "unitStart" as const, unit: sourceUnit, fingerprint };
-    if (!(await shouldProcessSourceUnit(options, sourceUnit, fingerprint))) {
+    let shouldProcess = false;
+    try {
+      shouldProcess = await shouldProcessSourceUnit(options, sourceUnit, fingerprint);
+    } catch (cause) {
+      rootComplete = false;
+      yield {
+        type: "diagnostic" as const,
+        diagnostic: {
+          adapterId: codexAdapter.id,
+          provider: "codex" as const,
+          status: "error" as const,
+          parserConfidence: "documented" as const,
+          rootPath: logicalSessionsRoot,
+          message: "Codex source-unit predicate failed.",
+          details: { error: cause instanceof Error ? cause.message : String(cause) },
+        },
+      };
+      yield { type: "unitEnd" as const, unit: sourceUnit, complete: false };
+      continue;
+    }
+    if (!shouldProcess) {
       skippedUnitCount += 1;
       yield { type: "unitEnd" as const, unit: sourceUnit, complete: true };
       continue;
@@ -587,6 +669,7 @@ async function* streamCodexRecords(
         sourcePath,
         logicalSessionsRoot,
         options,
+        { strictJsonLines: true },
       )) {
         for (const record of sessionToRecords(session)) {
           yield {
@@ -596,9 +679,20 @@ async function* streamCodexRecords(
         }
       }
     } catch (cause) {
-      void cause;
       unitComplete = false;
       rootComplete = false;
+      yield {
+        type: "diagnostic" as const,
+        diagnostic: {
+          adapterId: codexAdapter.id,
+          provider: "codex" as const,
+          status: "error" as const,
+          parserConfidence: "documented" as const,
+          rootPath: logicalSessionsRoot,
+          message: "Codex JSONL source unit could not be streamed completely.",
+          details: { error: cause instanceof Error ? cause.message : String(cause) },
+        },
+      };
     }
     yield { type: "unitEnd" as const, unit: sourceUnit, complete: unitComplete };
   }

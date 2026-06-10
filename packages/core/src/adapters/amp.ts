@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import type { SessionAdapter } from "./types";
+import { collectAdapterStream, type AdapterStreamItem, type SessionAdapter } from "./types";
 import type { SessionEdge, ToolCall, UsageRecord } from "../schemas";
 import {
   bestEffortEventRecordLike,
@@ -35,6 +35,7 @@ type AmpUsageDraft = Omit<
   UsageRecord,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
 >;
+type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
 type AmpEdgeDraft = Omit<
   SessionEdge,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
@@ -156,91 +157,112 @@ const nestedToolRecords = (record: Record<string, unknown>) => {
   );
 };
 
+async function* streamAmp(options: AdapterOptions): AsyncGenerator<AdapterStreamItem> {
+  const root = options.roots?.amp ?? ampAdapter.defaultRoot();
+  if (root === undefined || !existsSync(root)) {
+    yield {
+      type: "diagnostic",
+      diagnostic: {
+        adapterId: ampAdapter.id,
+        provider: "amp",
+        status: "no_data_found",
+        parserConfidence: "brittle",
+        message: "Amp root was not found.",
+        ...(root !== undefined ? { rootPath: root } : {}),
+      },
+    };
+    return;
+  }
+
+  yield {
+    type: "sourceRoot",
+    sourceRoot: sourceRoot("amp", ampAdapter.id, root, options.machine, options.now),
+  };
+  let sessionCount = 0;
+  const threadRoot = join(root, "threads");
+  const threadFiles = collectFiles(
+    threadRoot,
+    (path) => path.endsWith(".json"),
+    options.limit,
+    options.skip,
+  );
+  for (const path of threadFiles) {
+    if (/secrets|auth|token|credential/i.test(path)) continue;
+    const thread = recordFrom(readJsonFile(path));
+    const messages = threadMessages(thread).map(recordFrom).filter(bestEffortEventRecordLike);
+    if (messages.length === 0) continue;
+    const nativeSessionId = String(thread.id ?? thread.threadId ?? path);
+    const session = buildAmpSessionFromRecords(
+      path,
+      root,
+      options,
+      nativeSessionId,
+      typeof thread.cwd === "string" ? thread.cwd : undefined,
+      typeof thread.title === "string" ? thread.title : undefined,
+      messages,
+    );
+    yield {
+      type: "session",
+      session,
+      sourceUnit: {
+        provider: "amp",
+        adapterId: ampAdapter.id,
+        rootPath: root,
+        sourcePath: session.sourcePath,
+        physicalPath: path,
+      },
+    };
+    sessionCount += 1;
+  }
+
+  const historyPath = join(root, "history.jsonl");
+  const historyLines = existsSync(historyPath)
+    ? readJsonLines(historyPath).map((line) => recordFrom(line.value)).filter(bestEffortEventRecordLike)
+    : [];
+  if (historyLines.length > 0) {
+    const session = buildAmpSessionFromRecords(
+      historyPath,
+      root,
+      options,
+      "history",
+      undefined,
+      "Amp history",
+      historyLines,
+    );
+    yield {
+      type: "session",
+      session,
+      sourceUnit: {
+        provider: "amp",
+        adapterId: ampAdapter.id,
+        rootPath: root,
+        sourcePath: session.sourcePath,
+        physicalPath: historyPath,
+      },
+    };
+    sessionCount += 1;
+  }
+
+  yield {
+    type: "diagnostic",
+    diagnostic: {
+      adapterId: ampAdapter.id,
+      provider: "amp",
+      status: sessionCount > 0 ? "available" : "no_data_found",
+      parserConfidence: "brittle",
+      rootPath: root,
+      message: `Discovered ${sessionCount} Amp session(s).`,
+      details: { skippedSecretFiles: ["secrets.json"] },
+    },
+  };
+}
+
 export const ampAdapter: SessionAdapter = {
   id: "amp-local-threads",
   provider: "amp",
   displayName: "Amp local threads",
   stable: true,
   defaultRoot: () => homePath(".local/share/amp"),
-  read: async (options) => {
-    const root = options.roots?.amp ?? ampAdapter.defaultRoot();
-    if (root === undefined || !existsSync(root)) {
-      return {
-        sourceRoots: [],
-        sessions: [],
-        diagnostics: [
-          {
-            adapterId: ampAdapter.id,
-            provider: "amp",
-            status: "no_data_found",
-            parserConfidence: "brittle",
-            message: "Amp root was not found.",
-            ...(root !== undefined ? { rootPath: root } : {}),
-          },
-        ],
-      };
-    }
-
-    const threadRoot = join(root, "threads");
-    const threadFiles = collectFiles(
-      threadRoot,
-      (path) => path.endsWith(".json"),
-      options.limit,
-      options.skip,
-    );
-    const threadSessions = threadFiles.flatMap((path) => {
-      if (/secrets|auth|token|credential/i.test(path)) return [];
-      const thread = recordFrom(readJsonFile(path));
-      const messages = threadMessages(thread).map(recordFrom).filter(bestEffortEventRecordLike);
-      if (messages.length === 0) return [];
-      const nativeSessionId = String(thread.id ?? thread.threadId ?? path);
-      return [
-        buildAmpSessionFromRecords(
-          path,
-          root,
-          options,
-          nativeSessionId,
-          typeof thread.cwd === "string" ? thread.cwd : undefined,
-          typeof thread.title === "string" ? thread.title : undefined,
-          messages,
-        ),
-      ];
-    });
-
-    const historyPath = join(root, "history.jsonl");
-    const historyLines = existsSync(historyPath)
-      ? readJsonLines(historyPath).map((line) => recordFrom(line.value)).filter(bestEffortEventRecordLike)
-      : [];
-    const historySession =
-      historyLines.length === 0
-        ? []
-        : [
-            buildAmpSessionFromRecords(
-              historyPath,
-              root,
-              options,
-              "history",
-              undefined,
-              "Amp history",
-              historyLines,
-            ),
-          ];
-    const sessions = [...threadSessions, ...historySession];
-
-    return {
-      sourceRoots: [sourceRoot("amp", ampAdapter.id, root, options.machine, options.now)],
-      sessions,
-      diagnostics: [
-        {
-          adapterId: ampAdapter.id,
-          provider: "amp",
-          status: sessions.length > 0 ? "available" : "no_data_found",
-          parserConfidence: "brittle",
-          rootPath: root,
-          message: `Discovered ${sessions.length} Amp session(s).`,
-          details: { skippedSecretFiles: ["secrets.json"] },
-        },
-      ],
-    };
-  },
+  read: async (options) => collectAdapterStream(streamAmp(options)),
+  stream: streamAmp,
 };

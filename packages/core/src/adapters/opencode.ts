@@ -728,10 +728,24 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
         sourceRoot: sourceRoot("opencode", opencodeAdapter.id, logicalRoot ?? root, options.machine, options.now),
       };
       let sessionCount = 0;
-      for (const row of rows) {
+      for (const sessionEntry of rows) {
+        const session = buildOpenCodeSessionCli(
+          tempDb.path,
+          logicalDbPath ?? dbPath,
+          logicalRoot ?? root,
+          options,
+          sessionEntry,
+        );
         yield {
           type: "session",
-          session: buildOpenCodeSessionCli(tempDb.path, logicalDbPath ?? dbPath, logicalRoot ?? root, options, row),
+          session,
+          sourceUnit: {
+            provider: "opencode" as const,
+            adapterId: opencodeAdapter.id,
+            rootPath: logicalRoot ?? root,
+            sourcePath: session.sourcePath,
+            physicalPath: dbPath,
+          },
         };
         sessionCount += 1;
       }
@@ -757,10 +771,24 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
       sourceRoot: sourceRoot("opencode", opencodeAdapter.id, logicalRoot ?? root, options.machine, options.now),
     };
     let sessionCount = 0;
-    for (const row of readSessionRows(db, options.limit, options.skip)) {
+    for (const sessionEntry of readSessionRows(db, options.limit, options.skip)) {
+      const session = buildOpenCodeSession(
+        db,
+        logicalDbPath ?? dbPath,
+        logicalRoot ?? root,
+        options,
+        sessionEntry,
+      );
       yield {
         type: "session",
-        session: buildOpenCodeSession(db, logicalDbPath ?? dbPath, logicalRoot ?? root, options, row),
+        session,
+        sourceUnit: {
+          provider: "opencode" as const,
+          adapterId: opencodeAdapter.id,
+          rootPath: logicalRoot ?? root,
+          sourcePath: session.sourcePath,
+          physicalPath: dbPath,
+        },
       };
       sessionCount += 1;
     }

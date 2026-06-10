@@ -24,7 +24,12 @@ export interface AdapterReadResult {
 
 export type AdapterStreamItem =
   | { readonly type: "sourceRoot"; readonly sourceRoot: SourceRoot }
-  | { readonly type: "session"; readonly session: NormalizedSession }
+  | {
+      readonly type: "session";
+      readonly session: NormalizedSession;
+      readonly sourceUnit?: SourceUnit;
+      readonly fingerprint?: UnitFingerprint;
+    }
   | { readonly type: "diagnostic"; readonly diagnostic: AdapterDiagnostic };
 
 export type UnitFingerprint =
