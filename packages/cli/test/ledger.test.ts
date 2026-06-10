@@ -15,6 +15,7 @@ const unit: SourceFileUnit = {
   provider: "codex",
   adapterId: "codex-jsonl",
   sourcePath: "/fixtures/codex/session-a.jsonl",
+  physicalPath: "/tmp/quasar-ledger/session-a.jsonl",
 };
 
 const fingerprintA: UnitFingerprint = { size: 100, mtimeMs: 1_000 };
@@ -189,6 +190,17 @@ describe("ingest ledger", () => {
     const db = await openLedger();
 
     expect(await run(db.tableNames())).toEqual(["meta", "records", "source_files"]);
+    expect(await run(db.columnNames("source_files"))).toEqual([
+      "id",
+      "provider",
+      "adapter_id",
+      "source_path",
+      "physical_path",
+      "size",
+      "mtime_ms",
+      "scan_seq",
+      "completed_seq",
+    ]);
     expect(await run(db.columnNames("records"))).toEqual([
       "source_file_id",
       "record_id",
@@ -243,7 +255,21 @@ describe("ingest ledger", () => {
         provider: "codex",
         adapterId: "codex-jsonl",
         sourcePath: "/fixtures/codex/root/session-a.jsonl",
+        physicalPath: "/tmp/quasar-ledger/session-a.jsonl",
       }),
     ]);
+  });
+
+  test("deletes source files without retaining record payloads", async () => {
+    const db = await openLedger();
+    const scan = await run(db.upsertSourceFile(unit, fingerprintA));
+    await run(db.recordDerivedRecord(scan.fileId, "record-a", "event", "hash-a", scan.scanSeq));
+
+    expect(await run(db.recordsForFile(scan.fileId))).toEqual([
+      { recordId: "record-a", recordType: "event", contentHash: "hash-a" },
+    ]);
+
+    await run(db.deleteSourceFile(scan.fileId));
+    expect(await run(db.recordsForFile(scan.fileId))).toEqual([]);
   });
 });
