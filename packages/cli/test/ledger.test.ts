@@ -92,6 +92,34 @@ describe("ingest ledger", () => {
     });
   });
 
+  test("does not skip when the fingerprint is empty", async () => {
+    const db = await openLedger();
+    const first = await run(db.upsertSourceFile(unit, {}));
+    await run(db.markFileComplete(first.fileId, first.scanSeq, {}));
+
+    expect(await run(db.upsertSourceFile(unit, {}))).toMatchObject({
+      fileId: first.fileId,
+      scanSeq: first.scanSeq + 1,
+      changed: true,
+    });
+  });
+
+  test("reports pending records after a completed file reopens unchanged", async () => {
+    const db = await openLedger();
+    const first = await run(db.upsertSourceFile(unit, fingerprintA));
+    await run(db.recordDerivedRecord(first.fileId, "record-a", "event", "hash-a", first.scanSeq));
+    await run(db.markFileComplete(first.fileId, first.scanSeq, fingerprintA));
+
+    expect(await run(db.upsertSourceFile(unit, fingerprintA))).toMatchObject({
+      fileId: first.fileId,
+      scanSeq: first.scanSeq,
+      changed: false,
+    });
+    expect(await run(db.pendingRecords(first.fileId))).toEqual([
+      { recordId: "record-a", recordType: "event", contentHash: "hash-a" },
+    ]);
+  });
+
   test("computes stale records from an exact ID-set diff", async () => {
     const db = await openLedger();
     const first = await run(db.upsertSourceFile(unit, fingerprintA));
@@ -128,6 +156,35 @@ describe("ingest ledger", () => {
     ).toBe("needs_send");
   });
 
+  test("rejects records for unknown source files", async () => {
+    const db = await openLedger();
+    const error = await run(
+      Effect.flip(db.recordDerivedRecord(999, "record-a", "event", "hash-a", 1)),
+    );
+
+    expect(error._tag).toBe("LedgerError");
+    expect(error.message).toContain("FOREIGN KEY");
+  });
+
+  test("rejects unknown record types", async () => {
+    const db = await openLedger();
+    const scan = await run(db.upsertSourceFile(unit, fingerprintA));
+    const error = await run(
+      Effect.flip(
+        db.recordDerivedRecord(
+          scan.fileId,
+          "record-a",
+          "not-a-record" as never,
+          "hash-a",
+          scan.scanSeq,
+        ),
+      ),
+    );
+
+    expect(error._tag).toBe("LedgerError");
+    expect(error.message).toContain("Unknown record type");
+  });
+
   test("uses exactly the three durable tables and stores no record bodies", async () => {
     const db = await openLedger();
 
@@ -153,5 +210,40 @@ describe("ingest ledger", () => {
     );
 
     expect(new Set([first.fileId, second.fileId, third.fileId]).size).toBe(3);
+  });
+
+  test("lists files under a provider and adapter root with path boundaries", async () => {
+    const db = await openLedger();
+    const inside = await run(
+      db.upsertSourceFile(
+        { ...unit, sourcePath: "/fixtures/codex/root/session-a.jsonl" },
+        fingerprintA,
+      ),
+    );
+    await run(
+      db.upsertSourceFile(
+        { ...unit, sourcePath: "/fixtures/codex/root-sibling/session-b.jsonl" },
+        fingerprintA,
+      ),
+    );
+    await run(
+      db.upsertSourceFile(
+        {
+          ...unit,
+          adapterId: "codex-secondary",
+          sourcePath: "/fixtures/codex/root/session-c.jsonl",
+        },
+        fingerprintA,
+      ),
+    );
+
+    expect(await run(db.filesUnderRoot("codex", "codex-jsonl", "/fixtures/codex/root"))).toEqual([
+      expect.objectContaining({
+        fileId: inside.fileId,
+        provider: "codex",
+        adapterId: "codex-jsonl",
+        sourcePath: "/fixtures/codex/root/session-a.jsonl",
+      }),
+    ]);
   });
 });
