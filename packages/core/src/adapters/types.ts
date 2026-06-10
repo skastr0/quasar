@@ -5,6 +5,7 @@ import type {
   Provider,
   SourceRoot,
 } from "../schemas";
+import type { IngestRecord } from "../records";
 
 export interface AdapterDiscoverOptions {
   readonly machine: MachineIdentity;
@@ -24,6 +25,41 @@ export interface AdapterReadResult {
 export type AdapterStreamItem =
   | { readonly type: "sourceRoot"; readonly sourceRoot: SourceRoot }
   | { readonly type: "session"; readonly session: NormalizedSession }
+  | { readonly type: "diagnostic"; readonly diagnostic: AdapterDiagnostic };
+
+export type UnitFingerprint =
+  {
+    readonly size?: number;
+    readonly mtimeMs?: number;
+  };
+
+export interface SourceUnit {
+  readonly provider: Provider;
+  readonly adapterId: string;
+  readonly rootPath: string;
+  readonly sourcePath: string;
+  readonly physicalPath?: string;
+}
+
+export interface RecordStreamOptions extends AdapterDiscoverOptions {
+  readonly shouldProcessUnit?: (
+    unit: SourceUnit,
+    fingerprint: UnitFingerprint,
+  ) => boolean | Promise<boolean>;
+}
+
+export type RecordStreamItem =
+  | {
+      readonly type: "unitStart";
+      readonly unit: SourceUnit;
+      readonly fingerprint: UnitFingerprint;
+    }
+  | {
+      readonly type: "record";
+      readonly item: IngestRecord;
+    }
+  | { readonly type: "unitEnd"; readonly unit: SourceUnit; readonly complete: boolean }
+  | { readonly type: "rootScanned"; readonly root: SourceRoot; readonly complete: boolean }
   | { readonly type: "diagnostic"; readonly diagnostic: AdapterDiagnostic };
 
 export const collectAdapterStream = async (
@@ -48,4 +84,5 @@ export interface SessionAdapter {
   readonly defaultRoot: () => string | undefined;
   readonly read: (options: AdapterDiscoverOptions) => Promise<AdapterReadResult>;
   readonly stream?: (options: AdapterDiscoverOptions) => AsyncIterable<AdapterStreamItem>;
+  readonly streamRecords?: (options: RecordStreamOptions) => AsyncIterable<RecordStreamItem>;
 }
