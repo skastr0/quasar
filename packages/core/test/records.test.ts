@@ -266,6 +266,42 @@ describe("ingest records", () => {
     );
   });
 
+  test("suppresses explicit plain duplicate text blocks", () => {
+    const eventId = eventIdFor("codex", machine.machineId, sourcePath, 0, "plain-duplicate");
+    const session = buildSession({
+      provider: "codex",
+      agentName: "codex",
+      machine,
+      nativeSessionId: "plain-duplicate-session",
+      sourceRoot: "/fixtures/codex",
+      sourcePath,
+      projectPath: "/work/quasar",
+      events: [
+        {
+          id: eventId,
+          sequence: 0,
+          role: "user",
+          kind: "message",
+          contentText: "same text",
+          contentBlocks: [
+            {
+              id: "block:plain-duplicate",
+              sequence: 0,
+              kind: "text",
+              text: "same text",
+            },
+          ],
+          rawReference: { sourcePath, line: 1 },
+        },
+      ],
+    });
+
+    expect(sessionToRecords(session).map((record) => record.type)).toEqual([
+      "session",
+      "event",
+    ]);
+  });
+
   test("preserves non-derivable session edges", () => {
     const callEventId = eventIdFor("codex", machine.machineId, sourcePath, 0, "call");
     const resultEventId = eventIdFor("codex", machine.machineId, sourcePath, 1, "result");
