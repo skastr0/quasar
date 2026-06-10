@@ -325,7 +325,7 @@ const envelopeWireBytes = (envelope: RecordEnvelope) => wireBytesOf(envelope);
 const parseErrorMessage = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
 
-export const validateRecordEnvelope = (
+export const enforceRecordEnvelopeLimits = (
   envelope: RecordEnvelope,
   inputLimits?: Partial<RecordLimits>,
 ): Effect.Effect<RecordEnvelope, RecordContractError> =>
@@ -387,7 +387,7 @@ export const decodeRecordEnvelope = (
           message: parseErrorMessage(error),
         }),
     ),
-    Effect.flatMap((envelope) => validateRecordEnvelope(envelope, limits)),
+    Effect.flatMap((envelope) => enforceRecordEnvelopeLimits(envelope, limits)),
   );
 
 export const packRecordEnvelopes = ({
