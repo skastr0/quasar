@@ -5,6 +5,7 @@ import { Effect, Schema } from "effect";
 import {
   allAdapters,
   clampOversizedRecord,
+  decodeRecordEnvelope,
   loadMachineIdentity,
   packRecordEnvelopes,
   RECORD_LIMITS,
@@ -14,6 +15,7 @@ import {
   recordWireBytes,
   recordStreamFor,
   stableAdapters,
+  type AdapterDiagnostic,
   type IngestRecord,
   type IngestRecordType,
   type MachineIdentity,
@@ -37,8 +39,10 @@ export class IngestRunError extends Schema.TaggedError<IngestRunError>()(
   {
     reason: Schema.Literal(
       "adapter_stream_failed",
+      "invalid_record_envelope",
       "missing_source_unit",
       "pack_invariant_failed",
+      "response_count_mismatch",
       "unsupported_tombstone_type",
     ),
     message: Schema.String,
@@ -96,6 +100,11 @@ const isTombstoneRecordType = (type: IngestRecordType): type is TombstoneRecordT
 const sourceFileKey = (unit: Pick<SourceFileUnit, "provider" | "adapterId" | "sourcePath">) =>
   `${unit.provider}\0${unit.adapterId}\0${unit.sourcePath}`;
 
+const adapterKey = (provider: Provider, adapterId: string) => `${provider}\0${adapterId}`;
+
+const sourceRootKey = (provider: Provider, adapterId: string, rootPath: string) =>
+  `${provider}\0${adapterId}\0${rootPath}`;
+
 const sourceFileUnit = (unit: SourceUnit): SourceFileUnit => ({
   provider: unit.provider,
   adapterId: unit.adapterId,
@@ -126,20 +135,32 @@ const selectAdapters = (
   return candidates.filter((adapter) => selected.has(adapter.provider));
 };
 
-const tombstoneFor = (record: StaleRecord): IngestRecord => {
+const tombstoneFor = (record: StaleRecord): Effect.Effect<IngestRecord, IngestRunError> => {
   if (!isTombstoneRecordType(record.recordType)) {
-    throw new IngestRunError({
-      reason: "unsupported_tombstone_type",
-      message: `Cannot tombstone record type: ${record.recordType}`,
-    });
+    return Effect.fail(
+      new IngestRunError({
+        reason: "unsupported_tombstone_type",
+        message: `Cannot tombstone record type: ${record.recordType}`,
+      }),
+    );
   }
-  return {
+  return Effect.succeed({
     type: "tombstone",
     record: {
       recordType: record.recordType,
       recordId: record.recordId,
     },
-  };
+  });
+};
+
+const envelopeCountFor = (items: readonly PendingEnvelopeItem[]) => {
+  let live = 0;
+  let tombstone = 0;
+  for (const item of items) {
+    if (item.kind === "live") live += 1;
+    else tombstone += 1;
+  }
+  return { live, tombstone };
 };
 
 const rememberRecord = (
@@ -157,6 +178,8 @@ const rememberRecord = (
 class IngestRunState {
   private readonly unitScans = new Map<string, UnitScanState>();
   private readonly seenSourceFiles = new Set<string>();
+  private readonly blockedRootKeys = new Set<string>();
+  private readonly blockedAdapterKeys = new Set<string>();
   private pending: PendingEnvelopeItem[] = [];
   private pendingRecordWireBytes = 0;
   private readonly pendingEnvelopeOverheadBytes: number;
@@ -194,57 +217,91 @@ class IngestRunState {
         shouldProcessUnit: self.shouldProcessUnit,
       });
       const iterator: AsyncIterator<RecordStreamItem> = stream[Symbol.asyncIterator]();
-      while (true) {
-        const next = yield* Effect.tryPromise({
-          try: () => iterator.next(),
-          catch: (cause) =>
-            new IngestRunError({
-              reason: "adapter_stream_failed",
-              message: cause instanceof Error ? cause.message : String(cause),
-            }),
-        });
-        if (next.done === true) break;
-        const item = next.value;
-        switch (item.type) {
-          case "unitStart":
-            self.activeUnitKey = sourceFileKey(item.unit);
-            self.reporter.observeUnit(item.fingerprint);
-            break;
-          case "record":
-            if (item.item.type === "source_root") {
-              yield* self.handleSourceRoot(item.item);
-            } else if (item.item.type === "tombstone") {
-              return yield* new IngestRunError({
+      const closeIterator = Effect.tryPromise({
+        try: async () => {
+          await iterator.return?.();
+        },
+        catch: () =>
+          new IngestRunError({
+            reason: "adapter_stream_failed",
+            message: "Adapter stream could not be closed.",
+          }),
+      }).pipe(Effect.catchAll(() => Effect.void));
+
+      const loop = Effect.gen(function* () {
+        while (true) {
+          const next = yield* Effect.tryPromise({
+            try: () => iterator.next(),
+            catch: (cause) =>
+              new IngestRunError({
                 reason: "adapter_stream_failed",
-                message: "Adapters must not emit tombstone records.",
-              });
-            } else {
-              yield* self.handleLiveRecord(item.item);
-            }
-            break;
-          case "unitEnd":
-            yield* self.handleUnitEnd(item.unit, item.complete);
-            break;
-          case "rootScanned":
-            yield* self.handleRootScanned(item.root, item.complete);
-            break;
-          case "diagnostic":
-            self.reporter.observeDiagnostic(item.diagnostic);
-            break;
-        }
-      }
-      if (self.predicateFailure !== undefined) {
-        return yield* Effect.fail(
-          self.predicateFailure instanceof Error
-            ? self.predicateFailure
-            : new IngestRunError({
-                reason: "adapter_stream_failed",
-                message: String(self.predicateFailure),
+                message: cause instanceof Error ? cause.message : String(cause),
               }),
-        );
-      }
-      yield* self.flushPending();
+          });
+          if (next.done === true) break;
+          const item = next.value;
+          switch (item.type) {
+            case "unitStart":
+              self.activeUnitKey = sourceFileKey(item.unit);
+              self.reporter.observeUnit(item.fingerprint);
+              break;
+            case "record":
+              if (item.item.type === "source_root") {
+                yield* self.handleSourceRoot(item.item);
+              } else if (item.item.type === "tombstone") {
+                return yield* new IngestRunError({
+                  reason: "adapter_stream_failed",
+                  message: "Adapters must not emit tombstone records.",
+                });
+              } else {
+                yield* self.handleLiveRecord(item.item);
+              }
+              break;
+            case "unitEnd":
+              yield* self.handleUnitEnd(item.unit, item.complete);
+              break;
+            case "rootScanned":
+              yield* self.handleRootScanned(item.root, item.complete);
+              break;
+            case "diagnostic":
+              self.handleDiagnostic(item.diagnostic);
+              break;
+          }
+        }
+        if (self.predicateFailure !== undefined) {
+          return yield* Effect.fail(
+            self.predicateFailure instanceof Error
+              ? self.predicateFailure
+              : new IngestRunError({
+                  reason: "adapter_stream_failed",
+                  message: String(self.predicateFailure),
+                }),
+          );
+        }
+        yield* self.flushPending();
+      });
+
+      yield* loop.pipe(Effect.ensuring(closeIterator));
     });
+  }
+
+  private handleDiagnostic(diagnostic: AdapterDiagnostic) {
+    this.reporter.observeDiagnostic(diagnostic);
+    if (diagnostic.status !== "error" && diagnostic.status !== "unsupported") return;
+    if (diagnostic.rootPath !== undefined) {
+      this.blockedRootKeys.add(
+        sourceRootKey(diagnostic.provider, diagnostic.adapterId, diagnostic.rootPath),
+      );
+    } else {
+      this.blockedAdapterKeys.add(adapterKey(diagnostic.provider, diagnostic.adapterId));
+    }
+  }
+
+  private rootHasFatalDiagnostic(root: SourceRoot) {
+    return (
+      this.blockedAdapterKeys.has(adapterKey(root.provider, root.adapterId)) ||
+      this.blockedRootKeys.has(sourceRootKey(root.provider, root.adapterId, root.rootPath))
+    );
   }
 
   private shouldProcessUnitEffect(unit: SourceUnit, fingerprint: UnitFingerprint) {
@@ -351,24 +408,30 @@ class IngestRunState {
       self.activeUnitKey = undefined;
       if (scan === undefined) {
         if (!complete) self.reporter.observeIncompleteUnit();
+        self.reporter.finishUnit();
         return;
       }
       if (!complete) {
         self.reporter.observeIncompleteUnit();
         self.dropPendingForFile(scan.fileId);
+        self.reporter.finishUnit();
         return;
       }
-      if (!scan.shouldProcess) return;
+      if (!scan.shouldProcess) {
+        self.reporter.finishUnit();
+        return;
+      }
       yield* self.flushPending();
       yield* self.sendTombstones(scan.fileId, yield* self.ledger.staleRecords(scan.fileId, scan.scanSeq));
       yield* self.ledger.markFileComplete(scan.fileId, scan.scanSeq, scan.fingerprint);
+      self.reporter.finishUnit();
     });
   }
 
   private handleRootScanned(root: SourceRoot, complete: boolean) {
     const self = this;
     return Effect.gen(function* () {
-      if (!complete) return;
+      if (!complete || self.rootHasFatalDiagnostic(root)) return;
       const files = yield* self.ledger.filesUnderRoot(root.provider, root.adapterId, root.rootPath);
       for (const file of files) {
         if (self.seenSourceFiles.has(sourceFileKey(file))) continue;
@@ -409,9 +472,18 @@ class IngestRunState {
       });
       let offset = 0;
       for (const envelope of envelopes) {
-        const items = pending.slice(offset, offset + envelope.records.length);
-        offset += envelope.records.length;
-        yield* self.sendEnvelope(envelope, items);
+        const validatedEnvelope = yield* decodeRecordEnvelope(envelope).pipe(
+          Effect.mapError(
+            (error) =>
+              new IngestRunError({
+                reason: "invalid_record_envelope",
+                message: error.message,
+              }),
+          ),
+        );
+        const items = pending.slice(offset, offset + validatedEnvelope.records.length);
+        offset += validatedEnvelope.records.length;
+        yield* self.sendEnvelope(validatedEnvelope, items);
       }
     });
   }
@@ -420,6 +492,7 @@ class IngestRunState {
     const self = this;
     return Effect.gen(function* () {
       const response = yield* self.sender.send(envelope);
+      yield* self.validateResponseCounts(response, pending);
       self.reporter.observeEnvelope(envelope, response);
       const liveByFile = new Map<number, RecordAck[]>();
       const tombstonesByFile = new Map<number, string[]>();
@@ -450,7 +523,7 @@ class IngestRunState {
       if (records.length === 0) return;
       yield* self.flushPending();
       for (const record of records) {
-        const tombstone = tombstoneFor(record);
+        const tombstone = yield* tombstoneFor(record);
         self.reporter.observeRecord(tombstone);
         yield* self.addPending({
           kind: "tombstone",
@@ -482,11 +555,28 @@ class IngestRunState {
       0,
     );
   }
+
+  private validateResponseCounts(
+    response: { readonly applied: number; readonly unchanged: number; readonly tombstoned: number },
+    pending: readonly PendingEnvelopeItem[],
+  ) {
+    const { live, tombstone } = envelopeCountFor(pending);
+    const acknowledgedLive = response.applied + response.unchanged;
+    if (acknowledgedLive !== live || response.tombstoned !== tombstone) {
+      return Effect.fail(
+        new IngestRunError({
+          reason: "response_count_mismatch",
+          message: `Ingest response acknowledged live=${acknowledgedLive}/${live} and tombstones=${response.tombstoned}/${tombstone}.`,
+        }),
+      );
+    }
+    return Effect.void;
+  }
 }
 
 export const runIngest = (options: IngestOptions, overrides: RunIngestOverrides = {}) =>
   Effect.gen(function* () {
-    const dryRun = options.dryRun ?? false;
+    const dryRun = options.dryRun ?? true;
     const machine = overrides.machine ?? loadMachineIdentity();
     const now = overrides.now ?? new Date().toISOString();
     const adapters = selectAdapters(

@@ -1,4 +1,5 @@
 import {
+  RECORD_LIMITS,
   recordWireBytes,
   type AdapterDiagnostic,
   type IngestRecord,
@@ -55,6 +56,8 @@ export type IngestReport = {
 };
 
 const textEncoder = new TextEncoder();
+const USEFUL_TEXT_EVENT_ID_LIMIT = 8_192;
+const RECORD_SIZE_OVERFLOW_BUCKET = RECORD_LIMITS.maxRecordBytes + 1;
 
 const bytesOfText = (value: string | undefined) =>
   value === undefined ? 0 : textEncoder.encode(value).byteLength;
@@ -64,21 +67,23 @@ const bytesOfJson = (value: unknown) => {
   return serialized === undefined ? 0 : textEncoder.encode(serialized).byteLength;
 };
 
-const percentile = (values: readonly number[], target: number) => {
-  if (values.length === 0) return 0;
-  const sorted = [...values].sort((left, right) => left - right);
-  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * target) - 1));
-  return sorted[index] ?? 0;
+const collectUnitGarbage = () => {
+  const runtime = globalThis as typeof globalThis & {
+    readonly Bun?: { readonly gc?: (force?: boolean) => void };
+  };
+  runtime.Bun?.gc?.(true);
 };
 
 export class IngestReporter {
   private readonly startedAt = Date.now();
   private readonly recordTypeReports: Partial<Record<IngestRecordType, RecordTypeReport>> = {};
-  private readonly recordSizes: number[] = [];
-  private readonly eventUsefulTextIds = new Set<string>();
+  private readonly recordSizeBuckets = new Uint32Array(RECORD_SIZE_OVERFLOW_BUCKET + 1);
+  private readonly unitEventUsefulTextIds = new Set<string>();
   private sourceBytes = 0;
   private recordWireTotal = 0;
   private usefulTextBytes = 0;
+  private recordSizeCount = 0;
+  private maxRecordSize = 0;
   private filesDiscovered = 0;
   private filesProcessed = 0;
   private filesSkipped = 0;
@@ -115,6 +120,11 @@ export class IngestReporter {
     this.filesIncomplete += 1;
   }
 
+  finishUnit() {
+    this.unitEventUsefulTextIds.clear();
+    collectUnitGarbage();
+  }
+
   observeRemovedFile() {
     this.filesRemoved += 1;
   }
@@ -125,13 +135,16 @@ export class IngestReporter {
 
   observeRecord(record: IngestRecord) {
     const wireBytes = recordWireBytes(record);
+    const finiteWireBytes = Number.isFinite(wireBytes) ? Math.max(0, Math.ceil(wireBytes)) : 0;
     this.recordsDerived += 1;
-    this.recordWireTotal += Number.isFinite(wireBytes) ? wireBytes : 0;
-    this.recordSizes.push(Number.isFinite(wireBytes) ? wireBytes : 0);
+    this.recordWireTotal += finiteWireBytes;
+    this.recordSizeCount += 1;
+    this.maxRecordSize = Math.max(this.maxRecordSize, finiteWireBytes);
+    this.recordSizeBuckets[Math.min(finiteWireBytes, RECORD_SIZE_OVERFLOW_BUCKET)] += 1;
     const existing = this.recordTypeReports[record.type] ?? { count: 0, wireBytes: 0 };
     this.recordTypeReports[record.type] = {
       count: existing.count + 1,
-      wireBytes: existing.wireBytes + (Number.isFinite(wireBytes) ? wireBytes : 0),
+      wireBytes: existing.wireBytes + finiteWireBytes,
     };
     this.observeUsefulText(record);
   }
@@ -191,8 +204,8 @@ export class IngestReporter {
         recordWire: this.recordWireTotal,
         usefulText: this.usefulTextBytes,
         prunedEstimate,
-        maxRecord: Math.max(0, ...this.recordSizes),
-        p95Record: percentile(this.recordSizes, 0.95),
+        maxRecord: this.maxRecordSize,
+        p95Record: this.recordSizePercentile(0.95),
         amplificationRatio:
           this.usefulTextBytes === 0 ? 0 : this.envelopeWireBytes / this.usefulTextBytes,
       },
@@ -207,12 +220,15 @@ export class IngestReporter {
     if (record.type === "event") {
       const bytes = bytesOfText(record.record.contentText);
       if (bytes > 0) {
-        this.eventUsefulTextIds.add(record.record.id);
+        this.rememberUsefulEventId(record.record.id);
         this.usefulTextBytes += bytes;
       }
       return;
     }
-    if (record.type !== "content_block" || this.eventUsefulTextIds.has(record.record.eventId)) {
+    if (
+      record.type !== "content_block" ||
+      this.unitEventUsefulTextIds.has(record.record.eventId)
+    ) {
       return;
     }
     const bytes =
@@ -220,9 +236,28 @@ export class IngestReporter {
       bytesOfText(record.record.markdown) +
       bytesOfText(record.record.thinking);
     if (bytes > 0) {
-      this.eventUsefulTextIds.add(record.record.eventId);
+      this.rememberUsefulEventId(record.record.eventId);
       this.usefulTextBytes += bytes;
     }
+  }
+
+  private rememberUsefulEventId(eventId: string) {
+    if (this.unitEventUsefulTextIds.size >= USEFUL_TEXT_EVENT_ID_LIMIT) {
+      const first = this.unitEventUsefulTextIds.values().next().value;
+      if (typeof first === "string") this.unitEventUsefulTextIds.delete(first);
+    }
+    this.unitEventUsefulTextIds.add(eventId);
+  }
+
+  private recordSizePercentile(target: number) {
+    if (this.recordSizeCount === 0) return 0;
+    const threshold = Math.ceil(this.recordSizeCount * target);
+    let count = 0;
+    for (let index = 0; index < this.recordSizeBuckets.length; index += 1) {
+      count += this.recordSizeBuckets[index] ?? 0;
+      if (count >= threshold) return Math.min(index, RECORD_LIMITS.maxRecordBytes);
+    }
+    return this.maxRecordSize;
   }
 }
 
