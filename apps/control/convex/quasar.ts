@@ -16,6 +16,7 @@ import {
   aliasProjectHandler,
   listProjectsHandler,
 } from "./quasarProjectHandlers";
+import { applyRecordEnvelopeHandler } from "./quasarRecordIngest";
 import {
   listSessionsHandler,
   listToolCallsHandler,
@@ -111,6 +112,11 @@ export const listToolCallsInternal = internalQuery({
     limit: v.optional(v.number()),
   },
   handler: listToolCallsHandler,
+});
+
+export const applyRecordEnvelopeInternal = internalMutation({
+  args: { input: v.any() },
+  handler: async (ctx, args) => await applyRecordEnvelopeHandler(ctx, args.input),
 });
 
 export const textSearchInternal = internalQuery({
