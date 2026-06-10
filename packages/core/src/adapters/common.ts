@@ -650,7 +650,7 @@ const contentBlocksForEvent = (
 ) => {
   if (contentBlocks !== undefined) return [...contentBlocks];
   if (contentSource === undefined) return [];
-  if (compactText(contentSource) === contentText) return [];
+  if (typeof contentSource === "string" && compactText(contentSource) === contentText) return [];
   return contentBlocksFromNative(
     provider,
     machineId,

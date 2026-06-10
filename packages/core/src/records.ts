@@ -419,11 +419,13 @@ const onlyDuplicatesEventText = (
   record: ContentBlockRecord,
 ) =>
   event.contentText !== undefined &&
-  contentBlockText(record) === event.contentText &&
+  record.kind === "text" &&
+  record.text === event.contentText &&
   record.path === undefined &&
   record.uri === undefined &&
   record.mediaType === undefined &&
-  record.value === undefined;
+  record.value === undefined &&
+  record.metadata === undefined;
 
 export const sessionToRecords = (session: NormalizedSession): IngestRecord[] => {
   const {

@@ -367,7 +367,7 @@ describe("adapter record streams", () => {
 
     expect(records.map((record) => record.type)).toContain("session");
     expect(records.map((record) => record.type)).toContain("event");
-    expect(records.map((record) => record.type)).not.toContain("content_block");
+    expect(records.map((record) => record.type)).toContain("content_block");
     expect(idsFor(items)).toEqual(idsFor(await collect(
       codexAdapter.streamRecords!({
         machine,

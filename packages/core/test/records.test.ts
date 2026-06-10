@@ -178,6 +178,165 @@ describe("ingest records", () => {
     expect(records[0]?.record).toMatchObject({ contentBlockCount: 1 });
   });
 
+  test("preserves structured and metadata-bearing blocks with matching event text", () => {
+    const firstEventId = eventIdFor("codex", machine.machineId, sourcePath, 0, "sidecar");
+    const secondEventId = eventIdFor("codex", machine.machineId, sourcePath, 1, "markdown");
+    const thirdEventId = eventIdFor("codex", machine.machineId, sourcePath, 2, "metadata");
+    const session = buildSession({
+      provider: "codex",
+      agentName: "codex",
+      machine,
+      nativeSessionId: "sidecar-session",
+      sourceRoot: "/fixtures/codex",
+      sourcePath,
+      projectPath: "/work/quasar",
+      events: [
+        {
+          id: firstEventId,
+          sequence: 0,
+          role: "assistant",
+          kind: "message",
+          contentText: "caption",
+          contentSource: { type: "image", text: "caption", image_url: "https://example.test/image.png" },
+          rawReference: { sourcePath, line: 1 },
+        },
+        {
+          id: secondEventId,
+          sequence: 1,
+          role: "assistant",
+          kind: "message",
+          contentText: "## Same",
+          contentBlocks: [
+            {
+              id: "block:markdown",
+              sequence: 0,
+              kind: "markdown",
+              markdown: "## Same",
+            },
+          ],
+          rawReference: { sourcePath, line: 2 },
+        },
+        {
+          id: thirdEventId,
+          sequence: 2,
+          role: "assistant",
+          kind: "message",
+          contentText: "same text",
+          contentBlocks: [
+            {
+              id: "block:metadata",
+              sequence: 0,
+              kind: "text",
+              text: "same text",
+              metadata: { nativeType: "message" },
+            },
+          ],
+          rawReference: { sourcePath, line: 3 },
+        },
+      ],
+    });
+
+    const records = sessionToRecords(session);
+    const contentBlockRecords = records.filter((record) => record.type === "content_block");
+
+    expect(contentBlockRecords).toHaveLength(4);
+    expect(contentBlockRecords).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "content_block",
+          record: expect.objectContaining({ eventId: firstEventId, kind: "image" }),
+        }),
+        expect.objectContaining({
+          type: "content_block",
+          record: expect.objectContaining({ eventId: firstEventId, kind: "text", text: "caption" }),
+        }),
+        expect.objectContaining({
+          type: "content_block",
+          record: expect.objectContaining({ eventId: secondEventId, kind: "markdown" }),
+        }),
+        expect.objectContaining({
+          type: "content_block",
+          record: expect.objectContaining({
+            eventId: thirdEventId,
+            kind: "text",
+            metadata: { nativeType: "message" },
+          }),
+        }),
+      ]),
+    );
+  });
+
+  test("preserves non-derivable session edges", () => {
+    const callEventId = eventIdFor("codex", machine.machineId, sourcePath, 0, "call");
+    const resultEventId = eventIdFor("codex", machine.machineId, sourcePath, 1, "result");
+    const session = buildSession({
+      provider: "codex",
+      agentName: "codex",
+      machine,
+      nativeSessionId: "edge-session",
+      sourceRoot: "/fixtures/codex",
+      sourcePath,
+      projectPath: "/work/quasar",
+      events: [
+        {
+          id: callEventId,
+          sequence: 0,
+          role: "assistant",
+          kind: "tool_call",
+          toolCallId: "tool-a",
+          rawReference: { sourcePath, line: 1 },
+        },
+        {
+          id: resultEventId,
+          sequence: 1,
+          role: "tool",
+          kind: "tool_result",
+          toolCallId: "tool-a",
+          rawReference: { sourcePath, line: 2 },
+        },
+      ],
+      sessionEdges: [
+        {
+          id: edgeIdFor("codex", machine.machineId, sourcePath, "parent", "parent-a", "edge-session"),
+          kind: "parent",
+          fromId: "parent-a",
+          toId: "edge-session",
+        },
+        {
+          id: edgeIdFor("codex", machine.machineId, sourcePath, "subagent_of", "agent-a", "edge-session"),
+          kind: "subagent_of",
+          fromId: "agent-a",
+          toId: "edge-session",
+        },
+        {
+          id: edgeIdFor("codex", machine.machineId, sourcePath, "forked_from", "fork-a", "edge-session"),
+          kind: "forked_from",
+          fromId: "fork-a",
+          toId: "edge-session",
+        },
+        {
+          id: edgeIdFor("codex", machine.machineId, sourcePath, "compacted_into", "old-a", "new-a"),
+          kind: "compacted_into",
+          fromEventId: "old-a",
+          toEventId: "new-a",
+        },
+      ],
+    });
+
+    const edgeKinds = sessionToRecords(session)
+      .filter((record) => record.type === "edge")
+      .map((record) => record.record.kind)
+      .sort();
+
+    expect(edgeKinds).toEqual([
+      "compacted_into",
+      "forked_from",
+      "parent",
+      "subagent_of",
+      "tool_result_for",
+    ]);
+  });
+
   test("clamps oversized record payloads deterministically before hashing", () => {
     const record = sessionToRecords(makeSession()).find(
       (candidate) => candidate.type === "tool_call",
