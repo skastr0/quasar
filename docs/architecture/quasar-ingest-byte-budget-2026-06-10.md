@@ -207,3 +207,74 @@ The next follow-up must address repeated identity/evidence/storage shape. Event
 records alone now exceed the target envelope size implied by current useful-text
 bytes, so another payload clamp cannot pass the gate. Do not run live ingest
 until that storage-shape follow-up lands and this report is rerun.
+
+### QSR-027 Latest-Tree Rerun
+
+QSR-027 compacted derivable child identity and per-event source evidence:
+
+- Session records remain the identity anchor.
+- Event, content block, tool call, usage, artifact, and edge records no longer
+  carry session-derived machine/provider/agent/project identity fields.
+- Event records keep compact evidence such as line/native type, while source
+  path is derived from the session.
+- Convex materializes stored/indexed child identity from the existing parent
+  session or event in the single record write path.
+- Compact child records fail closed if their parent session/event is absent.
+- The decoder rejects legacy child identity fields before schema decode can
+  normalize them away.
+
+The latest full-machine dry-run completed successfully at
+`2026-06-10T08:16:49.153Z` with no live writes.
+
+| Metric | Value |
+| --- | ---: |
+| Files processed | 612 |
+| Records sent | 1,259,704 |
+| Envelopes sent | 6,647 |
+| Record wire bytes | 1,057,113,049 |
+| Envelope wire bytes | 1,059,422,979 |
+| Useful text bytes | 387,616,813 |
+| Pruned bytes estimate | 664,964,701 |
+| Amplification ratio | 2.733x |
+| Max record bytes | 32,768 |
+| p95 record bytes | 1,972 |
+| RSS high-water bytes | 1,563,082,752 |
+| Elapsed milliseconds | 741,139 |
+
+| Record type | Count | Wire bytes |
+| --- | ---: | ---: |
+| source_root | 8 | 1,871 |
+| session | 1,565 | 1,621,757 |
+| event | 453,060 | 595,461,570 |
+| content_block | 528,908 | 241,045,693 |
+| tool_call | 83,845 | 126,307,072 |
+| usage | 112,982 | 52,660,694 |
+| edge | 79,326 | 40,005,987 |
+| artifact | 10 | 8,405 |
+
+Field-level attribution after QSR-027:
+
+| Contributor | Bytes |
+| --- | ---: |
+| Event `contentText` | 377,687,284 |
+| Event ids/reference fields | 100,773,360 |
+| Event compact evidence | 24,084,041 |
+| Content block ids/reference fields | 98,975,610 |
+| Content block text fields | 74,875,689 |
+| Content block metadata | 23,921,253 |
+| Tool input payloads | 19,398,203 |
+| Tool output payloads | 66,191,324 |
+| Tool ids/reference fields | 25,431,451 |
+| Usage ids/reference fields | 31,304,286 |
+
+Verdict: QSR-027 materially improved QSR-026, but the byte gate still fails.
+Envelope bytes dropped from about 1.41GB to about 1.06GB and RSS dropped from
+about 2.42GB to about 1.56GB. Amplification remains 2.733x against the 1.5x
+target, and RSS is still not in the few-hundred-MB band.
+
+The remaining blocker is no longer derivable identity alone. Event
+`contentText` is the necessary search narrative, and event records alone are
+near the target envelope size. The next follow-up must decide what non-search
+detail belongs in live server storage before QSR-023: content block sidecars,
+tool payload bodies, usage detail, and edge detail cannot all remain live
+records at their current fidelity and still meet the measured budget.
