@@ -524,30 +524,46 @@ async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStr
     };
     if (db === undefined) {
       usedFallback = true;
-      for (const session of readSessionRowsCli(tempDb.path, options.limit, options.skip)) {
+      for (const sessionEntry of readSessionRowsCli(tempDb.path, options.limit, options.skip)) {
+        const session = buildHermesSessionFromRows(
+          logicalDbPath ?? dbPath,
+          logicalRoot ?? root,
+          options,
+          sessionEntry,
+          readMessageRowsCli(tempDb.path, String(sessionEntry.id ?? "")),
+        );
         yield {
           type: "session",
-          session: buildHermesSessionFromRows(
-            logicalDbPath ?? dbPath,
-            logicalRoot ?? root,
-            options,
-            session,
-            readMessageRowsCli(tempDb.path, String(session.id ?? "")),
-          ),
+          session,
+          sourceUnit: {
+            provider: "hermes" as const,
+            adapterId: hermesAdapter.id,
+            rootPath: logicalRoot ?? root,
+            sourcePath: session.sourcePath,
+            physicalPath: dbPath,
+          },
         };
         sessionCount += 1;
       }
     } else {
-      for (const session of readSessionRows(db, options.limit, options.skip)) {
+      for (const sessionEntry of readSessionRows(db, options.limit, options.skip)) {
+        const session = buildHermesSessionFromRows(
+          logicalDbPath ?? dbPath,
+          logicalRoot ?? root,
+          options,
+          sessionEntry,
+          readMessageRows(db, String(sessionEntry.id ?? "")),
+        );
         yield {
           type: "session",
-          session: buildHermesSessionFromRows(
-            logicalDbPath ?? dbPath,
-            logicalRoot ?? root,
-            options,
-            session,
-            readMessageRows(db, String(session.id ?? "")),
-          ),
+          session,
+          sourceUnit: {
+            provider: "hermes" as const,
+            adapterId: hermesAdapter.id,
+            rootPath: logicalRoot ?? root,
+            sourcePath: session.sourcePath,
+            physicalPath: dbPath,
+          },
         };
         sessionCount += 1;
       }

@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { basename } from "node:path";
 
-import type { SessionAdapter } from "./types";
+import { collectAdapterStream, type AdapterStreamItem, type SessionAdapter } from "./types";
 import type { SessionEdge, ToolCall, UsageRecord } from "../schemas";
 import {
   bestEffortEventRecordLike,
@@ -36,6 +36,7 @@ type PiUsageDraft = Omit<
   UsageRecord,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
 >;
+type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
 type PiEdgeDraft = Omit<
   SessionEdge,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
@@ -169,45 +170,63 @@ const projectPathFromRecords = (records: readonly unknown[]) => {
   return undefined;
 };
 
+async function* streamPi(options: AdapterOptions): AsyncGenerator<AdapterStreamItem> {
+  const root = options.roots?.pi ?? piAdapter.defaultRoot();
+  if (root === undefined || !existsSync(root)) {
+    yield {
+      type: "diagnostic",
+      diagnostic: {
+        adapterId: piAdapter.id,
+        provider: "pi",
+        status: "no_data_found",
+        parserConfidence: "brittle",
+        message: "Pi root was not found.",
+        ...(root !== undefined ? { rootPath: root } : {}),
+      },
+    };
+    return;
+  }
+  const files = collectFiles(root, piSessionLikeFile, options.limit, options.skip);
+  yield {
+    type: "sourceRoot",
+    sourceRoot: sourceRoot("pi", piAdapter.id, root, options.machine, options.now),
+  };
+  let sessionCount = 0;
+  for (const path of files) {
+    if (recordsFromFile(path).length === 0) continue;
+    const session = buildPiSession(path, root, options);
+    yield {
+      type: "session",
+      session,
+      sourceUnit: {
+        provider: "pi",
+        adapterId: piAdapter.id,
+        rootPath: root,
+        sourcePath: session.sourcePath,
+        physicalPath: path,
+      },
+    };
+    sessionCount += 1;
+  }
+  yield {
+    type: "diagnostic",
+    diagnostic: {
+      adapterId: piAdapter.id,
+      provider: "pi",
+      status: sessionCount > 0 ? "available" : "no_data_found",
+      parserConfidence: "brittle",
+      rootPath: root,
+      message: `Discovered ${sessionCount} Pi session(s).`,
+    },
+  };
+}
+
 export const piAdapter: SessionAdapter = {
   id: "pi-local-json-tree",
   provider: "pi",
   displayName: "Pi local JSON tree",
   stable: true,
   defaultRoot: () => homePath(".pi/agent/sessions"),
-  read: async (options) => {
-    const root = options.roots?.pi ?? piAdapter.defaultRoot();
-    if (root === undefined || !existsSync(root)) {
-      return {
-        sourceRoots: [],
-        sessions: [],
-        diagnostics: [
-          {
-            adapterId: piAdapter.id,
-            provider: "pi",
-            status: "no_data_found",
-            parserConfidence: "brittle",
-            message: "Pi root was not found.",
-            ...(root !== undefined ? { rootPath: root } : {}),
-          },
-        ],
-      };
-    }
-    const files = collectFiles(root, piSessionLikeFile, options.limit, options.skip);
-    const sessions = files.flatMap((path) => (recordsFromFile(path).length === 0 ? [] : [buildPiSession(path, root, options)]));
-    return {
-      sourceRoots: [sourceRoot("pi", piAdapter.id, root, options.machine, options.now)],
-      sessions,
-      diagnostics: [
-        {
-          adapterId: piAdapter.id,
-          provider: "pi",
-          status: sessions.length > 0 ? "available" : "no_data_found",
-          parserConfidence: "brittle",
-          rootPath: root,
-          message: `Discovered ${sessions.length} Pi session(s).`,
-        },
-      ],
-    };
-  },
+  read: async (options) => collectAdapterStream(streamPi(options)),
+  stream: streamPi,
 };

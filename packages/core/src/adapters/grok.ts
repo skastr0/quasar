@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
-import type { SessionAdapter } from "./types";
+import { collectAdapterStream, type AdapterStreamItem, type SessionAdapter } from "./types";
 import type { Artifact, ToolCall } from "../schemas";
 import {
   artifactIdFor,
@@ -38,6 +38,7 @@ type GrokArtifactDraft = Omit<
   Artifact,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
 >;
+type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
 
 const grokTime = (record: Record<string, unknown>) => {
   if (typeof record.timestamp === "string") return record.timestamp;
@@ -202,176 +203,213 @@ const grokArtifacts = (
     ];
   });
 
+const buildGrokSessionFromChatPath = (
+  chatPath: string,
+  sessionsRoot: string,
+  options: AdapterOptions,
+) => {
+  const sessionDir = dirname(chatPath);
+  const sessionId = basename(sessionDir);
+  const projectKey = basename(dirname(sessionDir));
+  const projectPath = decodeProjectPath(projectKey);
+  const summary = readJsonFile(join(sessionDir, "summary.json"));
+  const chatLines = readJsonLines(chatPath);
+  const eventLines = readJsonLines(join(sessionDir, "events.jsonl"));
+  const updateLines = readJsonLines(join(sessionDir, "updates.jsonl"));
+  const hunkPath = join(sessionDir, "hunk_records.jsonl");
+  const toolCallsById = new Map<string, GrokToolCallDraft>();
+  const collectTool = (
+    sourcePath: string,
+    eventId: string,
+    record: Record<string, unknown>,
+  ) => {
+    const toolCall = grokToolCall(
+      options.machine.machineId,
+      sourcePath,
+      sessionId,
+      eventId,
+      record,
+    );
+    if (toolCall !== undefined) toolCallsById.set(toolCall.id, toolCall);
+    return toolCall?.id;
+  };
+  const events = [
+    ...chatLines.map(({ value, lineNumber }, index) => {
+      const record =
+        typeof value === "object" && value !== null
+          ? (value as Record<string, unknown>)
+          : {};
+      const type = typeof record.type === "string" ? record.type : "message";
+      const nativeEventId =
+        typeof record.id === "string" ? record.id : undefined;
+      const eventId = eventIdFor(
+        "grok",
+        options.machine.machineId,
+        chatPath,
+        index,
+        nativeEventId ?? lineNumber,
+      );
+      const toolCallId = collectTool(chatPath, eventId, record);
+      const content = grokContentProjection(record);
+      return {
+        id: eventId,
+        nativeEventId,
+        sequence: index,
+        role: roleFrom(typeof record.type === "string" ? record.type : undefined),
+        kind: grokKind(record),
+        contentText: compactText(content),
+        contentSource: content,
+        ...(toolCallId !== undefined ? { toolCallId } : {}),
+        rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: type },
+      };
+    }),
+    ...eventLines.map(({ value, lineNumber }, index) => {
+      const record =
+        typeof value === "object" && value !== null
+          ? (value as Record<string, unknown>)
+          : {};
+      const type = typeof record.type === "string" ? record.type : "event";
+      const eventPath = join(sessionDir, "events.jsonl");
+      const nativeEventId =
+        typeof record.id === "string" ? record.id : undefined;
+      const eventId = eventIdFor(
+        "grok",
+        options.machine.machineId,
+        eventPath,
+        index,
+        nativeEventId ?? lineNumber,
+      );
+      const toolCallId = collectTool(eventPath, eventId, record);
+      const content = grokContentProjection(record);
+      return {
+        id: eventId,
+        nativeEventId,
+        sequence: chatLines.length + index,
+        timestamp: grokTime(record),
+        role: "unknown" as const,
+        kind: grokKind(record),
+        contentText: compactText(content),
+        contentSource: content,
+        ...(toolCallId !== undefined ? { toolCallId } : {}),
+        rawReference: {
+          sourcePath: eventPath,
+          line: lineNumber,
+          nativeType: type,
+        },
+      };
+    }),
+    ...updateLines.map(({ value, lineNumber }, index) => {
+      const record = recordFrom(value);
+      const updatePath = join(sessionDir, "updates.jsonl");
+      const type =
+        typeof record.method === "string"
+          ? record.method
+          : typeof record.type === "string"
+            ? record.type
+            : "update";
+      const eventId = eventIdFor(
+        "grok",
+        options.machine.machineId,
+        updatePath,
+        index,
+        lineNumber,
+      );
+      const toolCallId = collectTool(updatePath, eventId, record);
+      const content = grokContentProjection(record);
+      return {
+        id: eventId,
+        sequence: chatLines.length + eventLines.length + index,
+        timestamp: grokTime(record),
+        role: "system" as const,
+        kind: grokKind(record),
+        contentText: compactText(content),
+        contentSource: content,
+        ...(toolCallId !== undefined ? { toolCallId } : {}),
+        rawReference: { sourcePath: updatePath, line: lineNumber, nativeType: type },
+      };
+    }),
+  ];
+  return buildSession({
+    provider: "grok",
+    agentName: "grok-build",
+    machine: options.machine,
+    nativeSessionId: sessionId,
+    nativeProjectKey: projectKey,
+    title:
+      typeof (summary as Record<string, unknown> | undefined)?.title === "string"
+        ? ((summary as Record<string, unknown>).title as string)
+        : undefined,
+    sourceRoot: sessionsRoot,
+    sourcePath: sessionDir,
+    projectPath,
+    events,
+    toolCalls: [...toolCallsById.values()],
+    artifacts: existsSync(hunkPath)
+      ? grokArtifacts(options.machine.machineId, sessionDir, sessionId, hunkPath)
+      : [],
+  });
+};
+
+async function* streamGrok(options: AdapterOptions): AsyncGenerator<AdapterStreamItem> {
+  const root = options.roots?.grok ?? grokAdapter.defaultRoot();
+  if (root === undefined || !existsSync(root)) {
+    yield {
+      type: "diagnostic",
+      diagnostic: {
+        adapterId: grokAdapter.id,
+        provider: "grok",
+        status: "no_data_found",
+        parserConfidence: "observed",
+        message: "Grok root was not found.",
+        ...(root !== undefined ? { rootPath: root } : {}),
+      },
+    };
+    return;
+  }
+  const sessionsRoot = join(root, "sessions");
+  const files = collectFiles(
+    sessionsRoot,
+    (path) => path.endsWith("chat_history.jsonl"),
+    options.limit,
+    options.skip,
+  );
+  const rootRecord = sourceRoot("grok", grokAdapter.id, sessionsRoot, options.machine, options.now);
+  yield { type: "sourceRoot", sourceRoot: rootRecord };
+  let sessionCount = 0;
+  for (const chatPath of files) {
+    const session = buildGrokSessionFromChatPath(chatPath, sessionsRoot, options);
+    yield {
+      type: "session",
+      session,
+      sourceUnit: {
+        provider: "grok",
+        adapterId: grokAdapter.id,
+        rootPath: sessionsRoot,
+        sourcePath: session.sourcePath,
+        physicalPath: dirname(chatPath),
+      },
+    };
+    sessionCount += 1;
+  }
+  yield {
+    type: "diagnostic",
+    diagnostic: {
+      adapterId: grokAdapter.id,
+      provider: "grok",
+      status: sessionCount > 0 ? "available" : "no_data_found",
+      parserConfidence: "observed",
+      rootPath: sessionsRoot,
+      message: `Discovered ${sessionCount} Grok session(s).`,
+    },
+  };
+}
+
 export const grokAdapter: SessionAdapter = {
   id: "grok-session-folder",
   provider: "grok",
   displayName: "Grok session folder",
   stable: true,
   defaultRoot: () => homePath(".grok"),
-  read: async (options) => {
-    const root = options.roots?.grok ?? grokAdapter.defaultRoot();
-    if (root === undefined || !existsSync(root)) {
-      return {
-        sourceRoots: [],
-        sessions: [],
-        diagnostics: [
-          {
-            adapterId: grokAdapter.id,
-            provider: "grok",
-            status: "no_data_found",
-            parserConfidence: "observed",
-            message: "Grok root was not found.",
-            ...(root !== undefined ? { rootPath: root } : {}),
-          },
-        ],
-      };
-    }
-    const sessionsRoot = join(root, "sessions");
-    const files = collectFiles(
-      sessionsRoot,
-      (path) => path.endsWith("chat_history.jsonl"),
-      options.limit,
-      options.skip,
-    );
-    const rootRecord = sourceRoot("grok", grokAdapter.id, sessionsRoot, options.machine, options.now);
-    const sessions = files.map((chatPath) => {
-      const sessionDir = dirname(chatPath);
-      const sessionId = basename(sessionDir);
-      const projectKey = basename(dirname(sessionDir));
-      const projectPath = decodeProjectPath(projectKey);
-      const summary = readJsonFile(join(sessionDir, "summary.json"));
-      const chatLines = readJsonLines(chatPath);
-      const eventLines = readJsonLines(join(sessionDir, "events.jsonl"));
-      const updateLines = readJsonLines(join(sessionDir, "updates.jsonl"));
-      const hunkPath = join(sessionDir, "hunk_records.jsonl");
-      const toolCallsById = new Map<string, GrokToolCallDraft>();
-      const collectTool = (
-        sourcePath: string,
-        eventId: string,
-        record: Record<string, unknown>,
-      ) => {
-        const toolCall = grokToolCall(
-          options.machine.machineId,
-          sourcePath,
-          sessionId,
-          eventId,
-          record,
-        );
-        if (toolCall !== undefined) toolCallsById.set(toolCall.id, toolCall);
-        return toolCall?.id;
-      };
-      const events = [
-        ...chatLines.map(({ value, lineNumber }, index) => {
-          const record =
-            typeof value === "object" && value !== null
-              ? (value as Record<string, unknown>)
-              : {};
-          const type = typeof record.type === "string" ? record.type : "message";
-          const nativeEventId =
-            typeof record.id === "string" ? record.id : undefined;
-          const eventId = eventIdFor("grok", options.machine.machineId, chatPath, index, nativeEventId ?? lineNumber);
-          const toolCallId = collectTool(chatPath, eventId, record);
-          const content = grokContentProjection(record);
-          return {
-            id: eventId,
-            nativeEventId,
-            sequence: index,
-            role: roleFrom(typeof record.type === "string" ? record.type : undefined),
-            kind: grokKind(record),
-            contentText: compactText(content),
-            contentSource: content,
-            ...(toolCallId !== undefined ? { toolCallId } : {}),
-            rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: type },
-          };
-        }),
-        ...eventLines.map(({ value, lineNumber }, index) => {
-          const record =
-            typeof value === "object" && value !== null
-              ? (value as Record<string, unknown>)
-              : {};
-          const type = typeof record.type === "string" ? record.type : "event";
-          const eventPath = join(sessionDir, "events.jsonl");
-          const nativeEventId =
-            typeof record.id === "string" ? record.id : undefined;
-          const eventId = eventIdFor("grok", options.machine.machineId, eventPath, index, nativeEventId ?? lineNumber);
-          const toolCallId = collectTool(eventPath, eventId, record);
-          const content = grokContentProjection(record);
-          return {
-            id: eventId,
-            nativeEventId,
-            sequence: chatLines.length + index,
-            timestamp: grokTime(record),
-            role: "unknown" as const,
-            kind: grokKind(record),
-            contentText: compactText(content),
-            contentSource: content,
-            ...(toolCallId !== undefined ? { toolCallId } : {}),
-            rawReference: {
-              sourcePath: eventPath,
-              line: lineNumber,
-              nativeType: type,
-            },
-          };
-        }),
-        ...updateLines.map(({ value, lineNumber }, index) => {
-          const record = recordFrom(value);
-          const updatePath = join(sessionDir, "updates.jsonl");
-          const type =
-            typeof record.method === "string"
-              ? record.method
-              : typeof record.type === "string"
-                ? record.type
-                : "update";
-          const eventId = eventIdFor("grok", options.machine.machineId, updatePath, index, lineNumber);
-          const toolCallId = collectTool(updatePath, eventId, record);
-          const content = grokContentProjection(record);
-          return {
-            id: eventId,
-            sequence: chatLines.length + eventLines.length + index,
-            timestamp: grokTime(record),
-            role: "system" as const,
-            kind: grokKind(record),
-            contentText: compactText(content),
-            contentSource: content,
-            ...(toolCallId !== undefined ? { toolCallId } : {}),
-            rawReference: { sourcePath: updatePath, line: lineNumber, nativeType: type },
-          };
-        }),
-      ];
-      return buildSession({
-        provider: "grok",
-        agentName: "grok-build",
-        machine: options.machine,
-        nativeSessionId: sessionId,
-        nativeProjectKey: projectKey,
-        title:
-          typeof (summary as Record<string, unknown> | undefined)?.title === "string"
-            ? ((summary as Record<string, unknown>).title as string)
-            : undefined,
-        sourceRoot: sessionsRoot,
-        sourcePath: sessionDir,
-        projectPath,
-        events,
-        toolCalls: [...toolCallsById.values()],
-        artifacts: existsSync(hunkPath)
-          ? grokArtifacts(options.machine.machineId, sessionDir, sessionId, hunkPath)
-          : [],
-      });
-    });
-
-    return {
-      sourceRoots: [rootRecord],
-      sessions,
-      diagnostics: [
-        {
-          adapterId: grokAdapter.id,
-          provider: "grok",
-          status: sessions.length > 0 ? "available" : "no_data_found",
-          parserConfidence: "observed",
-          rootPath: sessionsRoot,
-          message: `Discovered ${sessions.length} Grok session(s).`,
-        },
-      ],
-    };
-  },
+  read: async (options) => collectAdapterStream(streamGrok(options)),
+  stream: streamGrok,
 };

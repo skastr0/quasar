@@ -16,6 +16,7 @@ import type {
   SourceUnit,
   UnitFingerprint,
 } from "../src/adapters/types";
+import type { NormalizedSession } from "../src/schemas";
 
 const machine = {
   machineId: "machine:test",
@@ -36,6 +37,24 @@ const recordItems = (items: readonly RecordStreamItem[]) =>
 
 const itemTypes = (items: readonly RecordStreamItem[]) =>
   items.map((item) => item.type);
+
+const idsFor = (items: readonly RecordStreamItem[]) =>
+  recordItems(items).flatMap((item) => {
+    const record = item.item.record as { readonly id?: string };
+    return typeof record.id === "string" ? [record.id] : [];
+  });
+
+const forbiddenKeysIn = (value: unknown): string[] => {
+  if (value === null || typeof value !== "object") return [];
+  if (Array.isArray(value)) return value.flatMap(forbiddenKeysIn);
+  return Object.entries(value as Record<string, unknown>).flatMap(([key, item]) => {
+    const nested = forbiddenKeysIn(item);
+    return /(?:^|_)(diff|patch|snapshot|ciphertext)(?:$|_)/i.test(key) ||
+      /encrypted[_-]?content/i.test(key)
+      ? [key, ...nested]
+      : nested;
+  });
+};
 
 const makeTempRoot = () => {
   const root = mkdtempSync(join(tmpdir(), "quasar-record-stream-"));
@@ -136,7 +155,11 @@ describe("adapter record streams", () => {
   });
 
   test("bridge skips records for unchanged source units", async () => {
-    const session = makeSession();
+    const session = {
+      provider: "codex",
+      sourceRoot: "/logical/codex",
+      sourcePath: "/logical/codex/rollout-test.jsonl",
+    } as NormalizedSession;
     const adapter: SessionAdapter = {
       id: "test-adapter",
       provider: "codex",
@@ -149,7 +172,17 @@ describe("adapter record streams", () => {
           type: "sourceRoot" as const,
           sourceRoot: sourceRoot("codex", "test-adapter", "/logical/codex", machine, now),
         };
-        yield { type: "session" as const, session };
+        yield {
+          type: "session" as const,
+          session,
+          sourceUnit: {
+            provider: "codex",
+            adapterId: "test-adapter",
+            rootPath: "/logical/codex",
+            sourcePath: "/logical/codex/rollout-test.jsonl",
+            physicalPath: "/physical/codex/rollout-test.jsonl",
+          },
+        };
       },
     };
 
@@ -163,20 +196,61 @@ describe("adapter record streams", () => {
 
     expect(itemTypes(items)).toEqual(["record", "unitStart", "unitEnd", "rootScanned"]);
     expect(recordItems(items).map((item) => item.item.type)).toEqual(["source_root"]);
+    expect(
+      items.find((item): item is Extract<RecordStreamItem, { readonly type: "unitStart" }> =>
+        item.type === "unitStart",
+      )?.unit.physicalPath,
+    ).toBe("/physical/codex/rollout-test.jsonl");
+  });
+
+  test("bridge fails closed when an adapter has no session stream", async () => {
+    const read = vi.fn(async () => ({ sourceRoots: [], sessions: [makeSession()], diagnostics: [] }));
+    const adapter: SessionAdapter = {
+      id: "test-adapter",
+      provider: "codex",
+      displayName: "Test adapter",
+      stable: true,
+      defaultRoot: () => undefined,
+      read,
+    };
+
+    const items = await collect(
+      recordStreamFor(adapter)({
+        machine,
+        now,
+      }),
+    );
+
+    expect(read).not.toHaveBeenCalled();
+    expect(items).toEqual([
+      {
+        type: "diagnostic",
+        diagnostic: {
+          adapterId: "test-adapter",
+          provider: "codex",
+          status: "unsupported",
+          message: "Adapter must expose a session stream before records can be streamed.",
+        },
+      },
+    ]);
   });
 
   test("Codex native streamRecords stats and skips unchanged files before opening", async () => {
     const root = makeTempRoot();
     const sessionsRoot = join(root, "sessions");
     mkdirSync(sessionsRoot, { recursive: true });
+    const skippedPath = join(sessionsRoot, "rollout-skipped.jsonl");
     writeFileSync(
-      join(sessionsRoot, "rollout-skipped.jsonl"),
+      skippedPath,
       JSON.stringify({ type: "session_meta", payload: { cwd: "/work/quasar" } }),
     );
     const createReadStream = vi.fn(() => undefined as never);
+    const actualFs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const statSync = vi.fn(actualFs.statSync);
     vi.doMock("node:fs", async () => ({
-      ...(await vi.importActual<typeof import("node:fs")>("node:fs")),
+      ...actualFs,
       createReadStream,
+      statSync,
     }));
     const { codexAdapter } = await import("../src/adapters/codex");
     const units: { unit: SourceUnit; fingerprint: UnitFingerprint }[] = [];
@@ -194,6 +268,7 @@ describe("adapter record streams", () => {
     );
 
     expect(createReadStream).not.toHaveBeenCalled();
+    expect(statSync.mock.calls.filter(([path]) => path === skippedPath)).toHaveLength(1);
     expect(itemTypes(items)).toContain("unitStart");
     expect(itemTypes(items)).toContain("unitEnd");
     expect(itemTypes(items)).toContain("rootScanned");
@@ -203,8 +278,8 @@ describe("adapter record streams", () => {
         unit: expect.objectContaining({
           provider: "codex",
           adapterId: "codex-local-jsonl",
-          sourcePath: join(root, "sessions", "rollout-skipped.jsonl"),
-          physicalPath: join(root, "sessions", "rollout-skipped.jsonl"),
+          sourcePath: skippedPath,
+          physicalPath: skippedPath,
         }),
         fingerprint: {
           size: expect.any(Number),
@@ -254,9 +329,58 @@ describe("adapter record streams", () => {
     expect(records.map((record) => record.type)).toContain("session");
     expect(records.map((record) => record.type)).toContain("event");
     expect(records.map((record) => record.type)).toContain("content_block");
+    expect(idsFor(items)).toEqual(idsFor(await collect(
+      codexAdapter.streamRecords!({
+        machine,
+        now,
+        roots: { codex: root },
+      }),
+    )));
+    expect(forbiddenKeysIn(records)).toEqual([]);
     expect(serialized).not.toContain(secret);
     expect(serialized).not.toContain("patch-secret");
     expect(serialized).not.toContain("cipher-secret");
     expect(serialized).not.toContain("encrypted_content");
+  });
+
+  test("Codex native streamRecords marks malformed JSON source units incomplete", async () => {
+    const root = makeTempRoot();
+    const sessionsRoot = join(root, "sessions");
+    mkdirSync(sessionsRoot, { recursive: true });
+    writeFileSync(
+      join(sessionsRoot, "rollout-broken.jsonl"),
+      [
+        JSON.stringify({ type: "session_meta", payload: { cwd: "/work/quasar" } }),
+        "{not-json",
+      ].join("\n"),
+    );
+    const { codexAdapter } = await import("../src/adapters/codex");
+
+    const items = await collect(
+      codexAdapter.streamRecords!({
+        machine,
+        now,
+        roots: { codex: root },
+      }),
+    );
+    const unitEnd = items.find(
+      (item): item is Extract<RecordStreamItem, { readonly type: "unitEnd" }> =>
+        item.type === "unitEnd",
+    );
+    const rootScanned = items.find(
+      (item): item is Extract<RecordStreamItem, { readonly type: "rootScanned" }> =>
+        item.type === "rootScanned",
+    );
+
+    expect(unitEnd?.complete).toBe(false);
+    expect(rootScanned?.complete).toBe(false);
+    expect(
+      items.some(
+        (item) =>
+          item.type === "diagnostic" &&
+          item.diagnostic.status === "error" &&
+          item.diagnostic.message.includes("could not be streamed completely"),
+      ),
+    ).toBe(true);
   });
 });

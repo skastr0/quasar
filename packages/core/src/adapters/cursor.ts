@@ -3,8 +3,8 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 
-import type { SessionAdapter } from "./types";
-import type { Artifact, NormalizedSession, ToolCall, UsageRecord } from "../schemas";
+import { collectAdapterStream, type AdapterStreamItem, type SessionAdapter } from "./types";
+import type { Artifact, ToolCall, UsageRecord } from "../schemas";
 import {
   bestEffortToolCall,
   contentFromRecord,
@@ -34,6 +34,7 @@ type CursorToolCallDraft = Omit<
   ToolCall,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
 >;
+type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
 type CursorUsageDraft = Omit<
   UsageRecord,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
@@ -369,52 +370,66 @@ const projectPathFromRecords = (records: readonly Record<string, unknown>[]) => 
   return undefined;
 };
 
+async function* streamCursor(options: AdapterOptions): AsyncGenerator<AdapterStreamItem> {
+  const root = options.roots?.cursor ?? cursorAdapter.defaultRoot();
+  if (root === undefined || !existsSync(root)) {
+    yield {
+      type: "diagnostic",
+      diagnostic: {
+        adapterId: cursorAdapter.id,
+        provider: "cursor",
+        status: "no_data_found",
+        parserConfidence: "brittle",
+        message: "Cursor User storage root was not found.",
+        ...(root !== undefined ? { rootPath: root } : {}),
+      },
+    };
+    return;
+  }
+  const files = statSync(root).isFile()
+    ? [root]
+    : collectFiles(root, cursorDbLike, options.limit, options.skip);
+  yield {
+    type: "sourceRoot",
+    sourceRoot: sourceRoot("cursor", cursorAdapter.id, root, options.machine, options.now),
+  };
+  let sessionCount = 0;
+  for (const path of files) {
+    const session = await buildCursorSession(path, root, options);
+    if (session === undefined) continue;
+    yield {
+      type: "session",
+      session,
+      sourceUnit: {
+        provider: "cursor",
+        adapterId: cursorAdapter.id,
+        rootPath: root,
+        sourcePath: session.sourcePath,
+        physicalPath: path,
+      },
+    };
+    sessionCount += 1;
+  }
+  yield {
+    type: "diagnostic",
+    diagnostic: {
+      adapterId: cursorAdapter.id,
+      provider: "cursor",
+      status: sessionCount > 0 ? "available" : "no_data_found",
+      parserConfidence: "brittle",
+      rootPath: root,
+      message: `Discovered ${sessionCount} Cursor SQLite session group(s).`,
+      details: { databasesScanned: files.length },
+    },
+  };
+}
+
 export const cursorAdapter: SessionAdapter = {
   id: "cursor-sqlite-copied",
   provider: "cursor",
   displayName: "Cursor copied SQLite storage",
   stable: true,
   defaultRoot: () => homePath("Library/Application Support/Cursor/User"),
-  read: async (options) => {
-    const root = options.roots?.cursor ?? cursorAdapter.defaultRoot();
-    if (root === undefined || !existsSync(root)) {
-      return {
-        sourceRoots: [],
-        sessions: [],
-        diagnostics: [
-          {
-            adapterId: cursorAdapter.id,
-            provider: "cursor",
-            status: "no_data_found",
-            parserConfidence: "brittle",
-            message: "Cursor User storage root was not found.",
-            ...(root !== undefined ? { rootPath: root } : {}),
-          },
-        ],
-      };
-    }
-    const files = statSync(root).isFile()
-      ? [root]
-      : collectFiles(root, cursorDbLike, options.limit, options.skip);
-    const sessions: NormalizedSession[] = [];
-    for (const path of files) {
-      const session = await buildCursorSession(path, root, options);
-      if (session !== undefined) sessions.push(session);
-    }
-    return {
-      sourceRoots: [sourceRoot("cursor", cursorAdapter.id, root, options.machine, options.now)],
-      sessions,
-      diagnostics: [
-        {
-          adapterId: cursorAdapter.id,
-          provider: "cursor",
-          status: sessions.length > 0 ? "available" : "no_data_found",
-          parserConfidence: "brittle",
-          rootPath: root,
-          message: `Discovered ${sessions.length} Cursor SQLite session group(s).`,
-          details: { databasesScanned: files.length },
-        },
-      ],
-    };
-  },
+  read: async (options) => collectAdapterStream(streamCursor(options)),
+  stream: streamCursor,
 };

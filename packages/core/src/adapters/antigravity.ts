@@ -1,7 +1,7 @@
 import { existsSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
-import type { SessionAdapter } from "./types";
+import { collectAdapterStream, type AdapterStreamItem, type SessionAdapter } from "./types";
 import type { Artifact, ToolCall, UsageRecord } from "../schemas";
 import {
   bestEffortEventRecordLike,
@@ -35,6 +35,7 @@ type AntigravityUsageDraft = Omit<
   UsageRecord,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
 >;
+type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
 type AntigravityArtifactDraft = Omit<
   Artifact,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
@@ -154,51 +155,67 @@ const projectPathFromLines = (records: readonly unknown[]) => {
   return undefined;
 };
 
+async function* streamAntigravity(options: AdapterOptions): AsyncGenerator<AdapterStreamItem> {
+  const root = options.roots?.antigravity ?? antigravityAdapter.defaultRoot();
+  if (root === undefined || !existsSync(root)) {
+    yield {
+      type: "diagnostic",
+      diagnostic: {
+        adapterId: antigravityAdapter.id,
+        provider: "antigravity",
+        status: "no_data_found",
+        parserConfidence: "brittle",
+        message: "Antigravity root was not found.",
+        ...(root !== undefined ? { rootPath: root } : {}),
+      },
+    };
+    return;
+  }
+  const files = statSync(root).isFile()
+    ? (transcriptLike(root) ? [root] : [])
+    : collectFiles(root, transcriptLike, options.limit, options.skip);
+  yield {
+    type: "sourceRoot",
+    sourceRoot: sourceRoot("antigravity", antigravityAdapter.id, root, options.machine, options.now),
+  };
+  let sessionCount = 0;
+  for (const path of files) {
+    if (!readJsonLines(path).some(({ value }) => bestEffortEventRecordLike(recordFrom(value)))) {
+      continue;
+    }
+    const session = buildAntigravitySession(path, root, options);
+    yield {
+      type: "session",
+      session,
+      sourceUnit: {
+        provider: "antigravity",
+        adapterId: antigravityAdapter.id,
+        rootPath: root,
+        sourcePath: session.sourcePath,
+        physicalPath: path,
+      },
+    };
+    sessionCount += 1;
+  }
+  yield {
+    type: "diagnostic",
+    diagnostic: {
+      adapterId: antigravityAdapter.id,
+      provider: "antigravity",
+      status: sessionCount > 0 ? "available" : "no_data_found",
+      parserConfidence: "brittle",
+      rootPath: root,
+      message: `Discovered ${sessionCount} Antigravity transcript(s).`,
+    },
+  };
+}
+
 export const antigravityAdapter: SessionAdapter = {
   id: "antigravity-local-transcripts",
   provider: "antigravity",
   displayName: "Antigravity local transcripts",
   stable: true,
   defaultRoot: () => process.env.ANTIGRAVITY_HOME ?? homePath(".gemini/antigravity"),
-  read: async (options) => {
-    const root = options.roots?.antigravity ?? antigravityAdapter.defaultRoot();
-    if (root === undefined || !existsSync(root)) {
-      return {
-        sourceRoots: [],
-        sessions: [],
-        diagnostics: [
-          {
-            adapterId: antigravityAdapter.id,
-            provider: "antigravity",
-            status: "no_data_found",
-            parserConfidence: "brittle",
-            message: "Antigravity root was not found.",
-            ...(root !== undefined ? { rootPath: root } : {}),
-          },
-        ],
-      };
-    }
-    const files = statSync(root).isFile()
-      ? (transcriptLike(root) ? [root] : [])
-      : collectFiles(root, transcriptLike, options.limit, options.skip);
-    const sessions = files.flatMap((path) =>
-      readJsonLines(path).some(({ value }) => bestEffortEventRecordLike(recordFrom(value)))
-        ? [buildAntigravitySession(path, root, options)]
-        : [],
-    );
-    return {
-      sourceRoots: [sourceRoot("antigravity", antigravityAdapter.id, root, options.machine, options.now)],
-      sessions,
-      diagnostics: [
-        {
-          adapterId: antigravityAdapter.id,
-          provider: "antigravity",
-          status: sessions.length > 0 ? "available" : "no_data_found",
-          parserConfidence: "brittle",
-          rootPath: root,
-          message: `Discovered ${sessions.length} Antigravity transcript(s).`,
-        },
-      ],
-    };
-  },
+  read: async (options) => collectAdapterStream(streamAntigravity(options)),
+  stream: streamAntigravity,
 };

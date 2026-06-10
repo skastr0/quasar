@@ -4,7 +4,7 @@ import {
   sessionToRecords,
   type IngestRecord,
 } from "../records";
-import type { SourceRoot } from "../schemas";
+import type { NormalizedSession, SourceRoot } from "../schemas";
 import type {
   AdapterStreamItem,
   RecordStreamItem,
@@ -40,65 +40,85 @@ const fileFingerprint = (path: string | undefined): UnitFingerprint => {
 
 const sourceUnitForSession = (
   adapter: SessionAdapter,
-  records: readonly IngestRecord[],
+  session: NormalizedSession,
+  sourceUnit: SourceUnit | undefined,
 ): SourceUnit | undefined => {
-  const session = records.find(
-    (record): record is Extract<IngestRecord, { readonly type: "session" }> =>
-      record.type === "session",
-  );
-  if (session === undefined) return undefined;
+  if (sourceUnit !== undefined) return sourceUnit;
   return {
-    provider: session.record.provider,
+    provider: session.provider,
     adapterId: adapter.id,
-    rootPath: session.record.sourceRoot,
-    sourcePath: session.record.sourcePath,
-    physicalPath: session.record.sourcePath,
+    rootPath: session.sourceRoot,
+    sourcePath: session.sourcePath,
+    physicalPath: session.sourcePath,
   };
 };
 
-async function* streamFromReadResult(
+const sourceUnitKey = (unit: SourceUnit) =>
+  `${unit.provider}\0${unit.adapterId}\0${unit.sourcePath}`;
+
+const diagnosticFromError = (
   adapter: SessionAdapter,
-  options: RecordStreamOptions,
-): AsyncGenerator<AdapterStreamItem> {
-  const result = await adapter.read(options);
-  for (const sourceRoot of result.sourceRoots) {
-    yield { type: "sourceRoot", sourceRoot };
-  }
-  for (const session of result.sessions) {
-    yield { type: "session", session };
-  }
-  for (const diagnostic of result.diagnostics) {
-    yield { type: "diagnostic", diagnostic };
-  }
-}
+  unit: SourceUnit,
+  message: string,
+  cause: unknown,
+) => ({
+  type: "diagnostic" as const,
+  diagnostic: {
+    adapterId: adapter.id,
+    provider: adapter.provider,
+    status: "error" as const,
+    parserConfidence: "observed" as const,
+    rootPath: unit.rootPath,
+    message,
+    details: { error: cause instanceof Error ? cause.message : String(cause) },
+  },
+});
 
 async function* bridgeRecordStream(
   adapter: SessionAdapter,
   options: RecordStreamOptions,
 ): AsyncGenerator<RecordStreamItem> {
-  const stream = adapter.stream?.(options) ?? streamFromReadResult(adapter, options);
+  if (adapter.stream === undefined) {
+    yield {
+      type: "diagnostic" as const,
+      diagnostic: {
+        adapterId: adapter.id,
+        provider: adapter.provider,
+        status: "unsupported" as const,
+        message: "Adapter must expose a session stream before records can be streamed.",
+      },
+    };
+    return;
+  }
+
+  const stream = adapter.stream(options);
   const roots = new Map<string, SourceRoot>();
   let activeUnit: SourceUnit | undefined;
   let activeFingerprint: UnitFingerprint | undefined;
-  let activeRecords: IngestRecord[] = [];
+  let activeShouldProcess = false;
+  let activeComplete = true;
 
   const flushUnit = async function* () {
     if (activeUnit === undefined || activeFingerprint === undefined) return;
-    yield { type: "unitStart" as const, unit: activeUnit, fingerprint: activeFingerprint };
-    const shouldProcess = await shouldProcessSourceUnit(
-      options,
-      activeUnit,
-      activeFingerprint,
-    );
-    if (shouldProcess) {
-      for (const record of activeRecords) {
-        yield { type: "record" as const, item: record };
-      }
-    }
-    yield { type: "unitEnd" as const, unit: activeUnit, complete: true };
+    yield { type: "unitEnd" as const, unit: activeUnit, complete: activeComplete };
     activeUnit = undefined;
     activeFingerprint = undefined;
-    activeRecords = [];
+    activeShouldProcess = false;
+    activeComplete = true;
+  };
+
+  const startUnit = async function* (unit: SourceUnit, fingerprint: UnitFingerprint) {
+    activeUnit = unit;
+    activeFingerprint = fingerprint;
+    activeShouldProcess = false;
+    activeComplete = true;
+    yield { type: "unitStart" as const, unit, fingerprint };
+    try {
+      activeShouldProcess = await shouldProcessSourceUnit(options, unit, fingerprint);
+    } catch (cause) {
+      activeComplete = false;
+      yield diagnosticFromError(adapter, unit, "Record stream source-unit predicate failed.", cause);
+    }
   };
 
   for await (const item of stream) {
@@ -112,25 +132,23 @@ async function* bridgeRecordStream(
       continue;
     }
 
-    const records = sessionToRecords(item.session);
-    const sourceUnit = sourceUnitForSession(adapter, records);
+    const sourceUnit = sourceUnitForSession(adapter, item.session, item.sourceUnit);
     if (sourceUnit === undefined) {
       continue;
     }
-    const key = `${sourceUnit.provider}\0${sourceUnit.adapterId}\0${sourceUnit.sourcePath}`;
-    const activeKey =
-      activeUnit === undefined
-        ? undefined
-        : `${activeUnit.provider}\0${activeUnit.adapterId}\0${activeUnit.sourcePath}`;
+    const key = sourceUnitKey(sourceUnit);
+    const activeKey = activeUnit === undefined ? undefined : sourceUnitKey(activeUnit);
     if (activeUnit !== undefined && key !== activeKey) {
       yield* flushUnit();
     }
     if (activeUnit === undefined) {
-      activeUnit = sourceUnit;
-      activeFingerprint = fileFingerprint(sourceUnit.physicalPath);
-      activeRecords = [];
+      yield* startUnit(sourceUnit, item.fingerprint ?? fileFingerprint(sourceUnit.physicalPath));
     }
-    activeRecords.push(...records);
+    if (activeShouldProcess) {
+      for (const record of sessionToRecords(item.session)) {
+        yield { type: "record" as const, item: record };
+      }
+    }
   }
 
   yield* flushUnit();

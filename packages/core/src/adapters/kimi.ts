@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
-import type { SessionAdapter } from "./types";
+import { collectAdapterStream, type AdapterStreamItem, type SessionAdapter } from "./types";
 import type { Artifact, SessionEdge, ToolCall, UsageRecord } from "../schemas";
 import {
   bestEffortToolCall,
@@ -34,6 +34,7 @@ type KimiUsageDraft = Omit<
   UsageRecord,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
 >;
+type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
 type KimiEdgeDraft = Omit<
   SessionEdge,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
@@ -184,51 +185,68 @@ const buildKimiSession = (
   });
 };
 
+async function* streamKimi(options: AdapterOptions): AsyncGenerator<AdapterStreamItem> {
+  const root = options.roots?.kimi ?? kimiAdapter.defaultRoot();
+  if (root === undefined || !existsSync(root)) {
+    yield {
+      type: "diagnostic",
+      diagnostic: {
+        adapterId: kimiAdapter.id,
+        provider: "kimi",
+        status: "no_data_found",
+        parserConfidence: "brittle",
+        message: "Kimi root was not found.",
+        ...(root !== undefined ? { rootPath: root } : {}),
+      },
+    };
+    return;
+  }
+  const indexById = indexEntries(root);
+  const wireFiles = collectFiles(
+    root,
+    (path) => path.endsWith("wire.jsonl"),
+    options.limit,
+    options.skip,
+  );
+  yield {
+    type: "sourceRoot",
+    sourceRoot: sourceRoot("kimi", kimiAdapter.id, root, options.machine, options.now),
+  };
+  let sessionCount = 0;
+  for (const path of wireFiles) {
+    const session = buildKimiSession(path, root, options, indexById);
+    yield {
+      type: "session",
+      session,
+      sourceUnit: {
+        provider: "kimi",
+        adapterId: kimiAdapter.id,
+        rootPath: root,
+        sourcePath: session.sourcePath,
+        physicalPath: path,
+      },
+    };
+    sessionCount += 1;
+  }
+  yield {
+    type: "diagnostic",
+    diagnostic: {
+      adapterId: kimiAdapter.id,
+      provider: "kimi",
+      status: sessionCount > 0 ? "available" : "no_data_found",
+      parserConfidence: "brittle",
+      rootPath: root,
+      message: `Discovered ${sessionCount} Kimi session(s).`,
+    },
+  };
+}
+
 export const kimiAdapter: SessionAdapter = {
   id: "kimi-local-wire",
   provider: "kimi",
   displayName: "Kimi Code local wire logs",
   stable: true,
   defaultRoot: () => process.env.KIMI_CODE_HOME ?? homePath(".kimi-code"),
-  read: async (options) => {
-    const root = options.roots?.kimi ?? kimiAdapter.defaultRoot();
-    if (root === undefined || !existsSync(root)) {
-      return {
-        sourceRoots: [],
-        sessions: [],
-        diagnostics: [
-          {
-            adapterId: kimiAdapter.id,
-            provider: "kimi",
-            status: "no_data_found",
-            parserConfidence: "brittle",
-            message: "Kimi root was not found.",
-            ...(root !== undefined ? { rootPath: root } : {}),
-          },
-        ],
-      };
-    }
-    const indexById = indexEntries(root);
-    const wireFiles = collectFiles(
-      root,
-      (path) => path.endsWith("wire.jsonl"),
-      options.limit,
-      options.skip,
-    );
-    const sessions = wireFiles.map((path) => buildKimiSession(path, root, options, indexById));
-    return {
-      sourceRoots: [sourceRoot("kimi", kimiAdapter.id, root, options.machine, options.now)],
-      sessions,
-      diagnostics: [
-        {
-          adapterId: kimiAdapter.id,
-          provider: "kimi",
-          status: sessions.length > 0 ? "available" : "no_data_found",
-          parserConfidence: "brittle",
-          rootPath: root,
-          message: `Discovered ${sessions.length} Kimi session(s).`,
-        },
-      ],
-    };
-  },
+  read: async (options) => collectAdapterStream(streamKimi(options)),
+  stream: streamKimi,
 };
