@@ -228,6 +228,43 @@ describe("record envelope ingest", () => {
     ]);
   });
 
+  test("materializes derivable content block text in chronological views", async () => {
+    const t = testBackend();
+    const { text: _text, ...contentBlockWithoutText } = {
+      ...contentBlockRecord,
+      id: "block:derivable",
+      text: eventRecord.contentText,
+      metadata: { nativeType: "message" },
+    };
+
+    await t.mutation(async (ctx) =>
+      await apply(
+        ctx as MutationCtx,
+        envelope([
+          { type: "session", record: { ...sessionRecord, eventCount: 1, contentBlockCount: 1 } },
+          { type: "event", record: eventRecord },
+          { type: "content_block", record: contentBlockWithoutText },
+        ]),
+      ),
+    );
+
+    const state = await t.query(async (ctx) => ({
+      storedBlocks: await ctx.db.query("contentBlocks").collect(),
+      session: await readSessionHandler(ctx, { sessionId: sessionRecord.id }),
+    }));
+
+    expect(state.storedBlocks[0]?.text).toBeUndefined();
+    expect(state.session?.views.chronological[0]?.contentBlocks).toEqual([
+      expect.objectContaining({
+        blockId: "block:derivable",
+        eventId: eventRecord.id,
+        kind: "text",
+        text: eventRecord.contentText,
+        metadataHash: expect.stringMatching(/^hash:/),
+      }),
+    ]);
+  });
+
   test("embeds assistant message events under the narrative policy", async () => {
     const t = testBackend();
     const assistantEvent = {
