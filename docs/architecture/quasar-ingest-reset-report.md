@@ -763,4 +763,3 @@ It is a split architecture:
 This is not a best-of-a-poor-fit compromise. It is the architecture implied by
 the physical location of the data, the product's search needs, and Convex's
 execution model.
-

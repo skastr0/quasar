@@ -5,16 +5,6 @@ import { executeJsonCommand } from "../output";
 
 const schemas = [
   {
-    schema_id: "quasar.ingest.options/v1",
-    command: "ingest validate|plan|run",
-    description: "Controls adapter selection, limits, roots, and dry-run behavior.",
-    example: {
-      providers: ["codex"],
-      limit: 5,
-      roots: { codex: "/Users/me/.codex" },
-    },
-  },
-  {
     schema_id: "quasar.search.request/v1",
     command: "search text|semantic|fusion",
     description: "Search query and optional filters.",

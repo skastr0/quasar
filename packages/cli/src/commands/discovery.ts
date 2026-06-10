@@ -13,7 +13,7 @@ const commandCapabilities = [
   "examples list|show",
   "sources discover",
   "projects list|alias",
-  "ingest validate|plan|run|inspect|wait|events",
+  "ingest",
   "search text|semantic|fusion",
   "sessions list|read",
   "tool-calls list|read",

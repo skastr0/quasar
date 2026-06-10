@@ -11,4 +11,4 @@ export const ingestCommand = Command.make("ingest", {}, () =>
       status: "not_ready",
     }),
   ),
-).pipe(Command.withDescription("Stream provider rows into Quasar."));
+).pipe(Command.withDescription("Stream provider records into Quasar."));
