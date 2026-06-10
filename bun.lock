@@ -15,7 +15,6 @@
       "version": "0.1.0",
       "dependencies": {
         "@ai-sdk/google": "^3.0.75",
-        "@convex-dev/migrations": "^0.3.4",
         "@convex-dev/rag": "^0.7.4",
         "@convex-dev/workpool": "^0.4.7",
         "@skastr0/quasar-core": "workspace:*",
@@ -82,8 +81,6 @@
     "@ai-sdk/provider": ["@ai-sdk/provider@3.0.10", "", { "dependencies": { "json-schema": "^0.4.0" } }, "sha512-Q3BZ27qfpYqnCYGvE3vt+Qi6LGOF9R5Nmzn+9JoM1lCRsD9mYaIhfJLkSunN48nfGXJ6n+XNV0J/XVpqGQl7Dw=="],
 
     "@ai-sdk/provider-utils": ["@ai-sdk/provider-utils@4.0.27", "", { "dependencies": { "@ai-sdk/provider": "3.0.10", "@standard-schema/spec": "^1.1.0", "eventsource-parser": "^3.0.8" }, "peerDependencies": { "zod": "^3.25.76 || ^4.1.8" } }, "sha512-ubkAJ+xODouwtmN1tYlvTPphH1hPOBfZaEQe8U7skGvFAnIRs9PPpsq57bC2+Ky/MB4yzhd6YOsxTAx9sGpazw=="],
-
-    "@convex-dev/migrations": ["@convex-dev/migrations@0.3.5", "", { "peerDependencies": { "convex": "^1.35.0", "convex-helpers": "^0.1.115" } }, "sha512-vj5qjY5XB8laX9WvvxeIFZe8sNW8DGvJ5cPo1zvpjJzYnPLqs5C+VG9HP6sSkEW2QGhsfYOZv56FUNkHiLe1wA=="],
 
     "@convex-dev/rag": ["@convex-dev/rag@0.7.5", "", { "dependencies": { "@convex-dev/workpool": "^0.4.3 || ^0.4.7-alpha", "ai": "^6.0.0" }, "peerDependencies": { "convex": "^1.24.8", "convex-helpers": "^0.1.94" } }, "sha512-u48NNcYdnBpGaAYq9GAbqEsCgFlKbaTj3Fc3cA+mNFis1flpy3Zz4eP2XdDavuyf/cNYE1dbxbnU20OcTvekOA=="],
 

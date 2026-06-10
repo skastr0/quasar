@@ -6,47 +6,6 @@ export type ProjectSummary = {
   sessionCount: number;
 };
 
-export type ImportRunSummary = {
-  importRunId: string;
-  status: string;
-  sessionCount: number;
-  eventCount: number;
-  toolCallCount?: number;
-  contentBlockCount?: number;
-  sessionEdgeCount?: number;
-  usageRecordCount?: number;
-  artifactCount?: number;
-  createdAt: number;
-};
-
-export type ImportJobSummary = {
-  job: {
-    importJobId: string;
-    status: string;
-    sourceRootCount: number;
-    sessionCount: number;
-    eventCount: number;
-    toolCallCount: number;
-    chunkCount: number;
-    expectedChunkCount?: number;
-    uploadedChunkCount?: number;
-    succeededChunkCount: number;
-    failedChunkCount: number;
-    createdAt: number;
-    updatedAt: number;
-    completedAt?: number;
-  };
-  readiness: {
-    total: number;
-    pending: number;
-    syncing: number;
-    ready: number;
-    skipped: number;
-    failed: number;
-    deadLetter?: number;
-  };
-};
-
 export type SessionSummary = {
   id: string;
   nativeSessionId?: string;
@@ -57,8 +16,6 @@ export type SessionSummary = {
   projectIdentityKey: string;
   eventCount: number;
   updatedAt: number;
-  ingestState?: string;
-  importJobId?: string;
 };
 
 export type ListEnvelope<T> = {
@@ -81,32 +38,11 @@ export type SessionBrowseFilters = {
 
 export type DashboardData = {
   projects: ProjectSummary[];
-  importRuns: ImportRunSummary[];
-  importJobs: ImportJobSummary[];
   sessions: SessionSummary[];
   searchDiagnostics: {
     embeddingsConfigured: boolean;
   };
 };
-
-export type ImportJobDetail = {
-  job: ImportJobSummary["job"];
-  chunks: Array<{
-    chunkId: string;
-    sequence: number;
-    status: string;
-    attempts: number;
-    eventCount: number;
-    error?: string;
-  }>;
-  failures: Array<{ failureId: string; chunkId?: string; error: string; retryable: boolean }>;
-  readiness: ImportJobSummary["readiness"];
-  pagination?: {
-    chunks?: PageInfo;
-    failures?: PageInfo;
-  };
-};
-
 export type SessionDetail = {
   session: {
     sessionId: string;

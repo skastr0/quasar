@@ -4,8 +4,6 @@ export const dynamic = "force-dynamic";
 
 const emptyDashboard: DashboardData = {
   projects: [],
-  importRuns: [],
-  importJobs: [],
   sessions: [],
   searchDiagnostics: {
     embeddingsConfigured: false,

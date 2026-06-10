@@ -11,7 +11,6 @@ import {
   ConnectionControls,
   DashboardHeader,
   BrowseFiltersPanel,
-  ImportsPanel,
   ProjectAliasPanel,
   ProjectsPanel,
   RecentSessionsPanel,
@@ -22,7 +21,6 @@ import {
 import { DashboardStyles } from "./quasar-dashboard-styles";
 import type {
   DashboardData,
-  ImportJobDetail,
   ListEnvelope,
   SearchMode,
   SessionBrowseFilters,
@@ -39,8 +37,6 @@ type SessionDetailPage =
   | "toolCalls"
   | "usageRecords"
   | "artifacts";
-type ImportJobDetailPage = "chunks" | "failures";
-
 const useConnectionSettings = () => {
   const [apiBase, setApiBase] = useState(defaultApiBase);
   const [token, setToken] = useState("");
@@ -79,7 +75,6 @@ export function Dashboard({ initial }: { initial: DashboardData }) {
   const [error, setError] = useState<string | null>(null);
   const [selectedSession, setSelectedSession] = useState<SessionDetail | null>(null);
   const [sessionCursor, setSessionCursor] = useState<string>("");
-  const [selectedJob, setSelectedJob] = useState<ImportJobDetail | null>(null);
   const [sessionBusy, setSessionBusy] = useState(false);
   const [sourceAlias, setSourceAlias] = useState("");
   const [targetAlias, setTargetAlias] = useState("");
@@ -92,17 +87,13 @@ export function Dashboard({ initial }: { initial: DashboardData }) {
     setBusy(true);
     setError(null);
     try {
-      const [projectsPage, importRuns, importJobs, sessionsPage, health] = await Promise.all([
+      const [projectsPage, sessionsPage, health] = await Promise.all([
         client.fetchJson<ListEnvelope<DashboardData["projects"][number]>>("/api/projects?limit=100"),
-        client.fetchJson<DashboardData["importRuns"]>("/api/import-runs"),
-        client.fetchJson<DashboardData["importJobs"]>("/api/ingest/jobs?limit=12"),
         client.fetchJson<ListEnvelope<SessionSummary>>(sessionsPath(filters, "")),
         client.fetchJson<{ embeddingsConfigured?: boolean }>("/api/health"),
       ]);
       setData({
         projects: projectsPage.items,
-        importRuns,
-        importJobs,
         sessions: sessionsPage.items,
         searchDiagnostics: {
           embeddingsConfigured: Boolean(health.embeddingsConfigured),
@@ -187,27 +178,6 @@ export function Dashboard({ initial }: { initial: DashboardData }) {
     }
   };
 
-  const readImportJob = async (
-    importJobId: string,
-    page?: ImportJobDetailPage,
-  ) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const current = selectedJob?.job.importJobId === importJobId ? selectedJob : null;
-      const job = await client.fetchJson<ImportJobDetail>(
-        importJobPath(importJobId, current, page),
-      );
-      setSelectedJob(
-        current === null || page === undefined ? job : mergeImportJobDetail(current, job, page),
-      );
-    } catch (jobError) {
-      setError(jobError instanceof Error ? jobError.message : String(jobError));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const aliasProject = async () => {
     setError(null);
     try {
@@ -234,11 +204,6 @@ export function Dashboard({ initial }: { initial: DashboardData }) {
     void readSession(selectedSession.session.sessionId, page);
   };
 
-  const loadImportJobPage = (page: ImportJobDetailPage) => {
-    if (selectedJob === null) return;
-    void readImportJob(selectedJob.job.importJobId, page);
-  };
-
   return (
     <main className="shell">
       <DashboardTop
@@ -261,7 +226,6 @@ export function Dashboard({ initial }: { initial: DashboardData }) {
         results={results}
         filters={filters}
         selectedSession={selectedSession}
-        selectedJob={selectedJob}
         sessionCursor={sessionCursor}
         busy={busy}
         sessionBusy={sessionBusy}
@@ -272,15 +236,12 @@ export function Dashboard({ initial }: { initial: DashboardData }) {
         onReadSession={readSession}
         onFiltersChange={updateFilters}
         onLoadMoreSessions={() => void loadSessions(filters, sessionCursor)}
-        onReadImportJob={readImportJob}
         onLoadSessionEvents={() => loadSessionPage("events")}
         onLoadSessionContentBlocks={() => loadSessionPage("contentBlocks")}
         onLoadSessionEdges={() => loadSessionPage("sessionEdges")}
         onLoadSessionToolCalls={() => loadSessionPage("toolCalls")}
         onLoadSessionUsage={() => loadSessionPage("usageRecords")}
         onLoadSessionArtifacts={() => loadSessionPage("artifacts")}
-        onLoadJobChunks={() => loadImportJobPage("chunks")}
-        onLoadJobFailures={() => loadImportJobPage("failures")}
         onSourceAliasChange={setSourceAlias}
         onTargetAliasChange={setTargetAlias}
         onAliasReasonChange={setAliasReason}
@@ -310,12 +271,6 @@ const sessionCursorParams: Record<SessionDetailPage, string> = {
   usageRecords: "usageCursor",
   artifacts: "artifactCursor",
 };
-
-const importJobCursorParams: Record<ImportJobDetailPage, string> = {
-  chunks: "chunkCursor",
-  failures: "failureCursor",
-};
-
 const sessionDetailPath = (
   sessionId: string,
   current: SessionDetail | null,
@@ -326,18 +281,6 @@ const sessionDetailPath = (
   if (page !== undefined && cursor !== "") params.set(sessionCursorParams[page], cursor);
   return `/api/sessions/read?${params.toString()}`;
 };
-
-const importJobPath = (
-  importJobId: string,
-  current: ImportJobDetail | null,
-  page?: ImportJobDetailPage,
-) => {
-  const params = new URLSearchParams({ importJobId, limit: "50" });
-  const cursor = page === undefined ? "" : (current?.pagination?.[page]?.continueCursor ?? "");
-  if (page !== undefined && cursor !== "") params.set(importJobCursorParams[page], cursor);
-  return `/api/ingest/jobs?${params.toString()}`;
-};
-
 const mergeSessionDetail = (
   current: SessionDetail,
   next: SessionDetail,
@@ -363,18 +306,6 @@ const mergeSessionDetail = (
   views: current.views,
   pagination: mergeSessionPagination(current.pagination, next.pagination, page),
 });
-
-const mergeImportJobDetail = (
-  current: ImportJobDetail,
-  next: ImportJobDetail,
-  page: ImportJobDetailPage,
-): ImportJobDetail => ({
-  ...next,
-  chunks: page === "chunks" ? [...current.chunks, ...next.chunks] : current.chunks,
-  failures: page === "failures" ? [...current.failures, ...next.failures] : current.failures,
-  pagination: mergeImportJobPagination(current.pagination, next.pagination, page),
-});
-
 const mergeSessionPagination = (
   current: SessionDetail["pagination"],
   next: SessionDetail["pagination"],
@@ -383,16 +314,6 @@ const mergeSessionPagination = (
   ...current,
   [page]: next?.[page] ?? current?.[page],
 });
-
-const mergeImportJobPagination = (
-  current: ImportJobDetail["pagination"],
-  next: ImportJobDetail["pagination"],
-  page: ImportJobDetailPage,
-): ImportJobDetail["pagination"] => ({
-  ...current,
-  [page]: next?.[page] ?? current?.[page],
-});
-
 function appendOptional<T>(left: T[] | undefined, right: T[] | undefined) {
   const merged = [...(left ?? []), ...(right ?? [])];
   return merged.length === 0 && left === undefined && right === undefined ? undefined : merged;
@@ -444,7 +365,6 @@ type DashboardPanelsProps = {
   results: unknown;
   filters: SessionBrowseFilters;
   selectedSession: SessionDetail | null;
-  selectedJob: ImportJobDetail | null;
   sessionCursor: string;
   busy: boolean;
   sessionBusy: boolean;
@@ -453,7 +373,6 @@ type DashboardPanelsProps = {
   aliasReason: string;
   aliasResult: unknown;
   onReadSession: (sessionId: string, page?: SessionDetailPage) => void;
-  onReadImportJob: (importJobId: string, page?: ImportJobDetailPage) => void;
   onLoadMoreSessions: () => void;
   onLoadSessionEvents: () => void;
   onLoadSessionContentBlocks: () => void;
@@ -461,8 +380,6 @@ type DashboardPanelsProps = {
   onLoadSessionToolCalls: () => void;
   onLoadSessionUsage: () => void;
   onLoadSessionArtifacts: () => void;
-  onLoadJobChunks: () => void;
-  onLoadJobFailures: () => void;
   onFiltersChange: (filters: SessionBrowseFilters) => void;
   onSourceAliasChange: (value: string) => void;
   onTargetAliasChange: (value: string) => void;
@@ -471,9 +388,6 @@ type DashboardPanelsProps = {
 };
 
 function DashboardPanels(props: DashboardPanelsProps) {
-  const recentRuns = [...props.data.importRuns]
-    .sort((left, right) => right.createdAt - left.createdAt)
-    .slice(0, 6);
   const filteredSessions = props.data.sessions
     .filter((session) =>
       props.filters.projectIdentityKey === ""
@@ -512,15 +426,6 @@ function DashboardPanels(props: DashboardPanelsProps) {
         onAliasProject={props.onAliasProject}
       />
       <ProjectsPanel projects={props.data.projects} />
-      <ImportsPanel
-        jobs={props.data.importJobs}
-        runs={recentRuns}
-        selectedJob={props.selectedJob}
-        busy={props.busy}
-        onSelectJob={props.onReadImportJob}
-        onLoadChunks={props.onLoadJobChunks}
-        onLoadFailures={props.onLoadJobFailures}
-      />
       <RecentSessionsPanel
         sessions={filteredSessions}
         sessionBusy={props.sessionBusy}

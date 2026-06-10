@@ -20,13 +20,6 @@ export function quasarConvexLocalRoot() {
   );
 }
 
-export function quasarConvexBackupRoot() {
-  return resolve(
-    process.env.QUASAR_BACKUP_ROOT ??
-      join(quasarStateRoot(), "backups", "convex"),
-  );
-}
-
 export function quasarTailscaleHost() {
   const host = process.env.QUASAR_TAILSCALE_HOST?.trim();
   if (host !== undefined && host.length > 0) return host;

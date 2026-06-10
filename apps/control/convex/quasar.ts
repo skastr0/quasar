@@ -13,29 +13,10 @@ import {
   updateEmbeddingReadinessAggregates,
 } from "./quasarEmbeddingReadiness";
 import {
-  cancelImportJobHandler,
-  cleanupCancelledImportJobHandler,
-  claimImportChunkHandler,
-  claimImportJobWorkerHandler,
-  enqueueImportChunkHandler,
-  listImportJobsHandler,
-  markImportChunkFailedHandler,
-  markImportChunkSucceededHandler,
-  processImportJobChunksHandler,
-  readImportJobHandler,
-  releaseImportJobWorkerHandler,
-  scheduleImportWorkerMutationHandler,
-  startImportJobHandler,
-  submitImportChunkHandler,
-  submitImportChunksHandler,
-} from "./quasarIngestJobs";
-import { ingestBatchHandler } from "./quasarIngestSessions";
-import {
   aliasProjectHandler,
   listProjectsHandler,
 } from "./quasarProjectHandlers";
 import {
-  listImportRunsHandler,
   listSessionsHandler,
   listToolCallsHandler,
   readSessionHandler,
@@ -72,112 +53,6 @@ const embeddingOutboxStatus = v.union(
   v.literal("dead_letter"),
 );
 
-export const ingestBatchInternal = internalMutation({
-  args: {
-    batch: v.any(),
-    importJobId: v.optional(v.string()),
-    importChunkId: v.optional(v.string()),
-    leaseToken: v.optional(v.string()),
-  },
-  handler: ingestBatchHandler,
-});
-
-export const startImportJobInternal = internalMutation({
-  args: { input: v.any() },
-  handler: startImportJobHandler,
-});
-
-export const submitImportChunkInternal = internalAction({
-  args: { input: v.any() },
-  handler: submitImportChunkHandler,
-});
-
-export const submitImportChunksInternal = internalAction({
-  args: { input: v.any() },
-  handler: submitImportChunksHandler,
-});
-
-export const enqueueImportChunkInternal = internalMutation({
-  args: { input: v.any(), scheduleWorker: v.optional(v.boolean()) },
-  handler: enqueueImportChunkHandler,
-});
-
-export const scheduleImportWorkerInternal = internalMutation({
-  args: { importJobId: v.string(), delayMs: v.optional(v.number()) },
-  handler: scheduleImportWorkerMutationHandler,
-});
-
-export const cancelImportJobInternal = internalMutation({
-  args: { importJobId: v.string(), reason: v.optional(v.string()) },
-  handler: cancelImportJobHandler,
-});
-
-export const cleanupCancelledImportJobInternal = internalMutation({
-  args: { importJobId: v.string() },
-  handler: cleanupCancelledImportJobHandler,
-});
-
-export const processImportJobChunksInternal = internalAction({
-  args: {
-    importJobId: v.optional(v.string()),
-    limit: v.optional(v.number()),
-  },
-  handler: processImportJobChunksHandler,
-});
-
-export const claimImportJobWorkerInternal = internalMutation({
-  args: {
-    importJobId: v.optional(v.string()),
-    now: v.number(),
-  },
-  handler: claimImportJobWorkerHandler,
-});
-
-export const releaseImportJobWorkerInternal = internalMutation({
-  args: {
-    importJobId: v.optional(v.string()),
-    leaseToken: v.string(),
-  },
-  handler: releaseImportJobWorkerHandler,
-});
-
-export const claimImportChunkInternal = internalMutation({
-  args: {
-    importJobId: v.optional(v.string()),
-    now: v.number(),
-  },
-  handler: claimImportChunkHandler,
-});
-
-export const markImportChunkSucceededInternal = internalMutation({
-  args: {
-    importJobId: v.string(),
-    chunkId: v.string(),
-    leaseToken: v.string(),
-  },
-  handler: markImportChunkSucceededHandler,
-});
-
-export const markImportChunkFailedInternal = internalMutation({
-  args: {
-    importJobId: v.string(),
-    chunkId: v.string(),
-    leaseToken: v.string(),
-    error: v.string(),
-  },
-  handler: markImportChunkFailedHandler,
-});
-
-export const readImportJobInternal = internalQuery({
-  args: { input: v.any() },
-  handler: readImportJobHandler,
-});
-
-export const listImportJobsInternal = internalQuery({
-  args: { limit: v.optional(v.number()) },
-  handler: listImportJobsHandler,
-});
-
 export const aliasProjectInternal = internalMutation({
   args: {
     sourceProjectIdentityKey: v.string(),
@@ -193,11 +68,6 @@ export const listProjectsInternal = internalQuery({
     limit: v.optional(v.number()),
   },
   handler: listProjectsHandler,
-});
-
-export const listImportRunsInternal = internalQuery({
-  args: {},
-  handler: listImportRunsHandler,
 });
 
 export const listSessionsInternal = internalQuery({
@@ -638,7 +508,6 @@ export const putEmbeddingCacheInternal = internalMutation({
 
 export const embeddingReadinessInternal = internalQuery({
   args: {
-    importJobId: v.optional(v.string()),
     projectIdentityKey: v.optional(v.string()),
     machineId: v.optional(v.string()),
     provider: v.optional(provider),

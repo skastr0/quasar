@@ -17,7 +17,6 @@ export type EmbeddingReadinessCounts = {
 };
 
 type ReadinessDoc = {
-  readonly importJobId?: string;
   readonly canonicalProjectIdentityKey: string;
   readonly machineId?: string;
   readonly provider?: ProviderSchema;
@@ -62,7 +61,7 @@ export const updateEmbeddingReadinessAggregates = async (
 
 export const embeddingReadinessForSearchFilters = async (
   ctx: QueryCtx,
-  args: Partial<SearchArgs> & { importJobId?: string },
+  args: Partial<SearchArgs>,
 ): Promise<EmbeddingReadinessCounts> => {
   if (args.from !== undefined || args.to !== undefined) {
     return documentReadinessForDateRange(ctx, args);
@@ -70,7 +69,6 @@ export const embeddingReadinessForSearchFilters = async (
   const rows = await readinessRows(ctx, args);
   return readinessCounts(
     rows.filter((row) =>
-      (args.importJobId === undefined || row.importJobId === args.importJobId) &&
       (args.projectIdentityKey === undefined ||
         row.canonicalProjectIdentityKey === args.projectIdentityKey) &&
       (args.machineId === undefined || row.machineId === args.machineId) &&
@@ -101,14 +99,8 @@ export const readinessCounts = (
 
 const readinessRows = async (
   ctx: QueryCtx,
-  args: Partial<SearchArgs> & { importJobId?: string },
+  args: Partial<SearchArgs>,
 ): Promise<ReadinessAggregateRow[]> => {
-  if (args.importJobId !== undefined) {
-    return await ctx.db
-      .query("embeddingReadiness")
-      .withIndex("by_job", (q) => q.eq("importJobId", args.importJobId))
-      .take(READINESS_TAKE_LIMIT);
-  }
   if (args.projectIdentityKey !== undefined) {
     return await ctx.db
       .query("embeddingReadiness")
@@ -137,7 +129,7 @@ const readinessRows = async (
 
 const documentReadinessForDateRange = async (
   ctx: QueryCtx,
-  args: Partial<SearchArgs> & { importJobId?: string },
+  args: Partial<SearchArgs>,
 ) => {
   const fromMs = dateBound(args.from);
   const toMs = dateBound(args.to);
@@ -148,7 +140,6 @@ const documentReadinessForDateRange = async (
   return readinessCounts(
     rows
       .filter((row) =>
-        (args.importJobId === undefined || row.importJobId === args.importJobId) &&
         (args.projectIdentityKey === undefined ||
           row.canonicalProjectIdentityKey === args.projectIdentityKey) &&
         (args.machineId === undefined || row.machineId === args.machineId) &&
@@ -253,7 +244,6 @@ const addToAggregate = async (
     if (documentCount === 0) return;
     await ctx.db.insert("embeddingReadiness", {
       aggregateKey: key,
-      importJobId: doc.importJobId,
       canonicalProjectIdentityKey: doc.canonicalProjectIdentityKey,
       machineId: doc.machineId,
       provider: doc.provider,
@@ -274,7 +264,6 @@ const addToAggregate = async (
 const aggregateKeyFor = (doc: ReadinessDoc) => {
   if (doc.ragSyncState === undefined) return undefined;
   return [
-    doc.importJobId ?? "no-job",
     doc.canonicalProjectIdentityKey,
     doc.machineId ?? "all-machines",
     doc.provider ?? "unknown",
