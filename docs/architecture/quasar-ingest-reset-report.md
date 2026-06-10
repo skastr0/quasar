@@ -34,7 +34,7 @@ foundation:
 - Convex search, read, RAG, embedding readiness, and dashboard surfaces remain
   useful.
 - The writer between those halves is intentionally missing.
-- The `ingest` CLI command is now only a `row_stream / not_ready` placeholder.
+- The `ingest` CLI command is now only a `record_stream / not_ready` placeholder.
 
 The replacement architecture should be:
 
@@ -86,7 +86,7 @@ The current active ingest command is deliberately inert:
 
 ```ts
 {
-  mode: "row_stream",
+  mode: "record_stream",
   status: "not_ready"
 }
 ```
@@ -95,7 +95,7 @@ The public HTTP capabilities now report that row streaming is not implemented:
 
 ```ts
 ingestion: {
-  rowStream: false,
+  recordStream: false,
   nativeHistoryWrites: false,
 }
 ```
@@ -462,9 +462,9 @@ The reset is clean, but the system is not yet useful for new ingest.
 Current limitations:
 
 - `quasar ingest` is a placeholder.
-- The server reports `rowStream: false`.
+- The server reports `recordStream: false`.
 - There is no CLI SQLite ledger yet.
-- There is no row-write HTTP endpoint yet.
+- There is no record-write HTTP endpoint yet.
 - There is no Convex mutation set for row upsert/tombstone semantics.
 - Some adapter APIs can still materialize arrays and must not be used as the
   production large-corpus path.
@@ -490,28 +490,27 @@ The CLI must know:
 
 - which source files exist
 - which files changed
-- which rows each file produced last time
-- which rows were sent
-- which rows were acknowledged
-- which rows disappeared and need tombstones
+- which records each file produced last time
+- which records were sent
+- which records were acknowledged
+- which records disappeared and need tombstones
 - where to resume after interruption
 
-### Principle 2: Adapters Stream Rows
+### Principle 2: Adapters Stream Records
 
 Adapters should emit an async stream:
 
 ```ts
-type IngestRow =
-  | { type: "source_root"; row: SourceRootRow }
-  | { type: "session"; row: SessionRow }
-  | { type: "event"; row: SessionEventRow }
-  | { type: "content_block"; row: ContentBlockRow }
-  | { type: "tool_call"; row: ToolCallRow }
-  | { type: "usage"; row: UsageRow }
-  | { type: "artifact"; row: ArtifactRow }
-  | { type: "search_document"; row: SearchDocumentRow }
-  | { type: "tombstone"; row: TombstoneRow }
-  | { type: "diagnostic"; row: AdapterDiagnosticRow };
+type IngestRecord =
+  | { type: "source_root"; record: SourceRootRecord }
+  | { type: "session"; record: SessionRecord }
+  | { type: "event"; record: SessionEventRecord }
+  | { type: "content_block"; record: ContentBlockRecord }
+  | { type: "tool_call"; record: ToolCallRecord }
+  | { type: "usage"; record: UsageRecord }
+  | { type: "artifact"; record: ArtifactRecord }
+  | { type: "edge"; record: EdgeRecord }
+  | { type: "tombstone"; record: TombstoneRecord };
 ```
 
 The stream should be bounded. No adapter should need to load the entire corpus
