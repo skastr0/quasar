@@ -123,3 +123,87 @@ Create and complete a Forge follow-up before QSR-023:
 - Keep parent/tool-result edges only when they carry non-derivable structure.
 - Reduce dry-run memory high-water materially; the pass target is a stable sub-GiB bound, with a preference for a few hundred MB.
 - Rerun the full dry-run and update this report before any live server writes.
+
+## Follow-Up Measurements
+
+### QSR-025 Corrected Baseline
+
+After preserving structured and metadata-bearing content blocks, the corrected
+post-QSR-025 full-machine dry-run still failed the gate.
+
+| Metric | Value |
+| --- | ---: |
+| Envelope wire bytes | 1,842,743,597 |
+| Useful text bytes | 554,158,295 |
+| Amplification ratio | 3.325x |
+| RSS high-water bytes | 3,292,758,016 |
+| Event wire bytes | 742,508,464 |
+| Content block wire bytes | 724,956,088 |
+| Tool call wire bytes | 241,602,587 |
+| Usage wire bytes | 74,652,834 |
+| Edge wire bytes | 55,096,588 |
+
+### QSR-026 Latest-Tree Rerun
+
+QSR-026 made the canonical projection leaner:
+
+- Derivable text/markdown/thinking fields are omitted from semantic content
+  block records when the owning event already carries the same `contentText`.
+- Chronological reads materialize those fields from the event.
+- Large projected tool payloads are replaced with deterministic
+  truncated/hash/preview markers.
+- Default dry-runs use a temporary disk SQLite ledger instead of a process-memory
+  ledger.
+
+The latest full-machine dry-run completed successfully at
+`2026-06-10T07:51:40.982Z` with no live writes.
+
+| Metric | Value |
+| --- | ---: |
+| Files processed | 612 |
+| Records sent | 1,255,085 |
+| Envelopes sent | 6,626 |
+| Record wire bytes | 1,411,357,097 |
+| Envelope wire bytes | 1,413,659,090 |
+| Useful text bytes | 386,379,384 |
+| Pruned bytes estimate | 307,915,884 |
+| Amplification ratio | 3.659x |
+| Max record bytes | 32,768 |
+| p95 record bytes | 2,245 |
+| RSS high-water bytes | 2,424,537,088 |
+| Elapsed milliseconds | 777,442 |
+
+| Record type | Count | Wire bytes |
+| --- | ---: | ---: |
+| source_root | 8 | 1,871 |
+| session | 1,565 | 1,621,747 |
+| event | 451,368 | 743,193,470 |
+| content_block | 527,279 | 394,208,049 |
+| tool_call | 83,427 | 142,233,353 |
+| usage | 112,704 | 74,763,456 |
+| edge | 78,724 | 55,324,746 |
+| artifact | 10 | 10,405 |
+
+Field-level measurement after QSR-026 showed the remaining bulk is no longer
+primarily oversized payload text:
+
+| Contributor | Bytes |
+| --- | ---: |
+| Event `contentText` | 376,344,855 |
+| Event ids/identity fields | 163,641,740 |
+| Event `rawReference` | 85,153,470 |
+| Content block ids/identity fields | 216,545,260 |
+| Content block text fields | 74,779,169 |
+| Content block metadata | 23,816,087 |
+| Tool input payloads | 19,286,973 |
+| Tool output payloads | 65,858,087 |
+
+Verdict: QSR-026 materially improved the corrected baseline, but the byte gate
+still fails. Envelope bytes dropped from about 1.84GB to about 1.41GB and RSS
+dropped from about 3.29GB to about 2.42GB, but amplification remains 3.659x
+against the 1.5x target and RSS is still not flat.
+
+The next follow-up must address repeated identity/evidence/storage shape. Event
+records alone now exceed the target envelope size implied by current useful-text
+bytes, so another payload clamp cannot pass the gate. Do not run live ingest
+until that storage-shape follow-up lands and this report is rerun.

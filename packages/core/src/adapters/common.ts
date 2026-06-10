@@ -3,7 +3,7 @@ import { basename, dirname, join, relative } from "node:path";
 
 import { Option, Schema } from "effect";
 
-import { stableJsonHash, stableWideHash } from "../hash";
+import { stableCanonicalJsonHash, stableJsonHash, stableWideHash } from "../hash";
 import { resolveProjectIdentity } from "../project-normalization";
 import { redactSensitive } from "../redaction";
 import type {
@@ -180,7 +180,32 @@ export const projectToolPayloadNativeValue = (value: unknown): unknown => {
     Schema.decodeUnknownOption(NativeProjectionInputSchema)(value),
     () => value,
   );
-  return projectNativeValue(decoded);
+  const projected = projectNativeValue(decoded);
+  return projectLargeToolPayload(projected);
+};
+
+const TOOL_PAYLOAD_WIRE_LIMIT_BYTES = 2 * 1024;
+const TOOL_PAYLOAD_PREVIEW_LENGTH = 1_000;
+const textEncoder = new TextEncoder();
+
+const wireBytesOf = (value: unknown) => {
+  const serialized = JSON.stringify(value);
+  return serialized === undefined ? undefined : textEncoder.encode(serialized).byteLength;
+};
+
+const projectLargeToolPayload = (value: NativeValue | undefined): unknown => {
+  if (value === undefined) return undefined;
+  const bytes = wireBytesOf(value);
+  if (bytes === undefined || bytes <= TOOL_PAYLOAD_WIRE_LIMIT_BYTES) return value;
+  const preview = compactText(value);
+  return {
+    truncated: true,
+    bytes,
+    hash: stableCanonicalJsonHash(value),
+    ...(preview !== undefined
+      ? { preview: preview.slice(0, TOOL_PAYLOAD_PREVIEW_LENGTH) }
+      : {}),
+  };
 };
 
 const compactProjectedText = (value: string | undefined, maxLength = 4_000) => {

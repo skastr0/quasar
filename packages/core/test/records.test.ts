@@ -8,6 +8,7 @@ import {
   buildSession,
   edgeIdFor,
   eventIdFor,
+  projectToolPayloadNativeValue,
   usageIdFor,
 } from "../src/adapters/common";
 import { QuasarApiPaths } from "../src/api-paths";
@@ -248,7 +249,7 @@ describe("ingest records", () => {
         }),
         expect.objectContaining({
           type: "content_block",
-          record: expect.objectContaining({ eventId: firstEventId, kind: "text", text: "caption" }),
+          record: expect.objectContaining({ eventId: firstEventId, kind: "text" }),
         }),
         expect.objectContaining({
           type: "content_block",
@@ -264,6 +265,27 @@ describe("ingest records", () => {
         }),
       ]),
     );
+    const textWithLocator = contentBlockRecords.find(
+      (record) =>
+        record.type === "content_block" &&
+        record.record.eventId === firstEventId &&
+        record.record.kind === "text",
+    );
+    const markdownBlock = contentBlockRecords.find(
+      (record) =>
+        record.type === "content_block" &&
+        record.record.eventId === secondEventId &&
+        record.record.kind === "markdown",
+    );
+    const textWithMetadata = contentBlockRecords.find(
+      (record) =>
+        record.type === "content_block" &&
+        record.record.eventId === thirdEventId &&
+        record.record.kind === "text",
+    );
+    expect(textWithLocator?.record).not.toHaveProperty("text");
+    expect(markdownBlock?.record).not.toHaveProperty("markdown");
+    expect(textWithMetadata?.record).not.toHaveProperty("text");
   });
 
   test("suppresses explicit plain duplicate text blocks", () => {
@@ -399,6 +421,30 @@ describe("ingest records", () => {
         },
       },
     });
+  });
+
+  test("projects large tool payloads to deterministic hash markers", () => {
+    const payload = {
+      command: "inspect",
+      args: Array.from({ length: 120 }, (_, index) => ({
+        path: `/tmp/project/${index}`,
+        output: "tool output ".repeat(80),
+      })),
+    };
+
+    const first = projectToolPayloadNativeValue(payload);
+    const second = projectToolPayloadNativeValue(payload);
+    const small = projectToolPayloadNativeValue({ command: "date" });
+
+    expect(first).toEqual(second);
+    expect(small).toEqual({ command: "date" });
+    expect(first).toMatchObject({
+      truncated: true,
+      bytes: expect.any(Number),
+      hash: expect.any(String),
+      preview: expect.any(String),
+    });
+    expect(JSON.stringify(first).length).toBeLessThan(JSON.stringify(payload).length);
   });
 
   test("hashes the same normalized record that packing sends", async () => {

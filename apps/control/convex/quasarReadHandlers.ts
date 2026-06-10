@@ -452,6 +452,22 @@ const textForBlock = (block: PublicContentBlock) => {
   return undefined;
 };
 
+const canDeriveTextForBlock = (block: PublicContentBlock) =>
+  (block.kind === "text" && block.text === undefined) ||
+  (block.kind === "markdown" && block.markdown === undefined) ||
+  (block.kind === "thinking" && block.thinking === undefined);
+
+const materializeDerivableBlockText = (
+  event: PublicSessionEvent,
+  block: PublicContentBlock,
+): PublicContentBlock => {
+  if (event.contentText === undefined || !canDeriveTextForBlock(block)) return block;
+  if (block.kind === "text") return { ...block, text: event.contentText };
+  if (block.kind === "markdown") return { ...block, markdown: event.contentText };
+  if (block.kind === "thinking") return { ...block, thinking: event.contentText };
+  return block;
+};
+
 const synthesizedTextBlockFor = (
   event: PublicSessionEvent,
   existing: readonly PublicContentBlock[],
@@ -488,7 +504,9 @@ const materializeChronologicalView = (
 ) => {
   const blocksByEvent = groupBy(contentBlocks, (block) => block.eventId);
   return events.map((event) => {
-    const existing = blocksByEvent.get(event.eventId) ?? [];
+    const existing = (blocksByEvent.get(event.eventId) ?? []).map((block) =>
+      materializeDerivableBlockText(event, block),
+    );
     const synthesized = synthesizedTextBlockFor(event, existing);
     return {
       eventId: event.eventId,

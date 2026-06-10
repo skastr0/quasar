@@ -414,6 +414,22 @@ const contentBlockText = (record: ContentBlockRecord) => {
   return undefined;
 };
 
+const omitContentBlockText = (record: ContentBlockRecord): ContentBlockRecord => {
+  if (record.kind === "text") {
+    const { text: _text, ...rest } = record;
+    return rest;
+  }
+  if (record.kind === "markdown") {
+    const { markdown: _markdown, ...rest } = record;
+    return rest;
+  }
+  if (record.kind === "thinking") {
+    const { thinking: _thinking, ...rest } = record;
+    return rest;
+  }
+  return record;
+};
+
 const onlyDuplicatesEventText = (
   event: NormalizedSession["events"][number],
   record: ContentBlockRecord,
@@ -426,6 +442,14 @@ const onlyDuplicatesEventText = (
   record.mediaType === undefined &&
   record.value === undefined &&
   record.metadata === undefined;
+
+const recordWithoutDerivableText = (
+  event: NormalizedSession["events"][number],
+  record: ContentBlockRecord,
+) =>
+  event.contentText !== undefined && contentBlockText(record) === event.contentText
+    ? omitContentBlockText(record)
+    : record;
 
 export const sessionToRecords = (session: NormalizedSession): IngestRecord[] => {
   const {
@@ -442,22 +466,26 @@ export const sessionToRecords = (session: NormalizedSession): IngestRecord[] => 
     artifactCount,
     ...sessionRecord
   } = session;
-  const contentBlockRecords = events.flatMap((event) =>
-    event.contentBlocks
-      .map((contentBlock) => ({
-        event,
-        contentBlock: {
-          ...contentBlock,
-          eventId: event.id,
-          sessionId: event.sessionId,
-          machineId: event.machineId,
-          provider: event.provider,
-          agentName: event.agentName,
-          projectIdentityKey: event.projectIdentityKey,
-        },
-      }))
-      .filter(({ event, contentBlock }) => !onlyDuplicatesEventText(event, contentBlock)),
-  );
+  const contentBlockRecords = events
+    .flatMap((event) =>
+      event.contentBlocks
+        .map((contentBlock) => ({
+          event,
+          contentBlock: {
+            ...contentBlock,
+            eventId: event.id,
+            sessionId: event.sessionId,
+            machineId: event.machineId,
+            provider: event.provider,
+            agentName: event.agentName,
+            projectIdentityKey: event.projectIdentityKey,
+          },
+        }))
+        .filter(({ event, contentBlock }) => !onlyDuplicatesEventText(event, contentBlock)),
+    )
+    .map(({ event, contentBlock }) => ({
+      contentBlock: recordWithoutDerivableText(event, contentBlock),
+    }));
 
   return [
     {

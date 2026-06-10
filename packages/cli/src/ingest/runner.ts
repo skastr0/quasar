@@ -1,4 +1,6 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { Effect, Schema } from "effect";
 
@@ -66,6 +68,11 @@ type UnitScanState = {
   readonly shouldProcess: boolean;
 };
 
+type LedgerLease = {
+  readonly path?: string;
+  readonly cleanup: Effect.Effect<void>;
+};
+
 type PendingEnvelopeItem =
   | {
       readonly kind: "live";
@@ -104,6 +111,26 @@ const adapterKey = (provider: Provider, adapterId: string) => `${provider}\0${ad
 
 const sourceRootKey = (provider: Provider, adapterId: string, rootPath: string) =>
   `${provider}\0${adapterId}\0${rootPath}`;
+
+const ledgerLeaseFor = (
+  dryRun: boolean,
+  overridePath: string | undefined,
+): Effect.Effect<LedgerLease> =>
+  Effect.sync(() => {
+    if (!dryRun || overridePath !== undefined) {
+      return {
+        path: overridePath,
+        cleanup: Effect.void,
+      };
+    }
+    const directory = mkdtempSync(join(tmpdir(), "qsr-"));
+    return {
+      path: join(directory, "ledger.sqlite"),
+      cleanup: Effect.sync(() => {
+        rmSync(directory, { recursive: true, force: true });
+      }),
+    };
+  });
 
 const sourceFileUnit = (unit: SourceUnit): SourceFileUnit => ({
   provider: unit.provider,
@@ -592,11 +619,16 @@ export const runIngest = (options: IngestOptions, overrides: RunIngestOverrides 
     const sender = overrides.sender ?? (dryRun ? dryRunRecordSender : liveRecordSender);
     const reporter = new IngestReporter(dryRun);
     const sampler = startRssSampler(overrides.rssSampleIntervalMs);
+    const ledgerLease = yield* ledgerLeaseFor(dryRun, overrides.ledgerPath);
     const ledger = yield* IngestLedger.open({
-      path: dryRun ? ":memory:" : overrides.ledgerPath,
+      path: ledgerLease.path,
       machineId: machine.machineId,
     });
     const state = new IngestRunState(ledger, machine, sender, reporter);
+    const cleanup = ledger.close().pipe(
+      Effect.catchAll(() => Effect.void),
+      Effect.zipRight(ledgerLease.cleanup.pipe(Effect.catchAll(() => Effect.void))),
+    );
     const program = Effect.gen(function* () {
       for (const adapter of adapters) {
         yield* state.processAdapter(adapter, options, machine, now);
@@ -605,6 +637,6 @@ export const runIngest = (options: IngestOptions, overrides: RunIngestOverrides 
     });
     return yield* program.pipe(
       Effect.tapError(() => Effect.sync(() => sampler.stop())),
-      Effect.ensuring(ledger.close().pipe(Effect.catchAll(() => Effect.void))),
+      Effect.ensuring(cleanup),
     );
   });
