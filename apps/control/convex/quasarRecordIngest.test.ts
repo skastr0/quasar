@@ -8,6 +8,7 @@ import {
 import schema from "./schema";
 import { applyRecordEnvelopeHandler } from "./quasarRecordIngest";
 import type { MutationCtx } from "./_generated/server";
+import { EMBEDDING_POLICY_VERSION } from "./quasarSearchDocuments";
 
 const machine = {
   machineId: "machine:test",
@@ -112,6 +113,20 @@ const envelope = (records: RecordEnvelope["records"]): RecordEnvelope => ({
 const apply = async (ctx: MutationCtx, input: unknown) =>
   await applyRecordEnvelopeHandler(ctx, input);
 
+const withGoogleApiKey = async <A>(action: () => Promise<A>) => {
+  const previousGoogleApiKey = process.env.GOOGLE_API_KEY;
+  process.env.GOOGLE_API_KEY = "test-key";
+  try {
+    return await action();
+  } finally {
+    if (previousGoogleApiKey === undefined) {
+      delete process.env.GOOGLE_API_KEY;
+    } else {
+      process.env.GOOGLE_API_KEY = previousGoogleApiKey;
+    }
+  }
+};
+
 type ModuleGlob = (pattern: string | readonly string[]) => Record<string, () => Promise<unknown>>;
 
 const modules = (import.meta as ImportMeta & { glob: ModuleGlob }).glob([
@@ -151,9 +166,7 @@ describe("record envelope ingest", () => {
 
   test("writes search documents only for searchable source records", async () => {
     const t = testBackend();
-    const previousGoogleApiKey = process.env.GOOGLE_API_KEY;
-    process.env.GOOGLE_API_KEY = "test-key";
-    try {
+    await withGoogleApiKey(async () => {
       await t.mutation(async (ctx) =>
         await apply(
           ctx as MutationCtx,
@@ -166,13 +179,7 @@ describe("record envelope ingest", () => {
           ]),
         ),
       );
-    } finally {
-      if (previousGoogleApiKey === undefined) {
-        delete process.env.GOOGLE_API_KEY;
-      } else {
-        process.env.GOOGLE_API_KEY = previousGoogleApiKey;
-      }
-    }
+    });
 
     const state = await t.query(async (ctx) => ({
       contentBlocks: await ctx.db.query("contentBlocks").collect(),
@@ -189,6 +196,98 @@ describe("record envelope ingest", () => {
         .sort(),
     ).toEqual(["event:event:test", "session:session:test", "tool_call:tool:test"]);
     expect(state.embeddingOutbox.map((doc) => doc.searchDocumentId)).toEqual(["event:event:test"]);
+  });
+
+  test("embeds assistant message events under the narrative policy", async () => {
+    const t = testBackend();
+    const assistantEvent = {
+      ...eventRecord,
+      id: "event:assistant",
+      nativeEventId: "native-event:assistant",
+      role: "assistant" as const,
+      contentText: "assistant answer text",
+    };
+
+    await withGoogleApiKey(async () => {
+      await t.mutation(async (ctx) =>
+        await apply(
+          ctx as MutationCtx,
+          envelope([
+            { type: "session", record: sessionRecord },
+            { type: "event", record: assistantEvent },
+          ]),
+        ),
+      );
+    });
+
+    const state = await t.query(async (ctx) => ({
+      searchDocuments: await ctx.db.query("searchDocuments").collect(),
+      embeddingOutbox: await ctx.db.query("embeddingOutbox").collect(),
+    }));
+    const assistantDoc = state.searchDocuments.find(
+      (doc) => doc.searchDocumentId === "event:event:assistant",
+    );
+    expect(assistantDoc?.embeddingEligible).toBe(true);
+    expect(assistantDoc?.embeddingSkipReason).toBeUndefined();
+    expect(assistantDoc?.embeddingPolicyVersion).toBe(EMBEDDING_POLICY_VERSION);
+    expect(state.embeddingOutbox.map((doc) => doc.searchDocumentId)).toEqual([
+      "event:event:assistant",
+    ]);
+  });
+
+  test("keeps machinery events out of embedding outbox", async () => {
+    const t = testBackend();
+    const skippedEvents = [
+      {
+        ...eventRecord,
+        id: "event:reasoning",
+        nativeEventId: "native-event:reasoning",
+        role: "assistant" as const,
+        kind: "reasoning" as const,
+        contentText: "reasoning text",
+      },
+      {
+        ...eventRecord,
+        id: "event:tool-result",
+        nativeEventId: "native-event:tool-result",
+        role: "tool" as const,
+        kind: "tool_result" as const,
+        contentText: "tool result text",
+      },
+      {
+        ...eventRecord,
+        id: "event:thinking",
+        nativeEventId: "native-event:thinking",
+        role: "thinking" as const,
+        kind: "message" as const,
+        contentText: "thinking text",
+      },
+    ];
+
+    await withGoogleApiKey(async () => {
+      await t.mutation(async (ctx) =>
+        await apply(
+          ctx as MutationCtx,
+          envelope([
+            { type: "session", record: sessionRecord },
+            ...skippedEvents.map((record) => ({ type: "event" as const, record })),
+          ]),
+        ),
+      );
+    });
+
+    const state = await t.query(async (ctx) => ({
+      searchDocuments: await ctx.db.query("searchDocuments").collect(),
+      embeddingOutbox: await ctx.db.query("embeddingOutbox").collect(),
+    }));
+    const byId = new Map(state.searchDocuments.map((doc) => [doc.searchDocumentId, doc]));
+    expect(byId.get("event:event:reasoning")?.embeddingEligible).toBe(false);
+    expect(byId.get("event:event:reasoning")?.embeddingSkipReason).toBe("reasoning");
+    expect(byId.get("event:event:tool-result")?.embeddingEligible).toBe(false);
+    expect(byId.get("event:event:tool-result")?.embeddingSkipReason).toBe("tool_metadata_only");
+    expect(byId.get("event:event:thinking")?.embeddingEligible).toBe(false);
+    expect(byId.get("event:event:thinking")?.embeddingSkipReason).toBe("reasoning");
+    expect(state.embeddingOutbox).toHaveLength(0);
   });
 
   test("records tombstones idempotently and removes source search documents", async () => {
