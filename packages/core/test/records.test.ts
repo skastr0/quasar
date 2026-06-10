@@ -124,11 +124,8 @@ describe("ingest records", () => {
     expect(records.slice(1).map((record) => record.type)).toEqual([
       "event",
       "event",
-      "content_block",
-      "content_block",
       "tool_call",
       "usage",
-      "edge",
       "edge",
       "artifact",
     ]);
@@ -136,11 +133,49 @@ describe("ingest records", () => {
     expect(records[0]?.record).toMatchObject({
       eventCount: 2,
       toolCallCount: 1,
-      contentBlockCount: 2,
-      sessionEdgeCount: 2,
+      contentBlockCount: 0,
+      sessionEdgeCount: 1,
       usageRecordCount: 1,
       artifactCount: 1,
     });
+  });
+
+  test("preserves content blocks that add information beyond event text", () => {
+    const eventId = eventIdFor("codex", machine.machineId, sourcePath, 0, "structured");
+    const session = buildSession({
+      provider: "codex",
+      agentName: "codex",
+      machine,
+      nativeSessionId: "structured-session",
+      sourceRoot: "/fixtures/codex",
+      sourcePath,
+      projectPath: "/work/quasar",
+      events: [
+        {
+          id: eventId,
+          sequence: 0,
+          role: "assistant",
+          kind: "message",
+          contentText: "Assistant summary",
+          contentSource: { type: "markdown", markdown: "## Full answer" },
+          rawReference: { sourcePath, line: 1 },
+        },
+      ],
+    });
+
+    const records = sessionToRecords(session);
+    const contentBlockRecords = records.filter((record) => record.type === "content_block");
+
+    expect(contentBlockRecords).toHaveLength(1);
+    expect(contentBlockRecords[0]).toMatchObject({
+      type: "content_block",
+      record: {
+        eventId,
+        kind: "markdown",
+        markdown: "## Full answer",
+      },
+    });
+    expect(records[0]?.record).toMatchObject({ contentBlockCount: 1 });
   });
 
   test("clamps oversized record payloads deterministically before hashing", () => {

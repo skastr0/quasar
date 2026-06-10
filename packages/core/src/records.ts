@@ -407,6 +407,24 @@ export const recordContentHash = (
   limits: RecordLimits = RECORD_LIMITS,
 ) => stableCanonicalJsonHash(normalizeRecordForWire(record, limits));
 
+const contentBlockText = (record: ContentBlockRecord) => {
+  if (record.kind === "text") return record.text;
+  if (record.kind === "markdown") return record.markdown;
+  if (record.kind === "thinking") return record.thinking;
+  return undefined;
+};
+
+const onlyDuplicatesEventText = (
+  event: NormalizedSession["events"][number],
+  record: ContentBlockRecord,
+) =>
+  event.contentText !== undefined &&
+  contentBlockText(record) === event.contentText &&
+  record.path === undefined &&
+  record.uri === undefined &&
+  record.mediaType === undefined &&
+  record.value === undefined;
+
 export const sessionToRecords = (session: NormalizedSession): IngestRecord[] => {
   const {
     events,
@@ -422,9 +440,21 @@ export const sessionToRecords = (session: NormalizedSession): IngestRecord[] => 
     artifactCount,
     ...sessionRecord
   } = session;
-  const childContentBlockCount = events.reduce(
-    (total, event) => total + event.contentBlocks.length,
-    0,
+  const contentBlockRecords = events.flatMap((event) =>
+    event.contentBlocks
+      .map((contentBlock) => ({
+        event,
+        contentBlock: {
+          ...contentBlock,
+          eventId: event.id,
+          sessionId: event.sessionId,
+          machineId: event.machineId,
+          provider: event.provider,
+          agentName: event.agentName,
+          projectIdentityKey: event.projectIdentityKey,
+        },
+      }))
+      .filter(({ event, contentBlock }) => !onlyDuplicatesEventText(event, contentBlock)),
   );
 
   return [
@@ -434,7 +464,7 @@ export const sessionToRecords = (session: NormalizedSession): IngestRecord[] => 
         ...sessionRecord,
         eventCount: eventCount ?? events.length,
         toolCallCount: toolCallCount ?? toolCalls.length,
-        contentBlockCount: contentBlockCount ?? childContentBlockCount,
+        contentBlockCount: contentBlockCount ?? contentBlockRecords.length,
         sessionEdgeCount: sessionEdgeCount ?? sessionEdges.length,
         usageRecordCount: usageRecordCount ?? usageRecords.length,
         artifactCount: artifactCount ?? artifacts.length,
@@ -444,20 +474,10 @@ export const sessionToRecords = (session: NormalizedSession): IngestRecord[] => 
       type: "event" as const,
       record: event,
     })),
-    ...events.flatMap((event) =>
-      event.contentBlocks.map((contentBlock) => ({
-        type: "content_block" as const,
-        record: {
-          ...contentBlock,
-          eventId: event.id,
-          sessionId: event.sessionId,
-          machineId: event.machineId,
-          provider: event.provider,
-          agentName: event.agentName,
-          projectIdentityKey: event.projectIdentityKey,
-        },
-      })),
-    ),
+    ...contentBlockRecords.map(({ contentBlock }) => ({
+      type: "content_block" as const,
+      record: contentBlock,
+    })),
     ...toolCalls.map((record) => ({ type: "tool_call" as const, record })),
     ...usageRecords.map((record) => ({ type: "usage" as const, record })),
     ...sessionEdges.map((record) => ({ type: "edge" as const, record })),

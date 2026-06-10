@@ -542,16 +542,6 @@ const defaultEdgesForEvents = (
     SessionEdge,
     "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
   >[] = [];
-  for (let index = 1; index < events.length; index += 1) {
-    const previous = events[index - 1];
-    const current = events[index];
-    edges.push({
-      id: edgeIdFor(provider, machineId, sourcePath, "next", previous.id, current.id),
-      kind: "next",
-      fromEventId: previous.id,
-      toEventId: current.id,
-    });
-  }
 
   const toolCallEventByToolId = new Map<string, string>();
   for (const event of events) {
@@ -578,14 +568,14 @@ const dedupeById = <
     readonly id: string;
   },
 >(
-  rows: readonly A[],
+  items: readonly A[],
 ) => {
   const seen = new Set<string>();
   const result: A[] = [];
-  for (const row of rows) {
-    if (seen.has(row.id)) continue;
-    seen.add(row.id);
-    result.push(row);
+  for (const item of items) {
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
+    result.push(item);
   }
   return result;
 };
@@ -649,6 +639,27 @@ export const logicalPathFor = (
   logicalRoot: string,
 ) => (physicalRoot === logicalRoot ? physicalPath : join(logicalRoot, relative(physicalRoot, physicalPath)));
 
+const contentBlocksForEvent = (
+  provider: Provider,
+  machineId: string,
+  sourcePath: string,
+  eventId: string,
+  contentText: string | undefined,
+  contentBlocks: readonly ContentBlock[] | undefined,
+  contentSource: NativeValue | undefined,
+) => {
+  if (contentBlocks !== undefined) return [...contentBlocks];
+  if (contentSource === undefined) return [];
+  if (compactText(contentSource) === contentText) return [];
+  return contentBlocksFromNative(
+    provider,
+    machineId,
+    sourcePath,
+    eventId,
+    contentSource,
+  );
+};
+
 export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
   const args = parseBuildSessionArgs(input);
   const projectIdentity = resolveProjectIdentity({
@@ -667,16 +678,15 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
     provider: args.provider,
     agentName: args.agentName,
     projectIdentityKey: projectIdentity.projectIdentityKey,
-    contentBlocks: [
-      ...(contentBlocks ??
-        contentBlocksFromNative(
-          args.provider,
-          args.machine.machineId,
-          args.sourcePath,
-          event.id,
-          contentSource ?? event.contentText,
-        )),
-    ],
+    contentBlocks: contentBlocksForEvent(
+      args.provider,
+      args.machine.machineId,
+      args.sourcePath,
+      event.id,
+      event.contentText,
+      contentBlocks,
+      contentSource,
+    ),
   }));
   const toolCalls = (args.toolCalls ?? []).map((toolCall) => ({
     ...toolCall,
