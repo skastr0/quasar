@@ -235,6 +235,47 @@ describe("adapter record streams", () => {
     ]);
   });
 
+  test("bridge marks root incomplete when source-unit predicate fails", async () => {
+    const session = makeSession();
+    const adapter: SessionAdapter = {
+      id: "test-adapter",
+      provider: "codex",
+      displayName: "Test adapter",
+      stable: true,
+      defaultRoot: () => undefined,
+      read: async () => ({ sourceRoots: [], sessions: [], diagnostics: [] }),
+      stream: async function* () {
+        yield {
+          type: "sourceRoot" as const,
+          sourceRoot: sourceRoot("codex", "test-adapter", "/logical/codex", machine, now),
+        };
+        yield { type: "session" as const, session };
+      },
+    };
+
+    const items = await collect(
+      recordStreamFor(adapter)({
+        machine,
+        now,
+        shouldProcessUnit: () => {
+          throw new Error("ledger unavailable");
+        },
+      }),
+    );
+    const unitEnd = items.find(
+      (item): item is Extract<RecordStreamItem, { readonly type: "unitEnd" }> =>
+        item.type === "unitEnd",
+    );
+    const rootScanned = items.find(
+      (item): item is Extract<RecordStreamItem, { readonly type: "rootScanned" }> =>
+        item.type === "rootScanned",
+    );
+
+    expect(unitEnd?.complete).toBe(false);
+    expect(rootScanned?.complete).toBe(false);
+    expect(items.some((item) => item.type === "diagnostic" && item.diagnostic.status === "error")).toBe(true);
+  });
+
   test("Codex native streamRecords stats and skips unchanged files before opening", async () => {
     const root = makeTempRoot();
     const sessionsRoot = join(root, "sessions");
