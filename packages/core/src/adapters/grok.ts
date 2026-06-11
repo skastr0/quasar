@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
 import { collectAdapterStream, type AdapterStreamItem, type SessionAdapter } from "./types";
-import type { Artifact, ToolCall } from "../schemas";
+import type { Artifact, SessionEvent, ToolCall } from "../schemas";
 import {
   artifactIdFor,
   buildSession,
@@ -11,6 +11,7 @@ import {
   eventIdFor,
   homePath,
   kindFromNative,
+  parseJsonString,
   projectSessionNativeValue,
   projectToolPayloadNativeValue,
   recordFrom,
@@ -19,6 +20,7 @@ import {
   roleFrom,
   scopedId,
   sourceRoot,
+  stringValue,
   type NativeValue,
 } from "./common";
 
@@ -38,6 +40,10 @@ type GrokArtifactDraft = Omit<
   Artifact,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
 >;
+type GrokEventDraft = Omit<
+  SessionEvent,
+  "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey" | "contentBlocks"
+> & { readonly contentBlocks?: readonly import("../schemas").ContentBlock[]; readonly contentSource?: NativeValue };
 type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
 
 const grokTime = (record: Record<string, unknown>) => {
@@ -51,6 +57,8 @@ const grokTime = (record: Record<string, unknown>) => {
 const grokToolName = (record: Record<string, unknown>) => {
   if (typeof record.toolName === "string") return record.toolName;
   if (typeof record.tool === "string") return record.tool;
+  // tool_calls array entries have `name` directly (no `type` wrapping)
+  if (typeof record.name === "string" && record.type === undefined) return record.name;
   if (typeof record.name === "string" && String(record.type ?? "").includes("tool")) return record.name;
   const state = recordFrom(record.state);
   if (typeof state.tool === "string") return state.tool;
@@ -203,6 +211,93 @@ const grokArtifacts = (
     ];
   });
 
+const grokSummaryRecord = (summary: unknown): Record<string, unknown> =>
+  summary !== null && typeof summary === "object" && !Array.isArray(summary)
+    ? (summary as Record<string, unknown>)
+    : {};
+
+/** Extract plaintext reasoning text from an assistant record's `reasoning` field. */
+const grokReasoningText = (record: Record<string, unknown>): string | undefined => {
+  const reasoningField = record.reasoning;
+  if (reasoningField === undefined || reasoningField === null) return undefined;
+  const reasoningRecord =
+    typeof reasoningField === "string"
+      ? recordFrom(parseJsonString(reasoningField))
+      : recordFrom(reasoningField);
+  return stringValue(reasoningRecord.text);
+};
+
+/** Collect tool calls from the `tool_calls` array on an assistant event.
+ *  Returns the first collected tool id for the event's `toolCallId` link. */
+const collectAssistantToolCalls = (
+  machineId: string,
+  sourcePath: string,
+  sessionId: string,
+  eventId: string,
+  record: Record<string, unknown>,
+  toolCallsById: Map<string, GrokToolCallDraft>,
+): string | undefined => {
+  const rawToolCalls = record.tool_calls;
+  if (rawToolCalls === undefined || rawToolCalls === null) return undefined;
+  const calls = Array.isArray(rawToolCalls)
+    ? rawToolCalls
+    : Array.isArray(parseJsonString(rawToolCalls))
+      ? (parseJsonString(rawToolCalls) as unknown[])
+      : [];
+  let firstId: string | undefined;
+  for (const call of calls) {
+    const callRecord = recordFrom(call);
+    const toolName = grokToolName(callRecord);
+    if (toolName === undefined) continue;
+    const nativeToolId = stringValue(callRecord.id) ?? eventId;
+    const input = projectToolPayloadNativeValue(
+      parseJsonString(callRecord.arguments) ?? callRecord.input ?? callRecord.params,
+    );
+    const timestamp = grokTime(record);
+    const toolCall: GrokToolCallDraft = {
+      id: scopedId("grok", machineId, sourcePath, "tool", sessionId, nativeToolId),
+      eventId,
+      toolName,
+      status: "started",
+      ...(input !== undefined ? { input } : {}),
+      ...(timestamp !== undefined ? { startedAt: timestamp } : {}),
+    };
+    toolCallsById.set(nativeToolId, toolCall);
+    firstId ??= toolCall.id;
+  }
+  return firstId;
+};
+
+/** Merge a tool_result record's output into the matching ToolCall record. */
+const mergeToolResult = (
+  machineId: string,
+  sourcePath: string,
+  sessionId: string,
+  eventId: string,
+  record: Record<string, unknown>,
+  toolCallsById: Map<string, GrokToolCallDraft>,
+): string | undefined => {
+  const nativeToolId = stringValue(record.tool_call_id);
+  if (nativeToolId === undefined) return undefined;
+  const existing = toolCallsById.get(nativeToolId);
+  const timestamp = grokTime(record);
+  const output = projectToolPayloadNativeValue(
+    stringValue(record.content) ?? record.content,
+  );
+  const merged: GrokToolCallDraft = {
+    id: existing?.id ?? scopedId("grok", machineId, sourcePath, "tool", sessionId, nativeToolId),
+    eventId: existing?.eventId ?? eventId,
+    toolName: existing?.toolName ?? "grok_tool",
+    status: "completed",
+    ...(existing?.input !== undefined ? { input: existing.input } : {}),
+    ...(output !== undefined ? { output } : {}),
+    ...(existing?.startedAt !== undefined ? { startedAt: existing.startedAt } : {}),
+    ...(timestamp !== undefined ? { completedAt: timestamp } : {}),
+  };
+  toolCallsById.set(nativeToolId, merged);
+  return merged.id;
+};
+
 const buildGrokSessionFromChatPath = (
   chatPath: string,
   sessionsRoot: string,
@@ -212,12 +307,23 @@ const buildGrokSessionFromChatPath = (
   const sessionId = basename(sessionDir);
   const projectKey = basename(dirname(sessionDir));
   const projectPath = decodeProjectPath(projectKey);
-  const summary = readJsonFile(join(sessionDir, "summary.json"));
+  const summary = grokSummaryRecord(readJsonFile(join(sessionDir, "summary.json")));
   const chatLines = readJsonLines(chatPath);
   const eventLines = readJsonLines(join(sessionDir, "events.jsonl"));
   const updateLines = readJsonLines(join(sessionDir, "updates.jsonl"));
   const hunkPath = join(sessionDir, "hunk_records.jsonl");
   const toolCallsById = new Map<string, GrokToolCallDraft>();
+
+  // Derive session metadata from summary.json.
+  const generatedTitle = stringValue(summary.generated_title);
+  const agentName =
+    stringValue(summary.agent_name) ?? stringValue(summary.current_model_id) ?? "grok-build";
+  const gitRemote = (() => {
+    const remotes = summary.git_remotes;
+    if (Array.isArray(remotes) && typeof remotes[0] === "string") return remotes[0] as string;
+    return undefined;
+  })();
+
   const collectTool = (
     sourcePath: string,
     eventId: string,
@@ -233,8 +339,9 @@ const buildGrokSessionFromChatPath = (
     if (toolCall !== undefined) toolCallsById.set(toolCall.id, toolCall);
     return toolCall?.id;
   };
+
   const events = [
-    ...chatLines.map(({ value, lineNumber }, index) => {
+    ...chatLines.flatMap(({ value, lineNumber }, index) => {
       const record =
         typeof value === "object" && value !== null
           ? (value as Record<string, unknown>)
@@ -249,19 +356,90 @@ const buildGrokSessionFromChatPath = (
         index,
         nativeEventId ?? lineNumber,
       );
-      const toolCallId = collectTool(chatPath, eventId, record);
-      const content = grokContentProjection(record);
-      return {
-        id: eventId,
-        nativeEventId,
-        sequence: index,
-        role: roleFrom(typeof record.type === "string" ? record.type : undefined),
-        kind: grokKind(record),
-        contentText: compactText(content),
-        contentSource: content,
-        ...(toolCallId !== undefined ? { toolCallId } : {}),
-        rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: type },
-      };
+
+      const result: GrokEventDraft[] = [];
+
+      if (type === "assistant") {
+        // Emit a reasoning event ahead of the assistant reply when plaintext reasoning exists.
+        const reasoningText = grokReasoningText(record);
+        if (reasoningText !== undefined) {
+          const reasoningEventId = `${eventId}:r`;
+          result.push({
+            id: reasoningEventId,
+            nativeEventId: nativeEventId !== undefined ? `${nativeEventId}:r` : undefined,
+            sequence: index,
+            timestamp: grokTime(record),
+            role: "thinking" as const,
+            kind: "reasoning" as const,
+            contentText: reasoningText,
+            rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: "reasoning" },
+          });
+        }
+
+        // Collect tool calls from the tool_calls array.
+        const toolCallId =
+          collectAssistantToolCalls(
+            options.machine.machineId,
+            chatPath,
+            sessionId,
+            eventId,
+            record,
+            toolCallsById,
+          ) ?? collectTool(chatPath, eventId, record);
+
+        const content = grokContentProjection(record);
+        result.push({
+          id: eventId,
+          nativeEventId,
+          sequence: index,
+          timestamp: grokTime(record),
+          role: roleFrom(type),
+          kind: toolCallId !== undefined ? ("tool_call" as const) : ("message" as const),
+          contentText: compactText(content),
+          contentSource: content,
+          ...(toolCallId !== undefined ? { toolCallId } : {}),
+          rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: type },
+        });
+      } else if (type === "tool_result") {
+        // Merge content into the matching ToolCall record.
+        const toolCallId = mergeToolResult(
+          options.machine.machineId,
+          chatPath,
+          sessionId,
+          eventId,
+          record,
+          toolCallsById,
+        ) ?? collectTool(chatPath, eventId, record);
+        const content = grokContentProjection(record);
+        result.push({
+          id: eventId,
+          nativeEventId,
+          sequence: index,
+          timestamp: grokTime(record),
+          role: "unknown" as const,
+          kind: "tool_result" as const,
+          contentText: compactText(content),
+          contentSource: content,
+          ...(toolCallId !== undefined ? { toolCallId } : {}),
+          rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: type },
+        });
+      } else {
+        const toolCallId = collectTool(chatPath, eventId, record);
+        const content = grokContentProjection(record);
+        result.push({
+          id: eventId,
+          nativeEventId,
+          sequence: index,
+          timestamp: grokTime(record),
+          role: roleFrom(type),
+          kind: grokKind(record),
+          contentText: compactText(content),
+          contentSource: content,
+          ...(toolCallId !== undefined ? { toolCallId } : {}),
+          rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: type },
+        });
+      }
+      return result;
     }),
     ...eventLines.map(({ value, lineNumber }, index) => {
       const record =
@@ -331,17 +509,15 @@ const buildGrokSessionFromChatPath = (
   ];
   return buildSession({
     provider: "grok",
-    agentName: "grok-build",
+    agentName,
     machine: options.machine,
     nativeSessionId: sessionId,
     nativeProjectKey: projectKey,
-    title:
-      typeof (summary as Record<string, unknown> | undefined)?.title === "string"
-        ? ((summary as Record<string, unknown>).title as string)
-        : undefined,
+    title: generatedTitle,
     sourceRoot: sessionsRoot,
     sourcePath: sessionDir,
     projectPath,
+    gitRemote,
     events,
     toolCalls: [...toolCallsById.values()],
     artifacts: existsSync(hunkPath)
