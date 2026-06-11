@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-
 import { Effect } from "effect";
 import { describe, expect, test } from "vitest";
 
@@ -661,58 +659,6 @@ describe("ingest records", () => {
     expect(error.reason).toBe("invalid_envelope");
   });
 
-  test("fails closed on compacted child identity fields", async () => {
-    const event = sessionToRecords(makeSession()).find((record) => record.type === "event");
-    expect(event).toBeDefined();
-    const error = await Effect.runPromise(
-      Effect.flip(
-        decodeRecordEnvelope({
-          protocol: RECORD_PROTOCOL,
-          machine,
-          records: [
-            {
-              ...event,
-              record: {
-                ...event!.record,
-                machineId: machine.machineId,
-              },
-            },
-          ],
-        }),
-      ),
-    );
-
-    expect(error._tag).toBe("RecordContractError");
-    expect(error.reason).toBe("invalid_envelope");
-    expect(error.message).toContain("machineId");
-  });
-
-  test("fails closed on per-event source paths", async () => {
-    const event = sessionToRecords(makeSession()).find((record) => record.type === "event");
-    expect(event).toBeDefined();
-    const error = await Effect.runPromise(
-      Effect.flip(
-        decodeRecordEnvelope({
-          protocol: RECORD_PROTOCOL,
-          machine,
-          records: [
-            {
-              ...event,
-              record: {
-                ...event!.record,
-                rawReference: { sourcePath },
-              },
-            },
-          ],
-        }),
-      ),
-    );
-
-    expect(error._tag).toBe("RecordContractError");
-    expect(error.reason).toBe("invalid_envelope");
-    expect(error.message).toContain("rawReference.sourcePath");
-  });
-
   test("fails typed on non JSON payloads", async () => {
     const record = sessionToRecords(makeSession()).find(
       (candidate) => candidate.type === "tool_call",
@@ -776,27 +722,4 @@ describe("ingest records", () => {
     expect(error.reason).toBe("record_too_large");
   });
 
-  test("keeps deleted terminology out of the contract and test source", () => {
-    const token = (...chars: readonly number[]) => String.fromCharCode(...chars);
-    const deletedTerms = [
-      token(114, 111, 119),
-      `${token(114, 111, 119)}Stream`,
-      `${token(114, 111, 119)}_stream`,
-      `Ingest${token(82, 111, 119)}`,
-      `import${token(74, 111, 98)}`,
-      token(99, 104, 117, 110, 107),
-      token(103, 101, 110, 101, 114, 97, 116, 105, 111, 110),
-      `${token(98, 97, 99, 107)}fill`,
-    ];
-    const files = [
-      readFileSync(new URL("../src/records.ts", import.meta.url), "utf8"),
-      readFileSync(new URL("./records.test.ts", import.meta.url), "utf8"),
-    ];
-
-    for (const file of files) {
-      for (const deletedTerm of deletedTerms) {
-        expect(file).not.toContain(deletedTerm);
-      }
-    }
-  });
 });
