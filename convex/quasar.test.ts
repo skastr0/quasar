@@ -18,19 +18,57 @@ const sessionArgs = {
   toolCallCount: 1,
 };
 
-test("upsertSession skips when sourceFingerprint is unchanged", async () => {
+type Tester = ReturnType<typeof convexTest>;
+
+/** Claims a session for a run so turn mutations can write under that claim. */
+const claimSession = async (
+  t: Tester,
+  sessionId: string,
+  projectKey: string,
+  runId: string,
+) =>
+  t.mutation(api.quasar.beginSessionIngest, {
+    ...sessionArgs,
+    sessionId,
+    projectKey,
+    sourceFingerprint: `fp:${sessionId}`,
+    runId,
+  });
+
+test("beginSessionIngest skips only committed sessions with an unchanged fingerprint", async () => {
   const t = convexTest(schema, modules);
 
-  const first = await t.mutation(api.quasar.upsertSession, sessionArgs);
+  const first = await t.mutation(api.quasar.beginSessionIngest, {
+    ...sessionArgs,
+    runId: "run-1",
+  });
   expect(first).toEqual({ skipped: false });
 
-  const second = await t.mutation(api.quasar.upsertSession, sessionArgs);
-  expect(second).toEqual({ skipped: true });
+  // Same fingerprint but uncommitted (a crashed run): never skipped.
+  const afterCrash = await t.mutation(api.quasar.beginSessionIngest, {
+    ...sessionArgs,
+    runId: "run-2",
+  });
+  expect(afterCrash).toEqual({ skipped: false });
 
-  const changed = await t.mutation(api.quasar.upsertSession, {
+  await t.mutation(api.quasar.commitSessionIngest, {
+    sessionId: sessionArgs.sessionId,
+    runId: "run-2",
+  });
+
+  // Committed and unchanged: skipped.
+  const unchanged = await t.mutation(api.quasar.beginSessionIngest, {
+    ...sessionArgs,
+    runId: "run-3",
+  });
+  expect(unchanged).toEqual({ skipped: true });
+
+  // Committed but changed fingerprint: re-ingested.
+  const changed = await t.mutation(api.quasar.beginSessionIngest, {
     ...sessionArgs,
     sourceFingerprint: JSON.stringify({ size: 2048, mtimeMs: 1781151599999 }),
     messageCount: 4,
+    runId: "run-4",
   });
   expect(changed).toEqual({ skipped: false });
 
@@ -42,9 +80,56 @@ test("upsertSession skips when sourceFingerprint is unchanged", async () => {
   expect(page.page[0].messageCount).toBe(4);
 });
 
+test("turn mutations reject a lost claim so concurrent runs cannot duplicate turns", async () => {
+  const t = convexTest(schema, modules);
+  const sessionId = "s-claim";
+
+  await claimSession(t, sessionId, "p1", "run-a");
+  await t.mutation(api.quasar.insertMessages, {
+    messages: [
+      { sessionId, seq: 0, role: "user" as const, text: "from run a", projectKey: "p1" },
+    ],
+    runId: "run-a",
+  });
+
+  // A second run re-claims the session; the first run's mutations now fail.
+  await claimSession(t, sessionId, "p1", "run-b");
+  await expect(
+    t.mutation(api.quasar.insertMessages, {
+      messages: [
+        { sessionId, seq: 1, role: "user" as const, text: "stale run", projectKey: "p1" },
+      ],
+      runId: "run-a",
+    }),
+  ).rejects.toThrow(/Ingest claim lost/);
+  await expect(
+    t.mutation(api.quasar.deleteSessionTurns, { sessionId, runId: "run-a" }),
+  ).rejects.toThrow(/Ingest claim lost/);
+  await expect(
+    t.mutation(api.quasar.commitSessionIngest, { sessionId, runId: "run-a" }),
+  ).rejects.toThrow(/Ingest claim lost/);
+
+  // The winning run proceeds normally.
+  await t.mutation(api.quasar.deleteSessionTurns, { sessionId, runId: "run-b" });
+  await t.mutation(api.quasar.insertMessages, {
+    messages: [
+      { sessionId, seq: 0, role: "user" as const, text: "from run b", projectKey: "p1" },
+    ],
+    runId: "run-b",
+  });
+  await t.mutation(api.quasar.commitSessionIngest, { sessionId, runId: "run-b" });
+
+  const page = await t.query(api.quasar.readSession, {
+    sessionId,
+    paginationOpts: { numItems: 10, cursor: null },
+  });
+  expect(page.page.map((m) => m.text)).toEqual(["from run b"]);
+});
+
 test("insertMessages + readSession paginates in seq ascending order", async () => {
   const t = convexTest(schema, modules);
   const sessionId = "s-read";
+  await claimSession(t, sessionId, "p1", "run-1");
   // Insert deliberately out of order; the index walk must return seq ascending.
   await t.mutation(api.quasar.insertMessages, {
     messages: [4, 1, 3, 0, 2].map((seq) => ({
@@ -54,6 +139,7 @@ test("insertMessages + readSession paginates in seq ascending order", async () =
       text: `message ${seq}`,
       projectKey: "p1",
     })),
+    runId: "run-1",
   });
 
   const page1 = await t.query(api.quasar.readSession, {
@@ -73,6 +159,9 @@ test("insertMessages + readSession paginates in seq ascending order", async () =
 
 test("searchMessages finds inserted text and respects projectKey filter", async () => {
   const t = convexTest(schema, modules);
+  await claimSession(t, "s-search-1", "proj-alpha", "run-1");
+  await claimSession(t, "s-search-2", "proj-beta", "run-1");
+  await claimSession(t, "s-search-3", "proj-alpha", "run-1");
   await t.mutation(api.quasar.insertMessages, {
     messages: [
       {
@@ -97,6 +186,7 @@ test("searchMessages finds inserted text and respects projectKey filter", async 
         projectKey: "proj-alpha",
       },
     ],
+    runId: "run-1",
   });
 
   const all = await t.query(api.quasar.searchMessages, { query: "tailscale" });
@@ -114,6 +204,8 @@ test("searchMessages finds inserted text and respects projectKey filter", async 
 
 test("toolCallsByName walks the (projectKey, toolName) index", async () => {
   const t = convexTest(schema, modules);
+  await claimSession(t, "s-tools", "proj-alpha", "run-1");
+  await claimSession(t, "s-other", "proj-beta", "run-1");
   await t.mutation(api.quasar.insertToolCalls, {
     toolCalls: [
       {
@@ -144,6 +236,7 @@ test("toolCallsByName walks the (projectKey, toolName) index", async () => {
         provider: "codex",
       },
     ],
+    runId: "run-1",
   });
 
   const page = await t.query(api.quasar.toolCallsByName, {
@@ -160,6 +253,8 @@ test("toolCallsByName walks the (projectKey, toolName) index", async () => {
 test("deleteSessionTurns drains messages and toolCalls under caller-driven batches", async () => {
   const t = convexTest(schema, modules);
   const sessionId = "s-delete";
+  await claimSession(t, sessionId, "p1", "run-1");
+  await claimSession(t, "s-keep", "p1", "run-1");
   // 450 messages + 30 toolCalls: forces multiple 200-row batches plus
   // a mixed messages/toolCalls batch and a caller-driven continuation.
   for (let start = 0; start < 450; start += 150) {
@@ -171,6 +266,7 @@ test("deleteSessionTurns drains messages and toolCalls under caller-driven batch
         text: `m${start + i}`,
         projectKey: "p1",
       })),
+      runId: "run-1",
     });
   }
   await t.mutation(api.quasar.insertToolCalls, {
@@ -183,6 +279,7 @@ test("deleteSessionTurns drains messages and toolCalls under caller-driven batch
       projectKey: "p1",
       provider: "claude",
     })),
+    runId: "run-1",
   });
   // An adjacent session must survive the cleanup untouched.
   await t.mutation(api.quasar.insertMessages, {
@@ -195,6 +292,7 @@ test("deleteSessionTurns drains messages and toolCalls under caller-driven batch
         projectKey: "p1",
       },
     ],
+    runId: "run-1",
   });
 
   // The caller loops while a full batch was deleted — exactly what ingest does.
@@ -202,7 +300,10 @@ test("deleteSessionTurns drains messages and toolCalls under caller-driven batch
   let calls = 0;
   let result: { deleted: number; batchSize: number };
   do {
-    result = await t.mutation(api.quasar.deleteSessionTurns, { sessionId });
+    result = await t.mutation(api.quasar.deleteSessionTurns, {
+      sessionId,
+      runId: "run-1",
+    });
     totalDeleted += result.deleted;
     calls += 1;
   } while (result.deleted === result.batchSize);

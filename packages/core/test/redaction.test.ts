@@ -30,10 +30,15 @@ describe("redaction", () => {
     expect(compactText(payload)).not.toContain("[redacted]");
   });
 
-  test("omits binary-like output from compact search text", () => {
-    const binaryOutput = `${"\u0000".repeat(32)}${"\ufffd".repeat(32)}mach-o`;
-    expect(compactText(binaryOutput.repeat(8))).toBe("[binary output omitted]");
-    expect(compactText("\\u0000".repeat(80))).toBe("[binary output omitted]");
+  test("preserves control-character-dense text instead of discarding it by heuristic", () => {
+    // No invented binary-detection budget: control characters normalize to
+    // spaces and the content survives. Convex limits, enforced at the ingest
+    // boundary, are the only line at which data is rejected.
+    const binaryOutput = `${"\u0000".repeat(32)}mach-o`;
+    expect(compactText(binaryOutput.repeat(8))).toBe(
+      Array.from({ length: 8 }, () => "mach-o").join(" "),
+    );
+    expect(compactText("\\u0000".repeat(80))).toBe("\\u0000".repeat(80));
   });
 
   test("redacts string content", () => {

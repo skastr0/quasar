@@ -242,8 +242,27 @@ describe("mapClaudeSession", () => {
     expect(mapped.session.toolCallCount).toBe(1);
   });
 
-  test("rejects any text at or beyond the boundary with a named diagnostic and zero rows", () => {
-    const garbage = "x".repeat(900_000);
+  test("admits values below the Convex 1 MiB limit and rejects at the limit with a named diagnostic", () => {
+    // The boundary is Convex's own 1 MiB value limit — no invented budget. A
+    // value just under it is legitimate (if rare) data and must be admitted.
+    const large = "y".repeat(1_048_575);
+    const mappedLarge = mapClaudeSession(
+      session({
+        events: [
+          baseEvent({
+            id: "e-large",
+            sequence: 0,
+            role: "user",
+            kind: "message",
+            contentText: large,
+          }),
+        ],
+      }),
+    );
+    expect(mappedLarge.messages).toHaveLength(1);
+    expect(mappedLarge.diagnostics).toHaveLength(0);
+
+    const garbage = "x".repeat(1_048_576);
     const mapped = mapClaudeSession(
       session({
         events: [
@@ -288,17 +307,64 @@ describe("mapClaudeSession", () => {
         provider: "claude",
         sessionId: SESSION_ID,
         field: "messages.text",
-        observedBytes: 900_000,
+        observedBytes: 1_048_576,
       },
       {
         provider: "claude",
         sessionId: SESSION_ID,
         field: "toolCalls.outputText",
-        observedBytes: 900_000,
+        observedBytes: 1_048_576,
       },
     ]);
     expect(mapped.session.messageCount).toBe(1);
     expect(mapped.session.toolCallCount).toBe(0);
+  });
+
+  test("skips injected preamble/system/summary events even when they carry user or assistant roles", () => {
+    const mapped = mapClaudeSession(
+      session({
+        events: [
+          baseEvent({
+            id: "e-preamble",
+            sequence: 0,
+            role: "user",
+            kind: "preamble",
+            contentText: "<user_instructions>injected wrapper</user_instructions>",
+          }),
+          baseEvent({
+            id: "e-system",
+            sequence: 1,
+            role: "user",
+            kind: "system",
+            contentText: "permission mode changed",
+          }),
+          baseEvent({
+            id: "e-summary",
+            sequence: 2,
+            role: "assistant",
+            kind: "summary",
+            contentText: "compaction summary of prior turns",
+          }),
+          baseEvent({
+            id: "e-real",
+            sequence: 3,
+            role: "user",
+            kind: "message",
+            contentText: "a human-authored turn",
+          }),
+        ],
+      }),
+    );
+    expect(mapped.messages).toEqual([
+      {
+        sessionId: SESSION_ID,
+        seq: 3,
+        role: "user",
+        text: "a human-authored turn",
+        projectKey: PROJECT_KEY,
+      },
+    ]);
+    expect(mapped.session.messageCount).toBe(1);
   });
 
   test("applies redactSensitive to every written text", () => {

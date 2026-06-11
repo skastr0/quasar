@@ -1,6 +1,6 @@
 import { paginationOptsValidator } from "convex/server";
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { mutation, query, type MutationCtx } from "./_generated/server";
 
 const roleValidator = v.union(
   v.literal("user"),
@@ -46,7 +46,32 @@ export const upsertProject = mutation({
   },
 });
 
-export const upsertSession = mutation({
+/**
+ * Verifies the caller still holds the ingest claim on a session. Turn
+ * mutations and the commit run under this check, so a concurrent run that
+ * re-claims the session makes the stale run's next mutation fail loudly
+ * instead of writing duplicate rows.
+ */
+const requireIngestClaim = async (ctx: MutationCtx, sessionId: string, runId: string) => {
+  const session = await ctx.db
+    .query("sessions")
+    .withIndex("by_sessionId", (q) => q.eq("sessionId", sessionId))
+    .unique();
+  if (session === null || session.ingestRunId !== runId) {
+    throw new Error(
+      `Ingest claim lost for session ${sessionId}: another ingest run claimed it. Do not run concurrent ingests for the same provider.`,
+    );
+  }
+  return session;
+};
+
+/**
+ * Claims a session for one ingest run. A session is skippable only when its
+ * fingerprint is unchanged AND no claim is pending — a crashed run leaves its
+ * claim set, so the session is re-ingested instead of permanently skipped.
+ * The claim is cleared by commitSessionIngest after all turns have landed.
+ */
+export const beginSessionIngest = mutation({
   args: {
     sessionId: v.string(),
     projectKey: v.string(),
@@ -59,21 +84,40 @@ export const upsertSession = mutation({
     sourceFingerprint: v.string(),
     messageCount: v.number(),
     toolCallCount: v.number(),
+    runId: v.string(),
   },
   handler: async (ctx, args) => {
+    const { runId, ...session } = args;
     const existing = await ctx.db
       .query("sessions")
-      .withIndex("by_sessionId", (q) => q.eq("sessionId", args.sessionId))
+      .withIndex("by_sessionId", (q) => q.eq("sessionId", session.sessionId))
       .unique();
-    if (existing !== null && existing.sourceFingerprint === args.sourceFingerprint) {
+    if (
+      existing !== null &&
+      existing.ingestRunId === undefined &&
+      existing.sourceFingerprint === session.sourceFingerprint
+    ) {
       return { skipped: true };
     }
     if (existing === null) {
-      await ctx.db.insert("sessions", args);
+      await ctx.db.insert("sessions", { ...session, ingestRunId: runId });
     } else {
-      await ctx.db.patch(existing._id, args);
+      await ctx.db.patch(existing._id, { ...session, ingestRunId: runId });
     }
     return { skipped: false };
+  },
+});
+
+/**
+ * Marks a session's ingest complete by clearing its claim. Only after this
+ * runs can an unchanged fingerprint skip the session.
+ */
+export const commitSessionIngest = mutation({
+  args: { sessionId: v.string(), runId: v.string() },
+  handler: async (ctx, args) => {
+    const session = await requireIngestClaim(ctx, args.sessionId, args.runId);
+    await ctx.db.patch(session._id, { ingestRunId: undefined });
+    return null;
   },
 });
 
@@ -89,8 +133,12 @@ export const insertMessages = mutation({
         projectKey: v.string(),
       }),
     ),
+    runId: v.string(),
   },
   handler: async (ctx, args) => {
+    for (const sessionId of new Set(args.messages.map((message) => message.sessionId))) {
+      await requireIngestClaim(ctx, sessionId, args.runId);
+    }
     for (const message of args.messages) {
       await ctx.db.insert("messages", message);
     }
@@ -114,8 +162,12 @@ export const insertToolCalls = mutation({
         provider: v.string(),
       }),
     ),
+    runId: v.string(),
   },
   handler: async (ctx, args) => {
+    for (const sessionId of new Set(args.toolCalls.map((toolCall) => toolCall.sessionId))) {
+      await requireIngestClaim(ctx, sessionId, args.runId);
+    }
     for (const toolCall of args.toolCalls) {
       await ctx.db.insert("toolCalls", toolCall);
     }
@@ -130,8 +182,9 @@ export const insertToolCalls = mutation({
  * (A scheduler-based continuation would race the subsequent inserts.)
  */
 export const deleteSessionTurns = mutation({
-  args: { sessionId: v.string() },
+  args: { sessionId: v.string(), runId: v.string() },
   handler: async (ctx, args) => {
+    await requireIngestClaim(ctx, args.sessionId, args.runId);
     const messages = await ctx.db
       .query("messages")
       .withIndex("by_sessionId_and_seq", (q) => q.eq("sessionId", args.sessionId))

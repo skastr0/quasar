@@ -2,8 +2,9 @@ import { statSync } from "node:fs";
 
 import { Command, Options } from "@effect/cli";
 import { ConvexHttpClient } from "convex/browser";
-import { anyApi } from "convex/server";
 import { Effect, Option } from "effect";
+
+import { api } from "../../../../convex/_generated/api";
 
 import {
   adaptersByProvider,
@@ -17,15 +18,14 @@ import { CommandInputError } from "../errors";
 import { executeJsonCommand } from "../output";
 
 /**
- * Boundary rejection line for a single text value. Convex's 1 MiB value limit
- * is the contract; this line sits just inside it so a row that carries the
- * value (plus its sibling fields) can never trip the platform limit. The
+ * Convex's 1 MiB value limit, adopted wholesale as the boundary-rejection
+ * line: a string value must be smaller than 1 MiB when UTF-8 encoded. The
  * measured corpus has no legitimate session value over 185 KB, so anything at
- * or beyond this line is provider garbage: named diagnostic
+ * or beyond the platform limit is provider garbage: named diagnostic
  * (provider, sessionId, field, observedBytes), zero rows written for it, run
- * continues. Never truncate, never clamp.
+ * continues. Never truncate, never clamp, never invent a smaller budget.
  */
-const TEXT_REJECTION_BYTES = 900_000;
+const CONVEX_MAX_VALUE_BYTES = 1_048_576;
 
 /** Rows per insert mutation — small, instantly-completing mutations. */
 const INSERT_BATCH = 250;
@@ -127,6 +127,14 @@ const stringifyToolPayload = (value: unknown): string => {
  */
 const MACHINERY_NATIVE_TYPES = new Set(["thinking", "tool_use", "tool_result"]);
 
+/**
+ * Event kinds that are injected machinery even when they carry a user or
+ * assistant role: wrappers and permissions preambles (`preamble`), provider
+ * system records (`system`), and compaction summaries (`summary`). No human
+ * authored them, so they never become `messages` rows.
+ */
+const INJECTED_EVENT_KINDS = new Set(["preamble", "system", "summary"]);
+
 const nativeTypeOf = (block: ContentBlock): string | undefined => {
   if (block.metadata === null || typeof block.metadata !== "object") return undefined;
   const nativeType = (block.metadata as Record<string, unknown>).nativeType;
@@ -164,7 +172,7 @@ export const mapClaudeSession = (session: NormalizedSession): MappedSession => {
 
   const admit = (value: string, field: string): string | undefined => {
     const observedBytes = utf8Bytes(value);
-    if (observedBytes >= TEXT_REJECTION_BYTES) {
+    if (observedBytes >= CONVEX_MAX_VALUE_BYTES) {
       diagnostics.push({ provider: session.provider, sessionId, field, observedBytes });
       return undefined;
     }
@@ -174,6 +182,7 @@ export const mapClaudeSession = (session: NormalizedSession): MappedSession => {
   const messages: MessageRow[] = [];
   for (const event of session.events) {
     if (event.role !== "user" && event.role !== "assistant") continue;
+    if (INJECTED_EVENT_KINDS.has(event.kind)) continue;
     const reasoningParts: string[] = [];
     const textParts: string[] = [];
     if (event.contentBlocks.length === 0) {
@@ -298,8 +307,6 @@ const withRetry = async <T>(operation: () => Promise<T>): Promise<T> => {
   }
 };
 
-const quasarApi = anyApi.quasar;
-
 const createConvexClient = (): ConvexHttpClient => {
   const url = process.env.CONVEX_SELF_HOSTED_URL ?? process.env.CONVEX_URL;
   if (url === undefined || url.length === 0) {
@@ -319,6 +326,10 @@ const runClaudeIngest = async (options: {
 }): Promise<IngestReport> => {
   const startedAt = Date.now();
   const client = createConvexClient();
+  // One claim token per run: every turn mutation verifies it, so a concurrent
+  // run that re-claims a session makes this run fail loudly instead of
+  // interleaving duplicate rows.
+  const runId = crypto.randomUUID();
   const stream = adaptersByProvider.get("claude")?.stream;
   if (stream === undefined) {
     throw new CommandInputError({
@@ -351,11 +362,24 @@ const runClaudeIngest = async (options: {
     const stat = statSync(physicalPath);
     const sourceFingerprint = JSON.stringify({ size: stat.size, mtimeMs: stat.mtimeMs });
 
-    await withRetry(() => client.mutation(quasarApi.upsertProject, mapped.project));
-    const upsert = (await withRetry(() =>
-      client.mutation(quasarApi.upsertSession, { ...mapped.session, sourceFingerprint }),
-    )) as { skipped: boolean };
-    if (upsert.skipped) {
+    await withRetry(() =>
+      client.mutation(api.quasar.upsertProject, {
+        ...mapped.project,
+        aliases: [...mapped.project.aliases],
+        rawPaths: [...mapped.project.rawPaths],
+      }),
+    );
+    // beginSessionIngest claims the session (run-scoped token); the claim is
+    // only cleared by commitSessionIngest after every turn row has landed, so
+    // a crash mid-ingest leaves the session claimed and re-ingested next run.
+    const begin = await withRetry(() =>
+      client.mutation(api.quasar.beginSessionIngest, {
+        ...mapped.session,
+        sourceFingerprint,
+        runId,
+      }),
+    );
+    if (begin.skipped) {
       sessionsSkipped += 1;
       continue;
     }
@@ -363,21 +387,30 @@ const runClaudeIngest = async (options: {
     // Drain old turns before inserting; the mutation deletes one batch per call.
     let result: { deleted: number; batchSize: number };
     do {
-      result = (await withRetry(() =>
-        client.mutation(quasarApi.deleteSessionTurns, {
+      result = await withRetry(() =>
+        client.mutation(api.quasar.deleteSessionTurns, {
           sessionId: mapped.session.sessionId,
+          runId,
         }),
-      )) as { deleted: number; batchSize: number };
+      );
     } while (result.deleted === result.batchSize);
 
     for (const rows of chunk(mapped.messages, INSERT_BATCH)) {
-      await withRetry(() => client.mutation(quasarApi.insertMessages, { messages: rows }));
+      await withRetry(() =>
+        client.mutation(api.quasar.insertMessages, { messages: rows, runId }),
+      );
     }
     for (const rows of chunk(mapped.toolCalls, INSERT_BATCH)) {
       await withRetry(() =>
-        client.mutation(quasarApi.insertToolCalls, { toolCalls: rows }),
+        client.mutation(api.quasar.insertToolCalls, { toolCalls: rows, runId }),
       );
     }
+    await withRetry(() =>
+      client.mutation(api.quasar.commitSessionIngest, {
+        sessionId: mapped.session.sessionId,
+        runId,
+      }),
+    );
 
     sessionsWritten += 1;
     messagesWritten += mapped.messages.length;
