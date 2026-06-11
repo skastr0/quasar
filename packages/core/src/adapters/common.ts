@@ -446,20 +446,41 @@ export const contentBlocksFromNative = (
       typeof record.markdown === "string";
     return hasLocator && hasProviderDisplay && !hasSemanticText;
   };
-  const visit = (item: unknown) => {
+  // Children of a tool block ARE tool payload: they inherit the parent's
+  // nativeType so downstream surfaces can exclude them no matter how deeply a
+  // provider nests tool_result content (arrays of text blocks, references, …).
+  const toolContextOf = (type: string | undefined): string | undefined => {
+    if (type === undefined) return undefined;
+    const lower = type.toLowerCase();
+    if (lower.includes("tool") && lower.includes("result")) return "tool_result";
+    if (lower.includes("tool")) return "tool_use";
+    return undefined;
+  };
+  const visit = (item: unknown, toolContext?: string) => {
     if (item === undefined || item === null) return;
     if (typeof item === "string") {
       const text = compactText(item as NativeValue);
-      if (text !== undefined) pushText("text", text);
+      if (text !== undefined) {
+        pushText(
+          "text",
+          text,
+          toolContext !== undefined ? { nativeType: toolContext } : undefined,
+        );
+      }
       return;
     }
     if (Array.isArray(item)) {
-      for (const child of item) visit(child);
+      for (const child of item) visit(child, toolContext);
       return;
     }
     if (typeof item !== "object") return;
     const record = item as Record<string, unknown>;
     const type = typeof record.type === "string" ? record.type : undefined;
+    const childContext = toolContextOf(type) ?? toolContext;
+    const metadataWithContext = () =>
+      childContext !== undefined
+        ? { ...metadataFor(record, type), nativeType: childContext }
+        : metadataFor(record, type);
     const before = blocks.length;
     const pushedMediaOrFile = pushMediaOrFile(record, type);
     const text =
@@ -469,18 +490,18 @@ export const contentBlocksFromNative = (
       stringValue(record.thinking) ??
       stringValue(record.markdown);
     if (text !== undefined) {
-      const metadata = metadataFor(record, type);
+      const metadata = metadataWithContext();
       if (type === "thinking" || record.thinking !== undefined) pushText("thinking", text, metadata);
       else if (type === "markdown" || record.markdown !== undefined) pushText("markdown", text, metadata);
       else pushText("text", text, metadata);
       return;
     }
-    if (record.content !== undefined) visit(record.content);
-    if (record.parts !== undefined) visit(record.parts);
-    if (record.message !== undefined) visit(record.message);
+    if (record.content !== undefined) visit(record.content, childContext);
+    if (record.parts !== undefined) visit(record.parts, childContext);
+    if (record.message !== undefined) visit(record.message, childContext);
     if (blocks.length === before && !pushedMediaOrFile && !providerMetadataOnly(record)) {
       const text = compactText(record as NativeValue);
-      if (text !== undefined) pushText("text", text, metadataFor(record, type));
+      if (text !== undefined) pushText("text", text, metadataWithContext());
     }
   };
   visit(value);
