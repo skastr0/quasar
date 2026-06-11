@@ -12,6 +12,8 @@ import {
   redactSensitive,
   type ContentBlock,
   type NormalizedSession,
+  type Provider,
+  type SessionEvent,
 } from "@skastr0/quasar-core";
 
 import { CommandInputError } from "../errors";
@@ -156,15 +158,58 @@ const blockThinking = (block: ContentBlock): string | undefined =>
     : undefined;
 
 /**
- * Maps a normalized Claude session to Quasar rows:
+ * Per-provider mapping hooks for the provider-generic engine. The shared
+ * mapper owns only normalized types; everything a hook decides is provider
+ * knowledge (which normalized events are admissible message sources).
+ */
+export interface ProviderIngestHooks {
+  /**
+   * Gate on normalized events before message mapping. Returning false skips
+   * the event for `messages`; `toolCalls` are mapped from the adapter's
+   * ToolCall records and are unaffected.
+   */
+  readonly admitMessageEvent?: (event: SessionEvent) => boolean;
+}
+
+/**
+ * Codex: `response_item` records are the canonical surface — `event_msg`
+ * rows duplicate the same content (18.7 MB measured) and are never ingested.
+ * Only `kind: "message"` events become messages rows: codex function_call /
+ * custom_tool_call events carry JSON tool payloads as their fallback text,
+ * and tool payloads belong to `toolCalls` only, never the search surface.
+ * Encrypted/summarized reasoning carries `role: "thinking"` and is already
+ * excluded by the shared role gate. Injected wrappers arrive as
+ * `kind: "preamble"` from the adapter and are excluded by the shared
+ * injected-kind gate.
+ */
+const codexHooks: ProviderIngestHooks = {
+  admitMessageEvent: (event) =>
+    event.kind === "message" &&
+    event.rawReference.nativeType?.startsWith("response_item") === true,
+};
+
+/** Hooks per supported provider; presence in this map is the support gate. */
+export const PROVIDER_INGEST_HOOKS: ReadonlyMap<Provider, ProviderIngestHooks> = new Map([
+  ["claude", {}],
+  ["codex", codexHooks],
+]);
+
+export const SUPPORTED_INGEST_PROVIDERS = [...PROVIDER_INGEST_HOOKS.keys()];
+
+/**
+ * Maps a normalized session to Quasar rows (provider-generic engine):
  * - user/assistant text turns → `messages` rows (seq = event sequence);
- * - plaintext thinking blocks → `role: "reasoning"` rows (the adapter emits
+ * - plaintext thinking blocks → `role: "reasoning"` rows (adapters emit
  *   them as assistant message blocks; promotion happens here);
  * - adapter ToolCall records → `toolCalls` rows with faithfully stringified
- *   input/output and seq taken from the originating tool_use event.
- * Every text passes through redactSensitive, then the boundary line.
+ *   input/output and seq taken from the originating tool-call event.
+ * Provider specifics enter only through `hooks`. Every text passes through
+ * redactSensitive, then the Convex 1 MiB boundary line.
  */
-export const mapClaudeSession = (session: NormalizedSession): MappedSession => {
+export const mapNormalizedSession = (
+  session: NormalizedSession,
+  hooks: ProviderIngestHooks = {},
+): MappedSession => {
   const sessionId = session.id;
   const projectKey = session.projectIdentity.projectIdentityKey;
   const diagnostics: IngestDiagnostic[] = [];
@@ -183,6 +228,7 @@ export const mapClaudeSession = (session: NormalizedSession): MappedSession => {
   for (const event of session.events) {
     if (event.role !== "user" && event.role !== "assistant") continue;
     if (INJECTED_EVENT_KINDS.has(event.kind)) continue;
+    if (hooks.admitMessageEvent?.(event) === false) continue;
     const reasoningParts: string[] = [];
     const textParts: string[] = [];
     if (event.contentBlocks.length === 0) {
@@ -320,22 +366,31 @@ const createConvexClient = (): ConvexHttpClient => {
   return new ConvexHttpClient(url, { skipConvexDeploymentUrlCheck: true });
 };
 
-const runClaudeIngest = async (options: {
+const runProviderIngest = async (options: {
+  readonly provider: string;
   readonly root?: string;
   readonly limit?: number;
   readonly force?: boolean;
 }): Promise<IngestReport> => {
+  const provider = options.provider as Provider;
+  const hooks = PROVIDER_INGEST_HOOKS.get(provider);
+  if (hooks === undefined) {
+    throw new CommandInputError({
+      field: "provider",
+      message: `Unsupported ingest provider: ${options.provider}. Supported: ${SUPPORTED_INGEST_PROVIDERS.join(", ")}.`,
+    });
+  }
   const startedAt = Date.now();
   const client = createConvexClient();
   // One claim token per run: every turn mutation verifies it, so a concurrent
   // run that re-claims a session makes this run fail loudly instead of
   // interleaving duplicate rows.
   const runId = crypto.randomUUID();
-  const stream = adaptersByProvider.get("claude")?.stream;
+  const stream = adaptersByProvider.get(provider)?.stream;
   if (stream === undefined) {
     throw new CommandInputError({
       field: "provider",
-      message: "The claude adapter does not expose a session stream.",
+      message: `The ${provider} adapter does not expose a session stream.`,
     });
   }
 
@@ -349,13 +404,13 @@ const runClaudeIngest = async (options: {
   const items = stream({
     machine: loadMachineIdentity(),
     now: new Date().toISOString(),
-    ...(options.root !== undefined ? { roots: { claude: options.root } } : {}),
+    ...(options.root !== undefined ? { roots: { [provider]: options.root } } : {}),
     ...(options.limit !== undefined ? { limit: options.limit } : {}),
   });
 
   for await (const item of items) {
     if (item.type !== "session") continue;
-    const mapped = mapClaudeSession(item.session);
+    const mapped = mapNormalizedSession(item.session, hooks);
     diagnostics.push(...mapped.diagnostics);
 
     // The adapter never populates the stream fingerprint; stat the source file.
@@ -421,7 +476,7 @@ const runClaudeIngest = async (options: {
   }
 
   return {
-    provider: "claude",
+    provider,
     sessionsWritten,
     sessionsSkipped,
     messages: messagesWritten,
@@ -433,7 +488,9 @@ const runClaudeIngest = async (options: {
 };
 
 const providerOption = Options.text("provider").pipe(
-  Options.withDescription("Session provider to ingest (supported: claude)"),
+  Options.withDescription(
+    `Session provider to ingest (supported: ${SUPPORTED_INGEST_PROVIDERS.join(", ")})`,
+  ),
 );
 const rootOption = Options.text("root").pipe(
   Options.withDescription("Override the provider root directory"),
@@ -456,17 +513,18 @@ export const ingestCommand = Command.make(
     executeJsonCommand(
       "ingest",
       Effect.gen(function* () {
-        if (provider !== "claude") {
+        if (!SUPPORTED_INGEST_PROVIDERS.includes(provider as Provider)) {
           return yield* Effect.fail(
             new CommandInputError({
               field: "provider",
-              message: `Unsupported ingest provider: ${provider}. Supported: claude.`,
+              message: `Unsupported ingest provider: ${provider}. Supported: ${SUPPORTED_INGEST_PROVIDERS.join(", ")}.`,
             }),
           );
         }
         return yield* Effect.tryPromise({
           try: () =>
-            runClaudeIngest({
+            runProviderIngest({
+              provider,
               root: Option.getOrUndefined(root),
               limit: Option.getOrUndefined(limit),
               force,
