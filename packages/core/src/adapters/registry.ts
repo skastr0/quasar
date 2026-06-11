@@ -1,14 +1,8 @@
-import { ampAdapter } from "./amp";
-import { antigravityAdapter } from "./antigravity";
 import { claudeAdapter } from "./claude";
 import { codexAdapter } from "./codex";
-import { cursorAdapter } from "./cursor";
-import { droidAdapter } from "./droid";
 import { grokAdapter } from "./grok";
 import { hermesAdapter } from "./hermes";
-import { kimiAdapter } from "./kimi";
 import { opencodeAdapter } from "./opencode";
-import { piAdapter } from "./pi";
 import type { AdapterDiscoverOptions, AdapterReadResult, SessionAdapter } from "./types";
 
 export const stableAdapters = [
@@ -16,13 +10,7 @@ export const stableAdapters = [
   claudeAdapter,
   opencodeAdapter,
   grokAdapter,
-  ampAdapter,
-  piAdapter,
-  kimiAdapter,
-  droidAdapter,
   hermesAdapter,
-  antigravityAdapter,
-  cursorAdapter,
 ] as const;
 
 export const experimentalAdapters = [] as const;

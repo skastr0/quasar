@@ -2,17 +2,12 @@ import { createReadStream, existsSync, readdirSync, statSync, type Stats } from 
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
-import { shouldProcessSourceUnit } from "./record-stream";
 import {
   collectAdapterStream,
-  type RecordStreamItem,
-  type RecordStreamOptions,
   type SessionAdapter,
-  type SourceUnit,
 } from "./types";
 import type { NormalizedSession, SessionEventKind, SessionRole, ToolCall, UsageRecord } from "../schemas";
 import { stableWideHash } from "../hash";
-import { sessionToRecords } from "../records";
 import {
   buildSession,
   collectFiles,
@@ -381,18 +376,6 @@ function* walkFilesWithStats(
   yield* visit(walkInput.root);
 }
 
-const codexSourceUnit = (
-  logicalSessionsRoot: string,
-  sourcePath: string,
-  physicalPath: string,
-): SourceUnit => ({
-  provider: "codex",
-  adapterId: codexAdapter.id,
-  rootPath: logicalSessionsRoot,
-  sourcePath,
-  physicalPath,
-});
-
 async function* streamCodexSessionFromFile(
   path: string,
   sourcePath: string,
@@ -583,133 +566,6 @@ async function* streamCodex(options: AdapterOptions) {
   };
 }
 
-async function* streamCodexRecords(
-  options: RecordStreamOptions,
-): AsyncGenerator<RecordStreamItem> {
-  const root = options.roots?.codex ?? codexAdapter.defaultRoot();
-  if (root === undefined || !existsSync(root)) {
-    yield {
-      type: "diagnostic" as const,
-      diagnostic: {
-        adapterId: codexAdapter.id,
-        provider: "codex" as const,
-        status: "no_data_found" as const,
-        parserConfidence: "documented" as const,
-        message: "Codex root was not found.",
-        ...(root !== undefined ? { rootPath: root } : {}),
-      },
-    };
-    return;
-  }
-
-  const sessionsRoot = join(root, "sessions");
-  const logicalRoot = logicalRootFor("codex", root, options);
-  const logicalSessionsRoot = join(logicalRoot, "sessions");
-  const rootRecord = sourceRoot(
-    "codex",
-    codexAdapter.id,
-    logicalSessionsRoot,
-    options.machine,
-    options.now,
-  );
-  yield {
-    type: "record" as const,
-    item: {
-      type: "source_root" as const,
-      record: rootRecord,
-    },
-  };
-
-  let discoveredUnitCount = 0;
-  let processedUnitCount = 0;
-  let skippedUnitCount = 0;
-  let rootComplete = true;
-  for (const { path, stats } of walkFilesWithStats(
-    sessionsRoot,
-    (path) => /rollout-.*\.jsonl$/.test(path),
-    options.limit,
-    options.skip,
-  )) {
-    const sourcePath = logicalPathFor(path, sessionsRoot, logicalSessionsRoot);
-    const sourceUnit = codexSourceUnit(logicalSessionsRoot, sourcePath, path);
-    const fingerprint = fileFingerprint(stats);
-    discoveredUnitCount += 1;
-    yield { type: "unitStart" as const, unit: sourceUnit, fingerprint };
-    let shouldProcess = false;
-    try {
-      shouldProcess = await shouldProcessSourceUnit(options, sourceUnit, fingerprint);
-    } catch (cause) {
-      rootComplete = false;
-      yield {
-        type: "diagnostic" as const,
-        diagnostic: {
-          adapterId: codexAdapter.id,
-          provider: "codex" as const,
-          status: "error" as const,
-          parserConfidence: "documented" as const,
-          rootPath: logicalSessionsRoot,
-          message: "Codex source-unit predicate failed.",
-          details: { error: cause instanceof Error ? cause.message : String(cause) },
-        },
-      };
-      yield { type: "unitEnd" as const, unit: sourceUnit, complete: false };
-      continue;
-    }
-    if (!shouldProcess) {
-      skippedUnitCount += 1;
-      yield { type: "unitEnd" as const, unit: sourceUnit, complete: true };
-      continue;
-    }
-
-    processedUnitCount += 1;
-    let unitComplete = true;
-    try {
-      for await (const session of streamCodexSessionFromFile(
-        path,
-        sourcePath,
-        logicalSessionsRoot,
-        options,
-        { strictJsonLines: true },
-      )) {
-        for (const record of sessionToRecords(session)) {
-          yield {
-            type: "record" as const,
-            item: record,
-          };
-        }
-      }
-    } catch (cause) {
-      unitComplete = false;
-      rootComplete = false;
-      yield {
-        type: "diagnostic" as const,
-        diagnostic: {
-          adapterId: codexAdapter.id,
-          provider: "codex" as const,
-          status: "error" as const,
-          parserConfidence: "documented" as const,
-          rootPath: logicalSessionsRoot,
-          message: "Codex JSONL source unit could not be streamed completely.",
-          details: { error: cause instanceof Error ? cause.message : String(cause) },
-        },
-      };
-    }
-    yield { type: "unitEnd" as const, unit: sourceUnit, complete: unitComplete };
-  }
-  yield { type: "rootScanned" as const, root: rootRecord, complete: rootComplete };
-  yield {
-    type: "diagnostic" as const,
-    diagnostic: {
-      adapterId: codexAdapter.id,
-      provider: "codex" as const,
-      status: discoveredUnitCount > 0 ? ("available" as const) : ("no_data_found" as const),
-      parserConfidence: "documented" as const,
-      rootPath: logicalSessionsRoot,
-      message: `Discovered ${discoveredUnitCount} Codex source unit(s); processed ${processedUnitCount}; skipped ${skippedUnitCount}.`,
-    },
-  };
-}
-
 export const codexAdapter: SessionAdapter = {
   id: "codex-local-jsonl",
   provider: "codex",
@@ -718,5 +574,4 @@ export const codexAdapter: SessionAdapter = {
   defaultRoot: () => process.env.CODEX_HOME ?? homePath(".codex"),
   read: async (options) => collectAdapterStream(streamCodex(options)),
   stream: streamCodex,
-  streamRecords: streamCodexRecords,
 };

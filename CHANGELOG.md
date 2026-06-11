@@ -17,6 +17,15 @@ formats may still change.
 
 ### Removed
 
+- The entire abandoned record-stream ingest plane: the v1 record taxonomy and
+  envelope machinery, the adapter record bridge, the CLI ingest ledger and
+  runner, the Convex record-ingest endpoint and its `recordStates`/`tombstones`
+  tables, and the `/api/ingest/records` route. `quasar ingest` now reports
+  `not_ready` until the v2 sync contract lands. Parsing knowledge remains
+  minable from git history (see `docs/architecture/README.md`, Graveyard).
+- The six provider adapters with no data on any real host (Amp, Pi, Kimi,
+  Factory/Droid, Antigravity, Cursor); re-admitted only when data and a
+  consuming endpoint exist.
 - Compaction-era legacy-field rejection from the record envelope decoder, and
   the tests that pinned it.
 - The banned-terminology source scan and the character-code keyword
