@@ -57,9 +57,6 @@ type HermesArtifactDraft = Omit<
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
 >;
 
-const HERMES_MAX_TEXT_FIELD_BYTES = 96 * 1024;
-const HERMES_MAX_JSON_FIELD_BYTES = 128 * 1024;
-
 const maybeDatabase = async (path: string) => {
   try {
     const { Database } = await import("bun:sqlite");
@@ -106,12 +103,6 @@ const hermesDbPath = (root: string | undefined) => {
 export const hermesSessionWindowLimit = (limit: number | undefined) =>
   limit === undefined ? -1 : Math.max(1, Math.floor(limit));
 const sessionWindowSkip = (skip: number | undefined) => Math.max(0, Math.floor(skip ?? 0));
-const omittedTextSql = (column: string, label: string) =>
-  `case when length(${column}) > ${HERMES_MAX_TEXT_FIELD_BYTES} then '[omitted:large_hermes_${label} bytes=' || length(${column}) || ']' else ${column} end as ${column}`;
-const omittedJsonSql = (column: string, label: string) =>
-  `case when length(${column}) > ${HERMES_MAX_JSON_FIELD_BYTES} then json_object('omitted', 'large_hermes_${label}', 'bytes', length(${column})) else ${column} end as ${column}`;
-const omittedToolCallsSql = () =>
-  `case when length(tool_calls) > ${HERMES_MAX_JSON_FIELD_BYTES} then json_array(json_object('id', 'omitted', 'name', 'hermes_tool', 'arguments', json_object('omitted', 'large_hermes_tool_calls', 'bytes', length(tool_calls)))) else tool_calls end as tool_calls`;
 const HERMES_SESSION_COLUMNS = [
   "id",
   "model",
@@ -129,22 +120,24 @@ const HERMES_SESSION_COLUMNS = [
   "title",
   "cwd",
 ].join(", ");
+// Columns are read in full — never byte caps. Convex limits are the only
+// boundary; oversized values surface as named diagnostics at the ingest layer.
 const HERMES_MESSAGE_COLUMNS = [
   "id",
   "session_id",
   "role",
-  omittedTextSql("content", "content"),
+  "content",
   "tool_call_id",
-  omittedToolCallsSql(),
+  "tool_calls",
   "tool_name",
   "timestamp",
   "token_count",
   "finish_reason",
-  omittedTextSql("reasoning", "reasoning"),
-  omittedTextSql("reasoning_content", "reasoning_content"),
-  omittedJsonSql("reasoning_details", "reasoning_details"),
-  omittedJsonSql("codex_reasoning_items", "codex_reasoning_items"),
-  omittedJsonSql("codex_message_items", "codex_message_items"),
+  "reasoning",
+  "reasoning_content",
+  "reasoning_details",
+  "codex_reasoning_items",
+  "codex_message_items",
   "platform_message_id",
 ].join(", ");
 
