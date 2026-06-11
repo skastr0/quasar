@@ -1,7 +1,13 @@
 # Quasar v2 — Canonical Greenfield Plan
 
+> **HISTORICAL (superseded 2026-06-11).** Superseded by
+> [quasar-data-reality-plan-2026-06-11.md](quasar-data-reality-plan-2026-06-11.md)
+> after full-corpus measurement showed the product is a ~650MB static text estate,
+> retiring the wire-contract/byte-floor framing. No instruction in this document is
+> live work.
+
 Date: 2026-06-10
-Status: handoff document — buildable cold
+Status: historical — superseded by the data-reality plan
 Provenance: synthesized from a 14-agent forensic audit (tower glyph history QSR-001..028,
 git forensics over 96 commits, core/Convex/CLI code audits, empirical byte measurement on
 real session files, product-fit consumption matrix), a 3-judge salvageability panel, and

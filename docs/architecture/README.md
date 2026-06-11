@@ -2,20 +2,21 @@
 
 There is exactly **one current direction**:
 
-- **[Quasar v2 — Canonical Greenfield Plan](quasar-v2-greenfield-plan-2026-06-10.md)** —
-  the authoritative architecture: storage topology, wire contract (`quasar-sync/v2`),
-  CLI/ledger design, Convex schema, adapter strategy, work decomposition, and kill
-  criteria. Includes the self-hosted Convex hosting decision and the per-field
-  expectation addendum (out-of-expectation inputs are contract breaches rejected at the
-  adapter boundary — never absorbed).
+- **[Quasar — Data-Reality Plan](quasar-data-reality-plan-2026-06-11.md)** — the
+  authoritative architecture: measured corpus reality, the three principles (Convex
+  limits are the contract; store at the grain you read; indexing is a separate decision
+  from storing), the entity model (projects → sessions → messages + toolCalls),
+  per-provider turn-mapping rules, ingest pipeline, search phases (lexical, then Gemini
+  embeddings), and the build sequence QSR-053..062.
 - **[Convex Grain — Quasar v2 Verdicts](convex-grain-quasar-v2.md)** — platform rulings
   for building on self-hosted Convex: mutation chunking, index-only reads, action-based
   fusion, idempotency, migration policy, component boundaries.
 
-Everything else in this directory is **historical**: post-mortems and measurement
-reports from the two abandoned ingest architectures (the session-blob import era and the
-record-stream compaction era). They are preserved as evidence and lessons. No
-instruction, follow-up, or verdict in a historical document is live work.
+Everything else in this directory is **historical**: post-mortems, plans, and
+measurement reports from the abandoned eras (the session-blob import era, the
+record-stream compaction era, and the sync-contract/byte-gate era). They are preserved
+as evidence and lessons. No instruction, follow-up, or verdict in a historical document
+is live work.
 
 ## Graveyard
 
@@ -37,4 +38,11 @@ Tailscale scripts) and the CLI server client and server-backed commands
 (`packages/cli/src/api.ts`, `config.ts`, `commands/{ingest,search,sessions,tool-calls,projects}.ts`).
 All of it is minable at commit `7f0daf1`. The embedding outbox / RAG sync / readiness
 modules and the HTTP auth/body-cap patterns are the high-value mining targets for the
-v2 Convex build; the architecture around them stays dead.
+Convex build; the architecture around them stays dead.
+
+The sync-contract era artifacts were deleted on 2026-06-11 at QSR-053:
+`packages/core/src/sync-contract.ts`, `packages/core/test/sync-contract.test.ts`, and
+`scripts/check-sync-contract.ts` (the byte-floor measurement harness). They are minable
+from git history at the commit preceding the QSR-053 reorientation. Their one durable
+finding — tool events must be single-carried, never duplicated across message and
+tool-call rows — lives on as a mapping rule in the data-reality plan.
