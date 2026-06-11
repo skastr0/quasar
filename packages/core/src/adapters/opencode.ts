@@ -41,7 +41,13 @@ type OpenCodeSessionRow = {
   time_created: number;
   time_updated: number;
 };
-type OpenCodeMessageRow = { id: string; time_created: number; data: string };
+type OpenCodeMessageRow = {
+  id: string;
+  time_created: number;
+  data: string;
+  /** Pre-prune byte length of the raw `message.data` blob. */
+  raw_bytes?: number;
+};
 type OpenCodePartRow = {
   id: string;
   message_id: string;
@@ -95,6 +101,14 @@ const OPENCODE_PRUNED_MESSAGE_DATA_SQL = [
   ")",
   "else data end",
 ].join(" ");
+
+/**
+ * Pre-prune byte length of the raw row — measured in SQL because the pruning
+ * guards run before the data ever reaches this process. The ingest boundary
+ * uses it to surface pruned-away provider garbage (e.g. a 105 MB
+ * `summary.diffs` blob) as a named diagnostic instead of silently omitting it.
+ */
+const OPENCODE_RAW_BYTES_SQL = "length(cast(data as blob))";
 
 const OPENCODE_PRUNED_PART_DATA_SQL = [
   "case",
@@ -224,7 +238,7 @@ const readSessionRows = (
 const readMessages = (db: OpenCodeDatabase, sessionId: string) =>
   db
     .query(
-      `select id, time_created, ${OPENCODE_PRUNED_MESSAGE_DATA_SQL} as data from message where session_id = ? order by time_created, id`,
+      `select id, time_created, ${OPENCODE_RAW_BYTES_SQL} as raw_bytes, ${OPENCODE_PRUNED_MESSAGE_DATA_SQL} as data from message where session_id = ? order by time_created, id`,
     )
     .all(sessionId) as OpenCodeMessageRow[];
 
@@ -262,7 +276,7 @@ export const readOpenCodeSessionRowsForWindow = (
 const readMessagesCli = (dbPath: string, sessionId: string) =>
   sqliteJson<OpenCodeMessageRow>(
     dbPath,
-    `select id, time_created, ${OPENCODE_PRUNED_MESSAGE_DATA_SQL} as data from message where session_id = ${sql(sessionId)} order by time_created, id`,
+    `select id, time_created, ${OPENCODE_RAW_BYTES_SQL} as raw_bytes, ${OPENCODE_PRUNED_MESSAGE_DATA_SQL} as data from message where session_id = ${sql(sessionId)} order by time_created, id`,
   );
 
 const readPartsByMessageCli = (dbPath: string, sessionId: string) => {
@@ -343,12 +357,21 @@ const summaryMetadata = (value: unknown): NativeValue | undefined => {
   ) as NativeValue;
 };
 
+/**
+ * Part types that are agent machinery, not session turns: lifecycle markers,
+ * compaction records, and file attachments. They never project into message
+ * content (the search surface); diff/patch parts are likewise machinery and
+ * already surface separately as artifacts.
+ */
+const MACHINERY_PART_TYPES = new Set(["step-start", "step-finish", "compaction", "file"]);
+
 const partContentProjection = (part: NativeValue): NativeValue | undefined => {
   const record = recordFrom(part);
   if (Object.keys(record).length === 0) return typeof part === "string" ? part : undefined;
   const type = typeof record.type === "string" ? record.type : undefined;
   const lowerType = type?.toLowerCase() ?? "";
   if (lowerType.includes("diff") || lowerType.includes("patch")) return undefined;
+  if (MACHINERY_PART_TYPES.has(lowerType)) return undefined;
   const text =
     typeof record.text === "string"
       ? record.text
@@ -365,9 +388,13 @@ const partContentProjection = (part: NativeValue): NativeValue | undefined => {
         : typeof record.filePath === "string"
           ? record.filePath
           : undefined;
+  // Reasoning parts are plaintext thinking: project under the `thinking` key
+  // so the shared block builder emits `kind: "thinking"` blocks, which the
+  // ingest layer promotes to `role: "reasoning"` rows.
+  const textKey = lowerType === "reasoning" ? "thinking" : "text";
   const projected = {
     ...(type !== undefined ? { type } : {}),
-    ...(text !== undefined ? { text } : {}),
+    ...(text !== undefined ? { [textKey]: text } : {}),
     ...(path !== undefined ? { path } : {}),
     ...(toolNameFromPart(record) !== undefined ? { toolName: toolNameFromPart(record) } : {}),
     ...(typeof record.callID === "string" ? { callID: record.callID } : {}),
@@ -534,6 +561,12 @@ const eventFromMessage = (
 ) => {
   const data = parseMessageData(message);
   const content = messageContentProjection(data, parts);
+  // Machinery-only turns (step markers, compaction, patches) project to a
+  // bare role envelope; without content or parts there is no session text,
+  // so no content surfaces (a JSON dump of the envelope is not a turn).
+  const contentRecord = recordFrom(content);
+  const hasTurnContent =
+    contentRecord.content !== undefined || contentRecord.parts !== undefined;
   const role: SessionRole =
     data.role === "assistant" || data.role === "user" ? data.role : "unknown";
   const eventId = eventIdFor("opencode", machineId, dbPath, index, message.id);
@@ -550,9 +583,18 @@ const eventFromMessage = (
       timestamp: new Date(message.time_created).toISOString(),
       role,
       kind: parts.some((part) => toolNameFromPart(part) !== undefined) ? ("tool_call" as const) : ("message" as const),
-      contentText: compactText(content as NativeValue),
-      contentSource: content,
-      rawReference: { sourcePath: dbPath, table: "message", rowId: message.id, nativeType: "message" },
+      ...(hasTurnContent
+        ? { contentText: compactText(content as NativeValue), contentSource: content }
+        : {}),
+      rawReference: {
+        sourcePath: dbPath,
+        table: "message",
+        rowId: message.id,
+        nativeType: "message",
+        ...(typeof message.raw_bytes === "number" && Number.isFinite(message.raw_bytes)
+          ? { rawBytes: message.raw_bytes }
+          : {}),
+      },
     },
   };
 };

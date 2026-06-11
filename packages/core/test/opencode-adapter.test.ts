@@ -1,0 +1,119 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { afterAll, describe, expect, test } from "vitest";
+
+import { opencodeAdapter } from "../src/adapters/opencode";
+
+const MACHINE = {
+  machineId: "machine:test",
+  hostname: "test-host",
+  platform: "darwin",
+};
+
+const NOW = "2026-06-11T00:00:00.000Z";
+
+const SESSION_ID = "ses_fixture";
+
+/**
+ * Fixture mirrors the measured production shape: parts carry the session
+ * content (text / reasoning / tool) plus machinery (step markers), and one
+ * message row hides >1 MiB of `summary.diffs` garbage that the adapter's SQL
+ * pruning guard strips before the data reaches this process.
+ */
+const FIXTURE_SQL = `
+create table session (id text primary key, title text, directory text, time_created integer, time_updated integer);
+create table message (id text primary key, session_id text, time_created integer, data text);
+create table part (id text primary key, message_id text, session_id text, time_created integer, data text);
+
+insert into session values ('${SESSION_ID}', 'profiling session', '/tmp/proj', 1, 9);
+
+insert into message values ('msg_user', '${SESSION_ID}', 1, json_object('role', 'user', 'time', json_object('created', 1)));
+insert into part values ('prt_user_text', 'msg_user', '${SESSION_ID}', 1, json_object('type', 'text', 'text', 'please profile the ingest'));
+
+insert into message values ('msg_assistant', '${SESSION_ID}', 2, json_object('role', 'assistant', 'time', json_object('created', 2)));
+insert into part values ('prt_step_start', 'msg_assistant', '${SESSION_ID}', 2, json_object('type', 'step-start'));
+insert into part values ('prt_reasoning', 'msg_assistant', '${SESSION_ID}', 3, json_object('type', 'reasoning', 'text', 'I should measure first'));
+insert into part values ('prt_text', 'msg_assistant', '${SESSION_ID}', 4, json_object('type', 'text', 'text', 'Measured; here is the plan.'));
+insert into part values ('prt_tool', 'msg_assistant', '${SESSION_ID}', 5, json_object('type', 'tool', 'tool', 'bash', 'callID', 'call1', 'state', json_object('status', 'completed', 'input', json_object('command', 'ls'), 'output', 'file.txt')));
+insert into part values ('prt_step_finish', 'msg_assistant', '${SESSION_ID}', 6, json_object('type', 'step-finish'));
+
+-- Machinery-only turn: a compaction marker is not a session turn.
+insert into message values ('msg_machinery', '${SESSION_ID}', 3, json_object('role', 'assistant', 'time', json_object('created', 3)));
+insert into part values ('prt_compaction', 'msg_machinery', '${SESSION_ID}', 7, json_object('type', 'compaction', 'auto', json('true')));
+
+-- Garbage source row: >1 MiB of summary.diffs (hex(zeroblob(600000)) is 1.2M chars),
+-- pruned away in SQL — only raw_bytes can witness the breach downstream.
+insert into message values ('msg_garbage', '${SESSION_ID}', 4, json_object('role', 'user', 'time', json_object('created', 4), 'summary', json_object('diffs', json_array(hex(zeroblob(600000))))));
+insert into part values ('prt_garbage_text', 'msg_garbage', '${SESSION_ID}', 8, json_object('type', 'text', 'text', 'Continue'));
+`;
+
+const root = mkdtempSync(join(tmpdir(), "quasar-opencode-test-"));
+const dbPath = join(root, "opencode.db");
+execFileSync("sqlite3", [dbPath, FIXTURE_SQL]);
+
+afterAll(() => {
+  rmSync(root, { recursive: true, force: true });
+});
+
+describe("opencode adapter", () => {
+  test("maps parts to turns, drops machinery, and reports pre-prune raw bytes", async () => {
+    const result = await opencodeAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { opencode: root },
+    });
+
+    expect(result.sessions).toHaveLength(1);
+    const session = result.sessions[0]!;
+    expect(session.events).toHaveLength(4);
+
+    // User text part becomes a text block.
+    const userEvent = session.events[0]!;
+    expect(userEvent.role).toBe("user");
+    expect(userEvent.kind).toBe("message");
+    expect(userEvent.contentBlocks.map((block) => [block.kind, block.text])).toEqual([
+      ["text", "please profile the ingest"],
+    ]);
+
+    // Assistant turn: reasoning surfaces as a thinking block, visible text as
+    // a text block, the tool part is tagged tool_use machinery, and step
+    // markers never appear.
+    const assistantEvent = session.events[1]!;
+    expect(assistantEvent.kind).toBe("tool_call");
+    const kinds = assistantEvent.contentBlocks.map((block) => block.kind);
+    expect(kinds).toEqual(["thinking", "text", "text"]);
+    expect(assistantEvent.contentBlocks[0]?.thinking).toBe("I should measure first");
+    expect(assistantEvent.contentBlocks[1]?.text).toBe("Measured; here is the plan.");
+    const toolBlockMetadata = assistantEvent.contentBlocks[2]?.metadata as
+      | Record<string, unknown>
+      | undefined;
+    expect(toolBlockMetadata?.nativeType).toBe("tool_use");
+    expect(JSON.stringify(assistantEvent.contentBlocks)).not.toContain("step-start");
+    expect(JSON.stringify(assistantEvent.contentBlocks)).not.toContain("step-finish");
+
+    // Tool part maps to a ToolCall with state.input/state.output payloads.
+    expect(session.toolCalls).toHaveLength(1);
+    expect(session.toolCalls[0]).toMatchObject({
+      toolName: "bash",
+      status: "completed",
+      input: { command: "ls" },
+      output: "file.txt",
+    });
+
+    // Machinery-only turn carries no content at all.
+    const machineryEvent = session.events[2]!;
+    expect(machineryEvent.contentText).toBeUndefined();
+    expect(machineryEvent.contentBlocks).toHaveLength(0);
+
+    // The garbage row: SQL pruning removed summary.diffs from the projected
+    // content, and rawBytes reports the pre-prune size for the ingest line.
+    const garbageEvent = session.events[3]!;
+    expect(garbageEvent.rawReference.rawBytes).toBeGreaterThanOrEqual(1_048_576);
+    expect(JSON.stringify(garbageEvent.contentBlocks).length).toBeLessThan(10_000);
+    // Sound rows still report small raw byte counts.
+    expect(userEvent.rawReference.rawBytes).toBeLessThan(1_000);
+  });
+});

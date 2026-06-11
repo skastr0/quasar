@@ -229,6 +229,10 @@ export const RawReference = Schema.Struct({
   table: Schema.optional(Schema.String),
   rowId: Schema.optional(Schema.String),
   nativeType: Schema.optional(Schema.String),
+  /** UTF-8 bytes of the raw source row before any adapter pruning — the
+   * measurement the ingest boundary uses to name provider garbage even when
+   * machinery-key pruning shrinks what the CLI actually receives. */
+  rawBytes: Schema.optional(NonNegativeInteger),
 });
 export type RawReference = typeof RawReference.Type;
 
