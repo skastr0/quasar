@@ -5,20 +5,10 @@ import { executeJsonCommand } from "../output";
 
 const schemas = [
   {
-    schema_id: "quasar.search.request/v1",
-    command: "search text|semantic|fusion",
-    description: "Search query and optional filters.",
-    example: { query: "tool call failed", provider: "codex", limit: 10 },
-  },
-  {
-    schema_id: "quasar.projects.alias/v1",
-    command: "projects alias",
-    description: "Merge one observed project identity into another canonical identity.",
-    example: {
-      sourceProjectIdentityKey: "path:machine-a:abc",
-      targetProjectIdentityKey: "git:github.com/skastr0/quasar",
-      reason: "Same repository on another machine",
-    },
+    schema_id: "quasar.sources.discover/v1",
+    command: "sources discover",
+    description: "Discover local provider session sources, read-only.",
+    example: { providers: ["codex"], limit: 5 },
   },
 ];
 

@@ -78,13 +78,6 @@ const taggedErrorDetails = (
   error: Error & { _tag: string; [key: string]: unknown },
 ): FailureEnvelope["error"] => {
   switch (error._tag) {
-    case "ConfigurationError":
-      return taggedDetails(error, { field: toJsonValue(error.field) });
-    case "MissingApiKeyError":
-      return taggedDetails(error, {
-        env_var: toJsonValue(error.envVar),
-        hint: toJsonValue(error.hint),
-      }, `${String(error.envVar)} is not configured`);
     case "JsonInputError":
       return taggedDetails(error, {
         source: toJsonValue(error.source),
@@ -92,24 +85,6 @@ const taggedErrorDetails = (
       });
     case "CommandInputError":
       return taggedDetails(error, { field: toJsonValue(error.field) });
-    case "ApiRequestError":
-      return taggedDetails(error, {
-        method: toJsonValue(error.method),
-        path: toJsonValue(error.path),
-        reason: toJsonValue(error.reason),
-      });
-    case "ApiResponseError":
-      return taggedDetails(error, {
-        method: toJsonValue(error.method),
-        path: toJsonValue(error.path),
-        status: toJsonValue(error.status),
-        body: toJsonValue(error.body),
-      });
-    case "ApiDecodeError":
-      return taggedDetails(error, {
-        method: toJsonValue(error.method),
-        path: toJsonValue(error.path),
-      });
     default:
       return { type: error._tag, message: error.message };
   }
