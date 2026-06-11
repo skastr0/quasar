@@ -1,7 +1,12 @@
 # Quasar CLI
 
 The Quasar CLI imports local AI agent session histories, validates ingestion
-plans, and sends sanitized batches to a Quasar control server.
+plans, and sends sanitized records to a Quasar control server.
+
+Status: pre-release. Discovery, planning, and local inspection commands work
+read-only today; server-backed ingest is gated until the v2 sync contract
+lands (see `docs/architecture/quasar-v2-greenfield-plan-2026-06-10.md` in the
+repository).
 
 ## Install
 

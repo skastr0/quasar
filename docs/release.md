@@ -1,5 +1,9 @@
 # Release Checklist
 
+Publishing is paused until the v2 product gates are green (see
+`docs/architecture/quasar-v2-greenfield-plan-2026-06-10.md`). Public artifacts
+must describe a working system, not aspirations.
+
 Quasar uses CI-first npm publishing for the CLI package. Do not publish locally
 unless the maintainer explicitly approves a specific package/version exception.
 
