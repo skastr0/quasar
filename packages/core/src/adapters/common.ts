@@ -4,6 +4,7 @@ import { basename, dirname, join, relative } from "node:path";
 import { Option, Schema } from "effect";
 
 import { stableJsonHash, stableWideHash } from "../hash";
+import { gitRemoteForPath } from "../git-identity";
 import { resolveProjectIdentity } from "../project-normalization";
 import { redactSensitive } from "../redaction";
 import type {
@@ -678,10 +679,14 @@ const contentBlocksForEvent = (
 
 export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
   const args = parseBuildSessionArgs(input);
+  // Identity ladder: an adapter-supplied remote wins; otherwise the recorded
+  // working directory is resolved against the local clone enclosing it, so
+  // sessions from every provider that ran in the same repository unify on one
+  // `git:` projectKey (cross-provider project unity).
   const projectIdentity = resolveProjectIdentity({
     machineId: args.machine.machineId,
     rawPath: args.projectPath ?? args.nativeProjectKey,
-    gitRemote: args.gitRemote,
+    gitRemote: args.gitRemote ?? gitRemoteForPath(args.projectPath),
     packageName: args.packageName,
   });
   const id = `${args.provider}:${args.machine.machineId}:${stableWideHash(
