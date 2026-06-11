@@ -311,46 +311,6 @@ type ContentBlockIngestRecord = Extract<IngestRecord, { readonly type: "content_
 const isObject = (value: unknown): value is { readonly [key: string]: unknown } =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-const legacyChildFields = {
-  event: ["machineId", "provider", "agentName", "projectIdentityKey"],
-  content_block: ["sessionId", "machineId", "provider", "agentName", "projectIdentityKey"],
-  tool_call: ["machineId", "provider", "agentName", "projectIdentityKey"],
-  usage: ["machineId", "provider", "agentName", "projectIdentityKey"],
-  artifact: ["machineId", "provider", "agentName", "projectIdentityKey"],
-  edge: ["machineId", "provider", "agentName", "projectIdentityKey"],
-} as const;
-
-const legacyChildFieldError = (type: string, key: string, index: number) =>
-  new RecordContractError({
-    reason: "invalid_envelope",
-    message: `Record ${index} (${type}) carries compacted legacy field ${key}.`,
-  });
-
-const findLegacyChildFieldError = (value: unknown): RecordContractError | undefined => {
-  if (!isObject(value) || !Array.isArray(value.records)) return undefined;
-  for (const [index, item] of value.records.entries()) {
-    if (!isObject(item) || typeof item.type !== "string" || !isObject(item.record)) continue;
-    const keys = legacyChildFields[item.type as keyof typeof legacyChildFields];
-    if (keys === undefined) continue;
-    for (const key of keys) {
-      if (Object.hasOwn(item.record, key)) return legacyChildFieldError(item.type, key, index);
-    }
-    if (
-      item.type === "event" &&
-      isObject(item.record.rawReference) &&
-      Object.hasOwn(item.record.rawReference, "sourcePath")
-    ) {
-      return legacyChildFieldError(item.type, "rawReference.sourcePath", index);
-    }
-  }
-  return undefined;
-};
-
-const rejectLegacyChildFields = (value: unknown): Effect.Effect<void, RecordContractError> => {
-  const error = findLegacyChildFieldError(value);
-  return error === undefined ? Effect.void : Effect.fail(error);
-};
-
 const isTruncationMarker = (value: unknown): value is TruncationMarker =>
   isObject(value) && value.truncated === true && typeof value.bytes === "number";
 
@@ -749,17 +709,13 @@ export const decodeRecordEnvelope = (
   value: unknown,
   limits?: Partial<RecordLimits>,
 ): Effect.Effect<RecordEnvelope, RecordContractError> =>
-  rejectLegacyChildFields(value).pipe(
-    Effect.flatMap(() =>
-      Schema.decodeUnknown(RecordEnvelope)(value).pipe(
-        Effect.mapError(
-          (error) =>
-            new RecordContractError({
-              reason: "invalid_envelope",
-              message: parseErrorMessage(error),
-            }),
-        ),
-      ),
+  Schema.decodeUnknown(RecordEnvelope)(value).pipe(
+    Effect.mapError(
+      (error) =>
+        new RecordContractError({
+          reason: "invalid_envelope",
+          message: parseErrorMessage(error),
+        }),
     ),
     Effect.flatMap((envelope) => enforceRecordEnvelopeLimits(envelope, limits)),
   );
