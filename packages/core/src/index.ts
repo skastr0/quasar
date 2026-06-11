@@ -1,6 +1,7 @@
 export * from "./schemas";
 export * from "./hash";
 export * from "./project-normalization";
+export * from "./git-identity";
 export * from "./machine";
 export * from "./redaction";
 export * from "./api-paths";

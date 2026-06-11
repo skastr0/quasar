@@ -47,6 +47,35 @@ export const upsertProject = mutation({
 });
 
 /**
+ * Deletes project rows that no session references. Project identity is
+ * derived state: when a mapping change re-keys sessions (e.g. a path-keyed
+ * project unifying onto its git-remote key), the abandoned key must vanish —
+ * one canonical projectKey per project, delete over deprecate. Bounded work:
+ * single-tenant, ~tens of project rows, one indexed `.first()` probe each.
+ */
+export const pruneEmptyProjects = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const projects = await ctx.db
+      .query("projects")
+      .withIndex("by_projectKey")
+      .take(LIST_PROJECTS_MAX);
+    let deleted = 0;
+    for (const project of projects) {
+      const anySession = await ctx.db
+        .query("sessions")
+        .withIndex("by_projectKey", (q) => q.eq("projectKey", project.projectKey))
+        .first();
+      if (anySession === null) {
+        await ctx.db.delete(project._id);
+        deleted += 1;
+      }
+    }
+    return { deleted };
+  },
+});
+
+/**
  * Verifies the caller still holds the ingest claim on a session. Turn
  * mutations and the commit run under this check, so a concurrent run that
  * re-claims the session makes the stale run's next mutation fail loudly

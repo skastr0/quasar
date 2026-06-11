@@ -565,6 +565,11 @@ const runProviderIngest = async (options: {
     bytesWritten += mapped.bytesAdmitted;
   }
 
+  // Project identity is derived state: a mapping change can re-key sessions
+  // (e.g. path-keyed rows unifying onto a git-remote key), abandoning the old
+  // project row. One canonical projectKey per project — drop empty ones.
+  await withRetry(() => client.mutation(api.quasar.pruneEmptyProjects, {}));
+
   return {
     provider,
     sessionsWritten,

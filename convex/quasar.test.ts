@@ -328,3 +328,34 @@ test("deleteSessionTurns drains messages and toolCalls under caller-driven batch
   });
   expect(kept.page).toHaveLength(1);
 });
+
+test("pruneEmptyProjects deletes only project rows no session references", async () => {
+  const t = convexTest(schema, modules);
+
+  await t.mutation(api.quasar.upsertProject, {
+    projectKey: "git:github.com/skastr0/quasar",
+    displayName: "quasar",
+    aliases: [],
+    rawPaths: ["/Users/a/Projects/quasar"],
+  });
+  // Abandoned key from before a mapping change re-keyed its sessions.
+  await t.mutation(api.quasar.upsertProject, {
+    projectKey: "path:machine-a:stale",
+    displayName: "quasar",
+    aliases: [],
+    rawPaths: ["/Users/a/Projects/quasar"],
+  });
+  await t.mutation(api.quasar.beginSessionIngest, {
+    ...sessionArgs,
+    projectKey: "git:github.com/skastr0/quasar",
+    runId: "run-1",
+  });
+
+  const result = await t.mutation(api.quasar.pruneEmptyProjects, {});
+  expect(result).toEqual({ deleted: 1 });
+
+  const projects = await t.query(api.quasar.listProjects, {});
+  expect(projects.map((project) => project.projectKey)).toEqual([
+    "git:github.com/skastr0/quasar",
+  ]);
+});
