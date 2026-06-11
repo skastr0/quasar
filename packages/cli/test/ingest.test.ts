@@ -7,7 +7,7 @@ import type {
   ToolCall,
 } from "@skastr0/quasar-core";
 
-import { mapClaudeSession } from "../src/commands/ingest";
+import { mapNormalizedSession, PROVIDER_INGEST_HOOKS } from "../src/commands/ingest";
 
 const MACHINE_ID = "machine:test";
 const SESSION_ID = "claude:machine:test:abc";
@@ -64,9 +64,9 @@ const session = (overrides: Partial<NormalizedSession>): NormalizedSession => ({
   ...overrides,
 });
 
-describe("mapClaudeSession", () => {
+describe("mapNormalizedSession", () => {
   test("maps plain user/assistant text turns with seq and ts", () => {
-    const mapped = mapClaudeSession(
+    const mapped = mapNormalizedSession(
       session({
         events: [
           baseEvent({
@@ -115,7 +115,7 @@ describe("mapClaudeSession", () => {
   });
 
   test("promotes non-empty thinking blocks to role reasoning and drops empty stubs", () => {
-    const mapped = mapClaudeSession(
+    const mapped = mapNormalizedSession(
       session({
         events: [
           // Non-empty thinking + text in the same assistant event.
@@ -176,7 +176,7 @@ describe("mapClaudeSession", () => {
   });
 
   test("excludes tool machinery from messages and maps toolCalls rows faithfully", () => {
-    const mapped = mapClaudeSession(
+    const mapped = mapNormalizedSession(
       session({
         events: [
           baseEvent({
@@ -246,7 +246,7 @@ describe("mapClaudeSession", () => {
     // The boundary is Convex's own 1 MiB value limit — no invented budget. A
     // value just under it is legitimate (if rare) data and must be admitted.
     const large = "y".repeat(1_048_575);
-    const mappedLarge = mapClaudeSession(
+    const mappedLarge = mapNormalizedSession(
       session({
         events: [
           baseEvent({
@@ -263,7 +263,7 @@ describe("mapClaudeSession", () => {
     expect(mappedLarge.diagnostics).toHaveLength(0);
 
     const garbage = "x".repeat(1_048_576);
-    const mapped = mapClaudeSession(
+    const mapped = mapNormalizedSession(
       session({
         events: [
           baseEvent({
@@ -321,7 +321,7 @@ describe("mapClaudeSession", () => {
   });
 
   test("skips injected preamble/system/summary events even when they carry user or assistant roles", () => {
-    const mapped = mapClaudeSession(
+    const mapped = mapNormalizedSession(
       session({
         events: [
           baseEvent({
@@ -368,7 +368,7 @@ describe("mapClaudeSession", () => {
   });
 
   test("applies redactSensitive to every written text", () => {
-    const mapped = mapClaudeSession(
+    const mapped = mapNormalizedSession(
       session({
         events: [
           baseEvent({
@@ -393,5 +393,120 @@ describe("mapClaudeSession", () => {
     expect(mapped.messages[0]?.text).toBe("my key is [redacted]");
     expect(mapped.toolCalls[0]?.inputText).not.toContain("supersecretvalue123");
     expect(mapped.toolCalls[0]?.outputText).toBe("Bearer [redacted]");
+  });
+});
+
+describe("mapNormalizedSession with codex hooks", () => {
+  const codexHooks = PROVIDER_INGEST_HOOKS.get("codex")!;
+
+  const codexEvent = (
+    overrides: Partial<SessionEvent> &
+      Pick<SessionEvent, "id" | "sequence" | "role" | "kind"> & {
+        readonly nativeType: string;
+      },
+  ): SessionEvent => {
+    const { nativeType, ...rest } = overrides;
+    return baseEvent({
+      provider: "codex",
+      agentName: "codex",
+      rawReference: { sourcePath: SOURCE_PATH, nativeType },
+      ...rest,
+    });
+  };
+
+  test("admits only response_item message events: event_msg duplicates never become rows", () => {
+    const mapped = mapNormalizedSession(
+      session({
+        provider: "codex",
+        agentName: "codex",
+        events: [
+          codexEvent({
+            id: "e-canonical",
+            sequence: 0,
+            role: "user",
+            kind: "message",
+            nativeType: "response_item.message",
+            contentBlocks: [block({ kind: "text", text: "please fix the bug" })],
+          }),
+          // event_msg duplicates the same content — never ingested.
+          codexEvent({
+            id: "e-dup",
+            sequence: 1,
+            role: "user",
+            kind: "message",
+            nativeType: "event_msg.user_message",
+            contentText: "please fix the bug",
+          }),
+          codexEvent({
+            id: "e-final-dup",
+            sequence: 2,
+            role: "assistant",
+            kind: "message",
+            nativeType: "event_msg.agent_message",
+            contentText: "done, the bug is fixed",
+          }),
+          codexEvent({
+            id: "e-reply",
+            sequence: 3,
+            role: "assistant",
+            kind: "message",
+            nativeType: "response_item.message",
+            contentBlocks: [block({ kind: "text", text: "done, the bug is fixed" })],
+          }),
+        ],
+      }),
+      codexHooks,
+    );
+    expect(mapped.messages.map((row) => [row.seq, row.role, row.text])).toEqual([
+      [0, "user", "please fix the bug"],
+      [3, "assistant", "done, the bug is fixed"],
+    ]);
+  });
+
+  test("keeps tool payloads out of messages: tool events map only via toolCalls", () => {
+    const mapped = mapNormalizedSession(
+      session({
+        provider: "codex",
+        agentName: "codex",
+        events: [
+          // codex function_call events render their JSON payload as fallback
+          // text blocks; the hook must keep them off the search surface.
+          codexEvent({
+            id: "e-call",
+            sequence: 0,
+            role: "assistant",
+            kind: "tool_call",
+            nativeType: "response_item.function_call",
+            toolCallId: "tc1",
+            contentBlocks: [
+              block({ kind: "text", text: '{"type":"function_call","name":"shell"}' }),
+            ],
+          }),
+          codexEvent({
+            id: "e-preamble",
+            sequence: 1,
+            role: "user",
+            kind: "preamble",
+            nativeType: "response_item.message",
+            contentBlocks: [block({ kind: "text", text: "<environment_context>injected</environment_context>" })],
+          }),
+        ],
+        toolCalls: [
+          toolCall({
+            id: "tc1",
+            eventId: "e-call",
+            toolName: "shell",
+            status: "completed",
+            input: { command: ["ls"] },
+            output: "file.txt",
+          }),
+        ],
+      }),
+      codexHooks,
+    );
+    expect(mapped.messages).toHaveLength(0);
+    expect(mapped.toolCalls).toHaveLength(1);
+    expect(mapped.toolCalls[0]?.toolName).toBe("shell");
+    expect(mapped.toolCalls[0]?.provider).toBe("codex");
   });
 });
