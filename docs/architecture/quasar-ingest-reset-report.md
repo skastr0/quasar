@@ -1,3 +1,11 @@
+> [!IMPORTANT]
+> **Historical document — superseded 2026-06-10.** This post-mortem of the session-blob
+> import era remains accurate as history, and its boundary lessons carry forward. But the
+> replacement architecture it prescribes (the 9-type record-stream taxonomy) was itself
+> built, measured, and abandoned for structural wire amplification. Do not build from
+> this document. The single current direction is
+> [Quasar v2 — Canonical Greenfield Plan](quasar-v2-greenfield-plan-2026-06-10.md).
+
 # Quasar Ingest Reset Report
 
 Date: 2026-06-09
