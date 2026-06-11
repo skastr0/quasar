@@ -142,17 +142,14 @@ export const readJsonFile = (path: string) => {
 };
 
 const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
-const ESCAPED_CONTROL_CHARS = /\\u00(?:0[0-9a-f]|1[0-9a-f]|7f)/gi;
-const REPLACEMENT_CHAR = /\ufffd/g;
 
+/**
+ * Normalizes a string for compact rendering: control characters become
+ * spaces and whitespace runs collapse. No content is ever discarded by a
+ * heuristic — Convex limits, enforced at the ingest boundary, are the only
+ * line at which data is rejected.
+ */
 const compactString = (value: string) => {
-  const controlCount =
-    (value.match(CONTROL_CHARS)?.length ?? 0) +
-    (value.match(ESCAPED_CONTROL_CHARS)?.length ?? 0) +
-    (value.match(REPLACEMENT_CHAR)?.length ?? 0);
-  if (value.length > 200 && controlCount > 20 && controlCount / value.length > 0.02) {
-    return "[binary output omitted]";
-  }
   const text = value.replace(CONTROL_CHARS, " ").replace(/\s+/g, " ").trim();
   return text.length === 0 ? undefined : text;
 };

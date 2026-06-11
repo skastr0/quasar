@@ -21,6 +21,10 @@ export default defineSchema({
     sourceFingerprint: v.string(),
     messageCount: v.number(),
     toolCallCount: v.number(),
+    // In-progress ingest claim: set by beginSessionIngest, cleared by
+    // commitSessionIngest once every turn row has landed. A session is only
+    // complete (and skippable on an unchanged fingerprint) when this is unset.
+    ingestRunId: v.optional(v.string()),
   })
     .index("by_sessionId", ["sessionId"])
     .index("by_projectKey", ["projectKey"]),
