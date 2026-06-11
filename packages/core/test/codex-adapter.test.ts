@@ -165,6 +165,119 @@ describe("codex adapter", () => {
     expect(assistantTurn.contentBlocks.some((block) => "text" in block)).toBe(true);
   });
 
+  test("maps the full injected-wrapper family to preamble (measured 2026-06-11)", async () => {
+    const wrapperDir = join(root, "sessions", "2026", "06", "12");
+    mkdirSync(wrapperDir, { recursive: true });
+    const wrapperTexts = [
+      "<permissions instructions>\nFilesystem sandboxing defines which files…",
+      "<skills_instructions>\n## Skills\nA skill is a set of local instructions…",
+      "<apps_instructions>\n## Apps (Connectors)…",
+      "<plugins_instructions>\n## Plugins…",
+      "<collaboration_mode># Collaboration Mode: Default…",
+      "<personality_spec> The user has requested a new communication style…",
+      "<model_switch>\nThe user was previously using a different model…",
+      "<app-context>\n# Codex desktop context…",
+    ];
+    writeFileSync(
+      join(wrapperDir, "rollout-2026-06-12-wrappers.jsonl"),
+      [
+        line({
+          timestamp: NOW,
+          type: "session_meta",
+          payload: { type: "session_meta", id: "wrappers", cwd: "/tmp/proj" },
+        }),
+        ...wrapperTexts.map((text) =>
+          line({
+            timestamp: NOW,
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text }],
+            },
+          }),
+        ),
+        line({
+          timestamp: NOW,
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "real question from a human" }],
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const result = await codexAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { codex: root },
+    });
+    const session = result.sessions.find((candidate) =>
+      candidate.sourcePath.endsWith("rollout-2026-06-12-wrappers.jsonl"),
+    )!;
+    const messageEvents = session.events.filter((event) => event.kind === "message");
+    expect(messageEvents).toHaveLength(1);
+    expect(JSON.stringify(messageEvents[0]!.contentBlocks)).toContain(
+      "real question from a human",
+    );
+    expect(
+      session.events.filter((event) => event.kind === "preamble"),
+    ).toHaveLength(wrapperTexts.length);
+  });
+
+  test("merges local_shell_call pairs into completed tool calls (input from `action`)", async () => {
+    const shellDir = join(root, "sessions", "2026", "06", "13");
+    mkdirSync(shellDir, { recursive: true });
+    writeFileSync(
+      join(shellDir, "rollout-2026-06-13-local-shell.jsonl"),
+      [
+        line({
+          timestamp: NOW,
+          type: "session_meta",
+          payload: { type: "session_meta", id: "local-shell", cwd: "/tmp/proj" },
+        }),
+        line({
+          timestamp: NOW,
+          type: "response_item",
+          payload: {
+            type: "local_shell_call",
+            call_id: "call_shell",
+            status: "completed",
+            action: { type: "exec", command: ["bash", "-lc", "ls"] },
+          },
+        }),
+        line({
+          timestamp: NOW,
+          type: "response_item",
+          payload: { type: "local_shell_call_output", call_id: "call_shell", output: "file.txt" },
+        }),
+      ].join("\n"),
+    );
+
+    const result = await codexAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { codex: root },
+    });
+    const session = result.sessions.find((candidate) =>
+      candidate.sourcePath.endsWith("rollout-2026-06-13-local-shell.jsonl"),
+    )!;
+
+    expect(session.toolCalls).toHaveLength(1);
+    const shell = session.toolCalls[0]!;
+    expect(shell.toolName).toBe("local_shell");
+    expect(shell.status).toBe("completed");
+    expect(JSON.stringify(shell.input)).toContain("bash");
+    expect(JSON.stringify(shell.output)).toContain("file.txt");
+
+    const kinds = session.events
+      .filter((event) => event.toolCallId !== undefined)
+      .map((event) => event.kind);
+    expect(kinds).toEqual(["tool_call", "tool_result"]);
+  });
+
   test("merges function_call and custom_tool_call pairs into completed tool calls", async () => {
     const result = await codexAdapter.read({
       machine: MACHINE,

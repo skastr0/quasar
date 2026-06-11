@@ -67,8 +67,21 @@ const INJECTED_WRAPPER_PREFIXES = [
   "<goal_context",
   "<codex_internal_context",
   "<proposed_plan",
+  "<collaboration_mode",
+  "<personality_spec",
+  "<model_switch",
+  "<app-context",
   "# AGENTS.md instructions",
 ] as const;
+
+/**
+ * Codex instruction bundles share one tag grammar — `<skills_instructions>`,
+ * `<apps_instructions>`, `<plugins_instructions>`, `<permissions instructions>`,
+ * `<user_instructions>`, … — all harness-injected, none human-authored.
+ * Measured 2026-06-11 (full corpus): wrapper blocks only ever lead a message;
+ * no genuine user text follows one, so the first-block test is exact.
+ */
+const INJECTED_INSTRUCTIONS_TAG = /^<[a-z][a-z0-9_-]*[_ ]instructions>/;
 
 const firstContentText = (payload: CodexRecord): string | undefined => {
   const content = payload.content;
@@ -85,7 +98,8 @@ const isInjectedWrapperMessage = (payload: CodexRecord): boolean => {
   const text = firstContentText(payload)?.trimStart();
   return (
     text !== undefined &&
-    INJECTED_WRAPPER_PREFIXES.some((prefix) => text.startsWith(prefix))
+    (INJECTED_WRAPPER_PREFIXES.some((prefix) => text.startsWith(prefix)) ||
+      INJECTED_INSTRUCTIONS_TAG.test(text))
   );
 };
 
@@ -102,9 +116,11 @@ const codexKindFrom = (
     case "agent_message":
       return payload.phase === "commentary" ? "preamble" : "message";
     case "function_call":
+    case "local_shell_call":
     case "custom_tool_call":
       return "tool_call";
     case "function_call_output":
+    case "local_shell_call_output":
     case "custom_tool_call_output":
       return "tool_result";
     case "reasoning":
@@ -133,10 +149,12 @@ const codexRoleFrom = (
   if (explicitRole !== "unknown") return explicitRole;
   switch (payloadType) {
     case "function_call":
+    case "local_shell_call":
     case "custom_tool_call":
     case "agent_message":
       return "assistant";
     case "function_call_output":
+    case "local_shell_call_output":
     case "custom_tool_call_output":
       return "tool";
     case "reasoning":
@@ -189,16 +207,26 @@ const upsertCodexToolCall = (
   const id = toolCallIdFor(machineId, nativeSessionId, sourcePath, callId);
   // custom_tool_call (apply_patch and friends) shares the function_call shape
   // but carries its payload in `input` (raw text) instead of `arguments` (JSON).
-  if (payloadType === "function_call" || payloadType === "custom_tool_call") {
+  // local_shell_call carries its payload in `action` (exec command record) and
+  // has no `name`.
+  if (
+    payloadType === "function_call" ||
+    payloadType === "local_shell_call" ||
+    payloadType === "custom_tool_call"
+  ) {
     const toolName =
       typeof payload.name === "string" && payload.name.length > 0
         ? payload.name
-        : "codex_tool";
+        : payloadType === "local_shell_call"
+          ? "local_shell"
+          : "codex_tool";
     const existing = toolCallsById.get(id);
     const input =
       payloadType === "custom_tool_call"
         ? projectToolPayloadNativeValue(payload.input)
-        : parseToolInput(payload.arguments);
+        : payloadType === "local_shell_call"
+          ? projectToolPayloadNativeValue(payload.action)
+          : parseToolInput(payload.arguments);
     toolCallsById.set(id, {
       ...existing,
       id,
@@ -212,7 +240,11 @@ const upsertCodexToolCall = (
     });
     return id;
   }
-  if (payloadType === "function_call_output" || payloadType === "custom_tool_call_output") {
+  if (
+    payloadType === "function_call_output" ||
+    payloadType === "local_shell_call_output" ||
+    payloadType === "custom_tool_call_output"
+  ) {
     const existing = toolCallsById.get(id);
     const output = projectToolPayloadNativeValue(payload.output);
     toolCallsById.set(id, {
