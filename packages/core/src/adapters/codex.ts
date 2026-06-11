@@ -50,6 +50,45 @@ const payloadTypeFrom = (payload: CodexRecord) =>
 const codexNativeType = (recordType: string, payloadType: string | undefined) =>
   payloadType === undefined ? recordType : `${recordType}.${payloadType}`;
 
+/**
+ * Codex injects machine-authored context into the transcript as ordinary
+ * `user`/`assistant` message records. No human authored these; they are
+ * wrappers around session machinery, recognized by the opening tag of the
+ * first content block and mapped to `kind: "preamble"` so the ingest layer's
+ * injected-kind filter excludes them from the search surface.
+ */
+const INJECTED_WRAPPER_PREFIXES = [
+  "<environment_context",
+  "<user_instructions",
+  "<turn_aborted",
+  "<ide_context",
+  "<skill>",
+  "<subagent_notification",
+  "<goal_context",
+  "<codex_internal_context",
+  "<proposed_plan",
+  "# AGENTS.md instructions",
+] as const;
+
+const firstContentText = (payload: CodexRecord): string | undefined => {
+  const content = payload.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return undefined;
+  for (const block of content) {
+    const text = recordFrom(block).text;
+    if (typeof text === "string") return text;
+  }
+  return undefined;
+};
+
+const isInjectedWrapperMessage = (payload: CodexRecord): boolean => {
+  const text = firstContentText(payload)?.trimStart();
+  return (
+    text !== undefined &&
+    INJECTED_WRAPPER_PREFIXES.some((prefix) => text.startsWith(prefix))
+  );
+};
+
 const codexKindFrom = (
   recordType: string,
   payloadType: string | undefined,
@@ -57,13 +96,16 @@ const codexKindFrom = (
 ): SessionEventKind => {
   switch (payloadType) {
     case "message":
+      return isInjectedWrapperMessage(payload) ? "preamble" : "message";
     case "user_message":
       return "message";
     case "agent_message":
       return payload.phase === "commentary" ? "preamble" : "message";
     case "function_call":
+    case "custom_tool_call":
       return "tool_call";
     case "function_call_output":
+    case "custom_tool_call_output":
       return "tool_result";
     case "reasoning":
       return "reasoning";
@@ -91,9 +133,11 @@ const codexRoleFrom = (
   if (explicitRole !== "unknown") return explicitRole;
   switch (payloadType) {
     case "function_call":
+    case "custom_tool_call":
     case "agent_message":
       return "assistant";
     case "function_call_output":
+    case "custom_tool_call_output":
       return "tool";
     case "reasoning":
       return "thinking";
@@ -143,13 +187,18 @@ const upsertCodexToolCall = (
   const callId = callIdFromPayload(payload);
   if (callId === undefined) return undefined;
   const id = toolCallIdFor(machineId, nativeSessionId, sourcePath, callId);
-  if (payloadType === "function_call") {
+  // custom_tool_call (apply_patch and friends) shares the function_call shape
+  // but carries its payload in `input` (raw text) instead of `arguments` (JSON).
+  if (payloadType === "function_call" || payloadType === "custom_tool_call") {
     const toolName =
       typeof payload.name === "string" && payload.name.length > 0
         ? payload.name
         : "codex_tool";
     const existing = toolCallsById.get(id);
-    const input = parseToolInput(payload.arguments);
+    const input =
+      payloadType === "custom_tool_call"
+        ? projectToolPayloadNativeValue(payload.input)
+        : parseToolInput(payload.arguments);
     toolCallsById.set(id, {
       ...existing,
       id,
@@ -163,7 +212,7 @@ const upsertCodexToolCall = (
     });
     return id;
   }
-  if (payloadType === "function_call_output") {
+  if (payloadType === "function_call_output" || payloadType === "custom_tool_call_output") {
     const existing = toolCallsById.get(id);
     const output = projectToolPayloadNativeValue(payload.output);
     toolCallsById.set(id, {
@@ -525,31 +574,58 @@ async function* streamCodex(options: AdapterOptions) {
     return;
   }
 
-  const sessionsRoot = join(root, "sessions");
   const logicalRoot = logicalRootFor("codex", root, options);
-  const logicalSessionsRoot = join(logicalRoot, "sessions");
-  const files = collectFiles(
-    sessionsRoot,
-    (path) => /rollout-.*\.jsonl$/.test(path),
-    options.limit,
-    options.skip,
+  // Codex keeps live rollouts under sessions/<year>/… and archived rollouts
+  // flat under archived_sessions/. Both hold the identical JSONL format, so
+  // both are scanned; skip/limit apply to the combined file list.
+  const scans = ["sessions", "archived_sessions"].map((directory) => ({
+    physicalRoot: join(root, directory),
+    logicalScanRoot: join(logicalRoot, directory),
+  }));
+  const logicalSessionsRoot = scans[0]!.logicalScanRoot;
+  const allFiles = scans.flatMap((scan) =>
+    collectFiles(scan.physicalRoot, (path) => /rollout-.*\.jsonl$/.test(path)).map(
+      (path) => ({ path, scan }),
+    ),
   );
-  yield {
-    type: "sourceRoot" as const,
-    sourceRoot: sourceRoot("codex", codexAdapter.id, logicalSessionsRoot, options.machine, options.now),
-  };
+  const skip =
+    options.skip !== undefined && Number.isFinite(options.skip) && options.skip > 0
+      ? Math.floor(options.skip)
+      : 0;
+  const limit =
+    options.limit !== undefined && Number.isFinite(options.limit)
+      ? Math.max(0, Math.floor(options.limit))
+      : Number.POSITIVE_INFINITY;
+  const files =
+    limit === Number.POSITIVE_INFINITY
+      ? allFiles.slice(skip)
+      : allFiles.slice(skip, skip + limit);
+  for (const scan of scans) {
+    yield {
+      type: "sourceRoot" as const,
+      sourceRoot: sourceRoot("codex", codexAdapter.id, scan.logicalScanRoot, options.machine, options.now),
+    };
+  }
   let sessionCount = 0;
-  for (const path of files) {
+  for (const { path, scan } of files) {
     sessionCount += 1;
+    const sourcePath = logicalPathFor(path, scan.physicalRoot, scan.logicalScanRoot);
     for await (const session of streamCodexSessionFromFile(
         path,
-        logicalPathFor(path, sessionsRoot, logicalSessionsRoot),
-        logicalSessionsRoot,
+        sourcePath,
+        scan.logicalScanRoot,
         options,
     )) {
       yield {
         type: "session" as const,
         session,
+        sourceUnit: {
+          provider: "codex" as const,
+          adapterId: codexAdapter.id,
+          rootPath: scan.logicalScanRoot,
+          sourcePath,
+          physicalPath: path,
+        },
       };
     }
   }
