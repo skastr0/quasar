@@ -1,15 +1,25 @@
 # Quasar
 
-Status: experimental initial public release.
+Status: pre-release, under an active v2 rebuild.
 
 Quasar is a local-first repository for AI agent sessions. It ingests local
-agent histories, normalizes them into an analysis-oriented event graph, and
-serves text, semantic, and fusion search through Convex.
+agent histories, normalizes them into searchable session intelligence, and
+serves text, semantic, and fusion search through a self-hosted Convex backend
+consumed by a CLI and agent MCP tools.
 
-V1 includes local history importers for Codex, Claude Code, OpenCode, Grok,
-Amp, Pi, Kimi, Factory/Droid, Hermes, Antigravity, and Cursor. Stable,
-documented or observed formats are parsed first-class; brittle local formats
-fail soft with diagnostics rather than writing to native history.
+The single current architecture direction is
+[docs/architecture/quasar-v2-greenfield-plan-2026-06-10.md](docs/architecture/quasar-v2-greenfield-plan-2026-06-10.md)
+together with
+[docs/architecture/convex-grain-quasar-v2.md](docs/architecture/convex-grain-quasar-v2.md).
+Other architecture documents are historical post-mortems.
+
+Honest current state: provider discovery, parsing, planning, and the Convex
+search/read substrate exist; **live server ingest is gated** until the v2 sync
+contract lands and its measured byte/memory gates pass. Adapters exist for
+Codex, Claude Code, OpenCode, Grok, Amp, Pi, Kimi, Factory/Droid, Hermes,
+Antigravity, and Cursor; only providers with data present on the host are
+exercised. Extraction is read-only; brittle local formats fail soft with
+diagnostics rather than writing to native history.
 
 ## Workspace
 
