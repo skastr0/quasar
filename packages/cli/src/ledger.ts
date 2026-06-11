@@ -85,7 +85,7 @@ type ColumnEntry = {
 };
 
 const SCHEMA_VERSION = "1";
-const sqliteStorageSuffix = ["WITHOUT", String.fromCharCode(82, 79, 87, 73, 68)].join(" ");
+const sqliteStorageSuffix = "WITHOUT ROWID";
 const recordTypes: readonly IngestRecordType[] = [
   "session",
   "event",
