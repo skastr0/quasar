@@ -1,3 +1,13 @@
+> [!IMPORTANT]
+> **Historical document — superseded 2026-06-10.** This report measured the abandoned
+> record-stream compaction era. Its gate (a 1.5x wire ratio whose denominator excluded
+> tool payloads) was diagnosed as structurally unreachable in that record shape, and the
+> compaction direction it mandates was abandoned. **Every instruction in this document is
+> superseded — including the "Required Follow-Up" and all verdicts.** The measurement
+> methodology (field-level byte attribution) survives and is re-instituted with a frozen
+> product-derived denominator. The single current direction is
+> [Quasar v2 — Canonical Greenfield Plan](quasar-v2-greenfield-plan-2026-06-10.md).
+
 # Quasar Ingest Byte Budget Report - 2026-06-10
 
 ## Verdict
