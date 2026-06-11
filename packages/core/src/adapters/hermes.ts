@@ -24,7 +24,12 @@ import {
   type NativeValue,
   usageIdFor,
 } from "./common";
-import { collectAdapterStream, type AdapterStreamItem, type SessionAdapter } from "./types";
+import {
+  collectAdapterStream,
+  type AdapterStreamItem,
+  type SessionAdapter,
+  type UnitFingerprint,
+} from "./types";
 
 type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
 type HermesDatabase = NonNullable<Awaited<ReturnType<typeof maybeDatabase>>>;
@@ -495,6 +500,22 @@ const missingDatabaseResult = (root: string | undefined) => ({
   ],
 });
 
+/**
+ * Per-session change signal. All hermes sessions live in one shared state.db
+ * file, so a file-level stat fingerprint would mismatch for every session
+ * whenever any single one is touched — forcing a full-estate re-ingest. The
+ * session's own message-row count plus newest message timestamp (epoch
+ * seconds, append-only log) is the per-session signal.
+ */
+const hermesSessionFingerprint = (rows: readonly HermesMessageRow[]): UnitFingerprint => {
+  let latest = 0;
+  for (const row of rows) {
+    const ts = typeof row.timestamp === "number" ? row.timestamp : Number(row.timestamp);
+    if (Number.isFinite(ts) && ts > latest) latest = ts;
+  }
+  return { size: rows.length, mtimeMs: latest };
+};
+
 async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStreamItem> {
   const root = options.roots?.hermes ?? hermesAdapter.defaultRoot();
   const dbPath = hermesDbPath(root);
@@ -518,12 +539,13 @@ async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStr
     if (db === undefined) {
       usedFallback = true;
       for (const sessionEntry of readSessionRowsCli(tempDb.path, options.limit, options.skip)) {
+        const messageRows = readMessageRowsCli(tempDb.path, String(sessionEntry.id ?? ""));
         const session = buildHermesSessionFromRows(
           logicalDbPath ?? dbPath,
           logicalRoot ?? root,
           options,
           sessionEntry,
-          readMessageRowsCli(tempDb.path, String(sessionEntry.id ?? "")),
+          messageRows,
         );
         yield {
           type: "session",
@@ -535,17 +557,19 @@ async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStr
             sourcePath: session.sourcePath,
             physicalPath: dbPath,
           },
+          fingerprint: hermesSessionFingerprint(messageRows),
         };
         sessionCount += 1;
       }
     } else {
       for (const sessionEntry of readSessionRows(db, options.limit, options.skip)) {
+        const messageRows = readMessageRows(db, String(sessionEntry.id ?? ""));
         const session = buildHermesSessionFromRows(
           logicalDbPath ?? dbPath,
           logicalRoot ?? root,
           options,
           sessionEntry,
-          readMessageRows(db, String(sessionEntry.id ?? "")),
+          messageRows,
         );
         yield {
           type: "session",
@@ -557,6 +581,7 @@ async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStr
             sourcePath: session.sourcePath,
             physicalPath: dbPath,
           },
+          fingerprint: hermesSessionFingerprint(messageRows),
         };
         sessionCount += 1;
       }

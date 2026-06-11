@@ -105,6 +105,9 @@ export interface IngestReport {
   readonly diagnostics: readonly IngestDiagnostic[];
   readonly durationMs: number;
   readonly approxMBWritten: number;
+  /** Present when the provider's run aborted: counts are zero, sessions
+   * already committed before the abort stay in the backend (idempotent). */
+  readonly error?: string;
 }
 
 export interface AllIngestReport {
@@ -503,10 +506,17 @@ const runProviderIngest = async (options: {
     const mapped = mapNormalizedSession(item.session, hooks);
     diagnostics.push(...mapped.diagnostics);
 
-    // The adapter never populates the stream fingerprint; stat the source file.
-    const physicalPath = item.sourceUnit?.physicalPath ?? item.session.sourcePath;
-    const stat = statSync(physicalPath);
-    const sourceFingerprint = JSON.stringify({ size: stat.size, mtimeMs: stat.mtimeMs });
+    // An adapter-provided fingerprint wins: shared-db providers (opencode,
+    // hermes) report the session row's own change signal, because the db
+    // file's stat changes whenever ANY session is touched. Otherwise stat the
+    // per-session source file.
+    let fingerprint = item.fingerprint;
+    if (fingerprint === undefined) {
+      const physicalPath = item.sourceUnit?.physicalPath ?? item.session.sourcePath;
+      const stat = statSync(physicalPath);
+      fingerprint = { size: stat.size, mtimeMs: stat.mtimeMs };
+    }
+    const sourceFingerprint = JSON.stringify(fingerprint);
 
     await withRetry(() =>
       client.mutation(api.quasar.upsertProject, {
@@ -588,8 +598,26 @@ const runAllProvidersIngest = async (options: {
 }): Promise<AllIngestReport> => {
   const reports: IngestReport[] = [];
   for (const provider of SUPPORTED_INGEST_PROVIDERS) {
-    const report = await runProviderIngest({ provider, limit: options.limit, force: options.force });
-    reports.push(report);
+    // One failing provider must never block the rest of the estate: record
+    // the failure on its report and continue (hermes/grok run after codex).
+    const startedAt = Date.now();
+    try {
+      reports.push(
+        await runProviderIngest({ provider, limit: options.limit, force: options.force }),
+      );
+    } catch (error) {
+      reports.push({
+        provider,
+        sessionsWritten: 0,
+        sessionsSkipped: 0,
+        messages: 0,
+        toolCalls: 0,
+        diagnostics: [],
+        durationMs: Date.now() - startedAt,
+        approxMBWritten: 0,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
   return {
     providers: reports,

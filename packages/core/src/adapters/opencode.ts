@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { execFileSync } from "node:child_process";
 
-import type { AdapterReadResult, AdapterStreamItem, SessionAdapter } from "./types";
+import type {
+  AdapterReadResult,
+  AdapterStreamItem,
+  SessionAdapter,
+  UnitFingerprint,
+} from "./types";
 import type { Artifact, SessionEdge, SessionRole, ToolCall, UsageRecord } from "../schemas";
 import {
   artifactIdFor,
@@ -740,6 +745,15 @@ const logicalOpencodeDbPath = (
   return join(logicalRoot, basename(dbPath));
 };
 
+/**
+ * Per-session change signal. All opencode sessions live in one shared db
+ * file, so a file-level stat fingerprint would mismatch for every session
+ * whenever any single one is touched — forcing a full-estate re-ingest. The
+ * session row's own time_updated is the per-session signal.
+ */
+const opencodeSessionFingerprint = (row: OpenCodeSessionRow): UnitFingerprint | undefined =>
+  typeof row.time_updated === "number" ? { mtimeMs: row.time_updated } : undefined;
+
 async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterStreamItem> {
   const root = options.roots?.opencode ?? opencodeAdapter.defaultRoot();
   const dbPath = opencodeDbPath(root);
@@ -775,6 +789,7 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
           options,
           sessionEntry,
         );
+        const fingerprint = opencodeSessionFingerprint(sessionEntry);
         yield {
           type: "session",
           session,
@@ -785,6 +800,7 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
             sourcePath: session.sourcePath,
             physicalPath: dbPath,
           },
+          ...(fingerprint !== undefined ? { fingerprint } : {}),
         };
         sessionCount += 1;
       }
@@ -818,6 +834,7 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
         options,
         sessionEntry,
       );
+      const fingerprint = opencodeSessionFingerprint(sessionEntry);
       yield {
         type: "session",
         session,
@@ -828,6 +845,7 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
           sourcePath: session.sourcePath,
           physicalPath: dbPath,
         },
+        ...(fingerprint !== undefined ? { fingerprint } : {}),
       };
       sessionCount += 1;
     }

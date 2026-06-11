@@ -562,7 +562,10 @@ async function* streamGrok(options: AdapterOptions): AsyncGenerator<AdapterStrea
         adapterId: grokAdapter.id,
         rootPath: sessionsRoot,
         sourcePath: session.sourcePath,
-        physicalPath: dirname(chatPath),
+        // The chat file itself, never its directory: a directory's mtime does
+        // not change when a file inside it is appended to, so a directory
+        // fingerprint would skip sessions whose chat_history.jsonl grew.
+        physicalPath: chatPath,
       },
     };
     sessionCount += 1;
