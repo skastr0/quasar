@@ -85,14 +85,19 @@ export const beginSessionIngest = mutation({
     messageCount: v.number(),
     toolCallCount: v.number(),
     runId: v.string(),
+    // Re-ingest even when the fingerprint is unchanged — needed after a
+    // turn-mapping change, when the rows derived from an unchanged source file
+    // are themselves stale.
+    force: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const { runId, ...session } = args;
+    const { runId, force, ...session } = args;
     const existing = await ctx.db
       .query("sessions")
       .withIndex("by_sessionId", (q) => q.eq("sessionId", session.sessionId))
       .unique();
     if (
+      force !== true &&
       existing !== null &&
       existing.ingestRunId === undefined &&
       existing.sourceFingerprint === session.sourceFingerprint

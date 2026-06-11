@@ -323,6 +323,7 @@ const createConvexClient = (): ConvexHttpClient => {
 const runClaudeIngest = async (options: {
   readonly root?: string;
   readonly limit?: number;
+  readonly force?: boolean;
 }): Promise<IngestReport> => {
   const startedAt = Date.now();
   const client = createConvexClient();
@@ -377,6 +378,7 @@ const runClaudeIngest = async (options: {
         ...mapped.session,
         sourceFingerprint,
         runId,
+        ...(options.force === true ? { force: true } : {}),
       }),
     );
     if (begin.skipped) {
@@ -441,11 +443,16 @@ const limitOption = Options.integer("limit").pipe(
   Options.withDescription("Ingest at most this many session files"),
   Options.optional,
 );
+const forceOption = Options.boolean("force").pipe(
+  Options.withDescription(
+    "Re-ingest sessions even when their source fingerprint is unchanged (use after a turn-mapping change)",
+  ),
+);
 
 export const ingestCommand = Command.make(
   "ingest",
-  { provider: providerOption, root: rootOption, limit: limitOption },
-  ({ provider, root, limit }) =>
+  { provider: providerOption, root: rootOption, limit: limitOption, force: forceOption },
+  ({ provider, root, limit, force }) =>
     executeJsonCommand(
       "ingest",
       Effect.gen(function* () {
@@ -462,6 +469,7 @@ export const ingestCommand = Command.make(
             runClaudeIngest({
               root: Option.getOrUndefined(root),
               limit: Option.getOrUndefined(limit),
+              force,
             }),
           catch: (error) => (error instanceof Error ? error : new Error(String(error))),
         });
