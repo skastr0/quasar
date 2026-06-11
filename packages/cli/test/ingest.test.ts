@@ -510,3 +510,154 @@ describe("mapNormalizedSession with codex hooks", () => {
     expect(mapped.toolCalls[0]?.provider).toBe("codex");
   });
 });
+
+describe("mapNormalizedSession with opencode hooks", () => {
+  const opencodeHooks = PROVIDER_INGEST_HOOKS.get("opencode")!;
+
+  const opencodeEvent = (
+    overrides: Partial<SessionEvent> &
+      Pick<SessionEvent, "id" | "sequence" | "role" | "kind"> & {
+        readonly rawBytes?: number;
+      },
+  ): SessionEvent => {
+    const { rawBytes, ...rest } = overrides;
+    return baseEvent({
+      provider: "opencode",
+      agentName: "opencode",
+      rawReference: {
+        sourcePath: SOURCE_PATH,
+        table: "message",
+        nativeType: "message",
+        ...(rawBytes !== undefined ? { rawBytes } : {}),
+      },
+      ...rest,
+    });
+  };
+
+  test("maps text parts to messages and thinking blocks to role reasoning", () => {
+    const mapped = mapNormalizedSession(
+      session({
+        provider: "opencode",
+        agentName: "opencode",
+        events: [
+          opencodeEvent({
+            id: "e0",
+            sequence: 0,
+            role: "user",
+            kind: "message",
+            rawBytes: 240,
+            contentBlocks: [block({ kind: "text", text: "please profile the ingest" })],
+          }),
+          opencodeEvent({
+            id: "e1",
+            sequence: 1,
+            role: "assistant",
+            kind: "tool_call",
+            rawBytes: 512,
+            contentBlocks: [
+              block({
+                kind: "thinking",
+                thinking: "I should measure first",
+                metadata: { nativeType: "reasoning" },
+              }),
+              block({
+                kind: "text",
+                text: "Measured; here is the plan.",
+                sequence: 1,
+                metadata: { nativeType: "text" },
+              }),
+              // Tool part rendering — tool payloads live in toolCalls only.
+              block({
+                kind: "text",
+                text: '{"type":"tool","toolName":"bash","callID":"call1"}',
+                sequence: 2,
+                metadata: { nativeType: "tool_use", toolName: "bash", callId: "call1" },
+              }),
+            ],
+          }),
+        ],
+        toolCalls: [
+          toolCall({
+            id: "tc1",
+            eventId: "e1",
+            toolName: "bash",
+            status: "completed",
+            input: { command: "ls" },
+            output: "file.txt",
+          }),
+        ],
+      }),
+      opencodeHooks,
+    );
+    expect(mapped.messages.map((row) => [row.seq, row.role, row.text])).toEqual([
+      [0, "user", "please profile the ingest"],
+      [1, "reasoning", "I should measure first"],
+      [1, "assistant", "Measured; here is the plan."],
+    ]);
+    expect(mapped.toolCalls).toHaveLength(1);
+    expect(mapped.toolCalls[0]?.toolName).toBe("bash");
+    expect(mapped.diagnostics).toHaveLength(0);
+  });
+
+  test("a source row at or beyond the Convex value limit is provider garbage: named diagnostic, zero rows", () => {
+    // The 105 MB summary.diffs blob is pruned away inside SQLite, so the
+    // post-prune value cannot witness the breach — the adapter's pre-prune
+    // rawBytes measurement carries it to the boundary line instead.
+    const mapped = mapNormalizedSession(
+      session({
+        provider: "opencode",
+        agentName: "opencode",
+        events: [
+          opencodeEvent({
+            id: "e-garbage",
+            sequence: 0,
+            role: "user",
+            kind: "message",
+            rawBytes: 105_806_336,
+            // Pruning left a perfectly small projection — rejected anyway.
+            contentBlocks: [block({ kind: "text", text: "Continue" })],
+          }),
+          opencodeEvent({
+            id: "e-sound",
+            sequence: 1,
+            role: "assistant",
+            kind: "message",
+            rawBytes: 180,
+            contentBlocks: [block({ kind: "text", text: "a sound turn" })],
+          }),
+        ],
+        toolCalls: [
+          // A tool call hanging off the rejected event writes zero rows too.
+          toolCall({
+            id: "tc-garbage",
+            eventId: "e-garbage",
+            toolName: "bash",
+            input: { command: "ok" },
+            output: "fine",
+          }),
+        ],
+      }),
+      opencodeHooks,
+    );
+    expect(mapped.messages).toEqual([
+      {
+        sessionId: SESSION_ID,
+        seq: 1,
+        role: "assistant",
+        text: "a sound turn",
+        projectKey: PROJECT_KEY,
+      },
+    ]);
+    expect(mapped.toolCalls).toHaveLength(0);
+    expect(mapped.diagnostics).toEqual([
+      {
+        provider: "opencode",
+        sessionId: SESSION_ID,
+        field: "message.data",
+        observedBytes: 105_806_336,
+      },
+    ]);
+    expect(mapped.session.messageCount).toBe(1);
+    expect(mapped.session.toolCallCount).toBe(0);
+  });
+});

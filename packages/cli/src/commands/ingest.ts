@@ -169,6 +169,17 @@ export interface ProviderIngestHooks {
    * ToolCall records and are unaffected.
    */
   readonly admitMessageEvent?: (event: SessionEvent) => boolean;
+  /**
+   * Source-row garbage line. Returning a rejection marks the event's raw
+   * source row as provider garbage: the engine emits the named diagnostic
+   * `(provider, sessionId, field, observedBytes)` and writes zero rows for
+   * the event — no messages and no toolCalls. Used when an adapter-side
+   * pruning guard removes the bulk before this process ever sees it, so the
+   * post-prune value cannot witness the breach itself.
+   */
+  readonly rejectEvent?: (
+    event: SessionEvent,
+  ) => { readonly field: string; readonly observedBytes: number } | undefined;
 }
 
 /**
@@ -188,10 +199,30 @@ const codexHooks: ProviderIngestHooks = {
     event.rawReference.nativeType?.startsWith("response_item") === true,
 };
 
+/**
+ * Opencode: text/reasoning/tool parts arrive already classified by the
+ * adapter (reasoning as thinking blocks, machinery parts dropped, tool parts
+ * tagged tool_use). The one provider-specific line: the adapter's SQL pruning
+ * guard strips machinery keys (`summary.diffs` et al.) inside SQLite, so a
+ * garbage source row — the measured corpus holds one 105 MB `message.data`
+ * blob — would otherwise vanish silently. The adapter reports the pre-prune
+ * byte length on `rawReference.rawBytes`; any row at or beyond the Convex
+ * value limit is provider garbage: named diagnostic, zero rows, continue.
+ */
+const opencodeHooks: ProviderIngestHooks = {
+  rejectEvent: (event) => {
+    const rawBytes = event.rawReference.rawBytes;
+    return rawBytes !== undefined && rawBytes >= CONVEX_MAX_VALUE_BYTES
+      ? { field: "message.data", observedBytes: rawBytes }
+      : undefined;
+  },
+};
+
 /** Hooks per supported provider; presence in this map is the support gate. */
 export const PROVIDER_INGEST_HOOKS: ReadonlyMap<Provider, ProviderIngestHooks> = new Map([
   ["claude", {}],
   ["codex", codexHooks],
+  ["opencode", opencodeHooks],
 ]);
 
 export const SUPPORTED_INGEST_PROVIDERS = [...PROVIDER_INGEST_HOOKS.keys()];
@@ -224,8 +255,26 @@ export const mapNormalizedSession = (
     return value;
   };
 
+  // Source-row garbage pass: a rejected event writes zero rows — its
+  // messages and toolCalls alike — and surfaces once as a named diagnostic.
+  const rejectedEventIds = new Set<string>();
+  if (hooks.rejectEvent !== undefined) {
+    for (const event of session.events) {
+      const rejection = hooks.rejectEvent(event);
+      if (rejection === undefined) continue;
+      diagnostics.push({
+        provider: session.provider,
+        sessionId,
+        field: rejection.field,
+        observedBytes: rejection.observedBytes,
+      });
+      rejectedEventIds.add(event.id);
+    }
+  }
+
   const messages: MessageRow[] = [];
   for (const event of session.events) {
+    if (rejectedEventIds.has(event.id)) continue;
     if (event.role !== "user" && event.role !== "assistant") continue;
     if (INJECTED_EVENT_KINDS.has(event.kind)) continue;
     if (hooks.admitMessageEvent?.(event) === false) continue;
@@ -269,6 +318,7 @@ export const mapNormalizedSession = (
   const seqByEventId = new Map(session.events.map((event) => [event.id, event.sequence]));
   const toolCalls: ToolCallRow[] = [];
   for (const toolCall of session.toolCalls) {
+    if (rejectedEventIds.has(toolCall.eventId)) continue;
     const inputText = admit(
       stringifyToolPayload(redactSensitive(toolCall.input)),
       "toolCalls.inputText",
