@@ -12,11 +12,6 @@ const commandCapabilities = [
   "schema list|show",
   "examples list|show",
   "sources discover",
-  "projects list|alias",
-  "ingest",
-  "search text|semantic|fusion",
-  "sessions list|read",
-  "tool-calls list|read",
 ];
 
 export const doctorCommand = Command.make("doctor", {}, () =>
@@ -51,10 +46,6 @@ export const capabilitiesCommand = Command.make("capabilities", {}, () =>
         stable: adapter.stable,
         default_root: adapter.defaultRoot(),
       })),
-      server: {
-        requires_authentication: true,
-        accepts_client_embeddings: false,
-      },
     }),
   ),
 );

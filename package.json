@@ -15,14 +15,12 @@
     "url": "https://github.com/skastr0/quasar/issues"
   },
   "workspaces": [
-    "apps/*",
     "packages/*"
   ],
   "scripts": {
-    "dev": "bun run --cwd apps/control dev",
-    "build": "bun run --cwd packages/core build && bun run --cwd packages/cli build && bun run --cwd apps/control build",
-    "typecheck": "bun run --cwd packages/core typecheck && bun run --cwd packages/cli typecheck && bun run --cwd apps/control typecheck",
-    "test": "bun run --cwd packages/core test && bun run --cwd packages/cli test && bun run --cwd apps/control test",
+    "build": "bun run --cwd packages/core build && bun run --cwd packages/cli build",
+    "typecheck": "bun run --cwd packages/core typecheck && bun run --cwd packages/cli typecheck",
+    "test": "bun run --cwd packages/core test && bun run --cwd packages/cli test",
     "verify": "bun run typecheck && bun run test && bun run build",
     "build:npm-packages": "bun run --cwd packages/cli build:npm-packages",
     "pack:dry-run": "bun scripts/pack-npm.mjs",

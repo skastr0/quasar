@@ -12,7 +12,7 @@ import {
 
 import { loadOptionalJsonInput } from "../json";
 import { executeJsonCommand } from "../output";
-import { IngestOptions } from "../protocol";
+import { DiscoverOptions } from "../protocol";
 
 const inputArg = Args.text({ name: "input" }).pipe(Args.optional);
 const toUndefined = <A>(value: { _tag: "Some"; value: A } | { _tag: "None" }) =>
@@ -50,7 +50,7 @@ export const sourcesCommand = Command.make("sources").pipe(
         Effect.gen(function* () {
           const inputText = toUndefined(input);
           const options = yield* loadOptionalJsonInput(
-            IngestOptions,
+            DiscoverOptions,
             inputText,
             { includeExperimental: true },
           );

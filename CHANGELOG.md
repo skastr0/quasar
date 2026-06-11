@@ -17,11 +17,16 @@ formats may still change.
 
 ### Removed
 
+- The Convex control app and dashboard (`apps/control`) in their entirety, the
+  CLI server client, and the server-backed CLI commands (ingest, search,
+  sessions, tool-calls, projects). The project has no users and no live data;
+  nothing v1-shaped earns life by working. The CLI keeps only local read-only
+  commands; the v2 server and surfaces are built fresh per the architecture
+  plan.
 - The entire abandoned record-stream ingest plane: the v1 record taxonomy and
   envelope machinery, the adapter record bridge, the CLI ingest ledger and
   runner, the Convex record-ingest endpoint and its `recordStates`/`tombstones`
-  tables, and the `/api/ingest/records` route. `quasar ingest` now reports
-  `not_ready` until the v2 sync contract lands. Parsing knowledge remains
+  tables, and the `/api/ingest/records` route. Parsing knowledge remains
   minable from git history (see `docs/architecture/README.md`, Graveyard).
 - The six provider adapters with no data on any real host (Amp, Pi, Kimi,
   Factory/Droid, Antigravity, Cursor); re-admitted only when data and a

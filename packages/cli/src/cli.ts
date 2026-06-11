@@ -2,17 +2,11 @@
 
 import { Command } from "@effect/cli";
 import { BunContext, BunRuntime } from "@effect/platform-bun";
-import { Effect, Layer } from "effect";
+import { Effect } from "effect";
 
-import { AppLayer } from "./api";
 import { capabilitiesCommand, doctorCommand } from "./commands/discovery";
 import { examplesCommand, schemaCommand } from "./commands/schema";
-import { ingestCommand } from "./commands/ingest";
-import { projectsCommand } from "./commands/projects";
-import { searchCommand } from "./commands/search";
-import { sessionsCommand } from "./commands/sessions";
 import { sourcesCommand } from "./commands/sources";
-import { toolCallsCommand } from "./commands/tool-calls";
 import { CLI_NAME, CLI_VERSION } from "./constants";
 import { CommandInputError } from "./errors";
 import {
@@ -27,11 +21,6 @@ const publicCommands = new Set([
   "schema",
   "examples",
   "sources",
-  "projects",
-  "ingest",
-  "search",
-  "sessions",
-  "tool-calls",
 ]);
 
 const userArgs = (args: readonly string[]) => args.slice(2);
@@ -52,16 +41,11 @@ export const rootCommand = Command.make(CLI_NAME).pipe(
     schemaCommand,
     examplesCommand,
     sourcesCommand,
-    projectsCommand,
-    ingestCommand,
-    searchCommand,
-    sessionsCommand,
-    toolCallsCommand,
   ]),
 );
 
 const cli = Command.run(rootCommand, { name: CLI_NAME, version: CLI_VERSION });
-const runtimeLayer = Layer.mergeAll(BunContext.layer, AppLayer);
+const runtimeLayer = BunContext.layer;
 
 export const runCli = (args: readonly string[]) =>
   Effect.suspend(() => {
