@@ -13,13 +13,16 @@ together with
 [docs/architecture/convex-grain-quasar-v2.md](docs/architecture/convex-grain-quasar-v2.md).
 Other architecture documents are historical post-mortems.
 
-Honest current state: provider discovery, parsing, planning, and the Convex
-search/read substrate exist; **live server ingest is gated** until the v2 sync
-contract lands and its measured byte/memory gates pass. Adapters exist for
-Codex, Claude Code, OpenCode, Grok, Amp, Pi, Kimi, Factory/Droid, Hermes,
-Antigravity, and Cursor; only providers with data present on the host are
-exercised. Extraction is read-only; brittle local formats fail soft with
-diagnostics rather than writing to native history.
+Honest current state: provider discovery, parsing, and the Convex search/read
+substrate exist; **the ingest write plane was removed** (the previous
+record-stream architecture was abandoned) and `quasar ingest` reports
+`not_ready` until the v2 sync contract lands with its measured byte/memory
+gates. Adapters exist for the providers with data on a real host: Codex,
+Claude Code, OpenCode, Grok, and Hermes. Adapters for providers without data
+(Amp, Pi, Kimi, Factory/Droid, Antigravity, Cursor) were removed and are
+re-admitted only when data and a consuming endpoint exist; their parsing
+knowledge remains in git history. Extraction is read-only; brittle local
+formats fail soft with diagnostics rather than writing to native history.
 
 ## Workspace
 

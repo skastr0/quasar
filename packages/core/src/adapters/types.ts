@@ -5,7 +5,6 @@ import type {
   Provider,
   SourceRoot,
 } from "../schemas";
-import type { IngestRecord } from "../records";
 
 export interface AdapterDiscoverOptions {
   readonly machine: MachineIdentity;
@@ -46,27 +45,6 @@ export interface SourceUnit {
   readonly physicalPath?: string;
 }
 
-export interface RecordStreamOptions extends AdapterDiscoverOptions {
-  readonly shouldProcessUnit?: (
-    unit: SourceUnit,
-    fingerprint: UnitFingerprint,
-  ) => boolean | Promise<boolean>;
-}
-
-export type RecordStreamItem =
-  | {
-      readonly type: "unitStart";
-      readonly unit: SourceUnit;
-      readonly fingerprint: UnitFingerprint;
-    }
-  | {
-      readonly type: "record";
-      readonly item: IngestRecord;
-    }
-  | { readonly type: "unitEnd"; readonly unit: SourceUnit; readonly complete: boolean }
-  | { readonly type: "rootScanned"; readonly root: SourceRoot; readonly complete: boolean }
-  | { readonly type: "diagnostic"; readonly diagnostic: AdapterDiagnostic };
-
 export const collectAdapterStream = async (
   stream: AsyncIterable<AdapterStreamItem>,
 ): Promise<AdapterReadResult> => {
@@ -89,5 +67,4 @@ export interface SessionAdapter {
   readonly defaultRoot: () => string | undefined;
   readonly read: (options: AdapterDiscoverOptions) => Promise<AdapterReadResult>;
   readonly stream?: (options: AdapterDiscoverOptions) => AsyncIterable<AdapterStreamItem>;
-  readonly streamRecords?: (options: RecordStreamOptions) => AsyncIterable<RecordStreamItem>;
 }

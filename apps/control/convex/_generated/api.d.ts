@@ -18,7 +18,6 @@ import type * as quasarProjectHandlers from "../quasarProjectHandlers.js";
 import type * as quasarRag from "../quasarRag.js";
 import type * as quasarRagSync from "../quasarRagSync.js";
 import type * as quasarReadHandlers from "../quasarReadHandlers.js";
-import type * as quasarRecordIngest from "../quasarRecordIngest.js";
 import type * as quasarSearchDocuments from "../quasarSearchDocuments.js";
 import type * as quasarSearchHandlers from "../quasarSearchHandlers.js";
 import type * as quasarSearchTypes from "../quasarSearchTypes.js";
@@ -43,7 +42,6 @@ declare const fullApi: ApiFromModules<{
   quasarRag: typeof quasarRag;
   quasarRagSync: typeof quasarRagSync;
   quasarReadHandlers: typeof quasarReadHandlers;
-  quasarRecordIngest: typeof quasarRecordIngest;
   quasarSearchDocuments: typeof quasarSearchDocuments;
   quasarSearchHandlers: typeof quasarSearchHandlers;
   quasarSearchTypes: typeof quasarSearchTypes;

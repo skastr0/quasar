@@ -1,7 +1,6 @@
 import { Args, Command } from "@effect/cli";
 import { Effect } from "effect";
 
-import { runIngest } from "../ingest/runner";
 import { loadOptionalJsonInput } from "../json";
 import { executeJsonCommand } from "../output";
 import { IngestOptions } from "../protocol";
@@ -14,7 +13,12 @@ export const ingestCommand = Command.make("ingest", { input: inputArg }, ({ inpu
   executeJsonCommand(
     "ingest",
     loadOptionalJsonInput(IngestOptions, toUndefined(input), {}).pipe(
-      Effect.flatMap((options) => runIngest(options)),
+      Effect.map(() => ({
+        status: "not_ready" as const,
+        direction: "quasar-sync/v2",
+        message:
+          "Live ingest is gated until the quasar-sync/v2 contract lands. See docs/architecture/quasar-v2-greenfield-plan-2026-06-10.md.",
+      })),
     ),
   ),
-).pipe(Command.withDescription("Stream provider records into Quasar."));
+).pipe(Command.withDescription("Ingest is gated until the v2 sync contract lands."));

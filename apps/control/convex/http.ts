@@ -1,5 +1,4 @@
 import { httpRouter } from "convex/server";
-import { RECORD_LIMITS, RECORD_PROTOCOL } from "@skastr0/quasar-core/records";
 import { httpAction } from "./_generated/server";
 import type { ActionCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
@@ -134,7 +133,6 @@ for (const path of [
   "/api/search/semantic",
   "/api/search/fusion",
   "/api/tool-calls",
-  quasarApiPaths.ingestRecords,
   "/api/capabilities",
   "/api/health",
 ]) {
@@ -164,9 +162,7 @@ http.route({
     json({
       protocolVersion: "quasar-api/v1",
       ingestion: {
-        recordStream: true,
-        protocol: RECORD_PROTOCOL,
-        limits: RECORD_LIMITS,
+        recordStream: false,
         nativeHistoryWrites: false,
       },
       search: {
@@ -179,19 +175,6 @@ http.route({
       },
     }),
   ),
-});
-
-http.route({
-  path: quasarApiPaths.ingestRecords,
-  method: "POST",
-  handler: handleMutation(async (ctx, req) => {
-    const body = await readJson(req, RECORD_LIMITS.maxEnvelopeBytes);
-    return json(
-      await ctx.runMutation(internal.quasar.applyRecordEnvelopeInternal, {
-        input: body,
-      }),
-    );
-  }),
 });
 
 http.route({
