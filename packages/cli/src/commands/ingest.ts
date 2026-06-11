@@ -107,6 +107,17 @@ export interface IngestReport {
   readonly approxMBWritten: number;
 }
 
+export interface AllIngestReport {
+  readonly providers: readonly IngestReport[];
+  readonly totalSessionsWritten: number;
+  readonly totalSessionsSkipped: number;
+  readonly totalMessages: number;
+  readonly totalToolCalls: number;
+  readonly totalDiagnostics: number;
+  readonly totalDurationMs: number;
+  readonly totalApproxMBWritten: number;
+}
+
 const redactText = (value: string): string => redactSensitive(value) as string;
 
 const utf8Bytes = (value: string): number => Buffer.byteLength(value, "utf8");
@@ -218,11 +229,28 @@ const opencodeHooks: ProviderIngestHooks = {
   },
 };
 
+/**
+ * Hermes: sessions and messages tables only; FTS tables and session_meta rows
+ * are filtered at the adapter level. No source-row garbage lines exist in the
+ * hermes corpus (all values well within Convex limits); plain admission.
+ */
+const hermesHooks: ProviderIngestHooks = {};
+
+/**
+ * Grok: chat_history events are the canonical turn surface. Reasoning is
+ * extracted as plaintext `thinking` blocks (emitted as role: "thinking" events
+ * by the adapter); tool_calls arrays on assistant events are the structural
+ * surface. No oversized rows measured in the full corpus; plain admission.
+ */
+const grokHooks: ProviderIngestHooks = {};
+
 /** Hooks per supported provider; presence in this map is the support gate. */
 export const PROVIDER_INGEST_HOOKS: ReadonlyMap<Provider, ProviderIngestHooks> = new Map([
   ["claude", {}],
   ["codex", codexHooks],
   ["opencode", opencodeHooks],
+  ["hermes", hermesHooks],
+  ["grok", grokHooks],
 ]);
 
 export const SUPPORTED_INGEST_PROVIDERS = [...PROVIDER_INGEST_HOOKS.keys()];
@@ -275,12 +303,21 @@ export const mapNormalizedSession = (
   const messages: MessageRow[] = [];
   for (const event of session.events) {
     if (rejectedEventIds.has(event.id)) continue;
-    if (event.role !== "user" && event.role !== "assistant") continue;
+    // Admit user, assistant, and thinking roles. `thinking` events are emitted
+    // by adapters (e.g. grok) that produce a dedicated reasoning event rather
+    // than embedding thinking blocks inside an assistant event; they map
+    // directly to role: "reasoning" rows.
+    if (event.role !== "user" && event.role !== "assistant" && event.role !== "thinking") continue;
     if (INJECTED_EVENT_KINDS.has(event.kind)) continue;
     if (hooks.admitMessageEvent?.(event) === false) continue;
     const reasoningParts: string[] = [];
     const textParts: string[] = [];
-    if (event.contentBlocks.length === 0) {
+    if (event.role === "thinking") {
+      // Dedicated reasoning event: treat contentText directly as reasoning.
+      if (event.contentText !== undefined && event.contentText.trim().length > 0) {
+        reasoningParts.push(event.contentText);
+      }
+    } else if (event.contentBlocks.length === 0) {
       // Plain-string content short-circuits block construction in the adapter.
       if (event.kind === "message" && event.contentText !== undefined) {
         textParts.push(event.contentText);
@@ -312,7 +349,10 @@ export const mapNormalizedSession = (
     };
     // Reasoning first so same-seq rows read in thought-then-reply order.
     pushRow("reasoning", reasoningParts);
-    pushRow(event.role, textParts);
+    // `thinking` events map entirely to reasoning; their textParts are empty.
+    if (event.role !== "thinking") {
+      pushRow(event.role, textParts);
+    }
   }
 
   const seqByEventId = new Map(session.events.map((event) => [event.id, event.sequence]));
@@ -537,13 +577,34 @@ const runProviderIngest = async (options: {
   };
 };
 
+const runAllProvidersIngest = async (options: {
+  readonly limit?: number;
+  readonly force?: boolean;
+}): Promise<AllIngestReport> => {
+  const reports: IngestReport[] = [];
+  for (const provider of SUPPORTED_INGEST_PROVIDERS) {
+    const report = await runProviderIngest({ provider, limit: options.limit, force: options.force });
+    reports.push(report);
+  }
+  return {
+    providers: reports,
+    totalSessionsWritten: reports.reduce((sum, r) => sum + r.sessionsWritten, 0),
+    totalSessionsSkipped: reports.reduce((sum, r) => sum + r.sessionsSkipped, 0),
+    totalMessages: reports.reduce((sum, r) => sum + r.messages, 0),
+    totalToolCalls: reports.reduce((sum, r) => sum + r.toolCalls, 0),
+    totalDiagnostics: reports.reduce((sum, r) => sum + r.diagnostics.length, 0),
+    totalDurationMs: reports.reduce((sum, r) => sum + r.durationMs, 0),
+    totalApproxMBWritten: Math.round(reports.reduce((sum, r) => sum + r.approxMBWritten, 0) * 100) / 100,
+  };
+};
+
 const providerOption = Options.text("provider").pipe(
   Options.withDescription(
-    `Session provider to ingest (supported: ${SUPPORTED_INGEST_PROVIDERS.join(", ")})`,
+    `Session provider to ingest (supported: ${SUPPORTED_INGEST_PROVIDERS.join(", ")}, all)`,
   ),
 );
 const rootOption = Options.text("root").pipe(
-  Options.withDescription("Override the provider root directory"),
+  Options.withDescription("Override the provider root directory (ignored when provider is 'all')"),
   Options.optional,
 );
 const limitOption = Options.integer("limit").pipe(
@@ -563,11 +624,21 @@ export const ingestCommand = Command.make(
     executeJsonCommand(
       "ingest",
       Effect.gen(function* () {
+        if (provider === "all") {
+          return yield* Effect.tryPromise({
+            try: () =>
+              runAllProvidersIngest({
+                limit: Option.getOrUndefined(limit),
+                force,
+              }),
+            catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+          });
+        }
         if (!SUPPORTED_INGEST_PROVIDERS.includes(provider as Provider)) {
           return yield* Effect.fail(
             new CommandInputError({
               field: "provider",
-              message: `Unsupported ingest provider: ${provider}. Supported: ${SUPPORTED_INGEST_PROVIDERS.join(", ")}.`,
+              message: `Unsupported ingest provider: ${provider}. Supported: ${SUPPORTED_INGEST_PROVIDERS.join(", ")}, all.`,
             }),
           );
         }

@@ -661,3 +661,121 @@ describe("mapNormalizedSession with opencode hooks", () => {
     expect(mapped.session.toolCallCount).toBe(0);
   });
 });
+
+describe("mapNormalizedSession with hermes hooks", () => {
+  const hermesHooks = PROVIDER_INGEST_HOOKS.get("hermes")!;
+
+  test("hermes hooks are registered and admit all user/assistant turns", () => {
+    const mapped = mapNormalizedSession(
+      session({
+        provider: "hermes",
+        agentName: "hermes",
+        events: [
+          baseEvent({
+            id: "e0",
+            sequence: 0,
+            role: "user",
+            kind: "message",
+            contentText: "describe the current architecture",
+          }),
+          baseEvent({
+            id: "e1",
+            sequence: 1,
+            role: "assistant",
+            kind: "message",
+            contentBlocks: [
+              block({ kind: "text", text: "The architecture uses Convex as its backend." }),
+            ],
+          }),
+        ],
+      }),
+      hermesHooks,
+    );
+    expect(mapped.messages.map((r) => [r.seq, r.role, r.text])).toEqual([
+      [0, "user", "describe the current architecture"],
+      [1, "assistant", "The architecture uses Convex as its backend."],
+    ]);
+    expect(mapped.diagnostics).toHaveLength(0);
+  });
+});
+
+describe("mapNormalizedSession with grok hooks", () => {
+  const grokHooks = PROVIDER_INGEST_HOOKS.get("grok")!;
+
+  test("grok hooks are registered and admit user/assistant turns", () => {
+    const mapped = mapNormalizedSession(
+      session({
+        provider: "grok",
+        agentName: "grok-build",
+        events: [
+          baseEvent({
+            id: "e0",
+            sequence: 0,
+            role: "user",
+            kind: "message",
+            contentText: "add booth-* projects to system-config",
+          }),
+          baseEvent({
+            id: "e1",
+            sequence: 1,
+            role: "assistant",
+            kind: "message",
+            contentBlocks: [
+              block({ kind: "text", text: "Done, added three booth-* directories." }),
+            ],
+          }),
+        ],
+      }),
+      grokHooks,
+    );
+    expect(mapped.messages.map((r) => [r.seq, r.role, r.text])).toEqual([
+      [0, "user", "add booth-* projects to system-config"],
+      [1, "assistant", "Done, added three booth-* directories."],
+    ]);
+    expect(mapped.diagnostics).toHaveLength(0);
+  });
+
+  test("grok thinking events become role:reasoning rows", () => {
+    const mapped = mapNormalizedSession(
+      session({
+        provider: "grok",
+        agentName: "grok-build",
+        events: [
+          // The grok adapter emits a dedicated reasoning event before the reply.
+          baseEvent({
+            id: "e0-r",
+            sequence: 5,
+            role: "thinking",
+            kind: "reasoning",
+            contentText: "Let me check the directory structure first",
+          }),
+          baseEvent({
+            id: "e0",
+            sequence: 5,
+            role: "assistant",
+            kind: "tool_call",
+            contentText: "",
+            toolCallId: "tc1",
+          }),
+        ],
+        toolCalls: [
+          toolCall({
+            id: "tc1",
+            eventId: "e0",
+            toolName: "list_dir",
+            status: "completed",
+            input: { target_directory: "/Users/guilhermecastro/Projects" },
+            output: "atlas/\nquasar/\nrig/",
+          }),
+        ],
+      }),
+      grokHooks,
+    );
+    expect(mapped.messages.map((r) => [r.seq, r.role, r.text])).toEqual([
+      [5, "reasoning", "Let me check the directory structure first"],
+    ]);
+    expect(mapped.toolCalls).toHaveLength(1);
+    expect(mapped.toolCalls[0]?.toolName).toBe("list_dir");
+    expect(mapped.diagnostics).toHaveLength(0);
+  });
+});
