@@ -3,7 +3,7 @@ import { basename, dirname, join, relative } from "node:path";
 
 import { Option, Schema } from "effect";
 
-import { stableCanonicalJsonHash, stableJsonHash, stableWideHash } from "../hash";
+import { stableJsonHash, stableWideHash } from "../hash";
 import { resolveProjectIdentity } from "../project-normalization";
 import { redactSensitive } from "../redaction";
 import type {
@@ -175,44 +175,17 @@ export const projectSessionPatchNativeValue = (value: unknown): NativeValue | un
   return projected === undefined ? undefined : (projected as NativeValue);
 };
 
-export const projectToolPayloadNativeValue = (value: unknown): unknown => {
+/**
+ * Tool payloads are stored in full — Convex limits are the only boundary, and
+ * the ingest layer enforces them with a named diagnostic. The adapter only
+ * redacts and prunes provider machinery keys; it never truncates.
+ */
+export const projectToolPayloadNativeValue = (value: unknown): NativeValue | undefined => {
   const decoded = Option.getOrElse(
     Schema.decodeUnknownOption(NativeProjectionInputSchema)(value),
     () => value,
   );
-  const projected = projectNativeValue(decoded);
-  return projectLargeToolPayload(projected);
-};
-
-const TOOL_PAYLOAD_WIRE_LIMIT_BYTES = 2 * 1024;
-const TOOL_PAYLOAD_PREVIEW_LENGTH = 1_000;
-const textEncoder = new TextEncoder();
-
-const wireBytesOf = (value: unknown) => {
-  const serialized = JSON.stringify(value);
-  return serialized === undefined ? undefined : textEncoder.encode(serialized).byteLength;
-};
-
-const projectLargeToolPayload = (value: NativeValue | undefined): unknown => {
-  if (value === undefined) return undefined;
-  const bytes = wireBytesOf(value);
-  if (bytes === undefined || bytes <= TOOL_PAYLOAD_WIRE_LIMIT_BYTES) return value;
-  const preview = compactText(value);
-  return {
-    truncated: true,
-    bytes,
-    hash: stableCanonicalJsonHash(value),
-    ...(preview !== undefined
-      ? { preview: preview.slice(0, TOOL_PAYLOAD_PREVIEW_LENGTH) }
-      : {}),
-  };
-};
-
-const compactProjectedText = (value: string | undefined, maxLength = 4_000) => {
-  if (value === undefined) return undefined;
-  const compacted = compactString(value);
-  if (compacted === undefined) return undefined;
-  return compacted.length <= maxLength ? compacted : `${compacted.slice(0, maxLength)}...`;
+  return projectNativeValue(decoded);
 };
 
 const shouldDropNativeKey = (key: string) =>
@@ -224,7 +197,7 @@ const projectNativeValue = (value: unknown): NativeValue | undefined => {
   const redacted = redactSensitive(value);
   if (redacted === undefined) return undefined;
   if (redacted === null) return null;
-  if (typeof redacted === "string") return compactProjectedText(redacted);
+  if (typeof redacted === "string") return compactString(redacted);
   if (typeof redacted === "number" || typeof redacted === "boolean") return redacted;
   if (Array.isArray(redacted)) {
     const items = redacted.flatMap((item) => {
@@ -276,7 +249,7 @@ export const collectFiles = (
 export const compactText = (value: NativeValue | undefined): string | undefined => {
   if (value === undefined || value === null) return undefined;
   if (typeof value === "string") {
-    const text = compactProjectedText(compactString(value));
+    const text = compactString(value);
     return text === undefined ? undefined : (redactSensitive(text) as string);
   }
   if (Array.isArray(value)) {
@@ -290,7 +263,7 @@ export const compactText = (value: NativeValue | undefined): string | undefined 
     const projected = projectNativeValue(value);
     if (projected === undefined) return undefined;
     try {
-      return compactProjectedText(JSON.stringify(projected), 4_000);
+      return compactString(JSON.stringify(projected));
     } catch {
       return undefined;
     }

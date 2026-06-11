@@ -51,12 +51,10 @@ type OpenCodePartRow = {
 type SQLiteColumnRow = { name: string };
 type SQLiteCountRow = { count: number };
 
-const OPENCODE_MAX_RAW_MESSAGE_DATA_BYTES = 256 * 1024;
-const OPENCODE_MAX_RAW_PART_DATA_BYTES = 128 * 1024;
-
+// Machinery-key pruning only — never byte caps. Convex limits are the only
+// boundary; oversized values surface as named diagnostics at the ingest layer.
 const OPENCODE_PRUNED_MESSAGE_DATA_SQL = [
   "case",
-  `when length(data) > ${OPENCODE_MAX_RAW_MESSAGE_DATA_BYTES} then json_object('content', '[omitted:large_opencode_message bytes=' || length(data) || ']')`,
   "when json_valid(data) then",
   "json_remove(",
   "data,",
@@ -100,7 +98,6 @@ const OPENCODE_PRUNED_MESSAGE_DATA_SQL = [
 
 const OPENCODE_PRUNED_PART_DATA_SQL = [
   "case",
-  `when length(data) > ${OPENCODE_MAX_RAW_PART_DATA_BYTES} then json_object('type', 'text', 'text', '[omitted:large_opencode_part bytes=' || length(data) || ']')`,
   "when json_valid(data) then",
   "json_remove(",
   "data,",

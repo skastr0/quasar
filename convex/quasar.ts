@@ -192,6 +192,7 @@ export const searchMessages = query({
       seq: row.seq,
       role: row.role,
       text: row.text,
+      projectKey: row.projectKey,
     }));
   },
 });
