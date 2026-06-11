@@ -1,0 +1,193 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { afterAll, describe, expect, test } from "vitest";
+
+import { codexAdapter } from "../src/adapters/codex";
+
+const MACHINE = {
+  machineId: "machine:test",
+  hostname: "test-host",
+  platform: "darwin",
+};
+
+const NOW = "2026-06-11T00:00:00.000Z";
+
+const line = (value: unknown) => JSON.stringify(value);
+
+const rolloutLines = (cwd: string) =>
+  [
+    line({
+      timestamp: NOW,
+      type: "session_meta",
+      payload: { type: "session_meta", id: "native", cwd },
+    }),
+    // Injected wrapper arriving with role user — must map to kind preamble.
+    line({
+      timestamp: NOW,
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "<environment_context>\n  <cwd>/x</cwd>\n</environment_context>" }],
+      },
+    }),
+    // Real human turn.
+    line({
+      timestamp: NOW,
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "please fix the bug" }],
+      },
+    }),
+    // event_msg duplicate of the same turn.
+    line({
+      timestamp: NOW,
+      type: "event_msg",
+      payload: { type: "user_message", message: "please fix the bug" },
+    }),
+    // Encrypted reasoning — content must be stripped by projection.
+    line({
+      timestamp: NOW,
+      type: "response_item",
+      payload: { type: "reasoning", summary: [], encrypted_content: "gAAAAAB-cipher" },
+    }),
+    // function_call pair.
+    line({
+      timestamp: NOW,
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        call_id: "call_fn",
+        name: "shell",
+        arguments: '{"command":["ls"]}',
+      },
+    }),
+    line({
+      timestamp: NOW,
+      type: "response_item",
+      payload: { type: "function_call_output", call_id: "call_fn", output: "file.txt" },
+    }),
+    // custom_tool_call pair (apply_patch carries raw text in `input`).
+    line({
+      timestamp: NOW,
+      type: "response_item",
+      payload: {
+        type: "custom_tool_call",
+        call_id: "call_patch",
+        name: "apply_patch",
+        status: "completed",
+        input: "*** Begin Patch\n*** Update File: /tmp/a.ts\n*** End Patch",
+      },
+    }),
+    line({
+      timestamp: NOW,
+      type: "response_item",
+      payload: {
+        type: "custom_tool_call_output",
+        call_id: "call_patch",
+        output: "Success. Updated the following files:\nM /tmp/a.ts",
+      },
+    }),
+    // Assistant reply.
+    line({
+      timestamp: NOW,
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "done, the bug is fixed" }],
+      },
+    }),
+  ].join("\n");
+
+const root = mkdtempSync(join(tmpdir(), "quasar-codex-adapter-"));
+
+afterAll(() => {
+  rmSync(root, { recursive: true, force: true });
+});
+
+describe("codex adapter", () => {
+  test("scans sessions/ (dated tree) and archived_sessions/ (flat) as one estate", async () => {
+    const datedDir = join(root, "sessions", "2026", "06", "11");
+    const archivedDir = join(root, "archived_sessions");
+    mkdirSync(datedDir, { recursive: true });
+    mkdirSync(archivedDir, { recursive: true });
+    writeFileSync(join(datedDir, "rollout-2026-06-11-live.jsonl"), rolloutLines("/tmp/proj"));
+    writeFileSync(join(archivedDir, "rollout-2026-05-01-archived.jsonl"), rolloutLines("/tmp/proj"));
+
+    const result = await codexAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { codex: root },
+    });
+
+    expect(result.sessions).toHaveLength(2);
+    expect(result.sourceRoots.map((sourceRoot) => sourceRoot.rootPath)).toEqual([
+      join(root, "sessions"),
+      join(root, "archived_sessions"),
+    ]);
+    const sourcePaths = result.sessions.map((session) => session.sourcePath).sort();
+    expect(sourcePaths[0]).toContain("archived_sessions");
+    expect(sourcePaths[1]).toContain(join("sessions", "2026"));
+    // Distinct sourcePath prefixes mean distinct session ids — idempotency safe.
+    expect(new Set(result.sessions.map((session) => session.id)).size).toBe(2);
+  });
+
+  test("maps wrappers to preamble, keeps human turns as messages, strips encrypted reasoning", async () => {
+    const result = await codexAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { codex: root },
+      limit: 1,
+    });
+    const session = result.sessions[0]!;
+
+    const wrapper = session.events.find((event) =>
+      event.rawReference.line === 2,
+    )!;
+    expect(wrapper.kind).toBe("preamble");
+
+    const humanTurn = session.events.find((event) => event.rawReference.line === 3)!;
+    expect(humanTurn.kind).toBe("message");
+    expect(humanTurn.role).toBe("user");
+
+    const reasoning = session.events.find((event) => event.kind === "reasoning")!;
+    expect(reasoning.role).toBe("thinking");
+    expect(JSON.stringify(reasoning)).not.toContain("gAAAAAB");
+
+    const assistantTurn = session.events.find(
+      (event) => event.kind === "message" && event.role === "assistant",
+    )!;
+    expect(assistantTurn.contentBlocks.some((block) => "text" in block)).toBe(true);
+  });
+
+  test("merges function_call and custom_tool_call pairs into completed tool calls", async () => {
+    const result = await codexAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { codex: root },
+      limit: 1,
+    });
+    const session = result.sessions[0]!;
+    expect(session.toolCalls).toHaveLength(2);
+
+    const shell = session.toolCalls.find((toolCall) => toolCall.toolName === "shell")!;
+    expect(shell.status).toBe("completed");
+    expect(shell.output).toContain("file.txt");
+
+    const patch = session.toolCalls.find((toolCall) => toolCall.toolName === "apply_patch")!;
+    expect(patch.status).toBe("completed");
+    expect(JSON.stringify(patch.input)).toContain("Begin Patch");
+    expect(JSON.stringify(patch.output)).toContain("Updated the following files");
+
+    // Tool-call/result events carry the kinds the ingest layer expects.
+    const kinds = session.events
+      .filter((event) => event.toolCallId !== undefined)
+      .map((event) => event.kind);
+    expect(kinds).toEqual(["tool_call", "tool_result", "tool_call", "tool_result"]);
+  });
+});
