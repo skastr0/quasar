@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 import { convexTest } from "convex-test";
-import { expect, test, vi } from "vitest";
+import { expect, test } from "vitest";
 import { api } from "./_generated/api";
 import schema from "./schema";
 
@@ -157,69 +157,73 @@ test("toolCallsByName walks the (projectKey, toolName) index", async () => {
   expect(page.isDone).toBe(true);
 });
 
-test("deleteSessionTurns cleans messages and toolCalls across chunks", async () => {
-  vi.useFakeTimers();
-  try {
-    const t = convexTest(schema, modules);
-    const sessionId = "s-delete";
-    // 450 messages + 30 toolCalls: forces multiple 200-row batches plus
-    // a mixed messages/toolCalls batch and a rescheduled continuation.
-    for (let start = 0; start < 450; start += 150) {
-      await t.mutation(api.quasar.insertMessages, {
-        messages: Array.from({ length: 150 }, (_, i) => ({
-          sessionId,
-          seq: start + i,
-          role: "user" as const,
-          text: `m${start + i}`,
-          projectKey: "p1",
-        })),
-      });
-    }
-    await t.mutation(api.quasar.insertToolCalls, {
-      toolCalls: Array.from({ length: 30 }, (_, i) => ({
+test("deleteSessionTurns drains messages and toolCalls under caller-driven batches", async () => {
+  const t = convexTest(schema, modules);
+  const sessionId = "s-delete";
+  // 450 messages + 30 toolCalls: forces multiple 200-row batches plus
+  // a mixed messages/toolCalls batch and a caller-driven continuation.
+  for (let start = 0; start < 450; start += 150) {
+    await t.mutation(api.quasar.insertMessages, {
+      messages: Array.from({ length: 150 }, (_, i) => ({
         sessionId,
-        seq: i,
-        toolName: "Bash",
-        inputText: "{}",
-        outputText: "ok",
+        seq: start + i,
+        role: "user" as const,
+        text: `m${start + i}`,
         projectKey: "p1",
-        provider: "claude",
       })),
     });
-    // An adjacent session must survive the cleanup untouched.
-    await t.mutation(api.quasar.insertMessages, {
-      messages: [
-        {
-          sessionId: "s-keep",
-          seq: 0,
-          role: "user" as const,
-          text: "keep me",
-          projectKey: "p1",
-        },
-      ],
-    });
-
-    await t.mutation(api.quasar.deleteSessionTurns, { sessionId });
-    await t.finishAllScheduledFunctions(vi.runAllTimers);
-
-    const messages = await t.query(api.quasar.readSession, {
-      sessionId,
-      paginationOpts: { numItems: 1, cursor: null },
-    });
-    expect(messages.page).toHaveLength(0);
-
-    const toolCalls = await t.query(api.quasar.sessionToolCalls, {
-      sessionId,
-      paginationOpts: { numItems: 1, cursor: null },
-    });
-    expect(toolCalls.page).toHaveLength(0);
-
-    const kept = await t.query(api.quasar.readSession, {
-      sessionId: "s-keep",
-      paginationOpts: { numItems: 1, cursor: null },
-    });
-    expect(kept.page).toHaveLength(1);
-  } finally {
-    vi.useRealTimers();
   }
+  await t.mutation(api.quasar.insertToolCalls, {
+    toolCalls: Array.from({ length: 30 }, (_, i) => ({
+      sessionId,
+      seq: i,
+      toolName: "Bash",
+      inputText: "{}",
+      outputText: "ok",
+      projectKey: "p1",
+      provider: "claude",
+    })),
+  });
+  // An adjacent session must survive the cleanup untouched.
+  await t.mutation(api.quasar.insertMessages, {
+    messages: [
+      {
+        sessionId: "s-keep",
+        seq: 0,
+        role: "user" as const,
+        text: "keep me",
+        projectKey: "p1",
+      },
+    ],
+  });
+
+  // The caller loops while a full batch was deleted — exactly what ingest does.
+  let totalDeleted = 0;
+  let calls = 0;
+  let result: { deleted: number; batchSize: number };
+  do {
+    result = await t.mutation(api.quasar.deleteSessionTurns, { sessionId });
+    totalDeleted += result.deleted;
+    calls += 1;
+  } while (result.deleted === result.batchSize);
+  expect(totalDeleted).toBe(480);
+  expect(calls).toBe(3);
+
+  const messages = await t.query(api.quasar.readSession, {
+    sessionId,
+    paginationOpts: { numItems: 1, cursor: null },
+  });
+  expect(messages.page).toHaveLength(0);
+
+  const toolCalls = await t.query(api.quasar.sessionToolCalls, {
+    sessionId,
+    paginationOpts: { numItems: 1, cursor: null },
+  });
+  expect(toolCalls.page).toHaveLength(0);
+
+  const kept = await t.query(api.quasar.readSession, {
+    sessionId: "s-keep",
+    paginationOpts: { numItems: 1, cursor: null },
+  });
+  expect(kept.page).toHaveLength(1);
 });

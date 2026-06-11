@@ -1,6 +1,5 @@
 import { paginationOptsValidator } from "convex/server";
 import { v } from "convex/values";
-import { api } from "./_generated/api";
 import { mutation, query } from "./_generated/server";
 
 const roleValidator = v.union(
@@ -124,6 +123,12 @@ export const insertToolCalls = mutation({
   },
 });
 
+/**
+ * Deletes one batch of a session's turns and reports how many rows it removed.
+ * Caller-driven continuation: the ingest engine loops while `deleted` equals a
+ * full batch, so delete completion is observable before re-insertion begins.
+ * (A scheduler-based continuation would race the subsequent inserts.)
+ */
 export const deleteSessionTurns = mutation({
   args: { sessionId: v.string() },
   handler: async (ctx, args) => {
@@ -145,12 +150,7 @@ export const deleteSessionTurns = mutation({
       }
       deleted += toolCalls.length;
     }
-    if (deleted === DELETE_BATCH) {
-      await ctx.scheduler.runAfter(0, api.quasar.deleteSessionTurns, {
-        sessionId: args.sessionId,
-      });
-    }
-    return null;
+    return { deleted, batchSize: DELETE_BATCH };
   },
 });
 
