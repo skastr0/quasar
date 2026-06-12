@@ -1,5 +1,6 @@
 import { ConvexHttpClient } from "convex/browser";
 
+import { configuredConvexUrl } from "./config";
 import { CommandInputError } from "./errors";
 
 /** Bounded retry for transient platform errors (e.g. TooManyWrites — a
@@ -24,12 +25,12 @@ export const withRetry = async <T>(operation: () => Promise<T>): Promise<T> => {
 };
 
 export const createConvexClient = (): ConvexHttpClient => {
-  const url = process.env.CONVEX_SELF_HOSTED_URL ?? process.env.CONVEX_URL;
+  const url = configuredConvexUrl();
   if (url === undefined || url.length === 0) {
     throw new CommandInputError({
       field: "CONVEX_URL",
       message:
-        "Convex backend URL not found: set CONVEX_SELF_HOSTED_URL or CONVEX_URL (bun auto-loads .env.local from the working directory).",
+        "Convex backend URL not found: set CONVEX_SELF_HOSTED_URL, CONVEX_URL, or ~/.config/quasar/config.json with convexUrl/fallbackUrls.convexUrl.",
     });
   }
   // The quasar functions are public; no admin auth is needed.

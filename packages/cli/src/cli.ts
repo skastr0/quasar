@@ -5,8 +5,8 @@ import { BunContext, BunRuntime } from "@effect/platform-bun";
 import { Effect } from "effect";
 
 import { capabilitiesCommand, doctorCommand } from "./commands/discovery";
-import { embedCommand } from "./commands/embed";
 import { ingestCommand } from "./commands/ingest";
+import { projectsCommand, sessionsCommand, toolCallsCommand } from "./commands/read";
 import { examplesCommand, schemaCommand } from "./commands/schema";
 import { searchCommand } from "./commands/search";
 import { sourcesCommand } from "./commands/sources";
@@ -25,8 +25,10 @@ const publicCommands = new Set([
   "examples",
   "sources",
   "ingest",
-  "embed",
   "search",
+  "projects",
+  "sessions",
+  "tool-calls",
 ]);
 
 const userArgs = (args: readonly string[]) => args.slice(2);
@@ -48,8 +50,10 @@ export const rootCommand = Command.make(CLI_NAME).pipe(
     examplesCommand,
     sourcesCommand,
     ingestCommand,
-    embedCommand,
     searchCommand,
+    projectsCommand,
+    sessionsCommand,
+    toolCallsCommand,
   ]),
 );
 
