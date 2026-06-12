@@ -19,7 +19,7 @@
     },
     "packages/cli": {
       "name": "@skastr0/quasar-cli",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "bin": {
         "quasar": "bin/quasar.js",
       },
@@ -34,15 +34,15 @@
         "typescript": "^6.0.3",
       },
       "optionalDependencies": {
-        "@skastr0/quasar-cli-darwin-arm64": "0.1.0",
-        "@skastr0/quasar-cli-darwin-x64": "0.1.0",
-        "@skastr0/quasar-cli-linux-arm64": "0.1.0",
-        "@skastr0/quasar-cli-linux-x64": "0.1.0",
+        "@skastr0/quasar-cli-darwin-arm64": "0.1.1",
+        "@skastr0/quasar-cli-darwin-x64": "0.1.1",
+        "@skastr0/quasar-cli-linux-arm64": "0.1.1",
+        "@skastr0/quasar-cli-linux-x64": "0.1.1",
       },
     },
     "packages/core": {
       "name": "@skastr0/quasar-core",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "dependencies": {
         "effect": "^3.21.2",
       },
@@ -233,14 +233,6 @@
     "@rolldown/pluginutils": ["@rolldown/pluginutils@1.0.1", "", {}, "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw=="],
 
     "@skastr0/quasar-cli": ["@skastr0/quasar-cli@workspace:packages/cli"],
-
-    "@skastr0/quasar-cli-darwin-arm64": ["@skastr0/quasar-cli-darwin-arm64@0.1.0", "", { "os": "darwin", "cpu": "arm64" }, "sha512-Bw2ds/nWaTrbd7QzjUYMMIqMupwFeGW7bdecgmmxMns3rbHEGmls2SQGUzHlHhNbn996YiPYQsPzCqqiJC3yYQ=="],
-
-    "@skastr0/quasar-cli-darwin-x64": ["@skastr0/quasar-cli-darwin-x64@0.1.0", "", { "os": "darwin", "cpu": "x64" }, "sha512-UPrKlSnUs2y5s7IxmkoVA32k7nGw9yxZpFxu+WfT8hW14uuR88rXWDPNd2K04zeGbxnD+WdiDsLfT9aIJbGo0w=="],
-
-    "@skastr0/quasar-cli-linux-arm64": ["@skastr0/quasar-cli-linux-arm64@0.1.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-BADvA3ma6/cGJCu0hGNVwZvkPBxs4+EJNLLWDIM+/HQxSq8mjYnr/3LhmJWausxxyDuTw/PTduDl8GldG41gbw=="],
-
-    "@skastr0/quasar-cli-linux-x64": ["@skastr0/quasar-cli-linux-x64@0.1.0", "", { "os": "linux", "cpu": "x64" }, "sha512-8Ig+eGB+0Lg/hoKz1tZhS0YrkX31t+Rb9rpcJyi2tPmzVqY/D40LsEfrSLLG3DAHlGLSi+CHw3oSvUgIy96LGA=="],
 
     "@skastr0/quasar-core": ["@skastr0/quasar-core@workspace:packages/core"],
 
