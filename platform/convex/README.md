@@ -20,7 +20,7 @@ docker compose --env-file platform/convex/.env -f platform/convex/compose.yaml e
 Store the key in the ignored root `.env.local`:
 
 ```bash
-CONVEX_SELF_HOSTED_URL='http://127.0.0.1:4210'
+CONVEX_SELF_HOSTED_URL='http://127.0.0.1:3217'
 CONVEX_SELF_HOSTED_ADMIN_KEY='<generated admin key>'
 ```
 
@@ -56,10 +56,10 @@ admin keys in the QSR-043 probe.
 Local defaults bind to ports that are not used by the local Tower Control
 Convex backend on this machine:
 
-- backend API: `http://127.0.0.1:4210`
-- HTTP actions/site proxy: `http://127.0.0.1:4211`
-- dashboard: `http://127.0.0.1:7791`
+- backend API: `http://127.0.0.1:3217`
+- HTTP actions/site proxy: `http://127.0.0.1:3218`
+- dashboard: `http://127.0.0.1:5177`
 
-For Tailscale access, set `CONVEX_CLOUD_ORIGIN`,
-`CONVEX_SITE_ORIGIN`, and `NEXT_PUBLIC_DEPLOYMENT_URL` in
-`platform/convex/.env` before starting the stack.
+The example `.env` is already aligned to the existing Quasar Tailscale Serve
+configuration: `/quasar-convex`, `/quasar-api`, and the DNS-free fallback ports
+`8177`, `8178`, and `8179` exposed on the tailnet IP.
