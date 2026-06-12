@@ -244,6 +244,19 @@ export const collectFiles = (
   return files;
 };
 
+/** Detects machinery-only envelopes: objects that project to only having a
+ * `type` field or similar machinery metadata. These should not appear on the
+ * search surface as JSON dumps. */
+const isMachineryOnlyEnvelope = (projected: NativeValue): boolean => {
+  if (typeof projected !== "object" || projected === null || Array.isArray(projected)) {
+    return false;
+  }
+  const record = projected as Record<string, unknown>;
+  const keys = Object.keys(record);
+  // Only a type field (or no fields at all) = machinery envelope with no content
+  return keys.length <= 1 && (keys.length === 0 || keys[0] === "type");
+};
+
 export const compactText = (value: NativeValue | undefined): string | undefined => {
   if (value === undefined || value === null) return undefined;
   if (typeof value === "string") {
@@ -260,6 +273,9 @@ export const compactText = (value: NativeValue | undefined): string | undefined 
     if (typeof record.content === "string") return compactText(record.content);
     const projected = projectNativeValue(value);
     if (projected === undefined) return undefined;
+    // Machinery-only envelopes (e.g. {"type":"reasoning"}) should not surface
+    // as JSON dumps on the search surface.
+    if (isMachineryOnlyEnvelope(projected)) return undefined;
     try {
       return compactString(JSON.stringify(projected));
     } catch {

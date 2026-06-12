@@ -593,6 +593,18 @@ const shouldDropKey = (key: string) =>
   /(?:^|_)(diff|patch|snapshot|ciphertext)(?:$|_)/i.test(key) ||
   /encrypted[_-]?content/i.test(key);
 
+/** Detects machinery-only envelopes: objects that have only a `type` field
+ * or no fields at all. These should not appear on the search surface as JSON dumps. */
+const isMachineryOnlyEnvelope = (projected: unknown): boolean => {
+  if (typeof projected !== "object" || projected === null || Array.isArray(projected)) {
+    return false;
+  }
+  const record = projected as Record<string, unknown>;
+  const keys = Object.keys(record);
+  // Only a type field (or no fields at all) = machinery envelope with no content
+  return keys.length <= 1 && (keys.length === 0 || keys[0] === "type");
+};
+
 export const projectLite = (value: unknown): unknown => {
   if (value === undefined || value === null) return value === null ? null : undefined;
   if (typeof value === "string") {
@@ -612,7 +624,11 @@ export const projectLite = (value: unknown): unknown => {
     const projected = SENSITIVE_KEY.test(key) ? "[redacted]" : projectLite(item);
     return projected === undefined ? [] : [[key, projected] as const];
   });
-  return entries.length === 0 ? undefined : Object.fromEntries(entries);
+  if (entries.length === 0) return undefined;
+  const result = Object.fromEntries(entries);
+  // Machinery-only envelopes (e.g. {type:"reasoning"}) should not surface
+  // as JSON dumps on the search surface.
+  return isMachineryOnlyEnvelope(result) ? undefined : result;
 };
 
 const parseJsonish = (value: unknown): unknown => {
