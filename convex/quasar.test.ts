@@ -1,10 +1,20 @@
 /// <reference types="vite/client" />
 import { convexTest } from "convex-test";
+import workpoolTest from "@convex-dev/workpool/test";
 import { expect, test } from "vitest";
 import { api } from "./_generated/api";
 import schema from "./schema";
 
 const modules = import.meta.glob("./**/*.ts");
+
+process.env.GOOGLE_API_KEY = "";
+process.env.GOOGLE_GENERATIVE_AI_API_KEY = "";
+
+const testConvex = () => {
+  const t = convexTest(schema, modules);
+  workpoolTest.register(t, "embeddingWorkpool");
+  return t;
+};
 
 const sessionArgs = {
   sessionId: "claude:machine-a:abc123",
@@ -36,7 +46,7 @@ const claimSession = async (
   });
 
 test("beginSessionIngest skips only committed sessions with an unchanged fingerprint", async () => {
-  const t = convexTest(schema, modules);
+  const t = testConvex();
 
   const first = await t.mutation(api.quasar.beginSessionIngest, {
     ...sessionArgs,
@@ -81,7 +91,7 @@ test("beginSessionIngest skips only committed sessions with an unchanged fingerp
 });
 
 test("turn mutations reject a lost claim so concurrent runs cannot duplicate turns", async () => {
-  const t = convexTest(schema, modules);
+  const t = testConvex();
   const sessionId = "s-claim";
 
   await claimSession(t, sessionId, "p1", "run-a");
@@ -127,7 +137,7 @@ test("turn mutations reject a lost claim so concurrent runs cannot duplicate tur
 });
 
 test("insertMessages + readSession paginates in seq ascending order", async () => {
-  const t = convexTest(schema, modules);
+  const t = testConvex();
   const sessionId = "s-read";
   await claimSession(t, sessionId, "p1", "run-1");
   // Insert deliberately out of order; the index walk must return seq ascending.
@@ -158,7 +168,7 @@ test("insertMessages + readSession paginates in seq ascending order", async () =
 });
 
 test("searchMessages finds inserted text and respects projectKey filter", async () => {
-  const t = convexTest(schema, modules);
+  const t = testConvex();
   await claimSession(t, "s-search-1", "proj-alpha", "run-1");
   await claimSession(t, "s-search-2", "proj-beta", "run-1");
   await claimSession(t, "s-search-3", "proj-alpha", "run-1");
@@ -203,7 +213,7 @@ test("searchMessages finds inserted text and respects projectKey filter", async 
 });
 
 test("toolCallsByName walks the (projectKey, toolName) index", async () => {
-  const t = convexTest(schema, modules);
+  const t = testConvex();
   await claimSession(t, "s-tools", "proj-alpha", "run-1");
   await claimSession(t, "s-other", "proj-beta", "run-1");
   await t.mutation(api.quasar.insertToolCalls, {
@@ -251,7 +261,7 @@ test("toolCallsByName walks the (projectKey, toolName) index", async () => {
 });
 
 test("deleteSessionTurns drains messages and toolCalls under caller-driven batches", async () => {
-  const t = convexTest(schema, modules);
+  const t = testConvex();
   const sessionId = "s-delete";
   await claimSession(t, sessionId, "p1", "run-1");
   await claimSession(t, "s-keep", "p1", "run-1");
@@ -330,7 +340,7 @@ test("deleteSessionTurns drains messages and toolCalls under caller-driven batch
 });
 
 test("pruneEmptyProjects deletes only project rows no session references", async () => {
-  const t = convexTest(schema, modules);
+  const t = testConvex();
 
   await t.mutation(api.quasar.upsertProject, {
     projectKey: "git:github.com/skastr0/quasar",

@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as crons from "../crons.js";
 import type * as embed from "../embed.js";
 import type * as quasar from "../quasar.js";
 import type * as quasarRag from "../quasarRag.js";
@@ -19,6 +20,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  crons: typeof crons;
   embed: typeof embed;
   quasar: typeof quasar;
   quasarRag: typeof quasarRag;
@@ -52,4 +54,5 @@ export declare const internal: FilterApi<
 
 export declare const components: {
   rag: import("@convex-dev/rag/_generated/component.js").ComponentApi<"rag">;
+  embeddingWorkpool: import("@convex-dev/workpool/_generated/component.js").ComponentApi<"embeddingWorkpool">;
 };

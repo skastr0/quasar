@@ -13,6 +13,7 @@
  *    mapping, and standard RRF fusion (k = 60).
  */
 import { convexTest, type TestConvex } from "convex-test";
+import workpoolTest from "@convex-dev/workpool/test";
 import { describe, expect, test } from "vitest";
 import { api, internal } from "./_generated/api";
 import {
@@ -28,6 +29,15 @@ import schema from "./schema";
 const modules = import.meta.glob("./**/*.ts");
 
 type Quasar = TestConvex<typeof schema>;
+
+process.env.GOOGLE_API_KEY = "";
+process.env.GOOGLE_GENERATIVE_AI_API_KEY = "";
+
+const testConvex = () => {
+  const t = convexTest(schema, modules);
+  workpoolTest.register(t, "embeddingWorkpool");
+  return t;
+};
 
 const PROJECT_KEY = "git:github.com/example/alpha";
 const SESSION_ID = "claude:machine:test:emb1";
@@ -81,7 +91,7 @@ const paginate = { numItems: 50, cursor: null };
 
 describe("embedding-surface role purity", () => {
   test("embeddableMessages returns only the requested conversation role", async () => {
-    const t = convexTest(schema, modules);
+    const t = testConvex();
     await seedSession(t);
     const users = await t.query(internal.embed.embeddableMessages, {
       sessionId: SESSION_ID,
@@ -104,7 +114,7 @@ describe("embedding-surface role purity", () => {
   });
 
   test("the validator cannot express any role outside the conversation surface", async () => {
-    const t = convexTest(schema, modules);
+    const t = testConvex();
     await seedSession(t);
     for (const role of ["reasoning", "system", "tool"]) {
       await expect(
@@ -124,28 +134,77 @@ describe("embedding-surface role purity", () => {
 // ---------------------------------------------------------------------------
 
 describe("embed queue and completion marking", () => {
-  test("pending derivation: claimed -> not pending; committed -> pending; marked -> not pending", async () => {
-    const t = convexTest(schema, modules);
+  test("pending derivation: ingest claimed -> not pending; committed -> pending; embedding claimed -> not pending; marked -> not pending", async () => {
+    const t = testConvex();
     await seedSession(t, { commit: false });
-    const claimed = (await t.query(api.embed.embedQueue, { paginationOpts: paginate })).page;
+    const claimed = (await t.query(internal.embed.embedQueue, { paginationOpts: paginate })).page;
     expect(claimed).toHaveLength(1);
     expect(claimed[0]).toMatchObject({ sessionId: SESSION_ID, ingestClaimed: true, pending: false });
 
     await t.mutation(api.quasar.commitSessionIngest, { sessionId: SESSION_ID, runId: RUN_ID });
-    const committed = (await t.query(api.embed.embedQueue, { paginationOpts: paginate })).page;
-    expect(committed[0]).toMatchObject({ ingestClaimed: false, pending: true });
+    const committed = (await t.query(internal.embed.embedQueue, { paginationOpts: paginate })).page;
+    expect(committed[0]).toMatchObject({
+      ingestClaimed: false,
+      embeddingClaimed: true,
+      pending: false,
+    });
+
+    const claim = await t.mutation(internal.embed.claimSessionEmbedding, {
+      sessionId: SESSION_ID,
+    });
+    expect(claim).toMatchObject({ claimed: false, reason: "already_claimed" });
+    const queued = (await t.query(internal.embed.embedQueue, { paginationOpts: paginate })).page;
+    expect(queued[0]).toMatchObject({ embeddingClaimed: true, pending: false });
 
     const marked = await t.mutation(internal.embed.markSessionEmbedded, {
       sessionId: SESSION_ID,
       sourceFingerprint: '{"size":10,"mtimeMs":20}',
     });
     expect(marked).toEqual({ marked: true });
-    const embedded = (await t.query(api.embed.embedQueue, { paginationOpts: paginate })).page;
-    expect(embedded[0]).toMatchObject({ pending: false });
+    const embedded = (await t.query(internal.embed.embedQueue, { paginationOpts: paginate })).page;
+    expect(embedded[0]).toMatchObject({ embeddingClaimed: false, pending: false });
+  });
+
+  test("claimSessionEmbedding is fingerprint-scoped and idempotent", async () => {
+    const t = testConvex();
+    expect(await t.mutation(internal.embed.claimSessionEmbedding, { sessionId: "nope" })).toEqual({
+      claimed: false,
+      reason: "missing",
+    });
+
+    await seedSession(t, { commit: false });
+    expect(await t.mutation(internal.embed.claimSessionEmbedding, { sessionId: SESSION_ID })).toEqual({
+      claimed: false,
+      reason: "ingest_in_progress",
+    });
+
+    await t.mutation(api.quasar.commitSessionIngest, { sessionId: SESSION_ID, runId: RUN_ID });
+    const first = await t.mutation(internal.embed.claimSessionEmbedding, { sessionId: SESSION_ID });
+    expect(first).toMatchObject({
+      claimed: false,
+      reason: "already_claimed",
+      sourceFingerprint: '{"size":10,"mtimeMs":20}',
+    });
+    const second = await t.mutation(internal.embed.claimSessionEmbedding, { sessionId: SESSION_ID });
+    expect(second).toMatchObject({
+      claimed: false,
+      reason: "already_claimed",
+      sourceFingerprint: '{"size":10,"mtimeMs":20}',
+    });
+
+    await t.mutation(internal.embed.markSessionEmbedded, {
+      sessionId: SESSION_ID,
+      sourceFingerprint: '{"size":10,"mtimeMs":20}',
+    });
+    expect(await t.mutation(internal.embed.claimSessionEmbedding, { sessionId: SESSION_ID })).toEqual({
+      claimed: false,
+      reason: "current",
+      sourceFingerprint: '{"size":10,"mtimeMs":20}',
+    });
   });
 
   test("markSessionEmbedded refuses missing, claimed, and superseded sessions", async () => {
-    const t = convexTest(schema, modules);
+    const t = testConvex();
     expect(
       await t.mutation(internal.embed.markSessionEmbedded, {
         sessionId: "nope",
@@ -171,7 +230,7 @@ describe("embed queue and completion marking", () => {
   });
 
   test("sessionEmbedState reports fingerprints and the ingest claim", async () => {
-    const t = convexTest(schema, modules);
+    const t = testConvex();
     await seedSession(t);
     const state = await t.query(internal.embed.sessionEmbedState, { sessionId: SESSION_ID });
     expect(state).toMatchObject({

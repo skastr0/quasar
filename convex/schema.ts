@@ -29,6 +29,9 @@ export default defineSchema({
     // session-grain like ingest: a session is embed-pending exactly when this
     // differs from sourceFingerprint and no ingest claim is in flight.
     embeddedFingerprint: v.optional(v.string()),
+    // Source fingerprint currently queued/running in the embedding workpool.
+    // Fingerprint-scoped so a newer ingest can supersede older queued work.
+    embeddingClaimedFingerprint: v.optional(v.string()),
   })
     .index("by_sessionId", ["sessionId"])
     .index("by_projectKey", ["projectKey"]),
