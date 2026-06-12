@@ -377,7 +377,7 @@ const partContentProjection = (part: NativeValue): NativeValue | undefined => {
   const lowerType = type?.toLowerCase() ?? "";
   if (lowerType.includes("diff") || lowerType.includes("patch")) return undefined;
   if (MACHINERY_PART_TYPES.has(lowerType)) return undefined;
-  const text =
+  const rawText =
     typeof record.text === "string"
       ? record.text
       : typeof record.content === "string"
@@ -385,6 +385,15 @@ const partContentProjection = (part: NativeValue): NativeValue | undefined => {
         : typeof record.message === "string"
           ? record.message
           : undefined;
+  // Blank text is absent text: the measured corpus holds thousands of
+  // encrypted-reasoning stubs ({"type":"reasoning","text":""}) whose plaintext
+  // is empty — the actual reasoning lives encrypted in metadata.
+  const text = rawText !== undefined && rawText.trim().length > 0 ? rawText : undefined;
+  const toolName = toolNameFromPart(record);
+  // A part with neither session text nor a tool identity is machinery, not a
+  // turn: it never projects, so a JSON dump of its bare envelope (e.g.
+  // {"type":"reasoning"}) can never reach the search surface.
+  if (text === undefined && toolName === undefined) return undefined;
   const path =
     typeof record.path === "string"
       ? record.path
@@ -397,15 +406,14 @@ const partContentProjection = (part: NativeValue): NativeValue | undefined => {
   // so the shared block builder emits `kind: "thinking"` blocks, which the
   // ingest layer promotes to `role: "reasoning"` rows.
   const textKey = lowerType === "reasoning" ? "thinking" : "text";
-  const projected = {
+  return {
     ...(type !== undefined ? { type } : {}),
     ...(text !== undefined ? { [textKey]: text } : {}),
     ...(path !== undefined ? { path } : {}),
-    ...(toolNameFromPart(record) !== undefined ? { toolName: toolNameFromPart(record) } : {}),
+    ...(toolName !== undefined ? { toolName } : {}),
     ...(typeof record.callID === "string" ? { callID: record.callID } : {}),
     ...(typeof record.id === "string" ? { id: record.id } : {}),
   };
-  return Object.keys(projected).length === 0 ? undefined : projected;
 };
 
 const messageContentProjection = (
