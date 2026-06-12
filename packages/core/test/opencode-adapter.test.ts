@@ -48,6 +48,13 @@ insert into part values ('prt_compaction', 'msg_machinery', '${SESSION_ID}', 7, 
 -- pruned away in SQL — only raw_bytes can witness the breach downstream.
 insert into message values ('msg_garbage', '${SESSION_ID}', 4, json_object('role', 'user', 'time', json_object('created', 4), 'summary', json_object('diffs', json_array(hex(zeroblob(600000))))));
 insert into part values ('prt_garbage_text', 'msg_garbage', '${SESSION_ID}', 8, json_object('type', 'text', 'text', 'Continue'));
+
+-- Empty stubs (measured 2026-06-11): an encrypted-reasoning part whose
+-- plaintext is empty, and an empty text part. Machinery, not turns — neither
+-- may surface as a JSON envelope dump.
+insert into message values ('msg_empty', '${SESSION_ID}', 5, json_object('role', 'assistant', 'time', json_object('created', 5)));
+insert into part values ('prt_empty_reasoning', 'msg_empty', '${SESSION_ID}', 9, json_object('type', 'reasoning', 'text', '', 'metadata', json_object('openai', json_object('reasoningEncryptedContent', 'gAAAAAB-cipher'))));
+insert into part values ('prt_empty_text', 'msg_empty', '${SESSION_ID}', 10, json_object('type', 'text', 'text', ''));
 `;
 
 const root = mkdtempSync(join(tmpdir(), "quasar-opencode-test-"));
@@ -68,7 +75,7 @@ describe("opencode adapter", () => {
 
     expect(result.sessions).toHaveLength(1);
     const session = result.sessions[0]!;
-    expect(session.events).toHaveLength(4);
+    expect(session.events).toHaveLength(5);
 
     // User text part becomes a text block.
     const userEvent = session.events[0]!;
@@ -115,5 +122,14 @@ describe("opencode adapter", () => {
     expect(JSON.stringify(garbageEvent.contentBlocks).length).toBeLessThan(10_000);
     // Sound rows still report small raw byte counts.
     expect(userEvent.rawReference.rawBytes).toBeLessThan(1_000);
+
+    // Empty stubs (blank reasoning plaintext, blank text) are machinery: the
+    // event carries no turn content, so no {"type":"reasoning"} envelope dump
+    // can reach the search surface.
+    const emptyEvent = session.events[4]!;
+    expect(emptyEvent.role).toBe("assistant");
+    expect(emptyEvent.contentText).toBeUndefined();
+    expect(emptyEvent.contentBlocks).toHaveLength(0);
+    expect(JSON.stringify(emptyEvent)).not.toContain("gAAAAAB");
   });
 });
