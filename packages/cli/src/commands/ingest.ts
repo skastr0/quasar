@@ -1,7 +1,6 @@
 import { statSync } from "node:fs";
 
 import { Command, Options } from "@effect/cli";
-import { ConvexHttpClient } from "convex/browser";
 import { Effect, Option } from "effect";
 
 import { api } from "../../../../convex/_generated/api";
@@ -16,6 +15,7 @@ import {
   type SessionEvent,
 } from "@skastr0/quasar-core";
 
+import { createConvexClient, withRetry } from "../convex-client";
 import { CommandInputError } from "../errors";
 import { executeJsonCommand } from "../output";
 
@@ -31,13 +31,6 @@ const CONVEX_MAX_VALUE_BYTES = 1_048_576;
 
 /** Rows per insert mutation — small, instantly-completing mutations. */
 const INSERT_BATCH = 250;
-
-/** Bounded retry for transient platform errors (e.g. TooManyWrites — a documented
- * Convex property, expected never to fire at sequential pace). */
-const RETRY_ATTEMPTS = 5;
-const RETRY_BASE_DELAY_MS = 250;
-const TRANSIENT_ERROR =
-  /toomanywrites|too many writes|429|503|overloaded|rate.?limit|timed?.?out|fetch failed|econnrefused|econnreset|socket|network/i;
 
 export type MessageRole = "user" | "assistant" | "reasoning";
 
@@ -430,33 +423,6 @@ const chunk = <T>(rows: readonly T[], size: number): T[][] => {
     chunks.push(rows.slice(index, index + size));
   }
   return chunks;
-};
-
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-const withRetry = async <T>(operation: () => Promise<T>): Promise<T> => {
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      return await operation();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (attempt >= RETRY_ATTEMPTS || !TRANSIENT_ERROR.test(message)) throw error;
-      await sleep(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
-    }
-  }
-};
-
-const createConvexClient = (): ConvexHttpClient => {
-  const url = process.env.CONVEX_SELF_HOSTED_URL ?? process.env.CONVEX_URL;
-  if (url === undefined || url.length === 0) {
-    throw new CommandInputError({
-      field: "CONVEX_URL",
-      message:
-        "Convex backend URL not found: set CONVEX_SELF_HOSTED_URL or CONVEX_URL (bun auto-loads .env.local from the working directory).",
-    });
-  }
-  // The quasar functions are public; no admin auth is needed for ingest.
-  return new ConvexHttpClient(url, { skipConvexDeploymentUrlCheck: true });
 };
 
 const runProviderIngest = async (options: {
