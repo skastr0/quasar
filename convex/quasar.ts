@@ -15,8 +15,11 @@ const DELETE_BATCH = 200;
 /** Hard upper bound on search results returned in one call. */
 const SEARCH_TAKE_MAX = 20;
 
-/** Upper bound for the single-shot project listing (single tenant, ~tens of rows). */
+/** Hard upper bound on project rows returned in one client listing. */
 const LIST_PROJECTS_MAX = 1000;
+
+/** Default project rows returned by the client discovery command. */
+const LIST_PROJECTS_DEFAULT = 100;
 
 // ---------------------------------------------------------------------------
 // Mutations
@@ -309,13 +312,27 @@ export const sessionToolCalls = query({
 });
 
 export const listProjects = query({
-  args: {},
-  handler: async (ctx) => {
-    return await ctx.db
+  args: { limit: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    if (
+      args.limit !== undefined &&
+      (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > LIST_PROJECTS_MAX)
+    ) {
+      throw new Error(
+        `listProjects: limit must be an integer in [1, ${LIST_PROJECTS_MAX}], got ${args.limit}`,
+      );
+    }
+    const projects = await ctx.db
       .query("projects")
       .withIndex("by_projectKey")
       .order("asc")
-      .take(LIST_PROJECTS_MAX);
+      .take(args.limit ?? LIST_PROJECTS_DEFAULT);
+    return projects.map((project) => ({
+      projectKey: project.projectKey,
+      displayName: project.displayName,
+      aliasCount: project.aliases.length,
+      rawPathCount: project.rawPaths.length,
+    }));
   },
 });
 

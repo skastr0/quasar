@@ -190,12 +190,12 @@ const FIELD_CONSUMERS: Record<string, Record<string, FieldConsumer>> = {
       proof: async (t) => expect((await seededProject(t)).displayName).toBe("alpha"),
     },
     aliases: {
-      via: "listProjects (returned)",
-      proof: async (t) => expect((await seededProject(t)).aliases).toContain("alpha-alias"),
+      via: "listProjects (returned as aliasCount)",
+      proof: async (t) => expect((await seededProject(t)).aliasCount).toBe(1),
     },
     rawPaths: {
-      via: "listProjects (returned)",
-      proof: async (t) => expect((await seededProject(t)).rawPaths).toContain("/tmp/alpha"),
+      via: "listProjects (returned as rawPathCount)",
+      proof: async (t) => expect((await seededProject(t)).rawPathCount).toBe(1),
     },
   },
   sessions: {

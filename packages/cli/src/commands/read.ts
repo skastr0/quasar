@@ -61,9 +61,9 @@ const normalizeToolCall = <T extends { readonly sessionId: string; readonly seq:
   ...row,
 });
 
-const listProjects = async () => {
+const listProjects = async (limit = DEFAULT_LIMIT) => {
   const client = createConvexClient();
-  const projects = await withRetry(() => client.query(api.quasar.listProjects, {}));
+  const projects = await withRetry(() => client.query(api.quasar.listProjects, { limit }));
   return { projects };
 };
 
@@ -107,7 +107,7 @@ const listSessions = async (options: {
     };
   }
 
-  const { projects } = await listProjects();
+  const { projects } = await listProjects(MAX_LIMIT);
   const sessions = [] as unknown[];
   for (const project of projects) {
     const projectSessions = await listSessionsForProject({
@@ -208,11 +208,11 @@ const readToolCall = async (id: string) => {
   return { toolCall: match ?? null };
 };
 
-const projectsListCommand = Command.make("list", {}, () =>
+const projectsListCommand = Command.make("list", { limit: limitOption }, ({ limit }) =>
   executeJsonCommand(
     "projects list",
     Effect.tryPromise({
-      try: listProjects,
+      try: () => listProjects(checkedLimit(limit)),
       catch: (error) => (error instanceof Error ? error : new Error(String(error))),
     }),
   ),
