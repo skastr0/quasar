@@ -1,7 +1,7 @@
 {
   "name": "quasar",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local-first repository and search surface for AI agent sessions.",
   "license": "MIT",
   "type": "module",
