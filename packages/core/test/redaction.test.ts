@@ -24,10 +24,18 @@ describe("redaction", () => {
         ciphertext: "[redacted]",
       },
     });
-    expect(compactText(payload)).not.toContain("gAAAAABpxgVW");
-    expect(compactText(payload)).not.toContain("another-secret-ciphertext");
-    expect(compactText(payload)).not.toContain("encrypted_content");
-    expect(compactText(payload)).not.toContain("[redacted]");
+    // The machinery envelope (type: "reasoning") with no actual content
+    // projects to undefined — no message row is created.
+    expect(compactText(payload)).toBeUndefined();
+    // Verify a payload with actual text content survives.
+    const payloadWithText = {
+      type: "reasoning",
+      text: "actual content",
+      encrypted_content: "gAAAAABpxgVW-secret-ciphertext",
+    };
+    expect(compactText(payloadWithText)).not.toContain("gAAAAABpxgVW");
+    expect(compactText(payloadWithText)).not.toContain("encrypted_content");
+    expect(compactText(payloadWithText)).toContain("actual content");
   });
 
   test("preserves control-character-dense text instead of discarding it by heuristic", () => {
