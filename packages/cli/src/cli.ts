@@ -4,6 +4,7 @@ import { Command } from "@effect/cli";
 import { BunContext, BunRuntime } from "@effect/platform-bun";
 import { Effect } from "effect";
 
+import { daemonCommand } from "./commands/daemon";
 import { capabilitiesCommand, doctorCommand } from "./commands/discovery";
 import { ingestCommand } from "./commands/ingest";
 import { projectsCommand, sessionsCommand, toolCallsCommand } from "./commands/read";
@@ -25,6 +26,7 @@ const publicCommands = new Set([
   "examples",
   "sources",
   "ingest",
+  "daemon",
   "search",
   "projects",
   "sessions",
@@ -50,6 +52,7 @@ export const rootCommand = Command.make(CLI_NAME).pipe(
     examplesCommand,
     sourcesCommand,
     ingestCommand,
+    daemonCommand,
     searchCommand,
     projectsCommand,
     sessionsCommand,

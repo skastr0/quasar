@@ -11,10 +11,10 @@ export interface QuasarClientConfig {
   };
 }
 
-const quasarHome = () =>
+export const quasarHome = () =>
   resolve(process.env.QUASAR_HOME ?? join(homedir(), ".config", "quasar"));
 
-const configPath = () =>
+export const configPath = () =>
   resolve(process.env.QUASAR_CONFIG ?? join(quasarHome(), "config.json"));
 
 const machinePath = () => join(quasarHome(), "machine.json");
