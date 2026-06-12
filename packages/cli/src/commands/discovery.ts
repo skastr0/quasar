@@ -21,7 +21,7 @@ const commandCapabilities = [
   "sessions list [--project <key>] [--provider <provider>] [--limit <n>]",
   "sessions read <sessionId> [--limit <n>]",
   "tool-calls list --session <sessionId> [--limit <n>]",
-  "tool-calls list --project <key> --tool-name <name> [--limit <n>]",
+  "tool-calls list --project <key> [--provider <provider>] [--tool-name <name>] [--limit <n>]",
   "tool-calls read <sessionId>#<seq>",
 ];
 
