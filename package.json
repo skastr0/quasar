@@ -25,6 +25,7 @@
     "verify:static": "bun run typecheck && bun run test && bun scripts/verify/convex-lint.ts",
     "verify:live": "bun scripts/verify/live.ts",
     "verify": "bun run verify:static && bun run verify:live",
+    "deploy:local": "bun scripts/init-local-convex.mjs && bun scripts/install-launchd.mjs && bun scripts/push-local-convex.mjs && bun scripts/sync-local-convex-env.mjs",
     "build:npm-packages": "bun run --cwd packages/cli build:npm-packages",
     "pack:dry-run": "bun scripts/pack-npm.mjs",
     "publish:npm": "bun scripts/publish-npm.mjs",
