@@ -94,6 +94,43 @@ const firstContentText = (payload: CodexRecord): string | undefined => {
   return undefined;
 };
 
+const codexImageOrFileItem = (item: CodexRecord): boolean => {
+  const type = typeof item.type === "string" ? item.type.toLowerCase() : "";
+  return (
+    type.includes("image") ||
+    type.includes("file") ||
+    item.image_url !== undefined ||
+    item.imageUrl !== undefined ||
+    item.image !== undefined ||
+    item.file !== undefined
+  );
+};
+
+/**
+ * A codex message payload is a session turn only when its content carries
+ * non-blank text (string content, a non-blank string item, or an item with a
+ * non-blank `text`) or attaches an image/file. The measured corpus holds
+ * assistant messages whose entire content is `[{"type":"output_text","text":""}]`
+ * — empty stubs, provider machinery: such an event carries no turn content,
+ * so a JSON dump of its envelope can never reach the search surface.
+ */
+const codexMessageHasTurnContent = (payload: CodexRecord): boolean => {
+  const content = payload.content;
+  if (typeof content === "string") return content.trim().length > 0;
+  if (!Array.isArray(content)) {
+    // event_msg user_message/agent_message payloads carry text directly.
+    const direct = payload.message ?? payload.text;
+    return typeof direct === "string" && direct.trim().length > 0;
+  }
+  return content.some((item) => {
+    if (typeof item === "string") return item.trim().length > 0;
+    if (item === null || typeof item !== "object") return false;
+    const record = item as CodexRecord;
+    if (typeof record.text === "string" && record.text.trim().length > 0) return true;
+    return codexImageOrFileItem(record);
+  });
+};
+
 const isInjectedWrapperMessage = (payload: CodexRecord): boolean => {
   const text = firstContentText(payload)?.trimStart();
   return (
@@ -567,6 +604,10 @@ async function* streamCodexSessionFromFile(
       payloadRecord,
     );
     if (usageRecord !== undefined) slice.usageRecords.push(usageRecord);
+    // Message events whose payload carries no turn content (empty text stubs)
+    // surface as bare events: no contentText/contentSource means no blocks and
+    // no fallback JSON dump on the search surface.
+    const hasTurnContent = kind !== "message" || codexMessageHasTurnContent(payloadRecord);
     slice.events.push({
       id: eventId,
       nativeEventId,
@@ -574,8 +615,9 @@ async function* streamCodexSessionFromFile(
       timestamp,
       role,
       kind,
-      contentText: compactText(content),
-      contentSource: content,
+      ...(hasTurnContent
+        ? { contentText: compactText(content), contentSource: content }
+        : {}),
       ...(toolCallId !== undefined ? { toolCallId } : {}),
       rawReference: {
         sourcePath,

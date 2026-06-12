@@ -227,6 +227,59 @@ describe("codex adapter", () => {
     ).toHaveLength(wrapperTexts.length);
   });
 
+  test("empty text stubs carry no turn content — no JSON envelope dump (measured 2026-06-11)", async () => {
+    const stubDir = join(root, "sessions", "2026", "06", "14");
+    mkdirSync(stubDir, { recursive: true });
+    writeFileSync(
+      join(stubDir, "rollout-2026-06-14-stubs.jsonl"),
+      [
+        line({
+          timestamp: NOW,
+          type: "session_meta",
+          payload: { type: "session_meta", id: "stubs", cwd: "/tmp/proj" },
+        }),
+        // The measured corpus shape: an assistant message whose entire
+        // content is one empty output_text stub. Provider machinery, not a turn.
+        line({
+          timestamp: NOW,
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "" }],
+          },
+        }),
+        line({
+          timestamp: NOW,
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "a real reply" }],
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const result = await codexAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { codex: root },
+    });
+    const session = result.sessions.find((candidate) =>
+      candidate.sourcePath.endsWith("rollout-2026-06-14-stubs.jsonl"),
+    )!;
+    const stubEvent = session.events.find((event) => event.rawReference.line === 2)!;
+    expect(stubEvent.kind).toBe("message");
+    expect(stubEvent.contentText).toBeUndefined();
+    expect(stubEvent.contentBlocks).toHaveLength(0);
+    expect(JSON.stringify(stubEvent)).not.toContain('{\\"type\\":\\"output_text\\"}');
+    const realEvent = session.events.find((event) => event.rawReference.line === 3)!;
+    expect(realEvent.contentBlocks.map((block) => [block.kind, block.text])).toEqual([
+      ["text", "a real reply"],
+    ]);
+  });
+
   test("merges local_shell_call pairs into completed tool calls (input from `action`)", async () => {
     const shellDir = join(root, "sessions", "2026", "06", "13");
     mkdirSync(shellDir, { recursive: true });
