@@ -22,11 +22,13 @@
     "typecheck": "bun run --cwd packages/core typecheck && bun run --cwd packages/cli typecheck",
     "test": "bun run --cwd packages/core test && bun run --cwd packages/cli test && bun run test:convex",
     "test:convex": "vitest run --config vitest.convex.config.ts",
-    "verify": "bun run typecheck && bun run test && bun run build",
+    "verify:static": "bun run typecheck && bun run test && bun scripts/verify/convex-lint.ts",
+    "verify:live": "bun scripts/verify/live.ts",
+    "verify": "bun run verify:static && bun run verify:live",
     "build:npm-packages": "bun run --cwd packages/cli build:npm-packages",
     "pack:dry-run": "bun scripts/pack-npm.mjs",
     "publish:npm": "bun scripts/publish-npm.mjs",
-    "release:check": "bun run verify && bun run build:npm-packages && bun run pack:dry-run && bun audit && publish-scan ."
+    "release:check": "bun run verify && bun run build && bun run build:npm-packages && bun run pack:dry-run && bun audit && publish-scan ."
   },
   "devDependencies": {
     "@convex-dev/rag": "0.7.5",
