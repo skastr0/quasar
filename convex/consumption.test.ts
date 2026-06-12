@@ -19,7 +19,7 @@
  */
 import { convexTest, type TestConvex } from "convex-test";
 import { describe, expect, test } from "vitest";
-import { api } from "./_generated/api";
+import { api, internal } from "./_generated/api";
 import schema from "./schema";
 
 const modules = import.meta.glob("./**/*.ts");
@@ -243,6 +243,29 @@ const FIELD_CONSUMERS: Record<string, Record<string, FieldConsumer>> = {
     toolCallCount: {
       via: "listSessions (returned)",
       proof: async (t) => expect((await committedSession(t)).toolCallCount).toBe(1),
+    },
+    embeddedFingerprint: {
+      via: "embedQueue (pending derivation) + listSessions (returned)",
+      proof: async (t) => {
+        const before = (
+          await t.query(api.embed.embedQueue, {
+            paginationOpts: { numItems: 10, cursor: null },
+          })
+        ).page.find((row) => row.sessionId === SESSION_ID);
+        expect(before?.pending).toBe(true);
+        const marked = await t.mutation(internal.embed.markSessionEmbedded, {
+          sessionId: SESSION_ID,
+          sourceFingerprint: '{"size":1,"mtimeMs":2}',
+        });
+        expect(marked).toEqual({ marked: true });
+        const after = (
+          await t.query(api.embed.embedQueue, {
+            paginationOpts: { numItems: 10, cursor: null },
+          })
+        ).page.find((row) => row.sessionId === SESSION_ID);
+        expect(after?.pending).toBe(false);
+        expect((await committedSession(t)).embeddedFingerprint).toBe('{"size":1,"mtimeMs":2}');
+      },
     },
     ingestRunId: {
       via: "listSessions (returned); in-progress-claim visibility",

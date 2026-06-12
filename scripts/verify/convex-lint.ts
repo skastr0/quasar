@@ -13,7 +13,11 @@
  *   6. `toolCalls` has no search index (the structural surface is never
  *      search-indexed or embedded);
  *   7. the `messages` search index filterFields are exactly
- *      [projectKey, role, sessionId].
+ *      [projectKey, role, sessionId];
+ *   8. embedding-surface purity: the embedding modules (embed.ts,
+ *      quasarRag.ts) never reference the structural surface (toolCalls) or
+ *      the non-conversation role (reasoning) — tool payloads and reasoning
+ *      rows are structurally unreachable from the embedding path.
  *
  * Every violation is reported as file:line. Nonzero exit on any violation.
  */
@@ -130,6 +134,11 @@ const matchDelimiter = (source: string, openIndex: number): number => {
 const FUNCTION_REGISTRATION =
   /\b(query|mutation|action|internalQuery|internalMutation|internalAction|httpAction)\s*\(\s*\{/g;
 
+/** Rule 8: the embedding pipeline's modules. Their stripped source (code +
+ * strings, comments removed) must never name what they must not touch. */
+const EMBEDDING_SURFACE_FILES = ["embed.ts", "quasarRag.ts"];
+const EMBEDDING_SURFACE_BANNED = ["toolCalls", "reasoning"];
+
 for (const file of convexSourceFiles) {
   const raw = readFileSync(file, "utf8");
   const source = stripNoise(raw);
@@ -183,6 +192,21 @@ for (const file of convexSourceFiles) {
       "no-collect",
       ".collect() is unbounded — use take/paginate/first/unique",
     );
+  }
+
+  // 8: embedding-surface purity — structurally blind to the structural
+  // surface and the non-conversation role.
+  if (EMBEDDING_SURFACE_FILES.some((name) => file.endsWith(`/${name}`))) {
+    for (const banned of EMBEDDING_SURFACE_BANNED) {
+      for (const match of source.matchAll(new RegExp(`\\b${banned}\\b`, "g"))) {
+        report(
+          file,
+          lineOfIndex(source, match.index!),
+          "embedding-surface-purity",
+          `embedding module references "${banned}" — the embedding path must be structurally blind to it`,
+        );
+      }
+    }
   }
 
   // 5/6/7: schema index rules (textual, so every finding carries file:line).

@@ -8,7 +8,9 @@
  * @module
  */
 
+import type * as embed from "../embed.js";
 import type * as quasar from "../quasar.js";
+import type * as quasarRag from "../quasarRag.js";
 
 import type {
   ApiFromModules,
@@ -17,7 +19,9 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  embed: typeof embed;
   quasar: typeof quasar;
+  quasarRag: typeof quasarRag;
 }>;
 
 /**
@@ -46,4 +50,6 @@ export declare const internal: FilterApi<
   FunctionReference<any, "internal">
 >;
 
-export declare const components: {};
+export declare const components: {
+  rag: import("@convex-dev/rag/_generated/component.js").ComponentApi<"rag">;
+};
