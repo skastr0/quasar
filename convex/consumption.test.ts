@@ -18,6 +18,7 @@
  * are out of scope by construction.
  */
 import { convexTest, type TestConvex } from "convex-test";
+import workpoolTest from "@convex-dev/workpool/test";
 import { describe, expect, test } from "vitest";
 import { api, internal } from "./_generated/api";
 import schema from "./schema";
@@ -25,6 +26,15 @@ import schema from "./schema";
 const modules = import.meta.glob("./**/*.ts");
 
 type Quasar = TestConvex<typeof schema>;
+
+process.env.GOOGLE_API_KEY = "";
+process.env.GOOGLE_GENERATIVE_AI_API_KEY = "";
+
+const testConvex = () => {
+  const t = convexTest(schema, modules);
+  workpoolTest.register(t, "embeddingWorkpool");
+  return t;
+};
 
 // ---------------------------------------------------------------------------
 // Seed: one project, one committed session with all optional fields set,
@@ -248,23 +258,41 @@ const FIELD_CONSUMERS: Record<string, Record<string, FieldConsumer>> = {
       via: "embedQueue (pending derivation) + listSessions (returned)",
       proof: async (t) => {
         const before = (
-          await t.query(api.embed.embedQueue, {
+          await t.query(internal.embed.embedQueue, {
             paginationOpts: { numItems: 10, cursor: null },
           })
         ).page.find((row) => row.sessionId === SESSION_ID);
-        expect(before?.pending).toBe(true);
+        expect(before?.embeddingClaimed).toBe(true);
+        expect(before?.pending).toBe(false);
         const marked = await t.mutation(internal.embed.markSessionEmbedded, {
           sessionId: SESSION_ID,
           sourceFingerprint: '{"size":1,"mtimeMs":2}',
         });
         expect(marked).toEqual({ marked: true });
         const after = (
-          await t.query(api.embed.embedQueue, {
+          await t.query(internal.embed.embedQueue, {
             paginationOpts: { numItems: 10, cursor: null },
           })
         ).page.find((row) => row.sessionId === SESSION_ID);
         expect(after?.pending).toBe(false);
         expect((await committedSession(t)).embeddedFingerprint).toBe('{"size":1,"mtimeMs":2}');
+      },
+    },
+    embeddingClaimedFingerprint: {
+      via: "embedQueue (pending derivation)",
+      proof: async (t) => {
+        const claimed = await t.mutation(internal.embed.claimSessionEmbedding, {
+          sessionId: SESSION_ID,
+          force: true,
+        });
+        expect(claimed.claimed).toBe(true);
+        const row = (
+          await t.query(internal.embed.embedQueue, {
+            paginationOpts: { numItems: 10, cursor: null },
+          })
+        ).page.find((candidate) => candidate.sessionId === SESSION_ID);
+        expect(row?.embeddingClaimed).toBe(true);
+        expect(row?.pending).toBe(false);
       },
     },
     ingestRunId: {
@@ -445,7 +473,7 @@ describe("consumption: every stored field has a serving reader", () => {
   });
 
   test("every mapped consumption proof holds against seeded data", async () => {
-    const t = convexTest(schema, modules);
+    const t = testConvex();
     await seed(t);
     for (const { table, field } of schemaFields()) {
       const consumer = FIELD_CONSUMERS[table]?.[field];

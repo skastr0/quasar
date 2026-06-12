@@ -1,14 +1,17 @@
 import { paginationOptsValidator, type PaginationResult } from "convex/server";
 import { v } from "convex/values";
 import { defaultChunker, type EntryFilter, type InputChunk } from "@convex-dev/rag";
+import { Workpool } from "@convex-dev/workpool";
 import { embedMany } from "ai";
-import { api, internal } from "./_generated/api";
+import { api, components, internal } from "./_generated/api";
+import type { DataModel } from "./_generated/dataModel";
 import {
   action,
+  internalAction,
   internalMutation,
   internalQuery,
-  query,
   type ActionCtx,
+  type MutationCtx,
 } from "./_generated/server";
 import {
   combinedProjectRoleValue,
@@ -49,12 +52,28 @@ const EMBEDDABLE_ROLES: readonly EmbeddableRole[] = ["user", "assistant"];
 /** Messages per internal page while embedding a session. */
 const EMBED_PAGE = 100;
 
+/** Google embedding API accepts at most 100 inputs per batch request. */
+const GEMINI_EMBED_BATCH_MAX = 100;
+
 /** Hard upper bound on search results returned in one call (mirrors
  * `searchMessages`). */
 const SEARCH_TAKE_MAX = 20;
 
 /** Sessions per `embedQueue` page (single-shot page bound). */
 const QUEUE_PAGE_MAX = 500;
+
+/** Pending sessions enqueued per backfill action invocation. */
+const BACKFILL_ENQUEUE_MAX = 500;
+
+/** The embedding provider is external work; keep parallelism intentionally low. */
+export const embeddingWorkpool = new Workpool(components.embeddingWorkpool, {
+  maxParallelism: 2,
+  retryActionsByDefault: true,
+  defaultRetryBehavior: { maxAttempts: 3, initialBackoffMs: 1_000, base: 2 },
+  logLevel: "ERROR",
+});
+
+type EmbeddingSchedulingCtx = ActionCtx | MutationCtx;
 
 // ---------------------------------------------------------------------------
 // Internal surface: session state + the role-pinned message walk
@@ -65,6 +84,7 @@ export interface SessionEmbedState {
   readonly projectKey: string;
   readonly sourceFingerprint: string;
   readonly embeddedFingerprint?: string;
+  readonly embeddingClaimedFingerprint?: string;
   readonly ingestClaimed: boolean;
 }
 
@@ -82,6 +102,9 @@ export const sessionEmbedState = internalQuery({
       sourceFingerprint: session.sourceFingerprint,
       ...(session.embeddedFingerprint !== undefined
         ? { embeddedFingerprint: session.embeddedFingerprint }
+        : {}),
+      ...(session.embeddingClaimedFingerprint !== undefined
+        ? { embeddingClaimedFingerprint: session.embeddingClaimedFingerprint }
         : {}),
       ingestClaimed: session.ingestRunId !== undefined,
     };
@@ -128,10 +151,60 @@ export interface MarkSessionEmbeddedResult {
   readonly reason?: "missing" | "ingest_in_progress" | "superseded";
 }
 
+export interface ClaimSessionEmbeddingResult {
+  readonly claimed: boolean;
+  readonly reason?: "missing" | "ingest_in_progress" | "current" | "already_claimed";
+  readonly sourceFingerprint?: string;
+}
+
+export const claimSessionEmbedding = internalMutation({
+  args: { sessionId: v.string(), force: v.optional(v.boolean()) },
+  handler: async (ctx, args): Promise<ClaimSessionEmbeddingResult> => {
+    const session = await ctx.db
+      .query("sessions")
+      .withIndex("by_sessionId", (q) => q.eq("sessionId", args.sessionId))
+      .unique();
+    if (session === null) return { claimed: false, reason: "missing" };
+    if (session.ingestRunId !== undefined) {
+      return { claimed: false, reason: "ingest_in_progress" };
+    }
+    if (args.force !== true && session.embeddedFingerprint === session.sourceFingerprint) {
+      return { claimed: false, reason: "current", sourceFingerprint: session.sourceFingerprint };
+    }
+    if (session.embeddingClaimedFingerprint === session.sourceFingerprint) {
+      return {
+        claimed: false,
+        reason: "already_claimed",
+        sourceFingerprint: session.sourceFingerprint,
+      };
+    }
+    await ctx.db.patch(session._id, {
+      embeddingClaimedFingerprint: session.sourceFingerprint,
+    });
+    return { claimed: true, sourceFingerprint: session.sourceFingerprint };
+  },
+});
+
+export const clearSessionEmbeddingClaim = internalMutation({
+  args: { sessionId: v.string(), sourceFingerprint: v.string() },
+  handler: async (ctx, args) => {
+    const session = await ctx.db
+      .query("sessions")
+      .withIndex("by_sessionId", (q) => q.eq("sessionId", args.sessionId))
+      .unique();
+    if (session === null) return { cleared: false };
+    if (session.embeddingClaimedFingerprint !== args.sourceFingerprint) {
+      return { cleared: false };
+    }
+    await ctx.db.patch(session._id, { embeddingClaimedFingerprint: undefined });
+    return { cleared: true };
+  },
+});
+
 /**
  * Records a completed embedding pass. Refuses when the session vanished, an
  * ingest claim landed mid-embed, or the source fingerprint moved — the embed
- * run reports the session as superseded and the next `quasar embed` retries.
+ * run reports the session as superseded and the next server-side pass retries.
  */
 export const markSessionEmbedded = internalMutation({
   args: { sessionId: v.string(), sourceFingerprint: v.string() },
@@ -147,13 +220,77 @@ export const markSessionEmbedded = internalMutation({
     if (session.sourceFingerprint !== args.sourceFingerprint) {
       return { marked: false, reason: "superseded" };
     }
-    await ctx.db.patch(session._id, { embeddedFingerprint: args.sourceFingerprint });
+    await ctx.db.patch(session._id, {
+      embeddedFingerprint: args.sourceFingerprint,
+      embeddingClaimedFingerprint: undefined,
+    });
     return { marked: true };
   },
 });
 
+const embeddingCompleteContextValidator = v.object({
+  sessionId: v.string(),
+  sourceFingerprint: v.string(),
+});
+
+export const embeddingComplete = embeddingWorkpool.defineOnComplete<
+  DataModel,
+  typeof embeddingCompleteContextValidator
+>({
+  context: embeddingCompleteContextValidator,
+  handler: async (ctx, { context, result }) => {
+    if (result.kind === "failed" || result.kind === "canceled") {
+      const session = await ctx.db
+        .query("sessions")
+        .withIndex("by_sessionId", (q) => q.eq("sessionId", context.sessionId))
+        .unique();
+      if (
+        session !== null &&
+        session.embeddingClaimedFingerprint === context.sourceFingerprint
+      ) {
+        await ctx.db.patch(session._id, { embeddingClaimedFingerprint: undefined });
+      }
+    }
+  },
+});
+
+export const scheduleSessionEmbedding = async (
+  ctx: EmbeddingSchedulingCtx,
+  args: { readonly sessionId: string; readonly force?: boolean },
+) => {
+  const claimed: ClaimSessionEmbeddingResult = await ctx.runMutation(
+    internal.embed.claimSessionEmbedding,
+    args,
+  );
+  if (!claimed.claimed || claimed.sourceFingerprint === undefined) {
+    return { scheduled: false, reason: claimed.reason ?? "not_claimed" };
+  }
+  try {
+    const workId = await embeddingWorkpool.enqueueAction(
+      ctx,
+      internal.embed.embedSession,
+      {
+        sessionId: args.sessionId,
+        ...(args.force === true ? { force: true } : {}),
+      },
+      {
+        retry: true,
+        onComplete: internal.embed.embeddingComplete,
+        context: { sessionId: args.sessionId, sourceFingerprint: claimed.sourceFingerprint },
+      },
+    );
+    return { scheduled: true, workId };
+  } catch (error) {
+    await ctx.runMutation(internal.embed.clearSessionEmbeddingClaim, {
+      sessionId: args.sessionId,
+      sourceFingerprint: claimed.sourceFingerprint,
+    });
+    throw error;
+  }
+};
+
 // ---------------------------------------------------------------------------
-// Public surface: backfill queue + per-session embed action
+// Internal surface: backfill queue + per-session embed action
 // ---------------------------------------------------------------------------
 
 export interface EmbedQueueRow {
@@ -162,15 +299,16 @@ export interface EmbedQueueRow {
   readonly provider: string;
   readonly messageCount: number;
   readonly ingestClaimed: boolean;
+  readonly embeddingClaimed: boolean;
   readonly pending: boolean;
 }
 
 /**
- * Paginated embed-state walk over sessions for the CLI backfill driver. A
+ * Paginated embed-state walk over sessions for the server-side backfill driver. A
  * session is pending exactly when its ingest is committed and its source
  * fingerprint differs from the last embedded fingerprint.
  */
-export const embedQueue = query({
+export const embedQueue = internalQuery({
   args: { paginationOpts: paginationOptsValidator },
   handler: async (ctx, args): Promise<PaginationResult<EmbedQueueRow>> => {
     if (args.paginationOpts.numItems < 1 || args.paginationOpts.numItems > QUEUE_PAGE_MAX) {
@@ -187,15 +325,90 @@ export const embedQueue = query({
       ...page,
       page: page.page.map((session) => {
         const ingestClaimed = session.ingestRunId !== undefined;
+        const embeddingClaimed =
+          session.embeddingClaimedFingerprint === session.sourceFingerprint;
         return {
           sessionId: session.sessionId,
           projectKey: session.projectKey,
           provider: session.provider,
           messageCount: session.messageCount,
           ingestClaimed,
-          pending: !ingestClaimed && session.embeddedFingerprint !== session.sourceFingerprint,
+          embeddingClaimed,
+          pending:
+            !ingestClaimed &&
+            !embeddingClaimed &&
+            session.embeddedFingerprint !== session.sourceFingerprint,
         };
       }),
+    };
+  },
+});
+
+export interface ScheduleEmbeddingBackfillReport {
+  readonly sessionsScanned: number;
+  readonly sessionsPending: number;
+  readonly sessionsScheduled: number;
+  readonly sessionsAlreadyClaimed: number;
+  readonly limit: number;
+  readonly workIds: readonly string[];
+}
+
+export const scheduleEmbeddingBackfill = internalAction({
+  args: { limit: v.optional(v.number()), force: v.optional(v.boolean()) },
+  handler: async (ctx, args): Promise<ScheduleEmbeddingBackfillReport> => {
+    const limit = args.limit ?? BACKFILL_ENQUEUE_MAX;
+    if (!Number.isInteger(limit) || limit < 1 || limit > BACKFILL_ENQUEUE_MAX) {
+      throw new Error(
+        `scheduleEmbeddingBackfill: limit must be an integer in [1, ${BACKFILL_ENQUEUE_MAX}], got ${limit}`,
+      );
+    }
+
+    let cursor: string | null = null;
+    let sessionsScanned = 0;
+    let sessionsPending = 0;
+    let sessionsScheduled = 0;
+    let sessionsAlreadyClaimed = 0;
+    const workIds: string[] = [];
+
+    do {
+      const page: PaginationResult<EmbedQueueRow> = await ctx.runQuery(
+        internal.embed.embedQueue,
+        { paginationOpts: { numItems: QUEUE_PAGE_MAX, cursor } },
+      );
+      for (const row of page.page) {
+        sessionsScanned += 1;
+        if (row.embeddingClaimed) sessionsAlreadyClaimed += 1;
+        if (!row.pending && args.force !== true) continue;
+        sessionsPending += 1;
+        const scheduled = await scheduleSessionEmbedding(ctx, {
+          sessionId: row.sessionId,
+          ...(args.force === true ? { force: true } : {}),
+        });
+        if (scheduled.scheduled) {
+          sessionsScheduled += 1;
+          workIds.push(String(scheduled.workId));
+          if (sessionsScheduled >= limit) {
+            return {
+              sessionsScanned,
+              sessionsPending,
+              sessionsScheduled,
+              sessionsAlreadyClaimed,
+              limit,
+              workIds,
+            };
+          }
+        }
+      }
+      cursor = page.isDone ? null : page.continueCursor;
+    } while (cursor !== null);
+
+    return {
+      sessionsScanned,
+      sessionsPending,
+      sessionsScheduled,
+      sessionsAlreadyClaimed,
+      limit,
+      workIds,
     };
   },
 });
@@ -219,6 +432,27 @@ const EMPTY_EMBED_COUNTS = {
   tokensEstimated: false,
 } as const;
 
+const embedValues = async (values: readonly string[]) => {
+  const embeddings: number[][] = [];
+  let tokens = 0;
+  let tokensEstimated = false;
+
+  for (let index = 0; index < values.length; index += GEMINI_EMBED_BATCH_MAX) {
+    const batch = values.slice(index, index + GEMINI_EMBED_BATCH_MAX);
+    const embedded = await embedMany({ model: quasarEmbeddingModel, values: batch });
+    embeddings.push(...embedded.embeddings);
+    const reportedTokens = embedded.usage?.tokens;
+    if (typeof reportedTokens === "number" && Number.isFinite(reportedTokens)) {
+      tokens += reportedTokens;
+    } else {
+      tokens += Math.ceil(batch.reduce((sum, value) => sum + value.length, 0) / 4);
+      tokensEstimated = true;
+    }
+  }
+
+  return { embeddings, tokens, tokensEstimated };
+};
+
 interface PendingMessageEntry {
   readonly key: string;
   readonly contentHash: string;
@@ -233,7 +467,7 @@ interface PendingMessageEntry {
  * Unchanged rows (matched by content hash) are reused without re-embedding,
  * so re-embedding a grown session only pays for the new rows.
  */
-export const embedSession = action({
+export const embedSession = internalAction({
   args: { sessionId: v.string(), force: v.optional(v.boolean()) },
   handler: async (ctx, args): Promise<EmbedSessionReport> => {
     const state: SessionEmbedState | null = await ctx.runQuery(
@@ -247,6 +481,10 @@ export const embedSession = action({
       return { status: "ingest_in_progress", ...EMPTY_EMBED_COUNTS };
     }
     if (args.force !== true && state.embeddedFingerprint === state.sourceFingerprint) {
+      await ctx.runMutation(internal.embed.clearSessionEmbeddingClaim, {
+        sessionId: args.sessionId,
+        sourceFingerprint: state.sourceFingerprint,
+      });
       return { status: "skipped", ...EMPTY_EMBED_COUNTS };
     }
     if (!serverEmbeddingsConfigured()) {
@@ -309,7 +547,7 @@ export const embedSession = action({
               embeddingInputFor({ purpose: "retrieval_document", text: chunk }),
             ),
           );
-          const embedded = await embedMany({ model: quasarEmbeddingModel, values });
+          const embedded = await embedValues(values);
           for (const embedding of embedded.embeddings) {
             if (embedding.length !== QUASAR_RAG_EMBEDDING_DIMENSIONS) {
               throw new Error(
@@ -317,15 +555,8 @@ export const embedSession = action({
               );
             }
           }
-          const reportedTokens = embedded.usage?.tokens;
-          if (typeof reportedTokens === "number" && Number.isFinite(reportedTokens)) {
-            tokens += reportedTokens;
-          } else {
-            tokens += Math.ceil(
-              values.reduce((sum, value) => sum + value.length, 0) / 4,
-            );
-            tokensEstimated = true;
-          }
+          tokens += embedded.tokens;
+          tokensEstimated = tokensEstimated || embedded.tokensEstimated;
 
           let offset = 0;
           for (const message of pending) {

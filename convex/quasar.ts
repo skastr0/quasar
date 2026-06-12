@@ -1,6 +1,7 @@
 import { paginationOptsValidator } from "convex/server";
 import { v } from "convex/values";
 import { mutation, query, type MutationCtx } from "./_generated/server";
+import { scheduleSessionEmbedding } from "./embed";
 
 const roleValidator = v.union(
   v.literal("user"),
@@ -151,6 +152,7 @@ export const commitSessionIngest = mutation({
   handler: async (ctx, args) => {
     const session = await requireIngestClaim(ctx, args.sessionId, args.runId);
     await ctx.db.patch(session._id, { ingestRunId: undefined });
+    await scheduleSessionEmbedding(ctx, { sessionId: args.sessionId });
     return null;
   },
 });
