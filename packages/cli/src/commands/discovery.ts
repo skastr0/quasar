@@ -13,8 +13,13 @@ const commandCapabilities = [
   "examples list|show",
   "sources discover",
   "ingest --provider <p|all> [--root <dir>] [--limit <n>] [--force]",
-  "embed [--limit <n>] [--force]",
   "search --query <q> [--mode text|semantic|fusion] [--project <key>] [--role user|assistant|reasoning] [--limit <n>]",
+  "projects list",
+  "sessions list [--project <key>] [--provider <provider>] [--limit <n>]",
+  "sessions read <sessionId> [--limit <n>]",
+  "tool-calls list --session <sessionId> [--limit <n>]",
+  "tool-calls list --project <key> --tool-name <name> [--limit <n>]",
+  "tool-calls read <sessionId>#<seq>",
 ];
 
 export const doctorCommand = Command.make("doctor", {}, () =>
