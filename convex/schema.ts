@@ -34,7 +34,8 @@ export default defineSchema({
     embeddingClaimedFingerprint: v.optional(v.string()),
   })
     .index("by_sessionId", ["sessionId"])
-    .index("by_projectKey", ["projectKey"]),
+    .index("by_projectKey", ["projectKey"])
+    .index("by_projectKey_and_provider", ["projectKey", "provider"]),
 
   messages: defineTable({
     sessionId: v.string(),
@@ -73,5 +74,7 @@ export default defineSchema({
     provider: v.string(),
   })
     .index("by_sessionId_and_seq", ["sessionId", "seq"])
-    .index("by_projectKey_and_toolName", ["projectKey", "toolName"]),
+    .index("by_projectKey_and_toolName", ["projectKey", "toolName"])
+    .index("by_projectKey_and_provider", ["projectKey", "provider"])
+    .index("by_projectKey_and_provider_and_toolName", ["projectKey", "provider", "toolName"]),
 });

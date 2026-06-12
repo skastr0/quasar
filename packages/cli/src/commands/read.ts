@@ -79,11 +79,11 @@ const listSessionsForProject = async (options: {
     const page = await withRetry(() =>
       client.query(api.quasar.listSessions, {
         projectKey: options.projectKey,
+        ...(options.provider !== undefined ? { provider: options.provider } : {}),
         paginationOpts: { numItems: PAGE_SIZE, cursor },
       }),
     );
     for (const session of page.page) {
-      if (options.provider !== undefined && session.provider !== options.provider) continue;
       sessions.push(session);
       if (sessions.length >= options.limit) break;
     }
@@ -157,7 +157,8 @@ const listToolCallsForSession = async (sessionId: string, limit: number) => {
 
 const listToolCallsByProjectAndName = async (options: {
   readonly projectKey: string;
-  readonly toolName: string;
+  readonly toolName?: string;
+  readonly provider?: string;
   readonly limit: number;
 }) => {
   const client = createConvexClient();
@@ -167,7 +168,8 @@ const listToolCallsByProjectAndName = async (options: {
     const page = await withRetry(() =>
       client.query(api.quasar.toolCallsByName, {
         projectKey: options.projectKey,
-        toolName: options.toolName,
+        ...(options.toolName !== undefined ? { toolName: options.toolName } : {}),
+        ...(options.provider !== undefined ? { provider: options.provider } : {}),
         paginationOpts: { numItems: Math.min(PAGE_SIZE, options.limit - toolCalls.length), cursor },
       }),
     );
@@ -180,22 +182,24 @@ const listToolCallsByProjectAndName = async (options: {
 const listToolCalls = async (options: {
   readonly sessionId?: string;
   readonly projectKey?: string;
+  readonly provider?: string;
   readonly toolName?: string;
   readonly limit: number;
 }) => {
   if (options.sessionId !== undefined) {
     return { toolCalls: await listToolCallsForSession(options.sessionId, options.limit) };
   }
-  if (options.projectKey !== undefined && options.toolName !== undefined) {
+  if (options.projectKey !== undefined && (options.toolName !== undefined || options.provider !== undefined)) {
     return { toolCalls: await listToolCallsByProjectAndName({
       projectKey: options.projectKey,
       toolName: options.toolName,
+      provider: options.provider,
       limit: options.limit,
     }) };
   }
   throw new CommandInputError({
     field: "filters",
-    message: "tool-calls list requires --session or both --project and --tool-name",
+    message: "tool-calls list requires --session or --project with --tool-name and/or --provider",
   });
 };
 
@@ -261,16 +265,18 @@ const toolCallsListCommand = Command.make(
   {
     session: Options.text("session").pipe(Options.optional),
     project: projectOption,
+    provider: providerOption,
     toolName: toolNameOption,
     limit: limitOption,
   },
-  ({ session, project, toolName, limit }) =>
+  ({ session, project, provider, toolName, limit }) =>
     executeJsonCommand(
       "tool-calls list",
       Effect.tryPromise({
         try: () => listToolCalls({
           sessionId: Option.getOrUndefined(session),
           projectKey: Option.getOrUndefined(project),
+          provider: Option.getOrUndefined(provider),
           toolName: Option.getOrUndefined(toolName),
           limit: checkedLimit(limit),
         }),

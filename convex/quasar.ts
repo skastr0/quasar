@@ -337,8 +337,20 @@ export const listProjects = query({
 });
 
 export const listSessions = query({
-  args: { projectKey: v.string(), paginationOpts: paginationOptsValidator },
+  args: {
+    projectKey: v.string(),
+    provider: v.optional(v.string()),
+    paginationOpts: paginationOptsValidator,
+  },
   handler: async (ctx, args) => {
+    if (args.provider !== undefined) {
+      return await ctx.db
+        .query("sessions")
+        .withIndex("by_projectKey_and_provider", (q) =>
+          q.eq("projectKey", args.projectKey).eq("provider", args.provider!),
+        )
+        .paginate(args.paginationOpts);
+    }
     return await ctx.db
       .query("sessions")
       .withIndex("by_projectKey", (q) => q.eq("projectKey", args.projectKey))
@@ -349,14 +361,37 @@ export const listSessions = query({
 export const toolCallsByName = query({
   args: {
     projectKey: v.string(),
-    toolName: v.string(),
+    toolName: v.optional(v.string()),
+    provider: v.optional(v.string()),
     paginationOpts: paginationOptsValidator,
   },
   handler: async (ctx, args) => {
+    if (args.provider !== undefined && args.toolName !== undefined) {
+      return await ctx.db
+        .query("toolCalls")
+        .withIndex("by_projectKey_and_provider_and_toolName", (q) =>
+          q
+            .eq("projectKey", args.projectKey)
+            .eq("provider", args.provider!)
+            .eq("toolName", args.toolName!),
+        )
+        .paginate(args.paginationOpts);
+    }
+    if (args.provider !== undefined) {
+      return await ctx.db
+        .query("toolCalls")
+        .withIndex("by_projectKey_and_provider", (q) =>
+          q.eq("projectKey", args.projectKey).eq("provider", args.provider!),
+        )
+        .paginate(args.paginationOpts);
+    }
+    if (args.toolName === undefined) {
+      throw new Error("toolCallsByName requires toolName or provider");
+    }
     return await ctx.db
       .query("toolCalls")
       .withIndex("by_projectKey_and_toolName", (q) =>
-        q.eq("projectKey", args.projectKey).eq("toolName", args.toolName),
+        q.eq("projectKey", args.projectKey).eq("toolName", args.toolName!),
       )
       .paginate(args.paginationOpts);
   },

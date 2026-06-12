@@ -230,6 +230,15 @@ test("toolCallsByName walks the (projectKey, toolName) index", async () => {
       {
         sessionId: "s-tools",
         seq: 2,
+        toolName: "Bash",
+        inputText: JSON.stringify({ command: "cat package.json" }),
+        outputText: "{}",
+        projectKey: "proj-alpha",
+        provider: "codex",
+      },
+      {
+        sessionId: "s-tools",
+        seq: 3,
         toolName: "Read",
         inputText: JSON.stringify({ file_path: "/tmp/x" }),
         outputText: "contents",
@@ -254,10 +263,29 @@ test("toolCallsByName walks the (projectKey, toolName) index", async () => {
     toolName: "Bash",
     paginationOpts: { numItems: 10, cursor: null },
   });
-  expect(page.page).toHaveLength(1);
+  expect(page.page).toHaveLength(2);
   expect(page.page[0].sessionId).toBe("s-tools");
   expect(page.page[0].toolName).toBe("Bash");
+  expect(page.page.map((row) => row.provider).sort()).toEqual(["claude", "codex"]);
   expect(page.isDone).toBe(true);
+
+  const codexPage = await t.query(api.quasar.toolCallsByName, {
+    projectKey: "proj-alpha",
+    provider: "codex",
+    paginationOpts: { numItems: 10, cursor: null },
+  });
+  expect(codexPage.page).toHaveLength(1);
+  expect(codexPage.page[0].provider).toBe("codex");
+  expect(codexPage.page[0].toolName).toBe("Bash");
+
+  const codexBashPage = await t.query(api.quasar.toolCallsByName, {
+    projectKey: "proj-alpha",
+    provider: "codex",
+    toolName: "Bash",
+    paginationOpts: { numItems: 10, cursor: null },
+  });
+  expect(codexBashPage.page).toHaveLength(1);
+  expect(codexBashPage.page[0].provider).toBe("codex");
 });
 
 test("deleteSessionTurns drains messages and toolCalls under caller-driven batches", async () => {
