@@ -12,6 +12,9 @@ const commandCapabilities = [
   "schema list|show",
   "examples list|show",
   "sources discover",
+  "ingest --provider <p|all> [--root <dir>] [--limit <n>] [--force]",
+  "embed [--limit <n>] [--force]",
+  "search --query <q> [--mode text|semantic|fusion] [--project <key>] [--role user|assistant|reasoning] [--limit <n>]",
 ];
 
 export const doctorCommand = Command.make("doctor", {}, () =>
