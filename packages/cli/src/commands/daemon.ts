@@ -101,11 +101,7 @@ export const renderLaunchAgentPlist = (options: {
     QUASAR_CONFIG: paths.config,
   };
 
-  for (const key of [
-    "CONVEX_URL",
-    "CONVEX_SELF_HOSTED_URL",
-    "QUASAR_USE_FALLBACK_URL",
-  ] as const) {
+  for (const key of ["QUASAR_USE_FALLBACK_URL"] as const) {
     const value = env[key];
     if (typeof value === "string" && value.trim().length > 0) envVars[key] = value;
   }
