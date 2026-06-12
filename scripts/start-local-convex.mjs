@@ -1,5 +1,14 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { quasarConvexLocalRoot, quasarStateRoot } from "./quasar-state.mjs";
@@ -86,5 +95,29 @@ child.on("exit", (code, signal) => {
 process.on("exit", cleanupRuntimeTmpDir);
 
 function cleanupRuntimeTmpDir() {
+  makeWritableForCleanup(runtimeTmpDir);
   rmSync(runtimeTmpDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+}
+
+function makeWritableForCleanup(path) {
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch {
+    return;
+  }
+
+  if (!stat.isDirectory()) {
+    try {
+      chmodSync(path, 0o600);
+    } catch {}
+    return;
+  }
+
+  try {
+    chmodSync(path, 0o700);
+  } catch {}
+  for (const entry of readdirSync(path)) {
+    makeWritableForCleanup(join(path, entry));
+  }
 }
