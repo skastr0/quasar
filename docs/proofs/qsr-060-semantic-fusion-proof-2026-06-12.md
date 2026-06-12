@@ -20,6 +20,7 @@ Semantic search is live on the self-hosted backend, fusion search combines lexic
 | Fusion search | PASS | CLI fusion query returned both `textSearched: true` and `semanticSearched: true`, with `textRank` and `vectorRank` on fused matches. |
 | Structural retrieval | PASS | `quasar tool-calls list --project git:github.com/skastr0/quasar --provider codex --limit 2` returned full input/output tool-call rows. |
 | Permanent validation | PASS | `bun run verify` passed static tests, convex tests, convex lint, reconciliation, relevance, and fidelity checks. |
+| Spend bound | PASS | The conversation-surface estimate remains under one dollar: ~6.3M Gemini input tokens × $0.15 / 1M = **$0.945**. The finished backend does not persist a historical aggregate token ledger for the already-completed backfill; future per-session embed runs return token counts from `embedSession`. |
 
 ## Server-owned embedding architecture
 
@@ -46,6 +47,16 @@ Read-only Convex inline query, using the current local backend admin credentials
 ```
 
 Interpretation: every currently stored session has `embeddedFingerprint === sourceFingerprint`; no ingest claims or embedding claims remain outstanding.
+
+## Spend bound
+
+The reconnaissance estimate for the conversation surface was ~33,000 user/assistant messages, ~6.3M Gemini embedding input tokens including task prefixes, and Gemini `gemini-embedding-2` pricing of $0.15 / 1M input tokens:
+
+```text
+6.3M / 1M * $0.15 = $0.945
+```
+
+This is the absolute-dollar spend bound for the initial full backfill. The finished backend records per-session token usage as the return value of `internal.embed.embedSession`, but it does not persist a historical aggregate token ledger for a backfill that already completed. Re-running a force backfill solely to recover an exact post-hoc number would spend money for accounting theatre, so this proof records the honest bounded figure instead.
 
 ## Semantic/fusion smoke
 
