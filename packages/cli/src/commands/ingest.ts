@@ -244,6 +244,8 @@ const grokHooks: ProviderIngestHooks = {};
 
 const kimiHooks: ProviderIngestHooks = {};
 
+const antigravityHooks: ProviderIngestHooks = {};
+
 /** Hooks per supported provider; presence in this map is the support gate. */
 export const PROVIDER_INGEST_HOOKS: ReadonlyMap<Provider, ProviderIngestHooks> = new Map([
   ["claude", {}],
@@ -252,6 +254,7 @@ export const PROVIDER_INGEST_HOOKS: ReadonlyMap<Provider, ProviderIngestHooks> =
   ["hermes", hermesHooks],
   ["grok", grokHooks],
   ["kimi", kimiHooks],
+  ["antigravity", antigravityHooks],
 ]);
 
 export const SUPPORTED_INGEST_PROVIDERS = [...PROVIDER_INGEST_HOOKS.keys()];
