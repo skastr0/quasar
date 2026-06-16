@@ -6,4 +6,5 @@ export * from "./machine";
 export * from "./redaction";
 export * from "./api-paths";
 export * from "./adapters/types";
+export { sessionIdFor, sourceFingerprintFor } from "./adapters/common";
 export * from "./adapters/registry";

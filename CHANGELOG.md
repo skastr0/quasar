@@ -40,6 +40,9 @@ formats may still change.
 
 ### Added
 
+- A local per-machine ingest fingerprint cache consulted before parsing so
+  unchanged sessions cost only a stat + cache read; the server remains the
+  authoritative idempotency gate, and `--reset-ledger` / `--force` bypass it.
 - Initial public Quasar CLI package preparation.
 - Local agent session discovery, planning, ingestion, search, and inspection
   commands.

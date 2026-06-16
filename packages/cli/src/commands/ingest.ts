@@ -9,6 +9,7 @@ import {
   adaptersByProvider,
   loadMachineIdentity,
   redactSensitive,
+  sourceFingerprintFor,
   type ContentBlock,
   type NormalizedSession,
   type Provider,
@@ -17,6 +18,7 @@ import {
 
 import { createConvexClient, withRetry } from "../convex-client";
 import { CommandInputError } from "../errors";
+import { openIngestLedger } from "../ingest-ledger";
 import { executeJsonCommand } from "../output";
 
 /**
@@ -425,11 +427,21 @@ const chunk = <T>(rows: readonly T[], size: number): T[][] => {
   return chunks;
 };
 
-const runProviderIngest = async (options: {
+/** The Convex mutation surface this engine drives; injectable for tests. */
+export interface IngestMutationClient {
+  mutation: (reference: unknown, args: unknown) => Promise<unknown>;
+}
+
+export const runProviderIngest = async (options: {
   readonly provider: string;
   readonly root?: string;
   readonly limit?: number;
   readonly force?: boolean;
+  readonly reset?: boolean;
+  /** Injected for tests; defaults to the live Convex client. */
+  readonly client?: IngestMutationClient;
+  /** Injected for tests; defaults to QUASAR_HOME. */
+  readonly ledgerHome?: string;
 }): Promise<IngestReport> => {
   const provider = options.provider as Provider;
   const hooks = PROVIDER_INGEST_HOOKS.get(provider);
@@ -440,7 +452,13 @@ const runProviderIngest = async (options: {
     });
   }
   const startedAt = Date.now();
-  const client = createConvexClient();
+  // Local fingerprint cache: a redundant optimization that lets an unchanged
+  // session be skipped before it is parsed. The server stays the authoritative
+  // idempotency gate, so a missing/stale ledger only ever costs a redundant
+  // begin the server then skips. --force/--reset bypass it entirely.
+  const ledger = openIngestLedger(options.ledgerHome);
+  if (options.reset === true) ledger.clear();
+  const client = options.client ?? createConvexClient();
   // One claim token per run: every turn mutation verifies it, so a concurrent
   // run that re-claims a session makes this run fail loudly instead of
   // interleaving duplicate rows.
@@ -465,6 +483,10 @@ const runProviderIngest = async (options: {
     now: new Date().toISOString(),
     ...(options.root !== undefined ? { roots: { [provider]: options.root } } : {}),
     ...(options.limit !== undefined ? { limit: options.limit } : {}),
+    shouldParseSession: (probe) =>
+      options.force === true || options.reset === true
+        ? true
+        : !ledger.has(probe.sessionId, probe.sourceFingerprint),
   });
 
   for await (const item of items) {
@@ -476,13 +498,13 @@ const runProviderIngest = async (options: {
     // hermes) report the session row's own change signal, because the db
     // file's stat changes whenever ANY session is touched. Otherwise stat the
     // per-session source file.
-    let fingerprint = item.fingerprint;
-    if (fingerprint === undefined) {
+    let sourceFingerprint: string;
+    if (item.fingerprint === undefined) {
       const physicalPath = item.sourceUnit?.physicalPath ?? item.session.sourcePath;
-      const stat = statSync(physicalPath);
-      fingerprint = { size: stat.size, mtimeMs: stat.mtimeMs };
+      sourceFingerprint = sourceFingerprintFor(statSync(physicalPath));
+    } else {
+      sourceFingerprint = JSON.stringify(item.fingerprint);
     }
-    const sourceFingerprint = JSON.stringify(fingerprint);
 
     await withRetry(() =>
       client.mutation(api.quasar.upsertProject, {
@@ -494,15 +516,18 @@ const runProviderIngest = async (options: {
     // beginSessionIngest claims the session (run-scoped token); the claim is
     // only cleared by commitSessionIngest after every turn row has landed, so
     // a crash mid-ingest leaves the session claimed and re-ingested next run.
-    const begin = await withRetry(() =>
+    const begin = (await withRetry(() =>
       client.mutation(api.quasar.beginSessionIngest, {
         ...mapped.session,
         sourceFingerprint,
         runId,
         ...(options.force === true ? { force: true } : {}),
       }),
-    );
+    )) as { skipped: boolean };
     if (begin.skipped) {
+      // The server already holds this fingerprint: record it locally so the
+      // next run skips the parse before reaching the server at all.
+      ledger.record(mapped.session.sessionId, sourceFingerprint);
       sessionsSkipped += 1;
       continue;
     }
@@ -510,12 +535,12 @@ const runProviderIngest = async (options: {
     // Drain old turns before inserting; the mutation deletes one batch per call.
     let result: { deleted: number; batchSize: number };
     do {
-      result = await withRetry(() =>
+      result = (await withRetry(() =>
         client.mutation(api.quasar.deleteSessionTurns, {
           sessionId: mapped.session.sessionId,
           runId,
         }),
-      );
+      )) as { deleted: number; batchSize: number };
     } while (result.deleted === result.batchSize);
 
     for (const rows of chunk(mapped.messages, INSERT_BATCH)) {
@@ -534,6 +559,9 @@ const runProviderIngest = async (options: {
         runId,
       }),
     );
+    // Only after a successful commit: the ledger entry must never claim an
+    // ingest the server has not durably accepted.
+    ledger.record(mapped.session.sessionId, sourceFingerprint);
 
     sessionsWritten += 1;
     messagesWritten += mapped.messages.length;
@@ -545,6 +573,7 @@ const runProviderIngest = async (options: {
   // (e.g. path-keyed rows unifying onto a git-remote key), abandoning the old
   // project row. One canonical projectKey per project — drop empty ones.
   await withRetry(() => client.mutation(api.quasar.pruneEmptyProjects, {}));
+  ledger.close();
 
   return {
     provider,
@@ -561,6 +590,7 @@ const runProviderIngest = async (options: {
 const runAllProvidersIngest = async (options: {
   readonly limit?: number;
   readonly force?: boolean;
+  readonly reset?: boolean;
 }): Promise<AllIngestReport> => {
   const reports: IngestReport[] = [];
   for (const provider of SUPPORTED_INGEST_PROVIDERS) {
@@ -569,7 +599,12 @@ const runAllProvidersIngest = async (options: {
     const startedAt = Date.now();
     try {
       reports.push(
-        await runProviderIngest({ provider, limit: options.limit, force: options.force }),
+        await runProviderIngest({
+          provider,
+          limit: options.limit,
+          force: options.force,
+          reset: options.reset,
+        }),
       );
     } catch (error) {
       reports.push({
@@ -615,11 +650,22 @@ const forceOption = Options.boolean("force").pipe(
     "Re-ingest sessions even when their source fingerprint is unchanged (use after a turn-mapping change)",
   ),
 );
+const resetLedgerOption = Options.boolean("reset-ledger").pipe(
+  Options.withDescription(
+    "Ignore and clear the local ingest fingerprint cache; re-consult the server for every session.",
+  ),
+);
 
 export const ingestCommand = Command.make(
   "ingest",
-  { provider: providerOption, root: rootOption, limit: limitOption, force: forceOption },
-  ({ provider, root, limit, force }) =>
+  {
+    provider: providerOption,
+    root: rootOption,
+    limit: limitOption,
+    force: forceOption,
+    resetLedger: resetLedgerOption,
+  },
+  ({ provider, root, limit, force, resetLedger }) =>
     executeJsonCommand(
       "ingest",
       Effect.gen(function* () {
@@ -629,6 +675,7 @@ export const ingestCommand = Command.make(
               runAllProvidersIngest({
                 limit: Option.getOrUndefined(limit),
                 force,
+                reset: resetLedger,
               }),
             catch: (error) => (error instanceof Error ? error : new Error(String(error))),
           });
@@ -648,6 +695,7 @@ export const ingestCommand = Command.make(
               root: Option.getOrUndefined(root),
               limit: Option.getOrUndefined(limit),
               force,
+              reset: resetLedger,
             }),
           catch: (error) => (error instanceof Error ? error : new Error(String(error))),
         });

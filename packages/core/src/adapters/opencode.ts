@@ -22,6 +22,7 @@ import {
   projectToolPayloadNativeValue,
   recordFrom,
   scopedId,
+  sessionIdFor,
   sourceRoot,
   type NativeValue,
   usageIdFor,
@@ -762,6 +763,29 @@ const logicalOpencodeDbPath = (
 const opencodeSessionFingerprint = (row: OpenCodeSessionRow): UnitFingerprint | undefined =>
   typeof row.time_updated === "number" ? { mtimeMs: row.time_updated } : undefined;
 
+/**
+ * Cheap pre-parse gate for a shared-db session: the session row already
+ * carries its own change signal (time_updated), so the message/parts read can
+ * be skipped without touching them. The probe's sourceFingerprint equals what
+ * the engine derives from `item.fingerprint` (JSON.stringify of the same unit
+ * fingerprint); when no per-session fingerprint exists the engine falls back
+ * to a file stat the probe cannot match, so the gate is not consulted.
+ */
+const skipOpenCodeSession = (
+  options: AdapterOptions,
+  sessionEntry: OpenCodeSessionRow,
+  sourcePath: string,
+): boolean => {
+  if (options.shouldParseSession === undefined) return false;
+  const fingerprint = opencodeSessionFingerprint(sessionEntry);
+  if (fingerprint === undefined) return false;
+  const probe = {
+    sessionId: sessionIdFor("opencode", options.machine.machineId, sessionEntry.id, sourcePath),
+    sourceFingerprint: JSON.stringify(fingerprint),
+  };
+  return options.shouldParseSession(probe) === false;
+};
+
 async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterStreamItem> {
   const root = options.roots?.opencode ?? opencodeAdapter.defaultRoot();
   const dbPath = opencodeDbPath(root);
@@ -790,6 +814,7 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
       };
       let sessionCount = 0;
       for (const sessionEntry of rows) {
+        if (skipOpenCodeSession(options, sessionEntry, logicalDbPath ?? dbPath)) continue;
         const session = buildOpenCodeSessionCli(
           tempDb.path,
           logicalDbPath ?? dbPath,
@@ -835,6 +860,7 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
     };
     let sessionCount = 0;
     for (const sessionEntry of readSessionRows(db, options.limit, options.skip)) {
+      if (skipOpenCodeSession(options, sessionEntry, logicalDbPath ?? dbPath)) continue;
       const session = buildOpenCodeSession(
         db,
         logicalDbPath ?? dbPath,
