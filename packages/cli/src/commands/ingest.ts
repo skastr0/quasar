@@ -242,6 +242,8 @@ const hermesHooks: ProviderIngestHooks = {};
  */
 const grokHooks: ProviderIngestHooks = {};
 
+const kimiHooks: ProviderIngestHooks = {};
+
 /** Hooks per supported provider; presence in this map is the support gate. */
 export const PROVIDER_INGEST_HOOKS: ReadonlyMap<Provider, ProviderIngestHooks> = new Map([
   ["claude", {}],
@@ -249,6 +251,7 @@ export const PROVIDER_INGEST_HOOKS: ReadonlyMap<Provider, ProviderIngestHooks> =
   ["opencode", opencodeHooks],
   ["hermes", hermesHooks],
   ["grok", grokHooks],
+  ["kimi", kimiHooks],
 ]);
 
 export const SUPPORTED_INGEST_PROVIDERS = [...PROVIDER_INGEST_HOOKS.keys()];
