@@ -437,16 +437,6 @@ const projectPathFromSessionMeta = (value: unknown) => {
       : undefined;
 };
 
-const codexSessionId = (
-  machineId: string,
-  nativeSessionId: string,
-  sourcePath: string,
-) => `codex:${machineId}:${stableWideHash(`${nativeSessionId}:${sourcePath}`)}`;
-
-const fileFingerprint = (stats: Pick<Stats, "size" | "mtimeMs">) => ({
-  size: stats.size,
-  mtimeMs: stats.mtimeMs,
-});
 
 const parseFileWalkInput = (root: string, limit: number | undefined, skip: number | undefined) => {
   const trimmedRoot = root.trim();
