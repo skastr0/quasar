@@ -97,15 +97,6 @@ const copyDatabaseForRead = (dbPath: string) => {
   };
 };
 
-const hermesDbPath = (root: string | undefined) => {
-  if (root === undefined) return undefined;
-  try {
-    return statSync(root).isFile() ? root : join(root, "state.db");
-  } catch {
-    return join(root, "state.db");
-  }
-};
-
 /** Enumerate all profile-scoped state.db files plus the top-level default. */
 const discoverHermesDbPaths = (root: string): { dbPath: string; profileName: string }[] => {
   const results: { dbPath: string; profileName: string }[] = [];
