@@ -39,6 +39,7 @@ type AntigravityEventDraft = {
     | "message"
     | "tool_call"
     | "tool_result"
+    | "reasoning"
     | "system"
     | "lifecycle"
     | "unknown";
@@ -59,45 +60,115 @@ type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
 // Role + kind mapping
 // ---------------------------------------------------------------------------
 
+// Non-PLANNER_RESPONSE tool execution records. Their content is a tool result
+// (a directory listing, a file body, a command transcript) — structural, never
+// an assistant message and never embedded.
+const TOOL_EXECUTION_TYPES = new Set([
+  "VIEW_FILE",
+  "LIST_DIRECTORY",
+  "GENERIC",
+  "CODE_ACTION",
+  "RUN_COMMAND",
+]);
+
 /**
- * source → role
- * USER_EXPLICIT → user
- * MODEL         → assistant
- * SYSTEM        → system
- * (anything else) → unknown
+ * Classification of a single transcript record AFTER turn segmentation. The
+ * driving rule is structural, not content-length based (AGENTS.md: no invented
+ * budgets):
+ *
+ *   USER_INPUT
+ *     → role user / kind message (searchable). One per user turn.
+ *
+ *   PLANNER_RESPONSE that is the LAST one before the next USER_INPUT (or the
+ *   end of the session) — the turn-TERMINAL response
+ *     → role assistant / kind message (searchable). One per user turn. This is
+ *       the model's real answer. Its tool_calls (if any) still emit as session
+ *       toolCalls, but the record itself is the answer, so it stays a message.
+ *
+ *   PLANNER_RESPONSE (mid-loop) carrying tool_calls
+ *     → kind tool_call / role assistant. The narration ("I will read X") is the
+ *       call's context, NOT a standalone message; structural, not searchable.
+ *
+ *   PLANNER_RESPONSE (mid-loop) carrying thinking but no tool_calls
+ *     → role thinking / kind reasoning. Off the embedding surface, like every
+ *       other adapter's reasoning.
+ *
+ *   PLANNER_RESPONSE (mid-loop) bare — no tool_calls, no thinking
+ *     → role unknown / kind lifecycle. A mid-loop tick: NOT a message, NOT
+ *       embedded.
+ *
+ *   VIEW_FILE / LIST_DIRECTORY / GENERIC / CODE_ACTION / RUN_COMMAND
+ *     → kind tool_call / role assistant (tool execution result; structural).
+ *
+ *   CHECKPOINT / SYSTEM_MESSAGE
+ *     → role system / kind system.
+ *
+ *   CONVERSATION_HISTORY
+ *     → SKIP (content is null — a replay marker, never content of its own).
  */
-const roleFromSource = (source: string | undefined): AntigravityEventDraft["role"] => {
-  if (source === "USER_EXPLICIT") return "user";
-  if (source === "MODEL") return "assistant";
-  if (source === "SYSTEM") return "system";
-  return "unknown";
+type AntigravityClassification = {
+  readonly role: AntigravityEventDraft["role"];
+  readonly kind: AntigravityEventDraft["kind"];
+};
+
+const classifyRecord = (input: {
+  readonly type: string;
+  readonly hasToolCalls: boolean;
+  readonly hasThinking: boolean;
+  readonly isTerminalPlannerResponse: boolean;
+}): AntigravityClassification | "SKIP" => {
+  const { type, hasToolCalls, hasThinking, isTerminalPlannerResponse } = input;
+
+  if (type === "CONVERSATION_HISTORY") return "SKIP";
+  if (type === "USER_INPUT") return { role: "user", kind: "message" };
+
+  if (type === "PLANNER_RESPONSE") {
+    // The turn-terminal response is the assistant's real answer — searchable,
+    // exactly one per user turn. Terminal classification wins even if the
+    // record also carries tool_calls (an aborted/incomplete final turn): the
+    // tool_calls are still emitted, but the record is the answer.
+    if (isTerminalPlannerResponse) return { role: "assistant", kind: "message" };
+    // Mid-loop responses: tool narration, reasoning, or a bare tick. None are
+    // messages; none reach the embedding surface.
+    if (hasToolCalls) return { role: "assistant", kind: "tool_call" };
+    if (hasThinking) return { role: "thinking", kind: "reasoning" };
+    return { role: "unknown", kind: "lifecycle" };
+  }
+
+  if (TOOL_EXECUTION_TYPES.has(type)) return { role: "assistant", kind: "tool_call" };
+  if (type === "CHECKPOINT" || type === "SYSTEM_MESSAGE") return { role: "system", kind: "system" };
+  return { role: "unknown", kind: "unknown" };
 };
 
 /**
- * type → kind
- * USER_INPUT           → message
- * PLANNER_RESPONSE     → message (tool_call when tool_calls non-empty)
- * VIEW_FILE / LIST_DIRECTORY / GENERIC / CODE_ACTION / RUN_COMMAND → tool_call
- * CHECKPOINT / SYSTEM_MESSAGE → system
- * CONVERSATION_HISTORY → SKIP (content null)
+ * Marks each PLANNER_RESPONSE record (by line index in the parsed-record array)
+ * that is the LAST PLANNER_RESPONSE inside its turn. A turn runs from a
+ * USER_INPUT (inclusive) up to the next USER_INPUT (exclusive); the trailing
+ * span after the final USER_INPUT is its own turn. Antigravity transcripts are
+ * cumulative replay snapshots — every USER_INPUT restarts step_index at 0 — so
+ * each replay's terminal response is counted, which is exactly why the emitted
+ * assistant-message count tracks the USER_INPUT count.
  */
-const kindFromAntigravityType = (
-  type: string,
-  hasToolCalls: boolean,
-): AntigravityEventDraft["kind"] | "SKIP" => {
-  if (type === "CONVERSATION_HISTORY") return "SKIP";
-  if (type === "USER_INPUT") return "message";
-  if (type === "PLANNER_RESPONSE") return hasToolCalls ? "tool_call" : "message";
-  if (
-    type === "VIEW_FILE" ||
-    type === "LIST_DIRECTORY" ||
-    type === "GENERIC" ||
-    type === "CODE_ACTION" ||
-    type === "RUN_COMMAND"
-  )
-    return "tool_call";
-  if (type === "CHECKPOINT" || type === "SYSTEM_MESSAGE") return "system";
-  return "unknown";
+const terminalPlannerResponseIndices = (
+  records: readonly { readonly type: string }[],
+): ReadonlySet<number> => {
+  const terminal = new Set<number>();
+  let lastPlannerInTurn: number | undefined;
+  const flush = () => {
+    if (lastPlannerInTurn !== undefined) terminal.add(lastPlannerInTurn);
+    lastPlannerInTurn = undefined;
+  };
+  for (let i = 0; i < records.length; i++) {
+    const type = records[i]!.type;
+    if (type === "USER_INPUT") {
+      // The previous turn ended at the PLANNER_RESPONSE we last saw.
+      flush();
+      continue;
+    }
+    if (type === "PLANNER_RESPONSE") lastPlannerInTurn = i;
+  }
+  flush();
+  return terminal;
 };
 
 // ---------------------------------------------------------------------------
@@ -189,18 +260,36 @@ const buildAntigravitySession = (
   // PLANNER_RESPONSE that initiated them. We link by step_index when possible.
   const stepIndexToEventId = new Map<number, string>();
 
+  // First pass: normalize every line into a record so turn segmentation can
+  // identify the terminal PLANNER_RESPONSE of each turn before classification.
+  const parsed = lines.map(({ value, lineNumber }) => {
+    const record =
+      typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+    return {
+      record,
+      lineNumber,
+      type: typeof record.type === "string" ? record.type : "unknown",
+    };
+  });
+  const terminalIndices = terminalPlannerResponseIndices(parsed);
+
   let seq = 0;
-  for (const { value, lineNumber } of lines) {
-    const record = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
-    const type = typeof record.type === "string" ? record.type : "unknown";
-    const source = typeof record.source === "string" ? record.source : undefined;
+  for (let recordIndex = 0; recordIndex < parsed.length; recordIndex++) {
+    const { record, lineNumber, type } = parsed[recordIndex]!;
     const createdAt = typeof record.created_at === "string" ? record.created_at : undefined;
     const stepIndex = typeof record.step_index === "number" ? record.step_index : undefined;
 
     // CONVERSATION_HISTORY records have null content — skip entirely.
     const rawToolCalls = Array.isArray(record.tool_calls) ? record.tool_calls : [];
-    const kind = kindFromAntigravityType(type, rawToolCalls.length > 0);
-    if (kind === "SKIP") continue;
+    const hasThinking = typeof record.thinking === "string" && record.thinking.length > 0;
+    const classification = classifyRecord({
+      type,
+      hasToolCalls: rawToolCalls.length > 0,
+      hasThinking,
+      isTerminalPlannerResponse: terminalIndices.has(recordIndex),
+    });
+    if (classification === "SKIP") continue;
+    const { role, kind } = classification;
 
     const eventId = eventIdFor(
       "antigravity",
@@ -215,12 +304,29 @@ const buildAntigravitySession = (
     // Extract content
     const contentRaw =
       typeof record.content === "string" ? record.content : undefined;
-    const contentSource: NativeValue | undefined = contentRaw;
-    const contentText = compactText(contentRaw);
+    const thinkingRaw = hasThinking ? (record.thinking as string) : undefined;
 
-    // Reasoning (thinking field — rare, appears on some PLANNER_RESPONSE records)
-    const reasoningRaw =
-      typeof record.thinking === "string" ? record.thinking : undefined;
+    // Content placement is keyed on the structural classification:
+    //  - message (user / turn-terminal assistant): the answer text is the
+    //    searchable + embeddable content.
+    //  - reasoning (mid-loop thinking): the thinking text becomes contentText
+    //    so the ingest mapper promotes it to a role:"reasoning" row (off the
+    //    embedding surface) — it must NOT carry the bare planner narration.
+    //  - tool_call (mid-loop narration) / lifecycle (bare tick): structural
+    //    only. No contentText, so no message and no embedding; the tool_calls
+    //    array below still carries the call payload.
+    const isMessage = kind === "message";
+    const isReasoning = role === "thinking" && kind === "reasoning";
+    const contentSource: NativeValue | undefined = isMessage ? contentRaw : undefined;
+    const contentText = isReasoning
+      ? compactText(thinkingRaw)
+      : isMessage
+        ? compactText(contentRaw)
+        : undefined;
+
+    // Reasoning carried as a structural field for downstream rendering even
+    // when it rides a turn-terminal assistant message (rare).
+    const reasoningRaw = thinkingRaw;
 
     // Tool calls on PLANNER_RESPONSE records
     let firstToolCallId: string | undefined;
@@ -272,8 +378,6 @@ const buildAntigravitySession = (
         }
       }
     }
-
-    const role = roleFromSource(source);
 
     eventDrafts.push({
       id: eventId,
