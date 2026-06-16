@@ -1,3 +1,4 @@
+import { ampAdapter } from "./amp";
 import { antigravityAdapter } from "./antigravity";
 import { claudeAdapter } from "./claude";
 import { codexAdapter } from "./codex";
@@ -15,6 +16,7 @@ export const stableAdapters = [
   hermesAdapter,
   kimiAdapter,
   antigravityAdapter,
+  ampAdapter,
 ] as const;
 
 export const experimentalAdapters = [] as const;

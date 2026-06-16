@@ -18,7 +18,7 @@ import {
 
 import { createConvexClient, withRetry } from "../convex-client";
 import { CommandInputError } from "../errors";
-import { openIngestLedger } from "../ingest-ledger";
+import { ingestLedgerExists, openIngestLedger } from "../ingest-ledger";
 import { executeJsonCommand } from "../output";
 
 /**
@@ -246,6 +246,15 @@ const kimiHooks: ProviderIngestHooks = {};
 
 const antigravityHooks: ProviderIngestHooks = {};
 
+/**
+ * Amp: server-side threads exported via the CLI. Roles arrive already
+ * classified by the adapter (user/assistant text → message, thinking →
+ * reasoning, tool_use/tool_result → toolCalls). The opaque encrypted-reasoning
+ * blob is dropped by the shared redaction pass. Oversized exported tool
+ * payloads are rejected only at the Convex boundary; plain admission.
+ */
+const ampHooks: ProviderIngestHooks = {};
+
 /** Hooks per supported provider; presence in this map is the support gate. */
 export const PROVIDER_INGEST_HOOKS: ReadonlyMap<Provider, ProviderIngestHooks> = new Map([
   ["claude", {}],
@@ -255,6 +264,7 @@ export const PROVIDER_INGEST_HOOKS: ReadonlyMap<Provider, ProviderIngestHooks> =
   ["grok", grokHooks],
   ["kimi", kimiHooks],
   ["antigravity", antigravityHooks],
+  ["amp", ampHooks],
 ]);
 
 export const SUPPORTED_INGEST_PROVIDERS = [...PROVIDER_INGEST_HOOKS.keys()];
@@ -593,13 +603,28 @@ export const runProviderIngest = async (options: {
   };
 };
 
+/**
+ * Whether a provider may run inside the `all` set (the daemon's steady-state
+ * tick). The network-CLI provider (amp) re-fetches a paginated list + per-thread
+ * export every tick, so it stays out of the all-set until the local fingerprint
+ * ledger exists to drive incremental export. A manual `ingest --provider amp`
+ * is always allowed; only the all-set is gated.
+ */
+const isDaemonEligible = (provider: Provider, ledgerHome?: string): boolean => {
+  if (provider === "amp") return ingestLedgerExists(ledgerHome);
+  return true;
+};
+
 const runAllProvidersIngest = async (options: {
   readonly limit?: number;
   readonly force?: boolean;
   readonly reset?: boolean;
+  /** Injected for tests; defaults to QUASAR_HOME. */
+  readonly ledgerHome?: string;
 }): Promise<AllIngestReport> => {
   const reports: IngestReport[] = [];
   for (const provider of SUPPORTED_INGEST_PROVIDERS) {
+    if (!isDaemonEligible(provider, options.ledgerHome)) continue;
     // One failing provider must never block the rest of the estate: record
     // the failure on its report and continue (hermes/grok run after codex).
     const startedAt = Date.now();

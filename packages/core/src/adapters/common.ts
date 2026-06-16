@@ -84,6 +84,15 @@ type BuildSessionArgs = {
   readonly machine: MachineIdentity;
   readonly nativeSessionId: string;
   readonly nativeProjectKey?: string;
+  /**
+   * Shared-remote override for the canonical session id. Local-file providers
+   * omit this so the id stays derived from (provider, machineId, nativeSessionId,
+   * sourcePath) — machineId is load-bearing there. A shared-remote provider
+   * (one whose transcript lives on a server and is identical from every machine)
+   * supplies an id derived from the remote identity ALONE, so every machine
+   * converges on one session id and the server upsert dedups cross-machine.
+   */
+  readonly canonicalId?: string;
   readonly title?: string;
   readonly startedAt?: string;
   readonly updatedAt?: string;
@@ -707,12 +716,14 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
     packageName: args.packageName,
     explicitProjectKey: args.explicitProjectKey,
   });
-  const id = sessionIdFor(
-    args.provider,
-    args.machine.machineId,
-    args.nativeSessionId,
-    args.sourcePath,
-  );
+  const id =
+    args.canonicalId ??
+    sessionIdFor(
+      args.provider,
+      args.machine.machineId,
+      args.nativeSessionId,
+      args.sourcePath,
+    );
   const events = args.events.map(({ contentBlocks, contentSource, ...event }) => ({
     ...event,
     sessionId: id,

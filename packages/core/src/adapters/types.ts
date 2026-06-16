@@ -53,6 +53,13 @@ export type UnitFingerprint =
   {
     readonly size?: number;
     readonly mtimeMs?: number;
+    /**
+     * Opaque change signal for sources with no local stat to fingerprint
+     * (a server-side transcript). The adapter derives it from cheap list
+     * metadata so an unchanged unit is skipped before any expensive fetch;
+     * it flows through `JSON.stringify(fingerprint)` into `sourceFingerprint`.
+     */
+    readonly tag?: string;
   };
 
 export interface SourceUnit {
