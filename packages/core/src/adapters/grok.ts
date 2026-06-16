@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
 import { collectAdapterStream, type AdapterStreamItem, type SessionAdapter } from "./types";
@@ -19,6 +19,8 @@ import {
   readJsonLines,
   roleFrom,
   scopedId,
+  sessionIdFor,
+  sourceFingerprintFor,
   sourceRoot,
   stringValue,
   type NativeValue,
@@ -553,6 +555,18 @@ async function* streamGrok(options: AdapterOptions): AsyncGenerator<AdapterStrea
   yield { type: "sourceRoot", sourceRoot: rootRecord };
   let sessionCount = 0;
   for (const chatPath of files) {
+    // Cheap pre-parse gate: the session lives in the chat file's directory,
+    // but the chat file's own stat (size/mtime) is the per-session change
+    // signal, so an unchanged session never reaches the multi-file parse.
+    if (options.shouldParseSession !== undefined) {
+      const sessionDir = dirname(chatPath);
+      const stat = statSync(chatPath);
+      const probe = {
+        sessionId: sessionIdFor("grok", options.machine.machineId, basename(sessionDir), sessionDir),
+        sourceFingerprint: sourceFingerprintFor(stat),
+      };
+      if (options.shouldParseSession(probe) === false) continue;
+    }
     const session = buildGrokSessionFromChatPath(chatPath, sessionsRoot, options);
     yield {
       type: "session",

@@ -19,6 +19,7 @@ import {
   recordFrom,
   roleFrom,
   scopedId,
+  sessionIdFor,
   sourceRoot,
   stringValue,
   type NativeValue,
@@ -516,6 +517,34 @@ const hermesSessionFingerprint = (rows: readonly HermesMessageRow[]): UnitFinger
   return { size: rows.length, mtimeMs: latest };
 };
 
+/**
+ * Cheap pre-parse gate for a hermes session. Hermes is honest about its
+ * partial skip: the message rows must be read to fingerprint a session (the
+ * shared state.db's file stat is useless per-session), but the gate runs
+ * before buildHermesSessionFromRows so the expensive normalization (content
+ * block projection, tool-call assembly, redaction) is skipped on a hit. The
+ * probe's sourceFingerprint equals what the engine derives from
+ * `item.fingerprint` (JSON.stringify of the same unit fingerprint).
+ */
+const skipHermesSession = (
+  options: AdapterOptions,
+  sessionEntry: HermesSessionRow,
+  messageRows: readonly HermesMessageRow[],
+  sourcePath: string,
+): boolean => {
+  if (options.shouldParseSession === undefined) return false;
+  const probe = {
+    sessionId: sessionIdFor(
+      "hermes",
+      options.machine.machineId,
+      String(sessionEntry.id ?? ""),
+      sourcePath,
+    ),
+    sourceFingerprint: JSON.stringify(hermesSessionFingerprint(messageRows)),
+  };
+  return options.shouldParseSession(probe) === false;
+};
+
 async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStreamItem> {
   const root = options.roots?.hermes ?? hermesAdapter.defaultRoot();
   const dbPath = hermesDbPath(root);
@@ -540,6 +569,7 @@ async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStr
       usedFallback = true;
       for (const sessionEntry of readSessionRowsCli(tempDb.path, options.limit, options.skip)) {
         const messageRows = readMessageRowsCli(tempDb.path, String(sessionEntry.id ?? ""));
+        if (skipHermesSession(options, sessionEntry, messageRows, logicalDbPath ?? dbPath)) continue;
         const session = buildHermesSessionFromRows(
           logicalDbPath ?? dbPath,
           logicalRoot ?? root,
@@ -564,6 +594,7 @@ async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStr
     } else {
       for (const sessionEntry of readSessionRows(db, options.limit, options.skip)) {
         const messageRows = readMessageRows(db, String(sessionEntry.id ?? ""));
+        if (skipHermesSession(options, sessionEntry, messageRows, logicalDbPath ?? dbPath)) continue;
         const session = buildHermesSessionFromRows(
           logicalDbPath ?? dbPath,
           logicalRoot ?? root,

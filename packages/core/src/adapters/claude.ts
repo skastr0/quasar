@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { collectAdapterStream, type SessionAdapter } from "./types";
@@ -22,6 +22,8 @@ import {
   recordFrom,
   roleFrom,
   scopedId,
+  sessionIdFor,
+  sourceFingerprintFor,
   sourceRoot,
   type NativeValue,
   usageIdFor,
@@ -396,6 +398,16 @@ async function* streamClaude(options: AdapterOptions) {
   let sessionCount = 0;
   for (const path of files) {
     const sourcePath = logicalPathFor(path, projectsRoot, logicalProjectsRoot);
+    // Cheap pre-parse gate: a stat (size/mtime) is the per-session change
+    // signal, so an unchanged session never reaches the line parse.
+    if (options.shouldParseSession !== undefined) {
+      const stat = statSync(path);
+      const probe = {
+        sessionId: sessionIdFor("claude", options.machine.machineId, nativeSessionIdFromPath(sourcePath), sourcePath),
+        sourceFingerprint: sourceFingerprintFor(stat),
+      };
+      if (options.shouldParseSession(probe) === false) continue;
+    }
     const session = buildClaudeSessionFromFile(
       path,
       sourcePath,

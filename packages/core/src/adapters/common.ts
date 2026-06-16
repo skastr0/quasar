@@ -705,9 +705,12 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
     gitRemote: args.gitRemote ?? gitRemoteForPath(args.projectPath),
     packageName: args.packageName,
   });
-  const id = `${args.provider}:${args.machine.machineId}:${stableWideHash(
-    `${args.nativeSessionId}:${args.sourcePath}`,
-  )}`;
+  const id = sessionIdFor(
+    args.provider,
+    args.machine.machineId,
+    args.nativeSessionId,
+    args.sourcePath,
+  );
   const events = args.events.map(({ contentBlocks, contentSource, ...event }) => ({
     ...event,
     sessionId: id,
@@ -794,6 +797,27 @@ export const eventIdFor = (
 
 export const nativeSessionIdFromPath = (path: string) =>
   basename(path).replace(/\.(jsonl|json|db)$/i, "");
+
+/**
+ * The canonical source fingerprint string for a stat. Adapter pre-parse
+ * probes and the ingest engine's statSync path MUST both route through this so
+ * the probe's `sourceFingerprint` is byte-identical to what the engine derives
+ * (`JSON.stringify({ size, mtimeMs })`, exact key order).
+ */
+export const sourceFingerprintFor = (stat: { size: number; mtimeMs: number }): string =>
+  JSON.stringify({ size: stat.size, mtimeMs: stat.mtimeMs });
+
+/**
+ * The session id a built session will carry, derived from the same
+ * (nativeSessionId, sourcePath) inputs `buildSession` uses. Adapter pre-parse
+ * probes compute it cheaply so the parse gate keys on the final session id.
+ */
+export const sessionIdFor = (
+  provider: Provider,
+  machineId: string,
+  nativeSessionId: string,
+  sourcePath: string,
+) => `${provider}:${machineId}:${stableWideHash(`${nativeSessionId}:${sourcePath}`)}`;
 
 export const parentDirectoryName = (path: string) => basename(dirname(path));
 

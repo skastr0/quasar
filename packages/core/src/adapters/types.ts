@@ -6,6 +6,18 @@ import type {
   SourceRoot,
 } from "../schemas";
 
+/**
+ * Cheap pre-parse probe: an adapter computes this (source path + statSync
+ * size/mtime alone) before the expensive build/yield of a session. The
+ * `sourceFingerprint` is byte-identical to what the ingest engine derives
+ * from the session's unit fingerprint, so a caller can decide skip purely
+ * from it.
+ */
+export interface SessionParseProbe {
+  readonly sessionId: string;
+  readonly sourceFingerprint: string;
+}
+
 export interface AdapterDiscoverOptions {
   readonly machine: MachineIdentity;
   readonly now: string;
@@ -13,6 +25,12 @@ export interface AdapterDiscoverOptions {
   readonly logicalRoots?: Partial<Record<Provider, string>>;
   readonly limit?: number;
   readonly skip?: number;
+  /**
+   * Pre-parse gate. Returning false means the adapter MUST skip the expensive
+   * build/yield for that session. Absent (the default) preserves today's
+   * behavior: every discovered session is parsed and yielded.
+   */
+  readonly shouldParseSession?: (probe: SessionParseProbe) => boolean;
 }
 
 export interface AdapterReadResult {

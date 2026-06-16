@@ -24,6 +24,8 @@ import {
   projectToolPayloadNativeValue,
   recordFrom,
   roleFrom,
+  sessionIdFor,
+  sourceFingerprintFor,
   sourceRoot,
   usageIdFor,
 } from "./common";
@@ -682,8 +684,18 @@ async function* streamCodex(options: AdapterOptions) {
   }
   let sessionCount = 0;
   for (const { path, scan } of files) {
-    sessionCount += 1;
     const sourcePath = logicalPathFor(path, scan.physicalRoot, scan.logicalScanRoot);
+    // Cheap pre-parse gate: a stat (size/mtime) is the per-session change
+    // signal, so an unchanged rollout file never reaches the line parse.
+    if (options.shouldParseSession !== undefined) {
+      const stat = statSync(path);
+      const probe = {
+        sessionId: sessionIdFor("codex", options.machine.machineId, nativeSessionIdFromPath(sourcePath), sourcePath),
+        sourceFingerprint: sourceFingerprintFor(stat),
+      };
+      if (options.shouldParseSession(probe) === false) continue;
+    }
+    sessionCount += 1;
     for await (const session of streamCodexSessionFromFile(
         path,
         sourcePath,
