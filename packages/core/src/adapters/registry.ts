@@ -2,6 +2,7 @@ import { claudeAdapter } from "./claude";
 import { codexAdapter } from "./codex";
 import { grokAdapter } from "./grok";
 import { hermesAdapter } from "./hermes";
+import { kimiAdapter } from "./kimi";
 import { opencodeAdapter } from "./opencode";
 import type { AdapterDiscoverOptions, AdapterReadResult, SessionAdapter } from "./types";
 
@@ -11,6 +12,7 @@ export const stableAdapters = [
   opencodeAdapter,
   grokAdapter,
   hermesAdapter,
+  kimiAdapter,
 ] as const;
 
 export const experimentalAdapters = [] as const;
