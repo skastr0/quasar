@@ -92,6 +92,7 @@ type BuildSessionArgs = {
   readonly projectPath?: string;
   readonly gitRemote?: string;
   readonly packageName?: string;
+  readonly explicitProjectKey?: string;
   readonly events: (Omit<
     SessionEvent,
     "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey" | "contentBlocks"
@@ -704,6 +705,7 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
     rawPath: args.projectPath ?? args.nativeProjectKey,
     gitRemote: args.gitRemote ?? gitRemoteForPath(args.projectPath),
     packageName: args.packageName,
+    explicitProjectKey: args.explicitProjectKey,
   });
   const id = sessionIdFor(
     args.provider,

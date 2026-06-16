@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -104,6 +104,39 @@ const hermesDbPath = (root: string | undefined) => {
   } catch {
     return join(root, "state.db");
   }
+};
+
+/** Enumerate all profile-scoped state.db files plus the top-level default. */
+const discoverHermesDbPaths = (root: string): { dbPath: string; profileName: string }[] => {
+  const results: { dbPath: string; profileName: string }[] = [];
+  const profilesDir = join(root, "profiles");
+  if (existsSync(profilesDir)) {
+    let profileDirs: string[] = [];
+    try {
+      profileDirs = readdirSync(profilesDir)
+        .filter((entry) => {
+          try {
+            return statSync(join(profilesDir, entry)).isDirectory();
+          } catch {
+            return false;
+          }
+        })
+        .sort();
+    } catch {
+      // unreadable profiles dir — skip, fall through to top-level
+    }
+    for (const profileName of profileDirs) {
+      const dbPath = join(profilesDir, profileName, "state.db");
+      if (existsSync(dbPath)) {
+        results.push({ dbPath, profileName });
+      }
+    }
+  }
+  const topLevelDb = join(root, "state.db");
+  if (existsSync(topLevelDb)) {
+    results.push({ dbPath: topLevelDb, profileName: "hermes" });
+  }
+  return results;
 };
 
 export const hermesSessionWindowLimit = (limit: number | undefined) =>
@@ -376,6 +409,7 @@ const buildHermesSessionFromRows = (
   options: AdapterOptions,
   session: HermesSessionRow,
   messages: readonly HermesMessageRow[],
+  profileName: string,
 ) => {
   const nativeSessionId = String(session.id ?? "");
   const machineId = options.machine.machineId;
@@ -477,7 +511,7 @@ const buildHermesSessionFromRows = (
     updatedAt: isoFromEpoch(session.ended_at),
     sourceRoot: root,
     sourcePath: dbPath,
-    projectPath: stringValue(session.cwd),
+    explicitProjectKey: `profile:${profileName}`,
     events,
     toolCalls: [...toolCallsByNativeId.values()],
     sessionEdges,
@@ -502,8 +536,9 @@ const missingDatabaseResult = (root: string | undefined) => ({
 });
 
 /**
- * Per-session change signal. All hermes sessions live in one shared state.db
- * file, so a file-level stat fingerprint would mismatch for every session
+ * Per-session change signal. Hermes shards sessions across profile-scoped
+ * state.db files (one per ~/.hermes/profiles/<name>/state.db), so a
+ * file-level stat fingerprint would mismatch for every session in a profile
  * whenever any single one is touched — forcing a full-estate re-ingest. The
  * session's own message-row count plus newest message timestamp (epoch
  * seconds, append-only log) is the per-session signal.
@@ -547,104 +582,132 @@ const skipHermesSession = (
 
 async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStreamItem> {
   const root = options.roots?.hermes ?? hermesAdapter.defaultRoot();
-  const dbPath = hermesDbPath(root);
   const logicalRoot = root === undefined ? undefined : logicalRootFor("hermes", root, options);
-  const logicalDbPath = hermesDbPath(logicalRoot);
-  if (root === undefined || dbPath === undefined || !existsSync(dbPath)) {
+
+  if (root === undefined) {
     for (const diagnostic of missingDatabaseResult(logicalRoot ?? root).diagnostics) {
       yield { type: "diagnostic", diagnostic };
     }
     return;
   }
-  const tempDb = copyDatabaseForRead(dbPath);
-  const db = await maybeDatabase(tempDb.path);
-  let usedFallback = false;
-  let sessionCount = 0;
-  try {
-    yield {
-      type: "sourceRoot",
-      sourceRoot: sourceRoot("hermes", hermesAdapter.id, logicalRoot ?? root, options.machine, options.now),
-    };
-    if (db === undefined) {
-      usedFallback = true;
-      for (const sessionEntry of readSessionRowsCli(tempDb.path, options.limit, options.skip)) {
-        const messageRows = readMessageRowsCli(tempDb.path, String(sessionEntry.id ?? ""));
-        if (skipHermesSession(options, sessionEntry, messageRows, logicalDbPath ?? dbPath)) continue;
-        const session = buildHermesSessionFromRows(
-          logicalDbPath ?? dbPath,
-          logicalRoot ?? root,
-          options,
-          sessionEntry,
-          messageRows,
-        );
-        yield {
-          type: "session",
-          session,
-          sourceUnit: {
-            provider: "hermes" as const,
-            adapterId: hermesAdapter.id,
-            rootPath: logicalRoot ?? root,
-            sourcePath: session.sourcePath,
-            physicalPath: dbPath,
-          },
-          fingerprint: hermesSessionFingerprint(messageRows),
-        };
-        sessionCount += 1;
-      }
-    } else {
-      for (const sessionEntry of readSessionRows(db, options.limit, options.skip)) {
-        const messageRows = readMessageRows(db, String(sessionEntry.id ?? ""));
-        if (skipHermesSession(options, sessionEntry, messageRows, logicalDbPath ?? dbPath)) continue;
-        const session = buildHermesSessionFromRows(
-          logicalDbPath ?? dbPath,
-          logicalRoot ?? root,
-          options,
-          sessionEntry,
-          messageRows,
-        );
-        yield {
-          type: "session",
-          session,
-          sourceUnit: {
-            provider: "hermes" as const,
-            adapterId: hermesAdapter.id,
-            rootPath: logicalRoot ?? root,
-            sourcePath: session.sourcePath,
-            physicalPath: dbPath,
-          },
-          fingerprint: hermesSessionFingerprint(messageRows),
-        };
-        sessionCount += 1;
-      }
-    }
+
+  const dbEntries = discoverHermesDbPaths(root);
+
+  if (dbEntries.length === 0) {
     yield {
       type: "diagnostic",
       diagnostic: {
         adapterId: hermesAdapter.id,
         provider: "hermes" as const,
-        status: sessionCount > 0 ? ("available" as const) : ("no_data_found" as const),
+        status: "no_data_found" as const,
         parserConfidence: "documented" as const,
-        rootPath: logicalDbPath ?? dbPath,
-        message: `Discovered ${sessionCount} Hermes session(s)${usedFallback ? " via sqlite3 fallback" : ""}.`,
+        message: "No Hermes state.db files found (checked profiles/* and top-level).",
+        rootPath: logicalRoot ?? root,
       },
     };
-  } catch (error) {
-    yield {
-      type: "diagnostic",
-      diagnostic: {
-        adapterId: hermesAdapter.id,
-        provider: "hermes" as const,
-        status: "unsupported" as const,
-        parserConfidence: "documented" as const,
-        rootPath: logicalDbPath ?? dbPath,
-        message: "Hermes state.db did not match the documented sessions/messages schema.",
-        details: { error: error instanceof Error ? error.message : String(error) },
-      },
-    };
-  } finally {
-    db?.close();
-    tempDb.cleanup();
+    return;
   }
+
+  yield {
+    type: "sourceRoot",
+    sourceRoot: sourceRoot("hermes", hermesAdapter.id, logicalRoot ?? root, options.machine, options.now),
+  };
+
+  let totalSessionCount = 0;
+
+  for (const { dbPath, profileName } of dbEntries) {
+    const logicalDbPath =
+      logicalRoot !== undefined
+        ? dbPath.replace(root, logicalRoot)
+        : dbPath;
+    const tempDb = copyDatabaseForRead(dbPath);
+    const db = await maybeDatabase(tempDb.path);
+    let profileSessionCount = 0;
+    try {
+      if (db === undefined) {
+        for (const sessionEntry of readSessionRowsCli(tempDb.path, options.limit, options.skip)) {
+          const messageRows = readMessageRowsCli(tempDb.path, String(sessionEntry.id ?? ""));
+          if (skipHermesSession(options, sessionEntry, messageRows, logicalDbPath)) continue;
+          const session = buildHermesSessionFromRows(
+            logicalDbPath,
+            logicalRoot ?? root,
+            options,
+            sessionEntry,
+            messageRows,
+            profileName,
+          );
+          yield {
+            type: "session",
+            session,
+            sourceUnit: {
+              provider: "hermes" as const,
+              adapterId: hermesAdapter.id,
+              rootPath: logicalRoot ?? root,
+              sourcePath: session.sourcePath,
+              physicalPath: dbPath,
+            },
+            fingerprint: hermesSessionFingerprint(messageRows),
+          };
+          profileSessionCount += 1;
+        }
+      } else {
+        for (const sessionEntry of readSessionRows(db, options.limit, options.skip)) {
+          const messageRows = readMessageRows(db, String(sessionEntry.id ?? ""));
+          if (skipHermesSession(options, sessionEntry, messageRows, logicalDbPath)) continue;
+          const session = buildHermesSessionFromRows(
+            logicalDbPath,
+            logicalRoot ?? root,
+            options,
+            sessionEntry,
+            messageRows,
+            profileName,
+          );
+          yield {
+            type: "session",
+            session,
+            sourceUnit: {
+              provider: "hermes" as const,
+              adapterId: hermesAdapter.id,
+              rootPath: logicalRoot ?? root,
+              sourcePath: session.sourcePath,
+              physicalPath: dbPath,
+            },
+            fingerprint: hermesSessionFingerprint(messageRows),
+          };
+          profileSessionCount += 1;
+        }
+      }
+      totalSessionCount += profileSessionCount;
+    } catch (error) {
+      yield {
+        type: "diagnostic",
+        diagnostic: {
+          adapterId: hermesAdapter.id,
+          provider: "hermes" as const,
+          status: "unsupported" as const,
+          parserConfidence: "documented" as const,
+          rootPath: logicalDbPath,
+          message: `Hermes state.db for profile '${profileName}' did not match the documented sessions/messages schema.`,
+          details: { error: error instanceof Error ? error.message : String(error) },
+        },
+      };
+    } finally {
+      db?.close();
+      tempDb.cleanup();
+    }
+  }
+
+  yield {
+    type: "diagnostic",
+    diagnostic: {
+      adapterId: hermesAdapter.id,
+      provider: "hermes" as const,
+      status: totalSessionCount > 0 ? ("available" as const) : ("no_data_found" as const),
+      parserConfidence: "documented" as const,
+      rootPath: logicalRoot ?? root,
+      message: `Discovered ${totalSessionCount} Hermes session(s) across ${dbEntries.length} profile database(s).`,
+    },
+  };
 }
 
 export const hermesAdapter: SessionAdapter = {
