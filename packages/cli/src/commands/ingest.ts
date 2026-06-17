@@ -244,7 +244,16 @@ const grokHooks: ProviderIngestHooks = {};
 
 const kimiHooks: ProviderIngestHooks = {};
 
-const antigravityHooks: ProviderIngestHooks = {};
+/**
+ * Antigravity: the adapter classifies cumulative replay transcripts by the
+ * turn-terminal rule — only `kind: "message"` events are searchable user or
+ * assistant answers. Mid-loop planner ticks, tool narration, thinking, and
+ * system replay rows must never reach `messages`, even if classification
+ * regresses. Belt on top of packages/core/src/adapters/antigravity.ts.
+ */
+const antigravityHooks: ProviderIngestHooks = {
+  admitMessageEvent: (event) => event.kind === "message",
+};
 
 /**
  * Amp: server-side threads exported via the CLI. Roles arrive already
