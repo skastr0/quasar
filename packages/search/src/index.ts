@@ -1,4 +1,5 @@
 import * as lancedb from "@lancedb/lancedb";
+import { Field, FixedSizeList, Float32, Int32, Schema as ArrowSchema, Utf8 } from "apache-arrow";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -10,14 +11,38 @@ export const DEFAULT_VECTOR_COLUMN = "vector";
 export const DEFAULT_TEXT_COLUMN = "text";
 export const DEFAULT_KEY_COLUMN = "key";
 export const DEFAULT_FUSION_K = 60;
+export const GEMINI_EMBEDDING_DIMENSIONS = 1536;
+export const MESSAGE_VECTOR_INDEX_NAME = "vector_idx";
+export const MESSAGE_TEXT_INDEX_NAME = "text_idx";
+
+export const MESSAGE_SEARCH_COLUMNS = [
+  "key",
+  "sessionId",
+  "seq",
+  "role",
+  "projectKey",
+  "text",
+  "contentHash",
+] as const;
 
 export type SearchVector = readonly number[];
+export type SearchRole = "user" | "assistant";
 
 export interface SearchRow {
   readonly key: string;
   readonly text: string;
   readonly vector: SearchVector;
   readonly [field: string]: unknown;
+}
+
+export interface MessageSearchRow {
+  readonly sessionId: string;
+  readonly seq: number;
+  readonly role: SearchRole;
+  readonly projectKey: string;
+  readonly text: string;
+  readonly contentHash: string;
+  readonly vector: SearchVector;
 }
 
 export interface LanceDbLayerOptions {
@@ -35,11 +60,25 @@ export interface EnsureTableRequest extends TableRequest {
   readonly vectorDimension?: number;
 }
 
+export interface EnsureMessageTableRequest extends TableRequest {
+  readonly rows?: readonly MessageSearchRow[];
+  readonly mode?: "create" | "overwrite";
+  readonly createIndexes?: boolean;
+}
+
+export interface CreateMessageIndexesRequest extends TableRequest {
+  readonly includeVector?: boolean;
+}
+
 export interface UpsertRowsRequest extends TableRequest {
   readonly rows: readonly SearchRow[];
   readonly keyColumn?: string;
   readonly vectorColumn?: string;
   readonly vectorDimension?: number;
+}
+
+export interface UpsertMessageRowsRequest extends TableRequest {
+  readonly rows: readonly MessageSearchRow[];
 }
 
 export interface DeleteByKeysRequest extends TableRequest {
@@ -138,6 +177,25 @@ type LanceDbError =
 
 const defaultSearchDataDir = (): string => join(homedir(), ".config", "quasar", "search.lance");
 
+export const messageSearchKey = (row: Pick<MessageSearchRow, "sessionId" | "seq" | "role">): string =>
+  `${row.sessionId}:${row.seq}:${row.role}`;
+
+export const createMessageSearchSchema = (dimensions = GEMINI_EMBEDDING_DIMENSIONS): ArrowSchema =>
+  new ArrowSchema([
+    new Field(DEFAULT_KEY_COLUMN, new Utf8(), false),
+    new Field("sessionId", new Utf8(), false),
+    new Field("seq", new Int32(), false),
+    new Field("role", new Utf8(), false),
+    new Field("projectKey", new Utf8(), false),
+    new Field(DEFAULT_TEXT_COLUMN, new Utf8(), false),
+    new Field("contentHash", new Utf8(), false),
+    new Field(
+      DEFAULT_VECTOR_COLUMN,
+      new FixedSizeList(dimensions, new Field("item", new Float32(), false)),
+      false,
+    ),
+  ]);
+
 export const searchDataDirFromEnv = (): string =>
   process.env.QUASAR_SEARCH_DATA_DIR?.trim() || defaultSearchDataDir();
 
@@ -183,6 +241,30 @@ const rowsForLance = (rows: readonly SearchRow[]): Record<string, unknown>[] =>
     ),
   );
 
+const projectRow = (
+  row: Record<string, unknown>,
+  columns: readonly string[] | undefined,
+): Record<string, unknown> => {
+  if (columns === undefined || columns.length === 0) {
+    return row;
+  }
+  return Object.fromEntries(columns.filter((column) => column in row).map((column) => [column, row[column]]));
+};
+
+const messageRowsForLance = (rows: readonly MessageSearchRow[]): Record<string, unknown>[] =>
+  rowsForLance(
+    rows.map((row) => ({
+      key: messageSearchKey(row),
+      sessionId: row.sessionId,
+      seq: row.seq,
+      role: row.role,
+      projectKey: row.projectKey,
+      text: row.text,
+      contentHash: row.contentHash,
+      vector: row.vector,
+    })),
+  );
+
 const detectIndexNotReady = (
   tableName: string,
   indexName: string,
@@ -224,14 +306,16 @@ const assertVectorDimension = (
       );
 
 const assertRowsVectorDimension = (
-  rows: readonly SearchRow[],
+  rows: readonly object[],
   vectorColumn: string,
   vectorDimension: number | undefined,
 ): Effect.Effect<void, DimensionMismatch> =>
   Effect.forEach(
     rows,
     (row) => {
-      const vector = row[vectorColumn];
+      const vector = Object.prototype.hasOwnProperty.call(row, vectorColumn)
+        ? (row as { readonly [key: string]: unknown })[vectorColumn]
+        : undefined;
       if (!Array.isArray(vector)) {
         return Effect.fail(
           new DimensionMismatch({
@@ -293,6 +377,95 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
       });
     };
 
+    const createMessageIndexes = (
+      request: CreateMessageIndexesRequest = {},
+    ): Effect.Effect<void, LanceDbError> =>
+      Effect.gen(function* () {
+        const tableName = tableNameOrDefault(request.tableName);
+        const table = yield* openTable({ tableName });
+        yield* Effect.tryPromise({
+          try: () =>
+            table.createIndex(DEFAULT_TEXT_COLUMN, {
+              config: lancedb.Index.fts(),
+              name: MESSAGE_TEXT_INDEX_NAME,
+              replace: true,
+              waitTimeoutSeconds: 60,
+            }),
+          catch: (cause) => detectIndexNotReady(tableName, MESSAGE_TEXT_INDEX_NAME, "createFtsIndex", cause),
+        });
+        if (request.includeVector === false) {
+          return;
+        }
+        const rows = yield* Effect.tryPromise({
+          try: () => table.countRows(),
+          catch: (cause) => makeOperationError(tableName, "countRows", cause),
+        });
+        if (rows === 0) {
+          return yield* Effect.fail(
+            new IndexNotReady({
+              tableName,
+              indexName: MESSAGE_VECTOR_INDEX_NAME,
+              operation: "createVectorIndex",
+              message: "LanceDB cannot train a vector index before rows exist.",
+            }),
+          );
+        }
+        yield* Effect.tryPromise({
+          try: () =>
+            table.createIndex(DEFAULT_VECTOR_COLUMN, {
+              config: lancedb.Index.ivfFlat({
+                distanceType: "cosine",
+                numPartitions: 1,
+              }),
+              name: MESSAGE_VECTOR_INDEX_NAME,
+              replace: true,
+              waitTimeoutSeconds: 60,
+            }),
+          catch: (cause) => detectIndexNotReady(tableName, MESSAGE_VECTOR_INDEX_NAME, "createVectorIndex", cause),
+        });
+      });
+
+    const ensureMessageTable = (request: EnsureMessageTableRequest = {}): Effect.Effect<Table, LanceDbError> =>
+      Effect.gen(function* () {
+        const tableName = tableNameOrDefault(request.tableName);
+        const rows = request.rows ?? [];
+        yield* assertRowsVectorDimension(rows, DEFAULT_VECTOR_COLUMN, GEMINI_EMBEDDING_DIMENSIONS);
+        const existing = yield* tableNames(connection, tableName);
+        const tableExists = existing.includes(tableName);
+        const table =
+          tableExists && request.mode !== "overwrite"
+            ? yield* openTable({ tableName })
+            : yield* Effect.tryPromise({
+                try: () =>
+                  rows.length === 0
+                    ? connection.createEmptyTable(tableName, createMessageSearchSchema(), {
+                        mode: request.mode ?? "create",
+                        existOk: true,
+                      })
+                    : connection.createTable(tableName, messageRowsForLance(rows), {
+                        mode: request.mode ?? "create",
+                        existOk: true,
+                        schema: createMessageSearchSchema(),
+                      }),
+                catch: (cause) => makeOperationError(tableName, "createMessageTable", cause),
+              });
+        if (tableExists && request.mode !== "overwrite" && rows.length > 0) {
+          yield* Effect.tryPromise({
+            try: () =>
+              table
+                .mergeInsert(DEFAULT_KEY_COLUMN)
+                .whenMatchedUpdateAll()
+                .whenNotMatchedInsertAll()
+                .execute(messageRowsForLance(rows)),
+            catch: (cause) => makeOperationError(tableName, "mergeInsertMessages", cause),
+          });
+        }
+        if (request.createIndexes !== false) {
+          yield* createMessageIndexes({ tableName, includeVector: rows.length > 0 });
+        }
+        return table;
+      });
+
     const ensureTable = (request: EnsureTableRequest): Effect.Effect<Table, LanceDbError> =>
       Effect.gen(function* () {
         const tableName = tableNameOrDefault(request.tableName);
@@ -318,6 +491,35 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
               existOk: true,
             }),
           catch: (cause) => makeOperationError(tableName, "createTable", cause),
+        });
+      });
+
+    const upsertMessageRows = (request: UpsertMessageRowsRequest): Effect.Effect<void, LanceDbError> =>
+      Effect.gen(function* () {
+        if (request.rows.length === 0) {
+          return;
+        }
+        const tableName = tableNameOrDefault(request.tableName);
+        yield* assertRowsVectorDimension(request.rows, DEFAULT_VECTOR_COLUMN, GEMINI_EMBEDDING_DIMENSIONS);
+        const records = messageRowsForLance(request.rows);
+        const existing = yield* tableNames(connection, tableName);
+        if (!existing.includes(tableName)) {
+          yield* ensureMessageTable({
+            tableName,
+            rows: request.rows,
+            createIndexes: false,
+          });
+          return;
+        }
+        const table = yield* openTable({ tableName });
+        yield* Effect.tryPromise({
+          try: () =>
+            table
+              .mergeInsert(DEFAULT_KEY_COLUMN)
+              .whenMatchedUpdateAll()
+              .whenNotMatchedInsertAll()
+              .execute(records),
+          catch: (cause) => makeOperationError(tableName, "mergeInsertMessages", cause),
         });
       });
 
@@ -438,34 +640,49 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
         const keyColumn = keyColumnOrDefault(request.keyColumn);
         const limit = limitOrDefault(request.limit);
         const fusionK = request.fusionK ?? DEFAULT_FUSION_K;
-        const [lexical, semantic] = yield* Effect.all(
-          [
-            ftsSearch({ ...request, limit: limit * 2 }),
-            vectorSearch({ ...request, limit: limit * 2 }),
-          ],
-          { concurrency: "unbounded" },
-        );
-        const fused = new Map<string, SearchHit>();
-        for (const source of [lexical, semantic]) {
-          for (const [rank, hit] of source.entries()) {
-            const key = String(hit.row[keyColumn] ?? hit.key);
-            const prior = fused.get(key);
-            const score = (prior?.score ?? 0) + 1 / (fusionK + rank + 1);
-            fused.set(key, {
-              key,
-              score,
-              row: prior?.row ?? hit.row,
-            });
-          }
+        const tableName = tableNameOrDefault(request.tableName);
+        const vectorColumn = vectorColumnOrDefault(request.vectorColumn);
+        const textColumn = textColumnOrDefault(request.textColumn);
+        yield* assertVectorDimension(request.vector, vectorColumn, request.vectorDimension);
+        const table = yield* openTable({ tableName });
+        const reranker = yield* Effect.tryPromise({
+          try: () => lancedb.rerankers.RRFReranker.create(fusionK),
+          catch: (cause) => detectIndexNotReady(tableName, "rrf", "createReranker", cause),
+        });
+        let query = table
+          .query()
+          .nearestTo([...request.vector])
+          .column(vectorColumn)
+          .fullTextSearch(request.query, { columns: textColumn })
+          .rerank(reranker)
+          .limit(limit);
+        if (request.filter !== undefined) {
+          query = query.where(request.filter);
         }
-        return [...fused.values()].sort((left, right) => right.score - left.score).slice(0, limit);
+        const rows = yield* Effect.tryPromise({
+          try: () => query.toArray(),
+          catch: (cause) => detectIndexNotReady(tableName, `${textColumn}_idx/${vectorColumn}_idx`, "hybridSearch", cause),
+        });
+        return rows.map((row, index) => ({
+          key: String(row[keyColumn] ?? row[DEFAULT_KEY_COLUMN] ?? index),
+          score:
+            typeof row._relevance_score === "number"
+              ? row._relevance_score
+              : typeof row._score === "number"
+                ? row._score
+                : 1 / (index + 1),
+          row: projectRow(row, request.select),
+        }));
       });
 
     return {
       dataDir,
       connect: Effect.succeed(connection),
       openTable,
+      ensureMessageTable,
+      createMessageIndexes,
       ensureTable,
+      upsertMessageRows,
       upsertRows,
       deleteByKeys,
       readRows,

@@ -53,6 +53,7 @@
       "version": "0.1.1",
       "dependencies": {
         "@lancedb/lancedb": "^0.30.0",
+        "apache-arrow": "18.1.0",
         "effect": "^3.21.2",
       },
       "devDependencies": {
