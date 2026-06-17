@@ -48,6 +48,19 @@ type GrokEventDraft = Omit<
 > & { readonly contentBlocks?: readonly import("../schemas").ContentBlock[]; readonly contentSource?: NativeValue };
 type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
 
+const grokSessionFingerprint = (sessionDir: string) => {
+  let size = 0;
+  let mtimeMs = 0;
+  for (const fileName of ["chat_history.jsonl", "events.jsonl", "updates.jsonl"]) {
+    const path = join(sessionDir, fileName);
+    if (!existsSync(path)) continue;
+    const stat = statSync(path);
+    size += stat.size;
+    mtimeMs = Math.max(mtimeMs, stat.mtimeMs);
+  }
+  return { size, mtimeMs };
+};
+
 const grokTime = (record: Record<string, unknown>) => {
   if (typeof record.timestamp === "string") return record.timestamp;
   if (typeof record.ts === "string") return record.ts;
@@ -311,8 +324,9 @@ const buildGrokSessionFromChatPath = (
   const projectPath = decodeProjectPath(projectKey);
   const summary = grokSummaryRecord(readJsonFile(join(sessionDir, "summary.json")));
   const chatLines = readJsonLines(chatPath);
-  const eventLines = readJsonLines(join(sessionDir, "events.jsonl"));
-  const updateLines = readJsonLines(join(sessionDir, "updates.jsonl"));
+  const readOptionalLines = (path: string) => (existsSync(path) ? readJsonLines(path) : []);
+  const eventLines = readOptionalLines(join(sessionDir, "events.jsonl"));
+  const updateLines = readOptionalLines(join(sessionDir, "updates.jsonl"));
   const hunkPath = join(sessionDir, "hunk_records.jsonl");
   const toolCallsById = new Map<string, GrokToolCallDraft>();
 
@@ -555,15 +569,15 @@ async function* streamGrok(options: AdapterOptions): AsyncGenerator<AdapterStrea
   yield { type: "sourceRoot", sourceRoot: rootRecord };
   let sessionCount = 0;
   for (const chatPath of files) {
-    // Cheap pre-parse gate: the session lives in the chat file's directory,
-    // but the chat file's own stat (size/mtime) is the per-session change
-    // signal, so an unchanged session never reaches the multi-file parse.
+    // Cheap pre-parse gate over the full session surface: chat is canonical,
+    // while events/updates are optional sidecars whose late creation must
+    // invalidate the prior ingest.
+    const sessionDir = dirname(chatPath);
+    const fingerprint = grokSessionFingerprint(sessionDir);
     if (options.shouldParseSession !== undefined) {
-      const sessionDir = dirname(chatPath);
-      const stat = statSync(chatPath);
       const probe = {
         sessionId: sessionIdFor("grok", options.machine.machineId, basename(sessionDir), sessionDir),
-        sourceFingerprint: sourceFingerprintFor(stat),
+        sourceFingerprint: sourceFingerprintFor(fingerprint),
       };
       if (options.shouldParseSession(probe) === false) continue;
     }
@@ -576,11 +590,9 @@ async function* streamGrok(options: AdapterOptions): AsyncGenerator<AdapterStrea
         adapterId: grokAdapter.id,
         rootPath: sessionsRoot,
         sourcePath: session.sourcePath,
-        // The chat file itself, never its directory: a directory's mtime does
-        // not change when a file inside it is appended to, so a directory
-        // fingerprint would skip sessions whose chat_history.jsonl grew.
         physicalPath: chatPath,
       },
+      fingerprint,
     };
     sessionCount += 1;
   }

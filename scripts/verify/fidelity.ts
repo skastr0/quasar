@@ -28,9 +28,10 @@
  */
 import { convexClient, readSessionMessages, walkEstateSessions, type EstateSession } from "./lib/estate";
 import {
+  parseAntigravitySession,
   collapse,
   expectedSessionId,
-  hermesDbPath,
+  hermesDbPaths,
   hermesSessionIds,
   loadMachineId,
   opencodeDbPath,
@@ -44,7 +45,7 @@ import {
   type TurnRow,
 } from "./lib/independent";
 
-const PROVIDERS = ["claude", "codex", "opencode", "hermes", "grok"] as const;
+const PROVIDERS = ["claude", "codex", "opencode", "hermes", "grok", "antigravity"] as const;
 const PREFIX = 80;
 
 const normalize = (text: string): string => collapse(text).slice(0, PREFIX);
@@ -162,11 +163,12 @@ const main = async () => {
       }
     });
   }
-  const hermesSource = estate.find((s) => s.provider === "hermes")?.sourcePath;
-  if (hermesSource !== undefined) {
-    withDbCopy(hermesDbPath(), (db) => {
+  const hermesSources = new Set(estate.filter((s) => s.provider === "hermes").map((s) => s.sourcePath));
+  for (const dbPath of hermesDbPaths()) {
+    if (!hermesSources.has(dbPath)) continue;
+    withDbCopy(dbPath, (db) => {
       for (const id of hermesSessionIds(db)) {
-        nativeBySessionId.set(expectedSessionId("hermes", machineId, id, hermesSource), id);
+        nativeBySessionId.set(expectedSessionId("hermes", machineId, id, dbPath), id);
       }
     });
   }
@@ -185,6 +187,7 @@ const main = async () => {
       if (provider === "claude") expected = parseClaudeSession(sample.sourcePath).messages;
       else if (provider === "codex") expected = parseCodexSession(sample.sourcePath).messages;
       else if (provider === "grok") expected = parseGrokSession(sample.sourcePath).messages;
+      else if (provider === "antigravity") expected = parseAntigravitySession(sample.sourcePath).messages;
       else {
         const native = nativeBySessionId.get(sample.sessionId);
         if (native === undefined) {
@@ -195,9 +198,13 @@ const main = async () => {
         expected =
           provider === "opencode"
             ? withDbCopy(opencodeDb!, (db) => parseOpencodeSession(db, native).messages)
-            : withDbCopy(hermesDbPath(), (db) => parseHermesSession(db, native).messages);
+            : withDbCopy(sample.sourcePath, (db) => parseHermesSession(db, native).messages);
       }
-      const fileBacked = provider === "claude" || provider === "codex" || provider === "grok";
+      const fileBacked =
+        provider === "claude" ||
+        provider === "codex" ||
+        provider === "grok" ||
+        provider === "antigravity";
       results.push(classifySession(sample, stored, expected, fileBacked));
     }
   }

@@ -9,7 +9,7 @@
  *
  * TOLERANCES (explicit, small — the corpus is live and grows during the run):
  *
- * - File-backed providers (claude, codex, grok): source files only ever grow
+ * - File-backed providers (claude, codex, grok, antigravity): source files only ever grow
  *   (Claude purge is set to 3650 days; codex archives stay scanned), so the
  *   live source count must be >= the Convex count, and the upward drift since
  *   the last ingest must stay within:
@@ -31,11 +31,12 @@
  * (provider.metric: source vs convex, drift, tolerance).
  */
 import {
+  antigravityTotals,
   claudeTotals,
   codexTotals,
   dbFingerprint,
   grokTotals,
-  hermesDbPath,
+  hermesDbPaths,
   hermesTotals,
   opencodeDbPath,
   opencodeTotals,
@@ -49,7 +50,7 @@ const UPPER_DRIFT_ROWS = 0.03;
 /** Absolute drift floor so one new session in a tiny corpus is not a breach. */
 const UPPER_DRIFT_FLOOR = 5;
 
-const PROVIDERS = ["claude", "codex", "opencode", "hermes", "grok"] as const;
+const PROVIDERS = ["claude", "codex", "opencode", "hermes", "grok", "antigravity"] as const;
 type ProviderName = (typeof PROVIDERS)[number];
 
 interface Comparison {
@@ -122,27 +123,35 @@ const main = async () => {
 
   // Independent source side (db fingerprints captured around the parse).
   const opencodeDb = opencodeDbPath();
-  const hermesDb = hermesDbPath();
   const opencodeBefore = opencodeDb === undefined ? undefined : dbFingerprint(opencodeDb);
-  const hermesBefore = dbFingerprint(hermesDb);
+  const hermesBefore = new Map(hermesDbPaths().map((path) => [path, dbFingerprint(path)] as const));
   const source: Record<ProviderName, ProviderTotals | undefined> = {
     claude: claudeTotals(),
     codex: codexTotals(),
     opencode: opencodeTotals(),
     hermes: hermesTotals(),
     grok: grokTotals(),
+    antigravity: antigravityTotals(),
   };
   const opencodeAfter = opencodeDb === undefined ? undefined : dbFingerprint(opencodeDb);
-  const hermesAfter = dbFingerprint(hermesDb);
+  const hermesAfter = new Map(hermesDbPaths().map((path) => [path, dbFingerprint(path)] as const));
+  const hermesQuiet =
+    hermesBefore.size > 0 &&
+    hermesBefore.size === hermesAfter.size &&
+    [...hermesBefore].every(([path, before]) => {
+      const after = hermesAfter.get(path);
+      return after !== undefined && sameDbFingerprint(before, after);
+    });
   const quiet: Record<ProviderName, boolean> = {
     claude: false,
     codex: false,
     grok: false,
+    antigravity: false,
     opencode:
       opencodeBefore !== undefined &&
       opencodeAfter !== undefined &&
       sameDbFingerprint(opencodeBefore, opencodeAfter),
-    hermes: sameDbFingerprint(hermesBefore, hermesAfter),
+    hermes: hermesQuiet,
   };
 
   const breaches: string[] = [];

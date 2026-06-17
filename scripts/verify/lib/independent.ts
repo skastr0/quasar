@@ -70,6 +70,7 @@ export const PROVIDER_ROOTS = {
   opencode: () => join(home(), ".local/share/opencode"),
   hermes: () => process.env.HERMES_HOME ?? join(home(), ".hermes"),
   grok: () => join(home(), ".grok", "sessions"),
+  antigravity: () => join(home(), ".gemini", "antigravity-cli", "brain"),
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -556,6 +557,35 @@ export const parseOpencodeSession = (db: Database, nativeSessionId: string): Ses
 
 export const hermesDbPath = (): string => join(PROVIDER_ROOTS.hermes(), "state.db");
 
+export const hermesDbPaths = (): readonly string[] => {
+  const root = PROVIDER_ROOTS.hermes();
+  const paths: string[] = [];
+  const profilesDir = join(root, "profiles");
+  if (existsSync(profilesDir)) {
+    let profileDirs: string[] = [];
+    try {
+      profileDirs = readdirSync(profilesDir)
+        .filter((entry) => {
+          try {
+            return statSync(join(profilesDir, entry)).isDirectory();
+          } catch {
+            return false;
+          }
+        })
+        .sort();
+    } catch {
+      profileDirs = [];
+    }
+    for (const profileName of profileDirs) {
+      const dbPath = join(profilesDir, profileName, "state.db");
+      if (existsSync(dbPath)) paths.push(dbPath);
+    }
+  }
+  const topLevelDb = hermesDbPath();
+  if (existsSync(topLevelDb)) paths.push(topLevelDb);
+  return paths;
+};
+
 /** Mirrors the documented machinery-key drop + emptiness pruning so a parsed
  * JSON field's "does it project to anything" answer matches the product. */
 const DROPPED_NATIVE_KEYS = new Set([
@@ -900,6 +930,136 @@ export const parseGrokSession = (sessionDir: string): SessionParse => {
 };
 
 // ---------------------------------------------------------------------------
+// antigravity — ~/.gemini/antigravity-cli/brain/<uuid>/...
+// Documented rules: USER_INPUT and the turn-terminal PLANNER_RESPONSE are the
+// only searchable messages. Mid-loop planner tool narration, tool execution
+// records, reasoning, system rows, and replay markers stay structural.
+// ---------------------------------------------------------------------------
+
+const ANTIGRAVITY_TOOL_EXECUTION_TYPES = new Set([
+  "VIEW_FILE",
+  "LIST_DIRECTORY",
+  "GENERIC",
+  "CODE_ACTION",
+  "RUN_COMMAND",
+]);
+
+type AntigravityClassification =
+  | { readonly role: "user" | "assistant" | "thinking" | "system" | "unknown"; readonly kind: string }
+  | "SKIP";
+
+const antigravityTerminalPlannerIndices = (
+  records: readonly { readonly type: string }[],
+): ReadonlySet<number> => {
+  const terminal = new Set<number>();
+  let lastPlannerInTurn: number | undefined;
+  const flush = () => {
+    if (lastPlannerInTurn !== undefined) terminal.add(lastPlannerInTurn);
+    lastPlannerInTurn = undefined;
+  };
+  for (let i = 0; i < records.length; i += 1) {
+    const type = records[i]!.type;
+    if (type === "USER_INPUT") {
+      flush();
+      continue;
+    }
+    if (type === "PLANNER_RESPONSE") lastPlannerInTurn = i;
+  }
+  flush();
+  return terminal;
+};
+
+const classifyAntigravityRecord = (input: {
+  readonly type: string;
+  readonly hasToolCalls: boolean;
+  readonly hasThinking: boolean;
+  readonly isTerminalPlannerResponse: boolean;
+}): AntigravityClassification => {
+  const { type, hasToolCalls, hasThinking, isTerminalPlannerResponse } = input;
+  if (type === "CONVERSATION_HISTORY") return "SKIP";
+  if (type === "USER_INPUT") return { role: "user", kind: "message" };
+  if (type === "PLANNER_RESPONSE") {
+    if (isTerminalPlannerResponse) return { role: "assistant", kind: "message" };
+    if (hasToolCalls) return { role: "assistant", kind: "tool_call" };
+    if (hasThinking) return { role: "thinking", kind: "reasoning" };
+    return { role: "unknown", kind: "lifecycle" };
+  }
+  if (ANTIGRAVITY_TOOL_EXECUTION_TYPES.has(type)) return { role: "assistant", kind: "tool_call" };
+  if (type === "CHECKPOINT" || type === "SYSTEM_MESSAGE") return { role: "system", kind: "system" };
+  return { role: "unknown", kind: "unknown" };
+};
+
+export const antigravitySessionDirs = (): string[] => {
+  const root = PROVIDER_ROOTS.antigravity();
+  if (!existsSync(root)) return [];
+  return readdirSync(root)
+    .sort()
+    .map((entry) => join(root, entry))
+    .filter((path) => {
+      try {
+        return (
+          statSync(path).isDirectory() &&
+          existsSync(join(path, ".system_generated", "logs", "transcript_full.jsonl"))
+        );
+      } catch {
+        return false;
+      }
+    });
+};
+
+export const parseAntigravitySession = (sessionDir: string): SessionParse => {
+  const transcriptPath = join(sessionDir, ".system_generated", "logs", "transcript_full.jsonl");
+  const parsed = readJsonLines(transcriptPath).map((value) => {
+    const record = asRecord(value);
+    return {
+      record,
+      type: typeof record.type === "string" ? record.type : "unknown",
+    };
+  });
+  const terminalIndices = antigravityTerminalPlannerIndices(parsed);
+  const rows: TurnRow[] = [];
+  const toolKeys = new Set<string>();
+  let rejected = 0;
+  let seq = 0;
+
+  parsed.forEach(({ record, type }, recordIndex) => {
+    const rawToolCalls = Array.isArray(record.tool_calls) ? record.tool_calls : [];
+    const hasThinking = typeof record.thinking === "string" && record.thinking.length > 0;
+    const classification = classifyAntigravityRecord({
+      type,
+      hasToolCalls: rawToolCalls.length > 0,
+      hasThinking,
+      isTerminalPlannerResponse: terminalIndices.has(recordIndex),
+    });
+    if (classification === "SKIP") return;
+
+    const stepIndex = typeof record.step_index === "number" ? record.step_index : seq;
+    for (const callValue of rawToolCalls) {
+      const call = asRecord(callValue);
+      const toolName = stringValue(call.name);
+      if (toolName !== undefined) toolKeys.add(`${stepIndex}:${toolName}`);
+    }
+
+    if (
+      classification.kind === "message" &&
+      (classification.role === "user" || classification.role === "assistant")
+    ) {
+      const text = typeof record.content === "string" ? collapse(record.content) : "";
+      rejected += pushRows(
+        rows,
+        seq,
+        classification.role,
+        [],
+        text.length > 0 ? [text] : [],
+      );
+    }
+    seq += 1;
+  });
+
+  return { messages: rows, toolCallCount: toolKeys.size, rejectedEvents: rejected, machineryDumpRows: 0 };
+};
+
+// ---------------------------------------------------------------------------
 // Provider totals
 // ---------------------------------------------------------------------------
 
@@ -931,15 +1091,21 @@ export const opencodeTotals = (): ProviderTotals | undefined => {
 };
 
 export const hermesTotals = (): ProviderTotals | undefined => {
-  const dbPath = hermesDbPath();
-  if (!existsSync(dbPath)) return undefined;
-  return withDbCopy(dbPath, (db) =>
-    sumParses(hermesSessionIds(db).map((id) => parseHermesSession(db, id))),
+  const dbPaths = hermesDbPaths();
+  if (dbPaths.length === 0) return undefined;
+  const parses = dbPaths.flatMap((dbPath) =>
+    withDbCopy(dbPath, (db) =>
+      hermesSessionIds(db).map((id) => parseHermesSession(db, id)),
+    ),
   );
+  return sumParses(parses);
 };
 
 export const grokTotals = (): ProviderTotals =>
   sumParses(grokSessionDirs().map(parseGrokSession));
+
+export const antigravityTotals = (): ProviderTotals =>
+  sumParses(antigravitySessionDirs().map(parseAntigravitySession));
 
 // ---------------------------------------------------------------------------
 // Session-identity plumbing for fidelity sampling: recompute the stored
