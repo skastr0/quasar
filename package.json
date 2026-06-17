@@ -41,6 +41,7 @@
   },
   "dependencies": {
     "@ai-sdk/google": "^3.0.83",
-    "ai": "^6.0.207"
+    "ai": "^6.0.207",
+    "js-tiktoken": "^1.0.21"
   }
 }
