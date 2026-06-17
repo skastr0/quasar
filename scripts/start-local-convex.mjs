@@ -33,6 +33,7 @@ const sqlitePath = resolve(localRoot, "convex_local_backend.sqlite3");
 const runtimeTmpRoot = process.env.QUASAR_CONVEX_TMP_ROOT ?? join(quasarStateRoot(), "tmp");
 mkdirSync(runtimeTmpRoot, { recursive: true, mode: 0o700 });
 const runtimeTmpDir = mkdtempSync(join(runtimeTmpRoot, "convex-"));
+const nodeLtsBin = join(homedir(), ".local", "share", "mise", "installs", "node", "lts", "bin");
 const host = process.env.QUASAR_TAILSCALE_HOST ?? "quasar.tail6742f6.ts.net";
 const convexOrigin =
   process.env.QUASAR_CONVEX_PUBLIC_URL ?? `https://${host}/quasar-convex`;
@@ -70,6 +71,7 @@ const child = spawn(binaryPath, args, {
   stdio: "inherit",
   env: {
     ...process.env,
+    PATH: `${nodeLtsBin}:${process.env.PATH ?? ""}`,
     TMPDIR: runtimeTmpDir,
   },
 });
