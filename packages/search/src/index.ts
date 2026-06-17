@@ -467,7 +467,7 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
             catch: (cause) => makeOperationError(tableName, "mergeInsertMessages", cause),
           });
         }
-        if (request.createIndexes !== false) {
+        if (request.createIndexes === true) {
           yield* createMessageIndexes({
             tableName,
             includeVector: request.includeVectorIndex !== false && rows.length > 0,
