@@ -69,6 +69,8 @@ export interface EnsureMessageTableRequest extends TableRequest {
 
 export interface CreateMessageIndexesRequest extends TableRequest {
   readonly includeVector?: boolean;
+  /** If true, replace existing indexes instead of skipping them. Defaults to false (create missing only). */
+  readonly replace?: boolean;
 }
 
 export interface UpsertRowsRequest extends TableRequest {
@@ -390,17 +392,30 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
       Effect.gen(function* () {
         const tableName = tableNameOrDefault(request.tableName);
         const table = yield* openTable({ tableName });
-        yield* Effect.tryPromise({
-          try: () =>
-            table.createIndex(DEFAULT_TEXT_COLUMN, {
-              config: lancedb.Index.fts(),
-              name: MESSAGE_TEXT_INDEX_NAME,
-              replace: true,
-              waitTimeoutSeconds: 60,
-            }),
-          catch: (cause) => detectIndexNotReady(tableName, MESSAGE_TEXT_INDEX_NAME, "createFtsIndex", cause),
+        const replace = request.replace === true;
+        const existingIndexes = yield* Effect.tryPromise({
+          try: () => table.listIndices(),
+          catch: (cause) => makeOperationError(tableName, "listIndices", cause),
         });
+        const existingIndexNames = new Set(existingIndexes.map((index) => index.name));
+
+        if (replace || !existingIndexNames.has(MESSAGE_TEXT_INDEX_NAME)) {
+          yield* Effect.tryPromise({
+            try: () =>
+              table.createIndex(DEFAULT_TEXT_COLUMN, {
+                config: lancedb.Index.fts(),
+                name: MESSAGE_TEXT_INDEX_NAME,
+                replace,
+                waitTimeoutSeconds: 60,
+              }),
+            catch: (cause) => detectIndexNotReady(tableName, MESSAGE_TEXT_INDEX_NAME, "createFtsIndex", cause),
+          });
+        }
+
         if (request.includeVector === false) {
+          return;
+        }
+        if (existingIndexNames.has(MESSAGE_VECTOR_INDEX_NAME) && !replace) {
           return;
         }
         const rows = yield* Effect.tryPromise({
@@ -425,7 +440,7 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
                 numPartitions: 1,
               }),
               name: MESSAGE_VECTOR_INDEX_NAME,
-              replace: true,
+              replace,
               waitTimeoutSeconds: 60,
             }),
           catch: (cause) => detectIndexNotReady(tableName, MESSAGE_VECTOR_INDEX_NAME, "createVectorIndex", cause),
