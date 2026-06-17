@@ -51,10 +51,8 @@ const run = async () => {
       return searchRuntime.runPromise(
         Effect.gen(function* () {
           const search = yield* LanceDb;
-          yield* search.ensureMessageTable({
+          yield* search.upsertMessageRows({
             rows: payload.rows ?? [],
-            createIndexes: payload.createIndexes,
-            includeVectorIndex: payload.createVectorIndex,
           });
           return { indexed: payload.rows?.length ?? 0 };
         }),

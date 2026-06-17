@@ -352,8 +352,6 @@ const indexCurrentMessages = async (args: {
       }));
       await runSearchWorker("indexMessageRows", {
         rows,
-        createIndexes: true,
-        createVectorIndex: false,
       });
       return {
         status: "indexed" as const,
@@ -376,8 +374,6 @@ const indexCurrentMessages = async (args: {
     }));
     await runSearchWorker("indexMessageRows", {
       rows,
-      createIndexes: true,
-      createVectorIndex: true,
     });
     return {
       status: "indexed" as const,
