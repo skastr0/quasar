@@ -11,10 +11,11 @@
   "scripts": {
     "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "LANCE_INCLUDE_VECTOR_CENTROIDS=false bun test"
   },
   "dependencies": {
     "@lancedb/lancedb": "^0.30.0",
+    "apache-arrow": "18.1.0",
     "effect": "^3.21.2"
   },
   "devDependencies": {
