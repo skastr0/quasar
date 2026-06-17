@@ -19,7 +19,6 @@ interface WorkerPayload {
     readonly contentHash: string;
     readonly vector: readonly number[];
   }[];
-  readonly createIndexes?: boolean;
   readonly createVectorIndex?: boolean;
   readonly replaceIndexes?: boolean;
   readonly sessionId?: string;

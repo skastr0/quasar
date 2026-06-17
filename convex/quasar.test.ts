@@ -130,7 +130,6 @@ test("searchSemantic reports ready with query embeddings and vector ranks", asyn
 
   await t.action(api.search.indexMessageRows, {
     secret: ACTION_SECRET,
-    createIndexes: true,
     rows: [
       {
         sessionId,
@@ -174,7 +173,6 @@ test("searchFusion reports lexical and semantic ranks when embeddings are ready"
 
   await t.action(api.search.indexMessageRows, {
     secret: ACTION_SECRET,
-    createIndexes: true,
     rows: [
       {
         sessionId,
