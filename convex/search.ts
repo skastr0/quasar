@@ -2,13 +2,17 @@
 
 import { createGoogleGenerativeAI, type GoogleEmbeddingModelOptions } from "@ai-sdk/google";
 import { embedMany } from "ai";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 import { v } from "convex/values";
 
 import { action, internalAction } from "./_generated/server";
+import { api, internal } from "./_generated/api";
+import type { DataModel } from "./_generated/dataModel";
+import { GenericActionCtx } from "convex/server";
 import {
   GEMINI_EMBED_BATCH_MAX,
   GEMINI_EMBEDDING_MODEL_ID,
@@ -227,37 +231,80 @@ const requireActionSecret = (secret: string) => {
   }
 };
 
-const runSearchWorker = <T>(operation: string, payload: unknown): Promise<T> =>
-  new Promise((resolve, reject) => {
-    const child = spawn(process.env.QUASAR_BUN_BIN ?? "bun", [workerPath, operation], {
+interface WorkerEnvelope {
+  readonly ok: boolean;
+  readonly data?: unknown;
+  readonly error?: string;
+}
+
+class SearchWorkerClient {
+  private readonly child: ChildProcessWithoutNullStreams;
+  private readonly lines: AsyncIterator<string>;
+  private readonly stderrBuffer: string[] = [];
+  private closed = false;
+
+  constructor() {
+    this.child = spawn(process.env.QUASAR_BUN_BIN ?? "bun", [workerPath], {
       cwd: process.env.QUASAR_REPO_ROOT ?? process.cwd(),
       env: process.env,
       stdio: ["pipe", "pipe", "pipe"],
     });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
+    this.child.stderr.setEncoding("utf8");
+    this.child.stderr.on("data", (chunk: string) => {
+      this.stderrBuffer.push(chunk);
     });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
+    const rl = createInterface({
+      input: this.child.stdout,
+      crlfDelay: Infinity,
     });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code !== 0) {
-        reject(new Error(stderr.trim() || `search worker exited with code ${code}`));
-        return;
-      }
-      try {
-        resolve(JSON.parse(stdout) as T);
-      } catch (error) {
-        reject(error);
-      }
+    this.lines = rl[Symbol.asyncIterator]();
+  }
+
+  async request<T>(operation: string, payload: unknown): Promise<T> {
+    if (this.closed) {
+      throw new Error("SearchWorkerClient request after close");
+    }
+    const requestLine = JSON.stringify({ operation, payload }) + "\n";
+    this.child.stdin.write(requestLine);
+    const next = await this.lines.next();
+    if (next.done === true) {
+      const stderr = this.stderrBuffer.join("").trim();
+      throw new Error(stderr || `search worker closed before response for ${operation}`);
+    }
+    const envelope = JSON.parse(next.value) as WorkerEnvelope;
+    if (envelope.ok !== true) {
+      throw new Error(envelope.error ?? `search worker ${operation} failed`);
+    }
+    return envelope.data as T;
+  }
+
+  async close(): Promise<void> {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
+    this.child.stdin.end();
+    await new Promise<void>((resolve) => {
+      this.child.on("close", () => resolve());
+      setTimeout(() => {
+        this.child.kill("SIGTERM");
+        resolve();
+      }, 5_000);
     });
-    child.stdin.end(JSON.stringify(payload));
-  });
+  }
+}
+
+const withSearchWorker = async <T>(fn: (client: SearchWorkerClient) => Promise<T>): Promise<T> => {
+  const client = new SearchWorkerClient();
+  try {
+    return await fn(client);
+  } finally {
+    await client.close();
+  }
+};
+
+const runSearchWorker = <T>(operation: string, payload: unknown): Promise<T> =>
+  withSearchWorker((client) => client.request<T>(operation, payload));
 
 const searchLimit = (limit: number | undefined): number =>
   Math.min(Math.max(1, Math.trunc(limit ?? SEARCH_TAKE_MAX)), SEARCH_TAKE_MAX);
@@ -464,6 +511,171 @@ export const indexSessionForIngest = action({
       sessionId: args.sessionId,
       currentMessages: args.currentMessages,
     });
+  },
+});
+
+interface IndexBatchRowsReport {
+  readonly status: "indexed" | "failed";
+  readonly sessionsSeen: number;
+  readonly messagesSeen: number;
+  readonly messagesEmbedded: number;
+  readonly messagesReused: number;
+  readonly keysDeleted: number;
+  readonly embeddingsConfigured: boolean;
+  readonly error?: string;
+}
+
+const parseMessageKeySessionId = (key: string): string => {
+  const parts = key.split(":");
+  parts.pop(); // role
+  parts.pop(); // seq
+  return parts.join(":");
+};
+
+const MESSAGES_PER_SESSION_LIMIT = 10_000;
+
+const indexBatchMessages = async (
+  ctx: GenericActionCtx<DataModel>,
+  sessionIds: readonly string[],
+): Promise<IndexBatchRowsReport> => {
+  try {
+    const embeddingsConfigured = serverEmbeddingsConfigured();
+    const messagesBySession = new Map<string, readonly CurrentMessageForIndex[]>();
+    await Promise.all(
+      sessionIds.map(async (sessionId) => {
+        const currentMessages = await ctx.runQuery(internal.ingestQueries.messagesForBatchIndex, { sessionId });
+        messagesBySession.set(sessionId, currentMessages);
+      }),
+    );
+
+    return await withSearchWorker(async (client) => {
+      const existingRows = await client.request<Record<string, unknown>[]>("readMessageRowsBySessions", {
+        sessionIds,
+      });
+      const existingBySession = new Map<string, ExistingSearchRow[]>();
+      for (const row of existingRows) {
+        const typed: ExistingSearchRow = {
+          key: String(row.key),
+          contentHash: row.contentHash === undefined ? undefined : String(row.contentHash),
+        };
+        const sessionId = parseMessageKeySessionId(typed.key);
+        const list = existingBySession.get(sessionId) ?? [];
+        list.push(typed);
+        existingBySession.set(sessionId, list);
+      }
+
+      const keysToDelete: string[] = [];
+      const rowsToEmbed: PlannedMessageRow[] = [];
+      let messagesSeen = 0;
+      let messagesReused = 0;
+      for (const sessionId of sessionIds) {
+        const currentMessages = messagesBySession.get(sessionId) ?? [];
+        messagesSeen += currentMessages.length;
+        const existingRowsForSession = existingBySession.get(sessionId) ?? [];
+        const plan = planSessionIndex({
+          currentMessages,
+          existingRows: embeddingsConfigured ? existingRowsForSession : lexicalOnlyPlanRows(existingRowsForSession),
+        });
+        keysToDelete.push(...plan.keysToDelete);
+        rowsToEmbed.push(...plan.rowsToEmbed);
+        messagesReused += plan.messagesReused;
+      }
+
+      let keysDeleted = 0;
+      if (keysToDelete.length > 0) {
+        const result = await client.request<{ deleted: number }>("deleteByKeys", {
+          keys: keysToDelete,
+        });
+        keysDeleted = result.deleted;
+      }
+
+      if (rowsToEmbed.length === 0) {
+        return {
+          status: "indexed" as const,
+          sessionsSeen: sessionIds.length,
+          messagesSeen,
+          messagesEmbedded: 0,
+          messagesReused,
+          keysDeleted,
+          embeddingsConfigured,
+        };
+      }
+
+      if (!embeddingsConfigured) {
+        const zeroVector = placeholderVector();
+        const rows = rowsToEmbed.map((row) => ({
+          sessionId: row.sessionId,
+          seq: row.seq,
+          role: row.role,
+          projectKey: row.projectKey,
+          text: row.text,
+          contentHash: unembeddedContentHash(row.contentHash),
+          vector: zeroVector,
+        }));
+        await client.request("indexMessageRows", { rows });
+        return {
+          status: "indexed" as const,
+          sessionsSeen: sessionIds.length,
+          messagesSeen,
+          messagesEmbedded: 0,
+          messagesReused,
+          keysDeleted,
+          embeddingsConfigured: false,
+        };
+      }
+
+      const embeddings = await embedRows(rowsToEmbed);
+      const rows = rowsToEmbed.map((row, index) => ({
+        sessionId: row.sessionId,
+        seq: row.seq,
+        role: row.role,
+        projectKey: row.projectKey,
+        text: row.text,
+        contentHash: row.contentHash,
+        vector: embeddings[index]!,
+      }));
+      await client.request("indexMessageRows", { rows });
+      return {
+        status: "indexed" as const,
+        sessionsSeen: sessionIds.length,
+        messagesSeen,
+        messagesEmbedded: rows.length,
+        messagesReused,
+        keysDeleted,
+        embeddingsConfigured: true,
+      };
+    });
+  } catch (error) {
+    return {
+      status: "failed" as const,
+      error: error instanceof Error ? error.message : String(error),
+      sessionsSeen: sessionIds.length,
+      messagesSeen: 0,
+      messagesEmbedded: 0,
+      messagesReused: 0,
+      keysDeleted: 0,
+      embeddingsConfigured: serverEmbeddingsConfigured(),
+    };
+  }
+};
+
+export const indexBatchRows = internalAction({
+  args: {
+    sessionIds: v.array(v.string()),
+  },
+  handler: async (ctx, args): Promise<IndexBatchRowsReport> => {
+    return indexBatchMessages(ctx, args.sessionIds);
+  },
+});
+
+export const indexBatchForIngest = action({
+  args: {
+    secret: v.string(),
+    sessionIds: v.array(v.string()),
+  },
+  handler: async (ctx, args): Promise<IndexBatchRowsReport> => {
+    requireActionSecret(args.secret);
+    return indexBatchMessages(ctx, args.sessionIds);
   },
 });
 

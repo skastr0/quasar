@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as ingestQueries from "../ingestQueries.js";
 import type * as quasar from "../quasar.js";
 import type * as search from "../search.js";
 import type * as searchData from "../searchData.js";
@@ -21,6 +22,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  ingestQueries: typeof ingestQueries;
   quasar: typeof quasar;
   search: typeof search;
   searchData: typeof searchData;

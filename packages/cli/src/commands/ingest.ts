@@ -35,6 +35,9 @@ const CONVEX_MAX_VALUE_BYTES = 1_048_576;
 /** Rows per insert mutation — small, instantly-completing mutations. */
 const INSERT_BATCH = 250;
 
+/** Sessions per batch index action — balances worker reuse with action runtime. */
+const INDEX_BATCH_SESSIONS = 250;
+
 export type MessageRole = "user" | "assistant" | "reasoning";
 
 export interface MessageRow {
@@ -519,6 +522,8 @@ export const runProviderIngest = async (options: {
   let toolCallsWritten = 0;
   let bytesWritten = 0;
   const diagnostics: IngestDiagnostic[] = [];
+  const pendingSessions: { readonly sessionId: string; readonly fingerprint: string }[] = [];
+  const sessionsToCommit: string[] = [];
 
   const items = stream({
     machine: loadMachineIdentity(),
@@ -567,9 +572,10 @@ export const runProviderIngest = async (options: {
       }),
     )) as { skipped: boolean };
     if (begin.skipped) {
-      // The server already holds this fingerprint: record it locally so the
-      // next run skips the parse before reaching the server at all.
-      ledger.record(mapped.session.sessionId, sourceFingerprint);
+      // The server already holds this fingerprint, but we still need it in the
+      // batch index so unchanged-yet-unindexed sessions are caught. Ledger
+      // recording is deferred until after batch indexing succeeds.
+      pendingSessions.push({ sessionId: mapped.session.sessionId, fingerprint: sourceFingerprint });
       sessionsSkipped += 1;
       continue;
     }
@@ -595,70 +601,54 @@ export const runProviderIngest = async (options: {
         client.mutation(api.quasar.insertToolCalls, { toolCalls: rows, runId }),
       );
     }
-    const currentMessages = mapped.messages
-      .filter((message) => message.role === "user" || message.role === "assistant")
-      .map((message) => ({
-        sessionId: message.sessionId,
-        seq: message.seq,
-        role: message.role as "user" | "assistant",
-        projectKey: message.projectKey,
-        text: message.text,
-      }));
-    await withRetry(() =>
-      client.mutation(api.quasar.beginSessionIndex, {
-        sessionId: mapped.session.sessionId,
-        runId,
-      }),
-    );
-    let searchIndex: SearchIndexReport;
-    try {
-      searchIndex = (await withRetry(() =>
-        client.action(api.search.indexSessionForIngest, {
-          sessionId: mapped.session.sessionId,
-          runId,
-          secret: actionSecret,
-          currentMessages,
-        }),
-      )) as SearchIndexReport;
-    } catch (error) {
-      await withRetry(() =>
-        client.mutation(api.quasar.abortSessionIndex, {
-          sessionId: mapped.session.sessionId,
-          runId,
-        }),
-      );
-      throw error;
-    }
-    if (
-      searchIndex.status === "failed" ||
-      searchIndex.status === "unconfigured" ||
-      searchIndex.status === "missing" ||
-      searchIndex.status === "ingest_in_progress"
-    ) {
-      await withRetry(() =>
-        client.mutation(api.quasar.abortSessionIndex, {
-          sessionId: mapped.session.sessionId,
-          runId,
-        }),
-      );
-      throw new Error(
-        `LanceDB index-on-ingest failed for ${mapped.session.sessionId}: ${searchIndex.status}${searchIndex.error === undefined ? "" : ` (${searchIndex.error})`}`,
-      );
-    }
-    await withRetry(() =>
-      client.mutation(api.quasar.commitSessionIngest, {
-        sessionId: mapped.session.sessionId,
-        runId,
-      }),
-    );
-    // Only after a successful commit: the ledger entry must never claim an
-    // ingest the server has not durably accepted.
-    ledger.record(mapped.session.sessionId, sourceFingerprint);
+    // Defer commit and ledger recording until after batch indexing succeeds;
+    // this keeps the session claimed if indexing fails so the next run retries.
+    pendingSessions.push({ sessionId: mapped.session.sessionId, fingerprint: sourceFingerprint });
+    sessionsToCommit.push(mapped.session.sessionId);
 
     sessionsWritten += 1;
     messagesWritten += mapped.messages.length;
     toolCallsWritten += mapped.toolCalls.length;
     bytesWritten += mapped.bytesAdmitted;
+  }
+
+  // Batch index all sessions touched in this run through one reusable worker
+  // process per batch, eliminating the per-session worker spawn overhead that
+  // previously dominated ingest time.
+  const indexableSessionIds = pendingSessions.map((entry) => entry.sessionId);
+  let batchReports: { readonly sessionsSeen: number; readonly messagesSeen: number }[] = [];
+  if (indexableSessionIds.length > 0) {
+    const batches = chunk(indexableSessionIds, INDEX_BATCH_SESSIONS);
+    for (const batch of batches) {
+      const report = (await withRetry(() =>
+        client.action(api.search.indexBatchForIngest, {
+          secret: actionSecret,
+          sessionIds: batch,
+        }),
+      )) as {
+        readonly status: string;
+        readonly sessionsSeen: number;
+        readonly messagesSeen: number;
+        readonly error?: string;
+      };
+      if (report.status === "failed") {
+        throw new Error(`LanceDB batch index failed: ${report.error ?? "unknown error"}`);
+      }
+      batchReports = [...batchReports, report];
+    }
+    // Commit the sessions whose rows were just written, then record fingerprints.
+    // A failure before this point leaves sessions claimed so the next run retries.
+    for (const sessionId of sessionsToCommit) {
+      await withRetry(() =>
+        client.mutation(api.quasar.commitSessionIngest, {
+          sessionId,
+          runId,
+        }),
+      );
+    }
+    for (const entry of pendingSessions) {
+      ledger.record(entry.sessionId, entry.fingerprint);
+    }
   }
 
   // Project identity is derived state: a mapping change can re-key sessions
