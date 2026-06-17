@@ -17,7 +17,9 @@ import {
   SEARCH_EMBEDDING_DIMS,
   embeddingInputFor,
   fuseMatches,
+  lexicalOnlyPlanRows,
   planSessionIndex,
+  unembeddedContentHash,
   type CurrentMessageForIndex,
   type ExistingSearchRow,
   type FusedSearchRank,
@@ -111,6 +113,9 @@ const serverEmbeddingsConfigured = (): boolean => {
   const apiKey = configuredGoogleApiKey();
   return apiKey !== undefined && apiKey.trim().length > 0;
 };
+
+const placeholderVector = (): readonly number[] =>
+  Array.from({ length: SEARCH_EMBEDDING_DIMS }, () => 0);
 
 const testQueryVector = (query: string): readonly number[] | undefined => {
   if (process.env.VITEST !== "true" || process.env.QUASAR_TEST_QUERY_EMBEDDINGS !== "1") {
@@ -310,21 +315,11 @@ const indexCurrentMessages = async (args: {
     const existingRows = await runSearchWorker<ExistingSearchRow[]>("readMessageRowsBySession", {
       sessionId: args.sessionId,
     });
+    const embeddingsConfigured = serverEmbeddingsConfigured();
     const plan = planSessionIndex({
       currentMessages: args.currentMessages,
-      existingRows,
+      existingRows: embeddingsConfigured ? existingRows : lexicalOnlyPlanRows(existingRows),
     });
-
-    if (plan.rowsToEmbed.length > 0 && !serverEmbeddingsConfigured()) {
-      return {
-        status: "unconfigured" as const,
-        messagesSeen: plan.currentRows.length,
-        messagesEmbedded: 0,
-        messagesReused: plan.messagesReused,
-        keysDeleted: 0,
-        embeddingsConfigured: false,
-      };
-    }
 
     let keysDeleted = 0;
     if (plan.keysToDelete.length > 0) {
@@ -341,7 +336,32 @@ const indexCurrentMessages = async (args: {
         messagesEmbedded: 0,
         messagesReused: plan.messagesReused,
         keysDeleted,
-        embeddingsConfigured: serverEmbeddingsConfigured(),
+        embeddingsConfigured,
+      };
+    }
+    if (!embeddingsConfigured) {
+      const zeroVector = placeholderVector();
+      const rows = plan.rowsToEmbed.map((row) => ({
+        sessionId: row.sessionId,
+        seq: row.seq,
+        role: row.role,
+        projectKey: row.projectKey,
+        text: row.text,
+        contentHash: unembeddedContentHash(row.contentHash),
+        vector: zeroVector,
+      }));
+      await runSearchWorker("indexMessageRows", {
+        rows,
+        createIndexes: true,
+        createVectorIndex: false,
+      });
+      return {
+        status: "indexed" as const,
+        messagesSeen: plan.currentRows.length,
+        messagesEmbedded: 0,
+        messagesReused: plan.messagesReused,
+        keysDeleted,
+        embeddingsConfigured: false,
       };
     }
     const embeddings = await embedRows(plan.rowsToEmbed);
@@ -354,7 +374,11 @@ const indexCurrentMessages = async (args: {
       contentHash: row.contentHash,
       vector: embeddings[index]!,
     }));
-    await runSearchWorker("indexMessageRows", { rows, createIndexes: false });
+    await runSearchWorker("indexMessageRows", {
+      rows,
+      createIndexes: true,
+      createVectorIndex: true,
+    });
     return {
       status: "indexed" as const,
       messagesSeen: plan.currentRows.length,

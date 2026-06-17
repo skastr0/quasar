@@ -7,6 +7,8 @@ import {
   makeLanceDbRuntime,
 } from "./index";
 
+const UNEMBEDDED_CONTENT_HASH_PREFIX = "unembedded:";
+
 interface WorkerPayload {
   readonly rows?: readonly {
     readonly sessionId: string;
@@ -18,6 +20,7 @@ interface WorkerPayload {
     readonly vector: readonly number[];
   }[];
   readonly createIndexes?: boolean;
+  readonly createVectorIndex?: boolean;
   readonly sessionId?: string;
   readonly query?: string;
   readonly vector?: readonly number[];
@@ -35,6 +38,13 @@ const operation = process.argv[2];
 const projectFilter = (projectKey: string | undefined): string | undefined =>
   projectKey === undefined ? undefined : `projectKey = '${projectKey.replaceAll("'", "''")}'`;
 
+const vectorReadyFilter = (projectKey: string | undefined): string => {
+  const clauses = [`contentHash NOT LIKE '${UNEMBEDDED_CONTENT_HASH_PREFIX.replaceAll("'", "''")}%'`];
+  const project = projectFilter(projectKey);
+  if (project !== undefined) clauses.push(project);
+  return clauses.join(" AND ");
+};
+
 const run = async () => {
   switch (operation) {
     case "indexMessageRows":
@@ -44,6 +54,7 @@ const run = async () => {
           yield* search.ensureMessageTable({
             rows: payload.rows ?? [],
             createIndexes: payload.createIndexes,
+            includeVectorIndex: payload.createVectorIndex,
           });
           return { indexed: payload.rows?.length ?? 0 };
         }),
@@ -86,7 +97,7 @@ const run = async () => {
             vector: payload.vector ?? [],
             vectorDimension: GEMINI_EMBEDDING_DIMENSIONS,
             limit: payload.limit,
-            filter: projectFilter(payload.projectKey),
+            filter: vectorReadyFilter(payload.projectKey),
             select: MESSAGE_SEARCH_COLUMNS,
           });
         }),
@@ -100,7 +111,7 @@ const run = async () => {
             vector: payload.vector ?? [],
             vectorDimension: GEMINI_EMBEDDING_DIMENSIONS,
             limit: payload.limit,
-            filter: projectFilter(payload.projectKey),
+            filter: vectorReadyFilter(payload.projectKey),
             select: MESSAGE_SEARCH_COLUMNS,
           });
         }),
