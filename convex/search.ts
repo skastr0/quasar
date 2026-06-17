@@ -131,38 +131,63 @@ const testQueryVector = (query: string): readonly number[] | undefined => {
   return Array.from({ length: SEARCH_EMBEDDING_DIMS }, (_, index) => (index === 0 ? 1 : 0));
 };
 
-const embedRows = async (rows: readonly PlannedMessageRow[]): Promise<readonly number[][]> => {
+const embedRows = async (
+  ctx: GenericActionCtx<DataModel>,
+  rows: readonly PlannedMessageRow[],
+): Promise<readonly number[][]> => {
   const apiKey = configuredGoogleApiKey();
   if (apiKey === undefined || apiKey.trim().length === 0) {
     throw new Error("Gemini embeddings are not configured");
   }
+
+  const uniqueHashes = [...new Set(rows.map((row) => row.contentHash))];
+  const cached = await ctx.runQuery(internal.embedCache.lookup, { contentHashes: uniqueHashes });
+  const cachedSet = new Set(Object.keys(cached));
+
+  const missRows = rows.filter((row) => !cachedSet.has(row.contentHash));
   const google = createGoogleGenerativeAI({ apiKey });
-  const embeddings: number[][] = [];
-  for (let index = 0; index < rows.length; index += GEMINI_EMBED_BATCH_MAX) {
-    const batch = rows.slice(index, index + GEMINI_EMBED_BATCH_MAX);
-    const embedded = await embedMany({
-      model: google.embedding(GEMINI_EMBEDDING_MODEL_ID),
-      values: batch.map((row) =>
-        embeddingInputFor({ purpose: "retrieval_document", text: row.text }),
-      ),
-      maxParallelCalls: 1,
-      providerOptions: {
-        google: {
-          outputDimensionality: SEARCH_EMBEDDING_DIMS,
-          taskType: "RETRIEVAL_DOCUMENT",
-        } satisfies GoogleEmbeddingModelOptions,
-      },
-    });
-    for (const embedding of embedded.embeddings) {
-      if (embedding.length !== SEARCH_EMBEDDING_DIMS) {
-        throw new Error(
-          `Gemini returned ${embedding.length} dimensions; expected ${SEARCH_EMBEDDING_DIMS}.`,
-        );
+  const missEmbeddings: number[][] = [];
+  if (missRows.length > 0) {
+    for (let index = 0; index < missRows.length; index += GEMINI_EMBED_BATCH_MAX) {
+      const batch = missRows.slice(index, index + GEMINI_EMBED_BATCH_MAX);
+      const embedded = await embedMany({
+        model: google.embedding(GEMINI_EMBEDDING_MODEL_ID),
+        values: batch.map((row) =>
+          embeddingInputFor({ purpose: "retrieval_document", text: row.text }),
+        ),
+        maxParallelCalls: 1,
+        providerOptions: {
+          google: {
+            outputDimensionality: SEARCH_EMBEDDING_DIMS,
+            taskType: "RETRIEVAL_DOCUMENT",
+          } satisfies GoogleEmbeddingModelOptions,
+        },
+      });
+      for (const embedding of embedded.embeddings) {
+        if (embedding.length !== SEARCH_EMBEDDING_DIMS) {
+          throw new Error(
+            `Gemini returned ${embedding.length} dimensions; expected ${SEARCH_EMBEDDING_DIMS}.`,
+          );
+        }
+        missEmbeddings.push(embedding);
       }
-      embeddings.push(embedding);
     }
+    await ctx.runMutation(internal.embedCache.store, {
+      entries: missRows.map((row, index) => ({
+        contentHash: row.contentHash,
+        vector: missEmbeddings[index]!,
+      })),
+    });
   }
-  return embeddings;
+
+  const missByHash = new Map(missRows.map((row, index) => [row.contentHash, missEmbeddings[index]!]));
+  return rows.map((row) => {
+    const cachedVector = cached[row.contentHash];
+    if (cachedVector !== undefined) return [...cachedVector];
+    const missVector = missByHash.get(row.contentHash);
+    if (missVector !== undefined) return missVector;
+    throw new Error(`Missing embedding for content hash ${row.contentHash}`);
+  });
 };
 
 const embedQuery = async (
@@ -458,10 +483,13 @@ const report = (args: {
 const chunksForMessages = (messages: readonly CurrentMessageForIndex[]): readonly IndexableChunk[] =>
   messages.flatMap((message) => chunkMessage(message));
 
-const indexCurrentMessages = async (args: {
-  readonly sessionId: string;
-  readonly currentMessages: readonly CurrentMessageForIndex[];
-}): Promise<IndexSessionRowsReport> => {
+const indexCurrentMessages = async (
+  ctx: GenericActionCtx<DataModel>,
+  args: {
+    readonly sessionId: string;
+    readonly currentMessages: readonly CurrentMessageForIndex[];
+  },
+): Promise<IndexSessionRowsReport> => {
   try {
     const existingRows = await runSearchWorker<ExistingSearchRow[]>("readMessageRowsBySession", {
       sessionId: args.sessionId,
@@ -514,7 +542,7 @@ const indexCurrentMessages = async (args: {
         embeddingsConfigured: false,
       };
     }
-    const embeddings = await embedRows(plan.rowsToEmbed);
+    const embeddings = await embedRows(ctx, plan.rowsToEmbed);
     const rows = plan.rowsToEmbed.map((row, index) => ({
       sessionId: row.sessionId,
       seq: row.seq,
@@ -553,7 +581,7 @@ export const indexSessionRows = internalAction({
     sessionId: v.string(),
     currentMessages: v.array(currentMessageForIndexValidator),
   },
-  handler: async (_ctx, args): Promise<IndexSessionRowsReport> => indexCurrentMessages(args),
+  handler: async (ctx, args): Promise<IndexSessionRowsReport> => indexCurrentMessages(ctx, args),
 });
 
 export const indexSessionForIngest = action({
@@ -563,9 +591,9 @@ export const indexSessionForIngest = action({
     secret: v.string(),
     currentMessages: v.array(currentMessageForIndexValidator),
   },
-  handler: async (_ctx, args): Promise<IndexSessionRowsReport> => {
+  handler: async (ctx, args): Promise<IndexSessionRowsReport> => {
     requireActionSecret(args.secret);
-    return await indexCurrentMessages({
+    return await indexCurrentMessages(ctx, {
       sessionId: args.sessionId,
       currentMessages: args.currentMessages,
     });
@@ -700,7 +728,7 @@ const indexBatchMessages = async (
         };
       }
 
-      const embeddings = await embedRows(rowsToEmbed);
+      const embeddings = await embedRows(ctx, rowsToEmbed);
       const rows = rowsToEmbed.map((row, index) => ({
         sessionId: row.sessionId,
         seq: row.seq,

@@ -49,6 +49,14 @@ export default defineSchema({
     .index("by_sessionId_and_seq", ["sessionId", "seq"])
     .index("by_sessionId_and_role_and_seq", ["sessionId", "role", "seq"]),
 
+  // Embedding cache keyed by content hash so re-ingest does not re-call the
+  // embeddings API for unchanged chunks.
+  embeddingCache: defineTable({
+    contentHash: v.string(),
+    vector: v.array(v.number()),
+    createdAt: v.number(),
+  }).index("by_contentHash", ["contentHash"]),
+
   // Structural surface: full tool inputs/outputs, retrieved by exact index walks.
   // NEVER search-indexed, NEVER embedded — tool payloads must not pollute search.
   toolCalls: defineTable({
