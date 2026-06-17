@@ -1,6 +1,9 @@
 {
   "$schema": "./node_modules/convex/schemas/convex.schema.json",
   "functions": "convex",
+  "node": {
+    "nodeVersion": "24"
+  },
   "aiFiles": {
     "skills": {
       "agents": ["codex"]

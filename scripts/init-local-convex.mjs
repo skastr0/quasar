@@ -27,6 +27,7 @@ if (deploymentName === undefined || sourceSecret === undefined || sourceSecret.l
 }
 
 const instanceSecret = isLocalBackendSecret(sourceSecret) ? sourceSecret : randomBytes(32).toString("hex");
+const actionSecret = env.QUASAR_ACTION_SECRET ?? randomBytes(32).toString("hex");
 
 const backendVersion = latestBackendVersion();
 const binaryPath = join(homedir(), ".cache", "convex", "binaries", backendVersion, "convex-local-backend");
@@ -41,6 +42,7 @@ writeFileSync(
       backendVersion,
       adminKey: localAdminKey,
       instanceSecret,
+      actionSecret,
       ports: {
         cloud: 3217,
         site: 3218,

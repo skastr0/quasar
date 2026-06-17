@@ -1,12 +1,15 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { quasarClientConfigPath, quasarStateRoot } from "./quasar-state.mjs";
+import { quasarClientConfigPath, quasarConvexLocalRoot, quasarStateRoot } from "./quasar-state.mjs";
 
 const repoRoot = process.cwd();
 const nodePath = process.execPath;
 const homeDir = homedir();
+const nodeLtsBin = join(homeDir, ".local", "share", "mise", "installs", "node", "lts", "bin");
+const bunBin =
+  process.env.QUASAR_BUN_BIN ?? (process.versions.bun ? process.execPath : spawnOutput("which", ["bun"]));
 const launchAgentsDir = join(homeDir, "Library", "LaunchAgents");
 const logsDir = join(repoRoot, "logs");
 const quasarTmpDir = join(quasarStateRoot(), "tmp");
@@ -16,6 +19,23 @@ const publicConvexUrl =
   process.env.QUASAR_CONVEX_PUBLIC_URL ?? `https://${tailscaleHost}/quasar-convex`;
 const publicConvexSiteUrl =
   process.env.QUASAR_CONVEX_SITE_PUBLIC_URL ?? `https://${tailscaleHost}/quasar-api`;
+const searchDataDir =
+  process.env.QUASAR_SEARCH_DATA_DIR ?? join(quasarStateRoot(), "search.lance");
+const localConvexConfigPath = join(quasarConvexLocalRoot(), "config.json");
+const localConvexConfig = existsSync(localConvexConfigPath)
+  ? JSON.parse(readFileSync(localConvexConfigPath, "utf8"))
+  : {};
+const actionSecret =
+  process.env.QUASAR_ACTION_SECRET ??
+  localConvexConfig.actionSecret ??
+  spawnOutput("openssl", ["rand", "-hex", "32"]);
+if (localConvexConfig.actionSecret === undefined && existsSync(localConvexConfigPath)) {
+  writeFileSync(
+    localConvexConfigPath,
+    `${JSON.stringify({ ...localConvexConfig, actionSecret }, null, 2)}\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
+}
 
 const agents = [
   {
@@ -57,7 +77,7 @@ function plist(agent) {
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>${dirname(nodePath)}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>${nodeLtsBin}:${dirname(nodePath)}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>HOME</key>
     <string>${homeDir}</string>
     <key>USER</key>
@@ -76,6 +96,14 @@ function plist(agent) {
     <string>${publicConvexUrl}</string>
     <key>QUASAR_CONVEX_SITE_PUBLIC_URL</key>
     <string>${publicConvexSiteUrl}</string>
+    <key>QUASAR_SEARCH_DATA_DIR</key>
+    <string>${searchDataDir}</string>
+    <key>QUASAR_REPO_ROOT</key>
+    <string>${repoRoot}</string>
+    <key>QUASAR_BUN_BIN</key>
+    <string>${bunBin}</string>
+    <key>QUASAR_ACTION_SECRET</key>
+    <string>${actionSecret}</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
