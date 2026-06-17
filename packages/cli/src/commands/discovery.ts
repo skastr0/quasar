@@ -16,7 +16,7 @@ const commandCapabilities = [
   "daemon install [--interval-seconds 300] [--binary <path>]",
   "daemon uninstall",
   "daemon status",
-  "search maintain [--create-indexes] [--create-vector-index] [--replace-indexes] [--optimize] [--cleanup-older-than-ms <n>]",
+  "maintain [--create-indexes] [--create-vector-index] [--replace-indexes] [--optimize] [--cleanup-older-than-ms <n>]", 
   "projects list",
   "sessions list [--project <key>] [--provider <provider>] [--limit <n>]",
   "sessions read <sessionId> [--limit <n>]",
