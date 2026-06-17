@@ -338,6 +338,43 @@ const FIELD_CONSUMERS: Record<string, Record<string, FieldConsumer>> = {
       },
     },
   },
+  embeddingCache: {
+    contentHash: {
+      via: "embedCache.lookup (filtered via by_contentHash)",
+      proof: async (t) => {
+        const hash = "test-hash";
+        await t.mutation(api.embedCache.store, {
+          entries: [{ contentHash: hash, vector: [1, 2, 3] }],
+        });
+        const found = await t.query(api.embedCache.lookup, { contentHashes: [hash] });
+        expect(found[hash]).toBeDefined();
+      },
+    },
+    vector: {
+      via: "embedCache.lookup (returned)",
+      proof: async (t) => {
+        const hash = "test-hash-vector";
+        await t.mutation(api.embedCache.store, {
+          entries: [{ contentHash: hash, vector: [4, 5, 6] }],
+        });
+        const found = await t.query(api.embedCache.lookup, { contentHashes: [hash] });
+        expect(found[hash]).toEqual([4, 5, 6]);
+      },
+    },
+    createdAt: {
+      via: "embedCache.lookup stores a creation timestamp",
+      proof: async (t) => {
+        const before = Date.now();
+        const hash = "test-hash-created";
+        await t.mutation(api.embedCache.store, {
+          entries: [{ contentHash: hash, vector: [7, 8, 9] }],
+        });
+        const rows = await t.query(api.embedCache.listForHash, { contentHash: hash });
+        expect(rows).toHaveLength(1);
+        expect(rows[0]?.createdAt).toBeGreaterThanOrEqual(before);
+      },
+    },
+  },
   toolCalls: {
     sessionId: {
       via: "sessionToolCalls (filtered via by_sessionId_and_seq, returned)",

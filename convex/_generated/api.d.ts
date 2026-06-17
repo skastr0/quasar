@@ -8,6 +8,8 @@
  * @module
  */
 
+import type * as chunk from "../chunk.js";
+import type * as embedCache from "../embedCache.js";
 import type * as ingestQueries from "../ingestQueries.js";
 import type * as quasar from "../quasar.js";
 import type * as search from "../search.js";
@@ -22,6 +24,8 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  chunk: typeof chunk;
+  embedCache: typeof embedCache;
   ingestQueries: typeof ingestQueries;
   quasar: typeof quasar;
   search: typeof search;
