@@ -103,6 +103,12 @@ export interface ReadMessageRowsBySessionRequest extends TableRequest {
   readonly select?: readonly string[];
 }
 
+export interface ReadMessageRowsBySessionsRequest extends TableRequest {
+  readonly sessionIds: readonly string[];
+  readonly limit?: number;
+  readonly select?: readonly string[];
+}
+
 export interface ReadRowsRequest extends TableRequest {
   readonly filter?: string;
   readonly limit?: number;
@@ -797,6 +803,32 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
         });
       });
 
+    const readMessageRowsBySessions = (
+      request: ReadMessageRowsBySessionsRequest,
+    ): Effect.Effect<readonly Record<string, unknown>[], LanceDbError> =>
+      Effect.gen(function* () {
+        const tableName = tableNameOrDefault(request.tableName);
+        const existing = yield* tableNames(connection, tableName);
+        if (!existing.includes(tableName) || request.sessionIds.length === 0) {
+          return [];
+        }
+        const table = yield* openTable({ tableName });
+        const filter = request.sessionIds
+          .map((sessionId) => `sessionId = ${escapeSqlString(sessionId)}`)
+          .join(" OR ");
+        let query = table.query().where(filter);
+        if (request.limit !== undefined) {
+          query = query.limit(limitOrDefault(request.limit));
+        }
+        return yield* Effect.tryPromise({
+          try: () =>
+            query
+              .select([...(request.select === undefined ? MESSAGE_SEARCH_COLUMNS : request.select)])
+              .toArray(),
+          catch: (cause) => makeOperationError(tableName, "readMessageRowsBySessions", cause),
+        });
+      });
+
     const vectorSearch = (request: VectorSearchRequest): Effect.Effect<readonly SearchHit[], LanceDbError> =>
       Effect.gen(function* () {
         const tableName = tableNameOrDefault(request.tableName);
@@ -900,6 +932,7 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
       deleteByKeys,
       readRows,
       readMessageRowsBySession,
+      readMessageRowsBySessions,
       vectorSearch,
       ftsSearch,
       hybridSearch,
