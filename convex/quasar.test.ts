@@ -210,6 +210,42 @@ test("searchFusion reports lexical and semantic ranks when embeddings are ready"
   });
 });
 
+test("maintainSearch creates indexes, optimizes, and reports stats", async () => {
+  const t = testConvex();
+  const sessionId = "s-maintain";
+  const projectKey = "p-maintain";
+  const vector = Array.from({ length: 1536 }, (_, index) => (index === 0 ? 1 : 0));
+
+  await t.action(api.search.indexMessageRows, {
+    secret: ACTION_SECRET,
+    rows: [
+      {
+        sessionId,
+        seq: 1,
+        role: "assistant",
+        projectKey,
+        text: "maintenance proof",
+        contentHash: "hash-maintain",
+        vector,
+      },
+    ],
+  });
+
+  const report = await t.action(api.search.maintainSearch, {
+    secret: ACTION_SECRET,
+    createIndexes: true,
+    createVectorIndex: true,
+    optimize: true,
+    cleanupOlderThanMs: 0,
+  });
+
+  expect(report.createdIndexes).toBe(true);
+  expect(report.optimized).toBe(true);
+  expect(report.stats.rowCount).toBeGreaterThanOrEqual(1);
+  expect(report.stats.indices.map((index: { name: string }) => index.name).sort()).toContain("text_idx");
+  expect(report.optimize?.stats.compaction).toBeDefined();
+});
+
 test("turn mutations reject a lost claim so concurrent runs cannot duplicate turns", async () => {
   const t = testConvex();
   const sessionId = "s-claim";

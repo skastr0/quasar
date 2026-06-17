@@ -382,4 +382,105 @@ describe("LanceDb", () => {
       },
     ]);
   });
+
+  test("createMessageIndexes is idempotent and skips existing indexes", async () => {
+    const dataDir = await makeTempDir();
+    const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));
+    const vector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, (_, index) =>
+      index === 0 ? 1 : 0,
+    );
+
+    await runtime.runPromise(
+      Effect.gen(function* () {
+        const search = yield* LanceDb;
+        yield* search.upsertMessageRows({
+          rows: [
+            {
+              sessionId: "session-a",
+              seq: 1,
+              role: "user",
+              projectKey: "project-a",
+              text: "first text",
+              contentHash: "hash-a",
+              vector,
+            },
+          ],
+        });
+        yield* search.createMessageIndexes();
+        yield* search.createMessageIndexes();
+        return yield* search.tableStats({});
+      }),
+    );
+  });
+
+  test("tableStats reports row count, indices, and disk sizes", async () => {
+    const dataDir = await makeTempDir();
+    const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));
+    const vector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, (_, index) =>
+      index === 0 ? 1 : 0,
+    );
+
+    const stats = await runtime.runPromise(
+      Effect.gen(function* () {
+        const search = yield* LanceDb;
+        yield* search.upsertMessageRows({
+          rows: [
+            {
+              sessionId: "session-a",
+              seq: 1,
+              role: "user",
+              projectKey: "project-a",
+              text: "first text",
+              contentHash: "hash-a",
+              vector,
+            },
+          ],
+        });
+        yield* search.createMessageIndexes();
+        return yield* search.tableStats({});
+      }),
+    );
+
+    expect(stats.rowCount).toBe(1);
+    expect(stats.indices.map((index) => index.name).sort()).toEqual(["text_idx", "vector_idx"]);
+    expect(stats.indices[0]?.numIndexedRows).toBe(1);
+    expect(stats.disk.totalBytes).toBeGreaterThan(0);
+    expect(stats.disk.dataBytes).toBeGreaterThanOrEqual(0);
+    expect(stats.disk.indexBytes).toBeGreaterThanOrEqual(0);
+    expect(stats.disk.versionBytes).toBeGreaterThanOrEqual(0);
+    expect(stats.tableStats.numRows).toBe(1);
+  });
+
+  test("optimizeTable compacts and reports prune stats", async () => {
+    const dataDir = await makeTempDir();
+    const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));
+    const vector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, (_, index) =>
+      index === 0 ? 1 : 0,
+    );
+
+    const report = await runtime.runPromise(
+      Effect.gen(function* () {
+        const search = yield* LanceDb;
+        yield* search.upsertMessageRows({
+          rows: [
+            {
+              sessionId: "session-a",
+              seq: 1,
+              role: "user",
+              projectKey: "project-a",
+              text: "first text",
+              contentHash: "hash-a",
+              vector,
+            },
+          ],
+        });
+        yield* search.createMessageIndexes();
+        return yield* search.optimizeTable({ cleanupOlderThan: new Date() });
+      }),
+    );
+
+    expect(report.tableName).toBe("messages");
+    expect(report.stats.compaction).toBeDefined();
+    expect(report.stats.prune).toBeDefined();
+  });
 });
