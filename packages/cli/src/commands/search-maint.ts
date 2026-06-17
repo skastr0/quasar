@@ -10,6 +10,10 @@ import { executeJsonCommand } from "../output";
 
 const DEFAULT_CLEANUP_OLDER_THAN_MS = 0;
 
+export interface SearchMaintenanceClient {
+  action(reference: unknown, args: unknown): Promise<unknown>;
+}
+
 const createIndexesOption = Options.boolean("create-indexes").pipe(
   Options.withDefault(true),
   Options.withDescription("Create missing text and vector indexes before optimizing"),
@@ -53,9 +57,10 @@ export const runSearchMaintenance = async (options: {
   readonly optimize: boolean;
   readonly cleanupOlderThanMs: number;
   readonly actionSecret?: string;
+  readonly client?: SearchMaintenanceClient;
 }): Promise<unknown> => {
   const secret = requireSearchSecret(options.actionSecret ?? configuredActionSecret());
-  const client = createConvexClient();
+  const client = options.client ?? createConvexClient();
   return withRetry(() =>
     client.action(api.search.maintainSearch, {
       secret,
