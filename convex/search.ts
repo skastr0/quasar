@@ -527,12 +527,30 @@ interface IndexBatchRowsReport {
 
 const parseMessageKeySessionId = (key: string): string => {
   const parts = key.split(":");
+  if (parts.length < 3) {
+    // Malformed key: fall back to the whole key so the row is grouped safely.
+    return key;
+  }
   parts.pop(); // role
   parts.pop(); // seq
   return parts.join(":");
 };
 
 const MESSAGES_PER_SESSION_LIMIT = 10_000;
+const INDEX_READ_CONCURRENCY = 10;
+
+const runInBatches = async <T, R>(
+  items: readonly T[],
+  batchSize: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> => {
+  const results: R[] = [];
+  for (let index = 0; index < items.length; index += batchSize) {
+    const batch = items.slice(index, index + batchSize);
+    results.push(...(await Promise.all(batch.map(fn))));
+  }
+  return results;
+};
 
 const indexBatchMessages = async (
   ctx: GenericActionCtx<DataModel>,
@@ -541,12 +559,10 @@ const indexBatchMessages = async (
   try {
     const embeddingsConfigured = serverEmbeddingsConfigured();
     const messagesBySession = new Map<string, readonly CurrentMessageForIndex[]>();
-    await Promise.all(
-      sessionIds.map(async (sessionId) => {
-        const currentMessages = await ctx.runQuery(internal.ingestQueries.messagesForBatchIndex, { sessionId });
-        messagesBySession.set(sessionId, currentMessages);
-      }),
-    );
+    await runInBatches(sessionIds, INDEX_READ_CONCURRENCY, async (sessionId) => {
+      const currentMessages = await ctx.runQuery(internal.ingestQueries.messagesForBatchIndex, { sessionId });
+      messagesBySession.set(sessionId, currentMessages);
+    });
 
     return await withSearchWorker(async (client) => {
       const existingRows = await client.request<Record<string, unknown>[]>("readMessageRowsBySessions", {

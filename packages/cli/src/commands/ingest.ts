@@ -120,11 +120,6 @@ export interface AllIngestReport {
   readonly totalApproxMBWritten: number;
 }
 
-interface SearchIndexReport {
-  readonly status: string;
-  readonly error?: string;
-}
-
 const redactText = (value: string): string => redactSensitive(value) as string;
 
 const utf8Bytes = (value: string): number => Buffer.byteLength(value, "utf8");
