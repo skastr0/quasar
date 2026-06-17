@@ -216,4 +216,89 @@ describe("LanceDb", () => {
       },
     ]);
   });
+
+  test("lists current message rows by sessionId and deletes returned keys", async () => {
+    const dataDir = await makeTempDir();
+    const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));
+    const vector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, (_, index) =>
+      index === 0 ? 1 : 0,
+    );
+
+    const result = await runtime.runPromise(
+      Effect.gen(function* () {
+        const search = yield* LanceDb;
+        yield* search.ensureMessageTable({ createIndexes: false });
+        yield* search.upsertMessageRows({
+          rows: [
+            {
+              sessionId: "session-a",
+              seq: 2,
+              role: "assistant",
+              projectKey: "project-a",
+              text: "second text",
+              contentHash: "hash-a2",
+              vector,
+            },
+            {
+              sessionId: "session-b",
+              seq: 1,
+              role: "user",
+              projectKey: "project-a",
+              text: "other session",
+              contentHash: "hash-b1",
+              vector,
+            },
+            {
+              sessionId: "session-a",
+              seq: 1,
+              role: "user",
+              projectKey: "project-a",
+              text: "first text",
+              contentHash: "hash-a1",
+              vector,
+            },
+          ],
+        });
+
+        const listed = yield* search.readMessageRowsBySession({
+          sessionId: "session-a",
+          select: ["key", "sessionId", "seq", "role", "text"],
+        });
+        const deleted = yield* search.deleteByKeys({ keys: ["session-a:1:user"] });
+        const remaining = yield* search.readMessageRowsBySession({
+          sessionId: "session-a",
+          select: ["key", "sessionId", "seq", "role", "text"],
+        });
+
+        return { listed, deleted, remaining };
+      }),
+    );
+
+    expect([...result.listed].sort((left, right) => String(left.key).localeCompare(String(right.key)))).toEqual([
+      {
+        key: "session-a:1:user",
+        sessionId: "session-a",
+        seq: 1,
+        role: "user",
+        text: "first text",
+      },
+      {
+        key: "session-a:2:assistant",
+        sessionId: "session-a",
+        seq: 2,
+        role: "assistant",
+        text: "second text",
+      },
+    ]);
+    expect(result.deleted).toBe(1);
+    expect(result.remaining).toEqual([
+      {
+        key: "session-a:2:assistant",
+        sessionId: "session-a",
+        seq: 2,
+        role: "assistant",
+        text: "second text",
+      },
+    ]);
+  });
 });

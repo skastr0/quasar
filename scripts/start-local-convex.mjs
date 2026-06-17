@@ -73,6 +73,7 @@ const child = spawn(binaryPath, args, {
     ...process.env,
     PATH: `${nodeLtsBin}:${process.env.PATH ?? ""}`,
     TMPDIR: runtimeTmpDir,
+    QUASAR_ACTION_SECRET: process.env.QUASAR_ACTION_SECRET ?? config.actionSecret,
   },
 });
 

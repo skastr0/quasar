@@ -17,6 +17,7 @@ import {
 } from "@skastr0/quasar-core";
 
 import { createConvexClient, withRetry } from "../convex-client";
+import { configuredActionSecret } from "../config";
 import { CommandInputError } from "../errors";
 import { ingestLedgerExists, openIngestLedger } from "../ingest-ledger";
 import { executeJsonCommand } from "../output";
@@ -114,6 +115,11 @@ export interface AllIngestReport {
   readonly totalDiagnostics: number;
   readonly totalDurationMs: number;
   readonly totalApproxMBWritten: number;
+}
+
+interface SearchIndexReport {
+  readonly status: string;
+  readonly error?: string;
 }
 
 const redactText = (value: string): string => redactSensitive(value) as string;
@@ -455,6 +461,7 @@ const chunk = <T>(rows: readonly T[], size: number): T[][] => {
 /** The Convex mutation surface this engine drives; injectable for tests. */
 export interface IngestMutationClient {
   mutation: (reference: unknown, args: unknown) => Promise<unknown>;
+  action: (reference: unknown, args: unknown) => Promise<unknown>;
 }
 
 export const runProviderIngest = async (options: {
@@ -465,6 +472,8 @@ export const runProviderIngest = async (options: {
   readonly reset?: boolean;
   /** Injected for tests; defaults to the live Convex client. */
   readonly client?: IngestMutationClient;
+  /** Injected for tests; defaults to QUASAR_ACTION_SECRET or local Convex config. */
+  readonly actionSecret?: string;
   /** Injected for tests; defaults to QUASAR_HOME. */
   readonly ledgerHome?: string;
 }): Promise<IngestReport> => {
@@ -484,6 +493,14 @@ export const runProviderIngest = async (options: {
   const ledger = openIngestLedger(options.ledgerHome);
   if (options.reset === true) ledger.clear();
   const client = options.client ?? createConvexClient();
+  const actionSecret = options.actionSecret ?? configuredActionSecret();
+  if (actionSecret === undefined) {
+    throw new CommandInputError({
+      field: "QUASAR_ACTION_SECRET",
+      message:
+        "Quasar action secret not found: set QUASAR_ACTION_SECRET or run on the Mac mini with ~/.config/quasar/local/default/config.json.",
+    });
+  }
   // One claim token per run: every turn mutation verifies it, so a concurrent
   // run that re-claims a session makes this run fail loudly instead of
   // interleaving duplicate rows.
@@ -576,6 +593,56 @@ export const runProviderIngest = async (options: {
     for (const rows of chunk(mapped.toolCalls, INSERT_BATCH)) {
       await withRetry(() =>
         client.mutation(api.quasar.insertToolCalls, { toolCalls: rows, runId }),
+      );
+    }
+    const currentMessages = mapped.messages
+      .filter((message) => message.role === "user" || message.role === "assistant")
+      .map((message) => ({
+        sessionId: message.sessionId,
+        seq: message.seq,
+        role: message.role as "user" | "assistant",
+        projectKey: message.projectKey,
+        text: message.text,
+      }));
+    await withRetry(() =>
+      client.mutation(api.quasar.beginSessionIndex, {
+        sessionId: mapped.session.sessionId,
+        runId,
+      }),
+    );
+    let searchIndex: SearchIndexReport;
+    try {
+      searchIndex = (await withRetry(() =>
+        client.action(api.search.indexSessionForIngest, {
+          sessionId: mapped.session.sessionId,
+          runId,
+          secret: actionSecret,
+          currentMessages,
+        }),
+      )) as SearchIndexReport;
+    } catch (error) {
+      await withRetry(() =>
+        client.mutation(api.quasar.abortSessionIndex, {
+          sessionId: mapped.session.sessionId,
+          runId,
+        }),
+      );
+      throw error;
+    }
+    if (
+      searchIndex.status === "failed" ||
+      searchIndex.status === "unconfigured" ||
+      searchIndex.status === "missing" ||
+      searchIndex.status === "ingest_in_progress"
+    ) {
+      await withRetry(() =>
+        client.mutation(api.quasar.abortSessionIndex, {
+          sessionId: mapped.session.sessionId,
+          runId,
+        }),
+      );
+      throw new Error(
+        `LanceDB index-on-ingest failed for ${mapped.session.sessionId}: ${searchIndex.status}${searchIndex.error === undefined ? "" : ` (${searchIndex.error})`}`,
       );
     }
     await withRetry(() =>

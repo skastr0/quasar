@@ -86,6 +86,12 @@ export interface DeleteByKeysRequest extends TableRequest {
   readonly keyColumn?: string;
 }
 
+export interface ReadMessageRowsBySessionRequest extends TableRequest {
+  readonly sessionId: string;
+  readonly limit?: number;
+  readonly select?: readonly string[];
+}
+
 export interface ReadRowsRequest extends TableRequest {
   readonly filter?: string;
   readonly limit?: number;
@@ -586,6 +592,29 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
         });
       });
 
+    const readMessageRowsBySession = (
+      request: ReadMessageRowsBySessionRequest,
+    ): Effect.Effect<readonly Record<string, unknown>[], LanceDbError> =>
+      Effect.gen(function* () {
+        const tableName = tableNameOrDefault(request.tableName);
+        const existing = yield* tableNames(connection, tableName);
+        if (!existing.includes(tableName)) {
+          return [];
+        }
+        const table = yield* openTable({ tableName });
+        let query = table.query().where(`sessionId = ${escapeSqlString(request.sessionId)}`);
+        if (request.limit !== undefined) {
+          query = query.limit(limitOrDefault(request.limit));
+        }
+        return yield* Effect.tryPromise({
+          try: () =>
+            query
+              .select([...(request.select === undefined ? MESSAGE_SEARCH_COLUMNS : request.select)])
+              .toArray(),
+          catch: (cause) => makeOperationError(tableName, "readMessageRowsBySession", cause),
+        });
+      });
+
     const vectorSearch = (request: VectorSearchRequest): Effect.Effect<readonly SearchHit[], LanceDbError> =>
       Effect.gen(function* () {
         const tableName = tableNameOrDefault(request.tableName);
@@ -686,6 +715,7 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
       upsertRows,
       deleteByKeys,
       readRows,
+      readMessageRowsBySession,
       vectorSearch,
       ftsSearch,
       hybridSearch,
