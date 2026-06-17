@@ -29,6 +29,20 @@ const actionSecret =
   process.env.QUASAR_ACTION_SECRET ??
   localConvexConfig.actionSecret ??
   spawnOutput("openssl", ["rand", "-hex", "32"]);
+const xmlText = (value) =>
+  String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll("\"", "&quot;")
+    .replaceAll("'", "&apos;");
+const googleEmbeddingEnv = ["GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"]
+  .flatMap((name) =>
+    process.env[name] === undefined
+      ? []
+      : [`    <key>${name}</key>`, `    <string>${xmlText(process.env[name])}</string>`],
+  )
+  .join("\n");
 if (localConvexConfig.actionSecret === undefined && existsSync(localConvexConfigPath)) {
   writeFileSync(
     localConvexConfigPath,
@@ -52,7 +66,7 @@ mkdirSync(quasarTmpDir, { recursive: true, mode: 0o700 });
 
 for (const agent of agents) {
   const plistPath = join(launchAgentsDir, `${agent.label}.plist`);
-  writeFileSync(plistPath, plist(agent), "utf8");
+  writeFileSync(plistPath, plist(agent), { encoding: "utf8", mode: 0o600 });
 
   spawnSync("launchctl", ["bootout", domain, plistPath], { stdio: "ignore" });
   run("launchctl", ["bootstrap", domain, plistPath]);
@@ -104,6 +118,7 @@ function plist(agent) {
     <string>${bunBin}</string>
     <key>QUASAR_ACTION_SECRET</key>
     <string>${actionSecret}</string>
+${googleEmbeddingEnv}
   </dict>
   <key>RunAtLoad</key>
   <true/>

@@ -38,5 +38,9 @@
     "convex-test": "^0.0.53",
     "typescript": "^6.0.3",
     "vitest": "^4.1.5"
+  },
+  "dependencies": {
+    "@ai-sdk/google": "^3.0.83",
+    "ai": "^6.0.207"
   }
 }

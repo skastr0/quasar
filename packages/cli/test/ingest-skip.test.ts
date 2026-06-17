@@ -9,6 +9,7 @@ import { api } from "../../../convex/_generated/api";
 import { runProviderIngest, type IngestMutationClient } from "../src/commands/ingest";
 
 const PROJECT_DIR = "-tmp-quasar-skip-project";
+const ACTION_SECRET = "test-action-secret";
 
 /**
  * A fake Convex client that counts mutations and emulates the server's
@@ -19,10 +20,12 @@ const PROJECT_DIR = "-tmp-quasar-skip-project";
  */
 class FakeConvex implements IngestMutationClient {
   readonly calls: string[] = [];
+  indexStatus = "skipped";
   /** sessionId -> last committed sourceFingerprint (the server's view). */
   readonly committed = new Map<string, string>();
   /** sessionId -> fingerprint claimed by an in-flight begin this run. */
   #pending = new Map<string, string>();
+  #indexing = new Set<string>();
 
   countOf(name: string): number {
     return this.calls.filter((call) => call === name).length;
@@ -33,6 +36,14 @@ class FakeConvex implements IngestMutationClient {
   }
 
   mutation(reference: unknown, args: unknown): Promise<unknown> {
+    return this.call(reference, args);
+  }
+
+  action(reference: unknown, args: unknown): Promise<unknown> {
+    return this.call(reference, args);
+  }
+
+  call(reference: unknown, args: unknown): Promise<unknown> {
     const name = getFunctionName(reference as Parameters<typeof getFunctionName>[0]);
     this.calls.push(name);
     const payload = args as Record<string, unknown>;
@@ -49,10 +60,28 @@ class FakeConvex implements IngestMutationClient {
       // deleted < batchSize ends the engine's drain loop after one call.
       return Promise.resolve({ deleted: 0, batchSize: 250 });
     }
+    if (name === "quasar:beginSessionIndex") {
+      const sessionId = String(payload.sessionId);
+      if (!this.#pending.has(sessionId)) {
+        return Promise.reject(new Error("Ingest claim lost"));
+      }
+      this.#indexing.add(sessionId);
+      return Promise.resolve({});
+    }
+    if (name === "quasar:abortSessionIndex") {
+      this.#indexing.delete(String(payload.sessionId));
+      return Promise.resolve({});
+    }
+    if (name === "search:indexSessionForIngest") {
+      expect(payload.secret).toBe(ACTION_SECRET);
+      expect(Array.isArray(payload.currentMessages)).toBe(true);
+      return Promise.resolve({ status: this.indexStatus });
+    }
     if (name === "quasar:commitSessionIngest") {
       const sessionId = String(payload.sessionId);
       const fingerprint = this.#pending.get(sessionId);
       if (fingerprint !== undefined) this.committed.set(sessionId, fingerprint);
+      this.#indexing.delete(sessionId);
       return Promise.resolve({});
     }
     return Promise.resolve({});
@@ -109,6 +138,7 @@ const run = (
     root,
     client,
     ledgerHome,
+    actionSecret: ACTION_SECRET,
     ...extra,
   });
 
@@ -121,6 +151,8 @@ describe("ingest fingerprint ledger skips unchanged sessions before parse", () =
     expect(cold.sessionsWritten).toBe(K);
     // A begin + commit per session on the cold tick.
     expect(client.countOf("quasar:beginSessionIngest")).toBe(K);
+    expect(client.countOf("quasar:beginSessionIndex")).toBe(K);
+    expect(client.countOf("search:indexSessionForIngest")).toBe(K);
     expect(client.countOf("quasar:commitSessionIngest")).toBe(K);
 
     // Warm tick: the ledger now matches every session, so the adapter skips
@@ -130,6 +162,8 @@ describe("ingest fingerprint ledger skips unchanged sessions before parse", () =
     expect(warm.sessionsWritten).toBe(0);
     expect(warm.sessionsSkipped).toBe(0);
     expect(client.countOf("quasar:beginSessionIngest")).toBe(0);
+    expect(client.countOf("quasar:beginSessionIndex")).toBe(0);
+    expect(client.countOf("search:indexSessionForIngest")).toBe(0);
     expect(client.countOf("quasar:commitSessionIngest")).toBe(0);
     expect(client.countOf("quasar:deleteSessionTurns")).toBe(0);
     expect(client.countOf("quasar:insertMessages")).toBe(0);
@@ -176,5 +210,20 @@ describe("ingest fingerprint ledger skips unchanged sessions before parse", () =
     const tick = await run(client);
     expect(client.countOf("quasar:beginSessionIngest")).toBe(1);
     expect(tick.sessionsWritten).toBe(1);
+  });
+
+  test("unconfigured search indexing fails before commit and ledger record", async () => {
+    const client = new FakeConvex();
+    client.indexStatus = "unconfigured";
+
+    await expect(run(client)).rejects.toThrow(/LanceDB index-on-ingest failed/);
+    expect(client.countOf("search:indexSessionForIngest")).toBe(1);
+    expect(client.countOf("quasar:abortSessionIndex")).toBe(1);
+    expect(client.countOf("quasar:commitSessionIngest")).toBe(0);
+
+    client.indexStatus = "skipped";
+    client.reset();
+    const retry = await run(client);
+    expect(retry.sessionsWritten).toBe(sessionFiles.length);
   });
 });

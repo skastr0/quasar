@@ -10,6 +10,9 @@
 
 import type * as quasar from "../quasar.js";
 import type * as search from "../search.js";
+import type * as searchData from "../searchData.js";
+import type * as searchIndex from "../searchIndex.js";
+import type * as searchPlan from "../searchPlan.js";
 
 import type {
   ApiFromModules,
@@ -20,6 +23,9 @@ import type {
 declare const fullApi: ApiFromModules<{
   quasar: typeof quasar;
   search: typeof search;
+  searchData: typeof searchData;
+  searchIndex: typeof searchIndex;
+  searchPlan: typeof searchPlan;
 }>;
 
 /**

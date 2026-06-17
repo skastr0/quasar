@@ -11,6 +11,10 @@ export interface QuasarClientConfig {
   };
 }
 
+export interface QuasarLocalConvexConfig {
+  readonly actionSecret?: string;
+}
+
 export const quasarHome = () =>
   resolve(process.env.QUASAR_HOME ?? join(homedir(), ".config", "quasar"));
 
@@ -18,6 +22,11 @@ export const configPath = () =>
   resolve(process.env.QUASAR_CONFIG ?? join(quasarHome(), "config.json"));
 
 const machinePath = () => join(quasarHome(), "machine.json");
+const localConvexConfigPath = () =>
+  resolve(
+    process.env.QUASAR_LOCAL_CONVEX_CONFIG ??
+      join(quasarHome(), "local", "default", "config.json"),
+  );
 
 const readJson = (path: string): unknown | undefined => {
   if (!existsSync(path)) return undefined;
@@ -47,6 +56,11 @@ const asConfig = (value: unknown): QuasarClientConfig | undefined => {
   };
 };
 
+const asLocalConvexConfig = (value: unknown): QuasarLocalConvexConfig | undefined => {
+  if (!isRecord(value)) return undefined;
+  return { actionSecret: asString(value.actionSecret) };
+};
+
 const machineHostname = (): string | undefined => {
   const parsed = readJson(machinePath());
   if (!isRecord(parsed)) return undefined;
@@ -63,6 +77,12 @@ const prefersFallbackUrl = (): boolean => {
 
 export const loadQuasarClientConfig = (): QuasarClientConfig | undefined =>
   asConfig(readJson(configPath()));
+
+export const configuredActionSecret = (): string | undefined => {
+  const explicit = process.env.QUASAR_ACTION_SECRET;
+  if (explicit !== undefined && explicit.trim().length > 0) return explicit.trim();
+  return asLocalConvexConfig(readJson(localConvexConfigPath()))?.actionSecret;
+};
 
 export const configuredConvexUrl = (): string | undefined => {
   const explicit = process.env.CONVEX_SELF_HOSTED_URL ?? process.env.CONVEX_URL;

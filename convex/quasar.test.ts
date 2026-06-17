@@ -1,4 +1,7 @@
 /// <reference types="vite/client" />
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { convexTest } from "convex-test";
 import { expect, test } from "vitest";
 import { api } from "./_generated/api";
@@ -7,6 +10,11 @@ import schema from "./schema";
 const modules = import.meta.glob("./**/*.ts");
 
 const testConvex = () => convexTest(schema, modules);
+const ACTION_SECRET = "test-action-secret";
+process.env.QUASAR_ACTION_SECRET = ACTION_SECRET;
+process.env.GOOGLE_API_KEY = "";
+process.env.GOOGLE_GENERATIVE_AI_API_KEY = "";
+process.env.QUASAR_SEARCH_DATA_DIR ??= mkdtempSync(join(tmpdir(), "quasar-convex-search-"));
 
 const sessionArgs = {
   sessionId: "claude:machine-a:abc123",
@@ -82,6 +90,33 @@ test("beginSessionIngest skips only committed sessions with an unchanged fingerp
   expect(page.page[0].messageCount).toBe(4);
 });
 
+test("indexSessionForIngest indexes the claimed run before commit", async () => {
+  const t = testConvex();
+  const sessionId = "s-index-schedule";
+
+  await claimSession(t, sessionId, "p1", "run-index");
+  await t.mutation(api.quasar.insertMessages, {
+    messages: [
+      { sessionId, seq: 1, role: "user" as const, text: "index me", projectKey: "p1" },
+    ],
+    runId: "run-index",
+  });
+  await t.mutation(api.quasar.beginSessionIndex, { sessionId, runId: "run-index" });
+  const report = await t.action(api.search.indexSessionForIngest, {
+    sessionId,
+    runId: "run-index",
+    secret: ACTION_SECRET,
+    currentMessages: [{ sessionId, seq: 1, role: "user", text: "index me", projectKey: "p1" }],
+  });
+  expect(report.status).toBe("unconfigured");
+  expect(report.messagesSeen).toBe(1);
+
+  await t.mutation(api.quasar.commitSessionIngest, {
+    sessionId,
+    runId: "run-index",
+  });
+});
+
 test("turn mutations reject a lost claim so concurrent runs cannot duplicate turns", async () => {
   const t = testConvex();
   const sessionId = "s-claim";
@@ -108,7 +143,16 @@ test("turn mutations reject a lost claim so concurrent runs cannot duplicate tur
     t.mutation(api.quasar.deleteSessionTurns, { sessionId, runId: "run-a" }),
   ).rejects.toThrow(/Ingest claim lost/);
   await expect(
-    t.mutation(api.quasar.commitSessionIngest, { sessionId, runId: "run-a" }),
+    t.mutation(api.quasar.beginSessionIndex, {
+      sessionId,
+      runId: "run-a",
+    }),
+  ).rejects.toThrow(/Ingest claim lost/);
+  await expect(
+    t.mutation(api.quasar.commitSessionIngest, {
+      sessionId,
+      runId: "run-a",
+    }),
   ).rejects.toThrow(/Ingest claim lost/);
 
   // The winning run proceeds normally.
@@ -119,13 +163,31 @@ test("turn mutations reject a lost claim so concurrent runs cannot duplicate tur
     ],
     runId: "run-b",
   });
-  await t.mutation(api.quasar.commitSessionIngest, { sessionId, runId: "run-b" });
+  await t.mutation(api.quasar.beginSessionIndex, { sessionId, runId: "run-b" });
+  await t.mutation(api.quasar.commitSessionIngest, {
+    sessionId,
+    runId: "run-b",
+  });
 
   const page = await t.query(api.quasar.readSession, {
     sessionId,
     paginationOpts: { numItems: 10, cursor: null },
   });
   expect(page.page.map((m) => m.text)).toEqual(["from run b"]);
+});
+
+test("beginSessionIndex blocks concurrent reclaims until abort or commit clears the lock", async () => {
+  const t = testConvex();
+  const sessionId = "s-index-lock";
+
+  await claimSession(t, sessionId, "p1", "run-a");
+  await t.mutation(api.quasar.beginSessionIndex, { sessionId, runId: "run-a" });
+  await expect(claimSession(t, sessionId, "p1", "run-b")).rejects.toThrow(
+    /Search indexing in progress/,
+  );
+
+  await t.mutation(api.quasar.abortSessionIndex, { sessionId, runId: "run-a" });
+  await claimSession(t, sessionId, "p1", "run-b");
 });
 
 test("insertMessages + readSession paginates in seq ascending order", async () => {

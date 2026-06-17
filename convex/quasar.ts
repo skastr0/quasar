@@ -1,6 +1,10 @@
 import { paginationOptsValidator } from "convex/server";
 import { v } from "convex/values";
-import { mutation, query, type MutationCtx } from "./_generated/server";
+import {
+  mutation,
+  query,
+  type MutationCtx,
+} from "./_generated/server";
 
 const roleValidator = v.union(
   v.literal("user"),
@@ -16,8 +20,9 @@ const LIST_PROJECTS_MAX = 1000;
 
 /** Default project rows returned by the client discovery command. */
 const LIST_PROJECTS_DEFAULT = 100;
-
+const INDEXING_LOCK_STALE_MS = 10 * 60 * 1000;
 // ---------------------------------------------------------------------------
+
 // Mutations
 // ---------------------------------------------------------------------------
 
@@ -126,6 +131,17 @@ export const beginSessionIngest = mutation({
       .withIndex("by_sessionId", (q) => q.eq("sessionId", session.sessionId))
       .unique();
     if (
+      existing !== null &&
+      existing.indexingRunId !== undefined &&
+      existing.indexingRunId !== runId &&
+      (existing.indexingStartedAt === undefined ||
+        Date.now() - existing.indexingStartedAt < INDEXING_LOCK_STALE_MS)
+    ) {
+      throw new Error(
+        `Search indexing in progress for session ${session.sessionId}: wait for the active ingest run to finish or retry after the lock expires.`,
+      );
+    }
+    if (
       force !== true &&
       existing !== null &&
       existing.ingestRunId === undefined &&
@@ -142,15 +158,45 @@ export const beginSessionIngest = mutation({
   },
 });
 
-/**
- * Marks a session's ingest complete by clearing its claim. Only after this
- * runs can an unchanged fingerprint skip the session.
- */
 export const commitSessionIngest = mutation({
   args: { sessionId: v.string(), runId: v.string() },
   handler: async (ctx, args) => {
     const session = await requireIngestClaim(ctx, args.sessionId, args.runId);
-    await ctx.db.patch(session._id, { ingestRunId: undefined });
+    await ctx.db.patch(session._id, {
+      ingestRunId: undefined,
+      indexingRunId: undefined,
+      indexingStartedAt: undefined,
+    });
+    return null;
+  },
+});
+
+export const beginSessionIndex = mutation({
+  args: { sessionId: v.string(), runId: v.string() },
+  handler: async (ctx, args) => {
+    const session = await requireIngestClaim(ctx, args.sessionId, args.runId);
+    await ctx.db.patch(session._id, {
+      indexingRunId: args.runId,
+      indexingStartedAt: Date.now(),
+    });
+    return null;
+  },
+});
+
+export const abortSessionIndex = mutation({
+  args: { sessionId: v.string(), runId: v.string() },
+  handler: async (ctx, args) => {
+    const session = await ctx.db
+      .query("sessions")
+      .withIndex("by_sessionId", (q) => q.eq("sessionId", args.sessionId))
+      .unique();
+    if (session?.indexingRunId !== args.runId) {
+      return null;
+    }
+    await ctx.db.patch(session._id, {
+      indexingRunId: undefined,
+      indexingStartedAt: undefined,
+    });
     return null;
   },
 });

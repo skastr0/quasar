@@ -25,6 +25,10 @@ export default defineSchema({
     // commitSessionIngest once every turn row has landed. A session is only
     // complete (and skippable on an unchanged fingerprint) when this is unset.
     ingestRunId: v.optional(v.string()),
+    // Search indexing lock: set immediately before LanceDB mutation and
+    // cleared by commit/abort so concurrent reclaims cannot race stale rows.
+    indexingRunId: v.optional(v.string()),
+    indexingStartedAt: v.optional(v.number()),
   })
     .index("by_sessionId", ["sessionId"])
     .index("by_projectKey", ["projectKey"])
@@ -41,7 +45,9 @@ export default defineSchema({
     text: v.string(),
     ts: v.optional(v.string()),
     projectKey: v.string(),
-  }).index("by_sessionId_and_seq", ["sessionId", "seq"]),
+  })
+    .index("by_sessionId_and_seq", ["sessionId", "seq"])
+    .index("by_sessionId_and_role_and_seq", ["sessionId", "role", "seq"]),
 
   // Structural surface: full tool inputs/outputs, retrieved by exact index walks.
   // NEVER search-indexed, NEVER embedded — tool payloads must not pollute search.

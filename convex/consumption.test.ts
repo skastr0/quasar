@@ -17,6 +17,9 @@
  * Convex component-internal tables would not appear in this schema object and
  * are out of scope by construction.
  */
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { convexTest, type TestConvex } from "convex-test";
 import { describe, expect, test } from "vitest";
 import { api } from "./_generated/api";
@@ -38,6 +41,11 @@ const PROJECT_KEY = "git:github.com/example/alpha";
 const SESSION_ID = "claude:machine:test:aaaa";
 const CLAIMED_SESSION_ID = "claude:machine:test:bbbb";
 const RUN_ID = "run-battery";
+const ACTION_SECRET = "test-action-secret";
+process.env.QUASAR_ACTION_SECRET = ACTION_SECRET;
+process.env.GOOGLE_API_KEY = "";
+process.env.GOOGLE_GENERATIVE_AI_API_KEY = "";
+process.env.QUASAR_SEARCH_DATA_DIR ??= mkdtempSync(join(tmpdir(), "quasar-convex-search-"));
 
 const seed = async (t: Quasar) => {
   await t.mutation(api.quasar.upsertProject, {
@@ -104,7 +112,10 @@ const seed = async (t: Quasar) => {
       },
     ],
   });
-  await t.mutation(api.quasar.commitSessionIngest, { sessionId: SESSION_ID, runId: RUN_ID });
+  await t.mutation(api.quasar.commitSessionIngest, {
+    sessionId: SESSION_ID,
+    runId: RUN_ID,
+  });
   // A second session left mid-claim: its ingestRunId must be visible to ops.
   await t.mutation(api.quasar.beginSessionIngest, {
     sessionId: CLAIMED_SESSION_ID,
@@ -115,6 +126,10 @@ const seed = async (t: Quasar) => {
     sourceFingerprint: '{"size":3,"mtimeMs":4}',
     messageCount: 0,
     toolCallCount: 0,
+    runId: RUN_ID,
+  });
+  await t.mutation(api.quasar.beginSessionIndex, {
+    sessionId: CLAIMED_SESSION_ID,
     runId: RUN_ID,
   });
 };
@@ -254,6 +269,26 @@ const FIELD_CONSUMERS: Record<string, Record<string, FieldConsumer>> = {
         expect(claimed?.ingestRunId).toBe(RUN_ID);
         const committed = rows.find((row) => row.sessionId === SESSION_ID);
         expect(committed?.ingestRunId).toBeUndefined();
+      },
+    },
+    indexingRunId: {
+      via: "listSessions (returned); in-progress-index visibility",
+      proof: async (t) => {
+        const rows = await listSessions(t);
+        const claimed = rows.find((row) => row.sessionId === CLAIMED_SESSION_ID);
+        expect(claimed?.indexingRunId).toBe(RUN_ID);
+        const committed = rows.find((row) => row.sessionId === SESSION_ID);
+        expect(committed?.indexingRunId).toBeUndefined();
+      },
+    },
+    indexingStartedAt: {
+      via: "listSessions (returned); stale-index-lock visibility",
+      proof: async (t) => {
+        const rows = await listSessions(t);
+        const claimed = rows.find((row) => row.sessionId === CLAIMED_SESSION_ID);
+        expect(typeof claimed?.indexingStartedAt).toBe("number");
+        const committed = rows.find((row) => row.sessionId === SESSION_ID);
+        expect(committed?.indexingStartedAt).toBeUndefined();
       },
     },
   },

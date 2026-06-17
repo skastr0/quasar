@@ -18,10 +18,12 @@ interface WorkerPayload {
     readonly vector: readonly number[];
   }[];
   readonly createIndexes?: boolean;
+  readonly sessionId?: string;
   readonly query?: string;
   readonly vector?: readonly number[];
   readonly projectKey?: string;
   readonly limit?: number;
+  readonly keys?: readonly string[];
 }
 
 const searchRuntime = makeLanceDbRuntime();
@@ -44,6 +46,24 @@ const run = async () => {
             createIndexes: payload.createIndexes,
           });
           return { indexed: payload.rows?.length ?? 0 };
+        }),
+      );
+    case "readMessageRowsBySession":
+      return searchRuntime.runPromise(
+        Effect.gen(function* () {
+          const search = yield* LanceDb;
+          return yield* search.readMessageRowsBySession({
+            sessionId: payload.sessionId ?? "",
+            select: MESSAGE_SEARCH_COLUMNS,
+          });
+        }),
+      );
+    case "deleteByKeys":
+      return searchRuntime.runPromise(
+        Effect.gen(function* () {
+          const search = yield* LanceDb;
+          const deleted = yield* search.deleteByKeys({ keys: payload.keys ?? [] });
+          return { deleted };
         }),
       );
     case "searchLexical":
