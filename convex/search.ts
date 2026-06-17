@@ -268,6 +268,53 @@ const internalSearchLimit = (limit: number | undefined): number =>
 const asNumber = (value: unknown): number => (typeof value === "number" ? value : 0);
 const asString = (value: unknown): string => (typeof value === "string" ? value : "");
 
+interface OptimizeReport {
+  readonly tableName: string;
+  readonly stats: {
+    readonly compaction: {
+      readonly fragmentsRemoved: number;
+      readonly fragmentsAdded: number;
+      readonly filesRemoved: number;
+      readonly filesAdded: number;
+    };
+    readonly prune: {
+      readonly bytesRemoved: number;
+      readonly oldVersionsRemoved: number;
+    };
+  };
+}
+
+interface IndexInfo {
+  readonly name: string;
+  readonly indexType: string;
+  readonly columns: readonly string[];
+  readonly numIndexedRows?: number;
+  readonly numUnindexedRows?: number;
+}
+
+interface DiskSizeBreakdown {
+  readonly totalBytes: number;
+  readonly dataBytes: number;
+  readonly indexBytes: number;
+  readonly versionBytes: number;
+}
+
+interface TableStatsReport {
+  readonly tableName: string;
+  readonly rowCount: number;
+  readonly versionCount: number;
+  readonly disk: DiskSizeBreakdown;
+  readonly tableStats: { readonly numRows: number; readonly totalBytes: number; readonly numIndices: number };
+  readonly indices: readonly IndexInfo[];
+}
+
+interface MaintenanceReport {
+  readonly createdIndexes: boolean;
+  readonly optimized: boolean;
+  readonly optimize?: OptimizeReport;
+  readonly stats: TableStatsReport;
+}
+
 const toSearchMatch = (
   hit: SearchWorkerHit,
   args: {
@@ -543,5 +590,42 @@ export const searchFusion = action({
       semanticStatus: "ready",
       embeddingDimensions: embedded.vector.length,
     });
+  },
+});
+
+export const maintainSearch = action({
+  args: {
+    secret: v.string(),
+    createIndexes: v.optional(v.boolean()),
+    createVectorIndex: v.optional(v.boolean()),
+    replaceIndexes: v.optional(v.boolean()),
+    optimize: v.optional(v.boolean()),
+    cleanupOlderThanMs: v.optional(v.number()),
+    deleteUnverified: v.optional(v.boolean()),
+  },
+  handler: async (_ctx, args): Promise<MaintenanceReport> => {
+    requireActionSecret(args.secret);
+    let createdIndexes = false;
+    if (args.createIndexes !== false) {
+      await runSearchWorker("createMissingIndexes", {
+        createVectorIndex: args.createVectorIndex,
+        replaceIndexes: args.replaceIndexes,
+      });
+      createdIndexes = true;
+    }
+    let optimizeReport: OptimizeReport | undefined;
+    if (args.optimize !== false) {
+      optimizeReport = await runSearchWorker<OptimizeReport>("optimizeTable", {
+        cleanupOlderThanMs: args.cleanupOlderThanMs,
+        deleteUnverified: args.deleteUnverified,
+      });
+    }
+    const stats = await runSearchWorker<TableStatsReport>("tableStats", {});
+    return {
+      createdIndexes,
+      optimized: optimizeReport !== undefined,
+      ...(optimizeReport !== undefined ? { optimize: optimizeReport } : {}),
+      stats,
+    };
   },
 });

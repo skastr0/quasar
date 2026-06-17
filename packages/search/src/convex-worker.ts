@@ -21,12 +21,15 @@ interface WorkerPayload {
   }[];
   readonly createIndexes?: boolean;
   readonly createVectorIndex?: boolean;
+  readonly replaceIndexes?: boolean;
   readonly sessionId?: string;
   readonly query?: string;
   readonly vector?: readonly number[];
   readonly projectKey?: string;
   readonly limit?: number;
   readonly keys?: readonly string[];
+  readonly cleanupOlderThanMs?: number;
+  readonly deleteUnverified?: boolean;
 }
 
 const searchRuntime = makeLanceDbRuntime();
@@ -55,6 +58,38 @@ const run = async () => {
             rows: payload.rows ?? [],
           });
           return { indexed: payload.rows?.length ?? 0 };
+        }),
+      );
+    case "createMissingIndexes":
+      return searchRuntime.runPromise(
+        Effect.gen(function* () {
+          const search = yield* LanceDb;
+          yield* search.createMessageIndexes({
+            includeVector: payload.createVectorIndex,
+            replace: payload.replaceIndexes,
+          });
+          return { created: true };
+        }),
+      );
+    case "optimizeTable":
+      return searchRuntime.runPromise(
+        Effect.gen(function* () {
+          const search = yield* LanceDb;
+          const cleanupOlderThan =
+            payload.cleanupOlderThanMs === undefined
+              ? undefined
+              : new Date(Date.now() - payload.cleanupOlderThanMs);
+          return yield* search.optimizeTable({
+            cleanupOlderThan,
+            deleteUnverified: payload.deleteUnverified,
+          });
+        }),
+      );
+    case "tableStats":
+      return searchRuntime.runPromise(
+        Effect.gen(function* () {
+          const search = yield* LanceDb;
+          return yield* search.tableStats({});
         }),
       );
     case "readMessageRowsBySession":

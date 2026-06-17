@@ -10,6 +10,7 @@ import { ingestCommand } from "./commands/ingest";
 import { projectsCommand, sessionsCommand, toolCallsCommand } from "./commands/read";
 import { examplesCommand, schemaCommand } from "./commands/schema";
 import { searchCommand } from "./commands/search";
+import { searchMaintainCommand } from "./commands/search-maint";
 import { sourcesCommand } from "./commands/sources";
 import { CLI_NAME, CLI_VERSION } from "./constants";
 import { CommandInputError } from "./errors";
@@ -54,6 +55,7 @@ export const rootCommand = Command.make(CLI_NAME).pipe(
     ingestCommand,
     daemonCommand,
     searchCommand,
+    searchMaintainCommand,
     projectsCommand,
     sessionsCommand,
     toolCallsCommand,

@@ -1,10 +1,18 @@
 import * as lancedb from "@lancedb/lancedb";
 import { Field, FixedSizeList, Float32, Int32, Schema as ArrowSchema, Utf8 } from "apache-arrow";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
+import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import type { Connection, Table } from "@lancedb/lancedb";
+import type {
+  Connection,
+  IndexConfig,
+  IndexStatistics,
+  OptimizeStats,
+  Table,
+  TableStatistics,
+} from "@lancedb/lancedb";
 
 export const DEFAULT_SEARCH_TABLE = "messages";
 export const DEFAULT_VECTOR_COLUMN = "vector";
@@ -129,6 +137,47 @@ export interface HybridSearchRequest extends TableRequest {
   readonly fusionK?: number;
   readonly filter?: string;
   readonly select?: readonly string[];
+}
+
+export interface OptimizeTableRequest extends TableRequest {
+  /** Remove versions older than this date. Defaults to now (all old versions). */
+  readonly cleanupOlderThan?: Date;
+  /** Delete unverified files older than cleanupOlderThan. Only set true when no concurrent writers. */
+  readonly deleteUnverified?: boolean;
+}
+
+export interface TableStatsRequest extends TableRequest {}
+
+export interface IndexInfo {
+  readonly name: string;
+  readonly indexType: string;
+  readonly columns: readonly string[];
+  readonly numIndexedRows?: number;
+  readonly numUnindexedRows?: number;
+  readonly distanceType?: string;
+  readonly numIndices?: number;
+  readonly loss?: number;
+}
+
+export interface DiskSizeBreakdown {
+  readonly totalBytes: number;
+  readonly dataBytes: number;
+  readonly indexBytes: number;
+  readonly versionBytes: number;
+}
+
+export interface TableStatsReport {
+  readonly tableName: string;
+  readonly rowCount: number;
+  readonly versionCount: number;
+  readonly disk: DiskSizeBreakdown;
+  readonly tableStats: TableStatistics;
+  readonly indices: readonly IndexInfo[];
+}
+
+export interface OptimizeTableReport {
+  readonly tableName: string;
+  readonly stats: OptimizeStats;
 }
 
 export interface SearchHit {
@@ -349,6 +398,57 @@ const makeOperationError = (
   return new LanceDbOperationFailed({ tableName, operation, message, cause });
 };
 
+const tableDirPath = (dataDir: string, tableName: string): string =>
+  join(dataDir, `${tableName}.lance`);
+
+const sizeOfDir = async (dir: string): Promise<number> => {
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    let total = 0;
+    for (const entry of entries) {
+      const entryPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        total += await sizeOfDir(entryPath);
+      } else if (entry.isFile()) {
+        total += (await stat(entryPath)).size;
+      }
+    }
+    return total;
+  } catch {
+    return 0;
+  }
+};
+
+const diskSizeBreakdown = async (
+  dataDir: string,
+  tableName: string,
+): Promise<DiskSizeBreakdown> => {
+  const tableDir = tableDirPath(dataDir, tableName);
+  const totalBytes = await sizeOfDir(tableDir);
+  const indexBytes = await sizeOfDir(join(tableDir, "_indices"));
+  const versionBytes = await sizeOfDir(join(tableDir, "_versions"));
+  const dataBytes = Math.max(0, totalBytes - indexBytes - versionBytes);
+  return { totalBytes, dataBytes, indexBytes, versionBytes };
+};
+
+const indexInfoFromConfig = (
+  config: IndexConfig,
+  stats: IndexStatistics | undefined | null,
+): IndexInfo => ({
+  name: config.name,
+  indexType: config.indexType,
+  columns: config.columns,
+  ...(stats !== undefined && stats !== null
+    ? {
+        numIndexedRows: stats.numIndexedRows,
+        numUnindexedRows: stats.numUnindexedRows,
+        distanceType: stats.distanceType,
+        numIndices: stats.numIndices,
+        loss: stats.loss,
+      }
+    : {}),
+});
+
 const connect = (dataDir: string): Effect.Effect<Connection, ConnectionFailed> =>
   Effect.tryPromise({
     try: () => lancedb.connect(dataDir),
@@ -445,6 +545,75 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
             }),
           catch: (cause) => detectIndexNotReady(tableName, MESSAGE_VECTOR_INDEX_NAME, "createVectorIndex", cause),
         });
+      });
+
+    const optimizeTable = (request: OptimizeTableRequest = {}): Effect.Effect<OptimizeTableReport, LanceDbError> =>
+      Effect.gen(function* () {
+        const tableName = tableNameOrDefault(request.tableName);
+        const table = yield* openTable({ tableName });
+        const cleanupOlderThan = request.cleanupOlderThan ?? new Date();
+        const stats = yield* Effect.tryPromise({
+          try: () =>
+            table.optimize({
+              cleanupOlderThan,
+              deleteUnverified: request.deleteUnverified ?? false,
+            }),
+          catch: (cause) => makeOperationError(tableName, "optimize", cause),
+        });
+        return { tableName, stats };
+      });
+
+    const tableStats = (request: TableStatsRequest = {}): Effect.Effect<TableStatsReport, LanceDbError> =>
+      Effect.gen(function* () {
+        const tableName = tableNameOrDefault(request.tableName);
+        const table = yield* openTable({ tableName });
+        const {
+          rowCount,
+          tableStatistics,
+          indexConfigs,
+          versions,
+          disk,
+        } = yield* Effect.all(
+          {
+            rowCount: Effect.tryPromise({
+              try: () => table.countRows(),
+              catch: (cause) => makeOperationError(tableName, "countRows", cause),
+            }),
+            tableStatistics: Effect.tryPromise({
+              try: () => table.stats(),
+              catch: (cause) => makeOperationError(tableName, "stats", cause),
+            }),
+            indexConfigs: Effect.tryPromise({
+              try: () => table.listIndices(),
+              catch: (cause) => makeOperationError(tableName, "listIndices", cause),
+            }),
+            versions: Effect.tryPromise({
+              try: () => table.listVersions(),
+              catch: (cause) => makeOperationError(tableName, "listVersions", cause),
+            }),
+            disk: Effect.tryPromise({
+              try: () => diskSizeBreakdown(dataDir, tableName),
+              catch: (cause) => makeOperationError(tableName, "diskSizeBreakdown", cause),
+            }),
+          },
+          { concurrency: 1 },
+        );
+        const indexInfos: IndexInfo[] = [];
+        for (const config of indexConfigs) {
+          const stats = yield* Effect.tryPromise({
+            try: () => table.indexStats(config.name),
+            catch: (cause) => makeOperationError(tableName, `indexStats(${config.name})`, cause),
+          });
+          indexInfos.push(indexInfoFromConfig(config, stats));
+        }
+        return {
+          tableName,
+          rowCount,
+          versionCount: versions.length,
+          disk,
+          tableStats: tableStatistics,
+          indices: indexInfos,
+        };
       });
 
     const ensureMessageTable = (request: EnsureMessageTableRequest = {}): Effect.Effect<Table, LanceDbError> =>
@@ -729,6 +898,8 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
       openTable,
       ensureMessageTable,
       createMessageIndexes,
+      optimizeTable,
+      tableStats,
       ensureTable,
       upsertMessageRows,
       upsertRows,
