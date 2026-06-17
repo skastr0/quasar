@@ -265,17 +265,53 @@ class SearchWorkerClient {
       throw new Error("SearchWorkerClient request after close");
     }
     const requestLine = JSON.stringify({ operation, payload }) + "\n";
-    this.child.stdin.write(requestLine);
+    await this.writeStdin(requestLine);
     const next = await this.lines.next();
     if (next.done === true) {
       const stderr = this.stderrBuffer.join("").trim();
       throw new Error(stderr || `search worker closed before response for ${operation}`);
     }
-    const envelope = JSON.parse(next.value) as WorkerEnvelope;
+    const envelope = this.parseEnvelope(next.value, operation);
     if (envelope.ok !== true) {
       throw new Error(envelope.error ?? `search worker ${operation} failed`);
     }
     return envelope.data as T;
+  }
+
+  private writeStdin(line: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const writable = this.child.stdin;
+      const onError = (err: Error) => {
+        writable.off("error", onError);
+        reject(err);
+      };
+      writable.once("error", onError);
+      const flushed = writable.write(line, (err) => {
+        if (err) {
+          writable.off("error", onError);
+          reject(err);
+        } else {
+          writable.off("error", onError);
+          resolve();
+        }
+      });
+      if (!flushed) {
+        writable.once("drain", () => {
+          writable.off("error", onError);
+          resolve();
+        });
+      }
+    });
+  }
+
+  private parseEnvelope(line: string, operation: string): WorkerEnvelope {
+    try {
+      return JSON.parse(line) as WorkerEnvelope;
+    } catch (err) {
+      throw new Error(
+        `search worker ${operation} returned invalid JSON: ${err instanceof Error ? err.message : String(err)}: ${line.slice(0, 200)}`,
+      );
+    }
   }
 
   async close(): Promise<void> {
@@ -284,12 +320,28 @@ class SearchWorkerClient {
     }
     this.closed = true;
     this.child.stdin.end();
+    const deadlineMs = 5_000;
+    const start = Date.now();
     await new Promise<void>((resolve) => {
-      this.child.on("close", () => resolve());
-      setTimeout(() => {
-        this.child.kill("SIGTERM");
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
         resolve();
-      }, 5_000);
+      };
+      this.child.on("close", finish);
+      const timeout = setTimeout(() => {
+        this.child.kill("SIGTERM");
+        const remaining = Math.max(0, deadlineMs - (Date.now() - start));
+        setTimeout(() => {
+          this.child.kill("SIGKILL");
+          finish();
+        }, remaining);
+      }, deadlineMs);
+      this.child.on("error", () => {
+        clearTimeout(timeout);
+        finish();
+      });
     });
   }
 }
