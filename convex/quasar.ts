@@ -1,7 +1,6 @@
 import { paginationOptsValidator } from "convex/server";
 import { v } from "convex/values";
 import { mutation, query, type MutationCtx } from "./_generated/server";
-import { scheduleSessionEmbedding } from "./embed";
 
 const roleValidator = v.union(
   v.literal("user"),
@@ -11,9 +10,6 @@ const roleValidator = v.union(
 
 /** Per-mutation delete batch, within Convex's small-instant-mutation opinion. */
 const DELETE_BATCH = 200;
-
-/** Hard upper bound on search results returned in one call. */
-const SEARCH_TAKE_MAX = 20;
 
 /** Hard upper bound on project rows returned in one client listing. */
 const LIST_PROJECTS_MAX = 1000;
@@ -155,7 +151,6 @@ export const commitSessionIngest = mutation({
   handler: async (ctx, args) => {
     const session = await requireIngestClaim(ctx, args.sessionId, args.runId);
     await ctx.db.patch(session._id, { ingestRunId: undefined });
-    await scheduleSessionEmbedding(ctx, { sessionId: args.sessionId });
     return null;
   },
 });
@@ -249,45 +244,6 @@ export const deleteSessionTurns = mutation({
 // ---------------------------------------------------------------------------
 // Queries
 // ---------------------------------------------------------------------------
-
-export const searchMessages = query({
-  args: {
-    query: v.string(),
-    projectKey: v.optional(v.string()),
-    role: v.optional(roleValidator),
-    limit: v.optional(v.number()),
-  },
-  handler: async (ctx, args) => {
-    if (
-      args.limit !== undefined &&
-      (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > SEARCH_TAKE_MAX)
-    ) {
-      throw new Error(
-        `searchMessages: limit must be an integer in [1, ${SEARCH_TAKE_MAX}], got ${args.limit}`,
-      );
-    }
-    const results = await ctx.db
-      .query("messages")
-      .withSearchIndex("search_text", (q) => {
-        let search = q.search("text", args.query);
-        if (args.projectKey !== undefined) {
-          search = search.eq("projectKey", args.projectKey);
-        }
-        if (args.role !== undefined) {
-          search = search.eq("role", args.role);
-        }
-        return search;
-      })
-      .take(args.limit ?? SEARCH_TAKE_MAX);
-    return results.map((row) => ({
-      sessionId: row.sessionId,
-      seq: row.seq,
-      role: row.role,
-      text: row.text,
-      projectKey: row.projectKey,
-    }));
-  },
-});
 
 export const readSession = query({
   args: { sessionId: v.string(), paginationOpts: paginationOptsValidator },

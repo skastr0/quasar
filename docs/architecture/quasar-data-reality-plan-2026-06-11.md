@@ -1,6 +1,6 @@
 # Quasar — Data-Reality Plan
 
-Date: 2026-06-11
+Date: 2026-06-11; updated 2026-06-17 for the LanceDB search cutover.
 Status: **canonical**. This is the only live architecture document, together with the
 platform rulings in [convex-grain-quasar-v2.md](convex-grain-quasar-v2.md).
 Provenance: owner decisions of 2026-06-11 after a full-corpus measurement (every file
@@ -9,9 +9,10 @@ sync-contract/stop-line apparatus.
 
 ## Product sentence
 
-Agents assess and research sessions for a project via search (lexical now, semantic
-fusion next) and deep session inspection — including targeted tool-call retrieval — in
-a fast CLI, MCP tools, and a Prism plugin, backed by self-hosted Convex over Tailscale.
+Agents assess and research sessions for a project via deep session inspection and
+targeted tool-call retrieval in a fast CLI, MCP tools, and a Prism plugin. Convex
+stores the OLTP session rows; LanceDB owns the replacement lexical/vector/fusion
+search indexes.
 
 ## The data reality (measured 2026-06-11)
 
@@ -44,15 +45,16 @@ Any future shape decision starts from a measurement of real data, in absolute MB
 1. **Convex's limits are the contract.** No invented caps, clamps, gates, ratios, or
    byte budgets — ever. Convex's document/value/transaction limits and its
    architectural opinions (small instantly-completing mutations, actions for external
-   work, Workpool for long jobs, RAG component for semantic) are adopted wholesale.
+   work) are adopted wholesale for OLTP storage.
    A value beyond a Convex limit is, by the physics above, provider garbage: emit a
    named diagnostic `(provider, sessionId, field, observedBytes)`, write zero rows for
    it, continue the run. Boundary rejection, never "robust handling."
 2. **Store at the grain you read.** Rows are turns. Reading a session is a paginated
    index walk in `seq` order. No chunking, no compaction, no reconstruction layer.
-3. **Indexing is a separate decision from storing.** Search surfaces and structural
-   retrieval surfaces are different tables. Tool payloads (an agent reading 100 files)
-   can never pollute session search, structurally.
+3. **Indexing is a separate decision from storing.** Convex stores the canonical
+   rows; LanceDB owns the search index and its indexing state. Search surfaces and
+   structural retrieval surfaces are different tables. Tool payloads (an agent
+   reading 100 files) can never pollute session search, structurally.
 
 ## Entity model and schema
 
@@ -70,8 +72,7 @@ sessions   sessionId, projectKey, provider, agentName, title, startedAt, updated
 
 messages   sessionId, seq, role (user|assistant|reasoning), text, ts, projectKey
            index: by_sessionId_and_seq
-           search index search_text(text; filters projectKey, role, sessionId)
-           — THE search surface; phase-2 embeddings read this table only
+           — source rows for LanceDB indexing; no Convex search index
 
 toolCalls  sessionId, seq, toolName, status, inputText, outputText,
            startedAt, completedAt, projectKey, provider
@@ -123,23 +124,21 @@ numbers: sessions written/skipped, rows, MB, diagnostics, duration.
 
 ## Search
 
-- Phase 1 (lexical): Convex search index over `messages.text`, filters
-  `projectKey`/`role`/`sessionId`. Proven by pinned real queries before anything else
-  builds on top.
-- Phase 2 (semantic): **Gemini embeddings — the model already configured on this
-  machine** (used by the Tower Control and Booth Convex projects; key in env; owner
-  decision 2026-06-11, not OpenAI). Conversation surface only (~50–80 MB). RAG
-  component + Workpool (validated on the self-hosted backend). Fusion = lexical +
-  vector via RRF in an action.
+Convex Searchlight/RAG is retired. Do not restore `searchIndex`, `@convex-dev/rag`,
+Workpool embedding queues, Gemini environment sync, `searchMessages`, or compatibility
+CLI search placeholders. Existing Convex search/vector state is disposable and is not
+exported or reused.
+
+LanceDB owns the replacement search stack on the Mac mini filesystem. It gets its own
+explicit indexing state, invalidation rules, FTS/vector indexes, and verification
+batteries. Convex actions may call the in-repo LanceDB client directly; there is no
+separate Bun HTTP daemon.
 
 ## Build sequence (Tower, project `quasar`, forge orbit)
 
-QSR-053 repo reorientation (this document) → QSR-054 Convex core →
-QSR-055 ingest engine + claude proof (blocks all optimization) → QSR-056 codex +
-cross-provider project unity → QSR-057 opencode + garbage-boundary proof →
-QSR-058 hermes/grok → QSR-059 validation swarm (reconciliation, consumption audit,
-guideline conformance, pinned relevance — all executable) → QSR-060 Gemini embeddings →
-QSR-061 MCP/Tailscale serving → QSR-062 ops.
+The original Convex/RAG sequence is historical. Current work continues in Tower with
+the LanceDB cutover: remove Convex search/RAG, keep Convex OLTP, add in-repo LanceDB
+indexing/search, then re-ingest clean data.
 
 ## Historical documents
 

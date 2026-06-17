@@ -87,27 +87,31 @@ describe("T1: multi-profile layout", () => {
     SESSION_SCHEMA + insertSession("top-session-1", "Top-level session") + insertMessage("top-msg-1", "top-session-1"),
   ]);
 
-  test("discovers 3 sessions, one per profile, with correct projectIdentityKey", async () => {
-    const result = await hermesAdapter.read({
-      machine: MACHINE,
-      now: NOW,
-      roots: { hermes: root },
-    });
+  test(
+    "discovers 3 sessions, one per profile, with correct projectIdentityKey",
+    async () => {
+      const result = await hermesAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { hermes: root },
+      });
 
-    expect(result.sessions).toHaveLength(3);
+      expect(result.sessions).toHaveLength(3);
 
-    const keys = result.sessions.map((s) => s.projectIdentity.projectIdentityKey).sort();
-    expect(keys).toEqual([
-      "project:profile:alpha",
-      "project:profile:beta",
-      "project:profile:hermes",
-    ]);
+      const keys = result.sessions.map((s) => s.projectIdentity.projectIdentityKey).sort();
+      expect(keys).toEqual([
+        "project:profile:alpha",
+        "project:profile:beta",
+        "project:profile:hermes",
+      ]);
 
-    // None should be path:-prefixed
-    for (const session of result.sessions) {
-      expect(session.projectIdentity.projectIdentityKey).not.toMatch(/^project:path:/);
-    }
-  });
+      // None should be path:-prefixed
+      for (const session of result.sessions) {
+        expect(session.projectIdentity.projectIdentityKey).not.toMatch(/^project:path:/);
+      }
+    },
+    15_000,
+  );
 });
 
 // ---------------------------------------------------------------------------

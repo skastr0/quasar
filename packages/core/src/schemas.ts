@@ -310,32 +310,3 @@ export const AdapterDiagnostic = Schema.Struct({
   details: Schema.optional(Schema.Unknown),
 });
 export type AdapterDiagnostic = typeof AdapterDiagnostic.Type;
-
-export const EmbeddingReadinessCounts = Schema.Struct({
-  total: NonNegativeInteger,
-  pending: NonNegativeInteger,
-  syncing: NonNegativeInteger,
-  ready: NonNegativeInteger,
-  skipped: NonNegativeInteger,
-  failed: NonNegativeInteger,
-  deadLetter: Schema.optional(NonNegativeInteger),
-});
-export type EmbeddingReadinessCounts = typeof EmbeddingReadinessCounts.Type;
-
-export const SearchMode = Schema.Literal("text", "semantic", "fusion");
-export type SearchMode = typeof SearchMode.Type;
-
-export const SearchRequest = Schema.Struct({
-  query: Schema.String,
-  projectIdentityKey: Schema.optional(Schema.String),
-  machineId: Schema.optional(Schema.String),
-  provider: Schema.optional(Provider),
-  agentName: Schema.optional(Schema.String),
-  role: Schema.optional(SessionRole),
-  kind: Schema.optional(SessionEventKind),
-  toolName: Schema.optional(Schema.String),
-  from: Schema.optional(Schema.String),
-  to: Schema.optional(Schema.String),
-  limit: Schema.optional(PositiveInteger),
-});
-export type SearchRequest = typeof SearchRequest.Type;

@@ -18,23 +18,15 @@
  * are out of scope by construction.
  */
 import { convexTest, type TestConvex } from "convex-test";
-import workpoolTest from "@convex-dev/workpool/test";
 import { describe, expect, test } from "vitest";
-import { api, internal } from "./_generated/api";
+import { api } from "./_generated/api";
 import schema from "./schema";
 
 const modules = import.meta.glob("./**/*.ts");
 
 type Quasar = TestConvex<typeof schema>;
 
-process.env.GOOGLE_API_KEY = "";
-process.env.GOOGLE_GENERATIVE_AI_API_KEY = "";
-
-const testConvex = () => {
-  const t = convexTest(schema, modules);
-  workpoolTest.register(t, "embeddingWorkpool");
-  return t;
-};
+const testConvex = () => convexTest(schema, modules);
 
 // ---------------------------------------------------------------------------
 // Seed: one project, one committed session with all optional fields set,
@@ -254,47 +246,6 @@ const FIELD_CONSUMERS: Record<string, Record<string, FieldConsumer>> = {
       via: "listSessions (returned)",
       proof: async (t) => expect((await committedSession(t)).toolCallCount).toBe(1),
     },
-    embeddedFingerprint: {
-      via: "embedQueue (pending derivation) + listSessions (returned)",
-      proof: async (t) => {
-        const before = (
-          await t.query(internal.embed.embedQueue, {
-            paginationOpts: { numItems: 10, cursor: null },
-          })
-        ).page.find((row) => row.sessionId === SESSION_ID);
-        expect(before?.embeddingClaimed).toBe(true);
-        expect(before?.pending).toBe(false);
-        const marked = await t.mutation(internal.embed.markSessionEmbedded, {
-          sessionId: SESSION_ID,
-          sourceFingerprint: '{"size":1,"mtimeMs":2}',
-        });
-        expect(marked).toEqual({ marked: true });
-        const after = (
-          await t.query(internal.embed.embedQueue, {
-            paginationOpts: { numItems: 10, cursor: null },
-          })
-        ).page.find((row) => row.sessionId === SESSION_ID);
-        expect(after?.pending).toBe(false);
-        expect((await committedSession(t)).embeddedFingerprint).toBe('{"size":1,"mtimeMs":2}');
-      },
-    },
-    embeddingClaimedFingerprint: {
-      via: "embedQueue (pending derivation)",
-      proof: async (t) => {
-        const claimed = await t.mutation(internal.embed.claimSessionEmbedding, {
-          sessionId: SESSION_ID,
-          force: true,
-        });
-        expect(claimed.claimed).toBe(true);
-        const row = (
-          await t.query(internal.embed.embedQueue, {
-            paginationOpts: { numItems: 10, cursor: null },
-          })
-        ).page.find((candidate) => candidate.sessionId === SESSION_ID);
-        expect(row?.embeddingClaimed).toBe(true);
-        expect(row?.pending).toBe(false);
-      },
-    },
     ingestRunId: {
       via: "listSessions (returned); in-progress-claim visibility",
       proof: async (t) => {
@@ -321,25 +272,21 @@ const FIELD_CONSUMERS: Record<string, Record<string, FieldConsumer>> = {
         expect((await readSessionRows(t)).map((row) => row.seq)).toEqual([0, 1, 1]),
     },
     role: {
-      via: "searchMessages (filtered) + readSession (returned)",
+      via: "readSession (returned)",
       proof: async (t) => {
-        const asUser = await t.query(api.quasar.searchMessages, {
-          query: "bravo",
-          role: "user",
-        });
-        expect(asUser.some((hit) => hit.text.includes("bravo"))).toBe(true);
-        const asAssistant = await t.query(api.quasar.searchMessages, {
-          query: "bravo",
-          role: "assistant",
-        });
-        expect(asAssistant).toHaveLength(0);
+        expect((await readSessionRows(t)).map((row) => row.role)).toEqual([
+          "user",
+          "reasoning",
+          "assistant",
+        ]);
       },
     },
     text: {
-      via: "searchMessages (search field, returned) + readSession (returned)",
+      via: "readSession (returned)",
       proof: async (t) => {
-        const hits = await t.query(api.quasar.searchMessages, { query: "foxtrot" });
-        expect(hits.some((hit) => hit.text === "delta echo foxtrot")).toBe(true);
+        expect((await readSessionRows(t)).map((row) => row.text)).toContain(
+          "delta echo foxtrot",
+        );
       },
     },
     ts: {
@@ -348,18 +295,11 @@ const FIELD_CONSUMERS: Record<string, Record<string, FieldConsumer>> = {
         expect((await readSessionRows(t))[0]?.ts).toBe("2026-06-11T00:00:01Z"),
     },
     projectKey: {
-      via: "searchMessages (filtered) + readSession (returned)",
+      via: "readSession (returned)",
       proof: async (t) => {
-        const scoped = await t.query(api.quasar.searchMessages, {
-          query: "bravo",
-          projectKey: PROJECT_KEY,
-        });
-        expect(scoped.length).toBeGreaterThan(0);
-        const elsewhere = await t.query(api.quasar.searchMessages, {
-          query: "bravo",
-          projectKey: "git:github.com/example/none",
-        });
-        expect(elsewhere).toHaveLength(0);
+        expect((await readSessionRows(t)).every((row) => row.projectKey === PROJECT_KEY)).toBe(
+          true,
+        );
       },
     },
   },

@@ -73,17 +73,3 @@ export const readSessionMessages = async (
   } while (cursor !== null);
   return messages;
 };
-
-export interface SearchHit {
-  readonly sessionId: string;
-  readonly seq: number;
-  readonly role: string;
-  readonly text: string;
-  readonly projectKey: string;
-}
-
-export const searchMessages = async (
-  client: ConvexHttpClient,
-  args: { query: string; projectKey?: string; role?: string; limit?: number },
-): Promise<SearchHit[]> =>
-  (await client.query("quasar:searchMessages" as never, args as never)) as SearchHit[];

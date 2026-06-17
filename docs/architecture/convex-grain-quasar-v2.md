@@ -1,19 +1,15 @@
 # Convex Grain — Quasar v2 Verdicts
 
-Date: 2026-06-10. Verified against live official docs (limits page, Zen/best-practices,
-text/vector search docs, self-hosted README + Stack self-hosting guide). General Convex
-guidance (Zen rules, full limits table, self-hosted ops, anti-grain warnings) lives in the
-global `convex` skill; this doc holds the **Quasar-v2-specific rulings** that adjust the
-greenfield plan (`quasar-v2-greenfield-plan-2026-06-10.md`).
+Date: 2026-06-10; updated 2026-06-17 after retiring Convex Searchlight/RAG. General
+Convex guidance (Zen rules, full limits table, self-hosted ops, anti-grain warnings)
+lives in the global `convex` skill; this doc now holds the **Quasar-specific Convex
+OLTP rulings**. Search indexing belongs to LanceDB, not Convex.
 
 ## Hosting decision recap
 
-Convex **self-hosted on this machine**, Docker Compose (backend `:3210`, HTTP actions
-`:3211`, dashboard `:6791`), SQLite persistence, pinned image tag, `npx convex export`
-before every upgrade, served to agents over Tailscale. Self-hosted supports all free-tier
-features (official statement); components support follows from that parity but lacks an
-explicit confirmation sentence — **verify the RAG component on the self-hosted backend in
-the beachhead glyph before anything depends on it.**
+Convex is **self-hosted on this machine**, SQLite persistence, pinned backend version,
+served to agents over Tailscale. It owns projects, sessions, messages, and tool-call
+rows only. Searchlight/RAG components are not part of the Quasar backend.
 
 ## Verdicts on v2 plan assumptions (each checked against current limits)
 
@@ -25,30 +21,21 @@ chunks of **~200–400 records per mutation**, checkpointing progress per chunk.
 single-writer ingest path OCC conflicts are unlikely — this is about the 1s cap, not
 contention.
 
-**(b) Search index on ~453k message docs with filter fields (project, role, kind) — yes.**
-No documented per-index doc-count or size cap; binding constraints are per-query (1,024
-docs scanned/returned, 16 terms, 8 filter clauses). Use **`staged: true`** when adding the
-search index to a pre-populated table (async backfill). Mind the 32-indexes-per-table
-total (db + search + vector combined).
+**(b) Convex search/vector indexes — retired for Quasar.**
+Do not add `searchIndex`, `vectorIndex`, RAG components, or embedding Workpool state to
+the Convex app. LanceDB owns FTS/vector indexes and indexing state.
 
-**(c) Vector index at message granularity, 150–250k vectors — yes; prefer 1536 dims.**
-Dimensions 2–4,096 allowed; no published vector-count cap. 256 max results/query is
-plenty for RRF (fetch top-64/128 per leg). At 250k vectors: 1536 dims ≈ 2.9 GB vs 3072 ≈
-6 GB of float64 — on a single Mac with SQLite persistence, **1536 unless retrieval quality
-demands otherwise**. Store vectors in a side table so message docs stay lean for
-pagination budgets.
+**(c) LanceDB search access from Convex — action boundary.**
+Convex actions may call the in-repo LanceDB client for filesystem-backed search work.
+There is no separate Bun HTTP daemon and no client-side embedding control surface.
 
 **(d) Paginated session reads — exactly the blessed pattern.**
 `.withIndex("by_session", …).paginate(paginationOpts)`; cap `numItems` and let the
 CLI/MCP client loop cursors. Never `.collect()` a session's messages.
 
-**(e) Embedding outbox + scheduled drain — textbook idiomatic.**
-Mutation writes message + outbox row and `ctx.scheduler.runAfter`s an **internal action**;
-the action takes a bounded batch, calls the embedding API, and commits via **one**
-internal mutation that marks outbox rows done (idempotent checkpointing). A cron sweeps
-stragglers. Do not chain multiple `ctx.runMutation` calls per batch. Raise
-`APPLICATION_MAX_CONCURRENT_*` knobs up front (community-reported crash at >16 concurrent
-actions on self-hosted, github issue #391).
+**(e) Embedding outbox + scheduled drain — not in Convex.**
+The old Convex embedding queue, cron, RAG component, and Workpool are deleted. LanceDB
+indexing owns any future embed/backfill/invalidation lifecycle explicitly.
 
 **(f) Ingest entry: prefer `ConvexHttpClient` → public mutation over an HTTP action.**
 The CLI is a trusted local client; calling a public mutation directly is more idiomatic
@@ -59,22 +46,20 @@ argument + Tailscale-only network exposure; the admin key never leaves the serve
 ingest mutation must be **idempotent on envelope/record identity** because the caller
 retries (v2's key-based always-write upserts already satisfy this).
 
-**(g) Hybrid/fusion search endpoint must be an action.**
-Vector search runs **only in actions**. Shape: action runs the vector leg, calls one
-query for the text leg, fuses on IDs (RRF), hydrates only the final top-k via one query.
-Note BM25 ties break by recency and the final term gets prefix matching (typeahead) —
-fine for the product; fuzzy search no longer exists (deprecated 2025-01-15).
+**(g) Hybrid/fusion search belongs to LanceDB.**
+The endpoint shape is re-decided by the LanceDB search glyphs. Convex remains the OLTP
+source and action host, not the index store.
 
 ## Plan-doc adjustments these rulings imply
 
 - §4 ingest endpoint: "POST /sync HTTP action" → CLI `ConvexHttpClient` calling a public
   mutation with shared-secret arg; transport envelope unchanged; server-side commit
   chunking at 200–400 records.
-- §4 reads: searchText stays a query; **searchFusion becomes an action**.
-- §4 embeddings: 1536-dim default; vectors in a side table; knobs set in the beachhead.
-- Glyph 1 (beachhead) gains gates: self-hosted backend running under a pinned tag with
-  restart policy; text + vector search verified working; **RAG component verified on
-  self-hosted**; export/upgrade drill documented; reachable from a second tailnet device.
+- §4 reads: session/tool-call reads stay Convex queries; search is reintroduced through
+  LanceDB.
+- §4 embeddings: no Convex embedding state. LanceDB owns indexing state and rebuilds.
+- Beachhead gates: self-hosted backend running under a pinned version with restart
+  policy; no Convex search/RAG components; reachable from a second tailnet device.
 - Ops invariants: pinned image, export-before-upgrade, `--disable-beacon` optional,
   single-node accepted, disaster recovery remains `quasar sync --rebuild` from source
   files (the server stays disposable; exports are a convenience, not a dependency).
@@ -95,8 +80,9 @@ fall back to code audit per the performance-audit skill.
 
 **(i) Index-only read discipline, stated stronger.** Convex's own `.filter()` does NOT
 push predicates to storage — it costs the same as JS filtering and still burns the
-scanned-documents budget. Every v2 read path uses `.withIndex()` / `.withSearchIndex()`
-only; `.filter()` is banned on tables that grow with the corpus. Also: no redundant
+scanned-documents budget. Every Convex read path over a growing table uses
+`.withIndex()` only; `.filter()` is banned on tables that grow with the corpus.
+Also: no redundant
 prefix indexes (`by_foo` + `by_foo_and_bar`) — the planned index set already complies;
 keep it that way when adding filters.
 
@@ -116,20 +102,12 @@ antidote: it forbids speculative complexity in Convex's own official voice.)
 written (the migration-helper skill's own "greenfield schema" exclusion). Post-launch
 breaking schema changes have two paths: (1) **wipe + `quasar sync --rebuild`** — preferred
 while re-ingest is cheap, since source files are the fidelity store; (2)
-**widen-migrate-narrow with `@convex-dev/migrations`** — adopt when rebuild stops being
-cheap, which happens the moment embeddings are live (re-embedding ~150–250k messages costs
-real API money; the embedding cache is server-only state that rebuild destroys). So: at
-the embeddings glyph, either re-adopt the migrations component or add embedding-cache
-export/import to the rebuild path. The reset deleted the migrations component for
-protecting bad data; its eventual return is legitimate when it protects expensive-to-
-recompute state.
+**widen-migrate-narrow with a migration tool** — adopt only when rebuild stops being
+cheap. Search/vector rebuild cost belongs to LanceDB's lifecycle, not Convex RAG state.
 
-**(m) Component boundary rules (for the RAG component and any future local component).**
-Components cannot read `process.env` or `ctx.auth` — the app passes API keys/identity in
-explicitly. Never expose component functions to clients; wrap in app functions.
-`.paginate()` does not cross the component boundary (use `convex-helpers` paginator if
-needed). Quasar's own outbox/ingest logic stays **app code**, not a component — the
-component-authoring skill itself says prefer app code absent a reuse/isolation need.
+**(m) Component boundary rules.**
+Quasar currently uses no Convex components. Future components must prove real isolation
+or reuse value; app-owned ingest and LanceDB orchestration stay app code.
 
 ## The one-line reconciliation with history
 

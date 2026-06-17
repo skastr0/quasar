@@ -10,14 +10,8 @@
  *   3. no `.collect()` anywhere (bounded reads: take/paginate/first/unique);
  *   4. no `ctx.db` inside actions (actions are for external work);
  *   5. index names follow the by_field1_and_field2 convention;
- *   6. `toolCalls` has no search index (the structural surface is never
- *      search-indexed or embedded);
- *   7. the `messages` search index filterFields are exactly
- *      [projectKey, role, sessionId];
- *   8. embedding-surface purity: the embedding modules (embed.ts,
- *      quasarRag.ts) never reference the structural surface (toolCalls) or
- *      the non-conversation role (reasoning) — tool payloads and reasoning
- *      rows are structurally unreachable from the embedding path.
+ *   6. no Convex search/vector indexes; LanceDB owns search indexing;
+ *   7. no Convex components; Quasar's Convex app is OLTP-only.
  *
  * Every violation is reported as file:line. Nonzero exit on any violation.
  */
@@ -134,15 +128,20 @@ const matchDelimiter = (source: string, openIndex: number): number => {
 const FUNCTION_REGISTRATION =
   /\b(query|mutation|action|internalQuery|internalMutation|internalAction|httpAction)\s*\(\s*\{/g;
 
-/** Rule 8: the embedding pipeline's modules. Their stripped source (code +
- * strings, comments removed) must never name what they must not touch. */
-const EMBEDDING_SURFACE_FILES = ["embed.ts", "quasarRag.ts"];
-const EMBEDDING_SURFACE_BANNED = ["toolCalls", "reasoning"];
-
 for (const file of convexSourceFiles) {
   const raw = readFileSync(file, "utf8");
   const source = stripNoise(raw);
   const isSchema = file.endsWith("schema.ts");
+  const isConfig = file.endsWith("convex.config.ts");
+
+  if (/\bdefineComponent\s*\(/.test(source) || /\bapp\s*\.\s*use\s*\(/.test(source)) {
+    report(
+      file,
+      1,
+      "no-convex-components",
+      "Convex components are not part of Quasar's OLTP-only backend",
+    );
+  }
 
   // 1 + 4: registered functions — args validator present; no ctx.db in actions.
   for (const match of source.matchAll(FUNCTION_REGISTRATION)) {
@@ -194,22 +193,16 @@ for (const file of convexSourceFiles) {
     );
   }
 
-  // 8: embedding-surface purity — structurally blind to the structural
-  // surface and the non-conversation role.
-  if (EMBEDDING_SURFACE_FILES.some((name) => file.endsWith(`/${name}`))) {
-    for (const banned of EMBEDDING_SURFACE_BANNED) {
-      for (const match of source.matchAll(new RegExp(`\\b${banned}\\b`, "g"))) {
-        report(
-          file,
-          lineOfIndex(source, match.index!),
-          "embedding-surface-purity",
-          `embedding module references "${banned}" — the embedding path must be structurally blind to it`,
-        );
-      }
-    }
+  if (isConfig && /@convex-dev\/(rag|workpool|migrations)/.test(raw)) {
+    report(
+      file,
+      1,
+      "no-convex-component-packages",
+      "Convex component packages must not be imported by the Quasar app config",
+    );
   }
 
-  // 5/6/7: schema index rules (textual, so every finding carries file:line).
+  // 5/6/7: schema/index/component rules (textual, so every finding carries file:line).
   if (isSchema) {
     for (const match of source.matchAll(/\.index\s*\(\s*'([^']*)'\s*,\s*\[([^\]]*)\]/g)) {
       const name = match[1]!;
@@ -239,42 +232,23 @@ for (const file of convexSourceFiles) {
         cursor = matchDelimiter(source, cursor + 1 + chained[0].length - 1);
       }
       const tableBlock = source.slice(match.index!, cursor + 1);
-      if (tableName === "toolCalls" && tableBlock.includes("searchIndex")) {
+      const searchIndex = tableBlock.indexOf("searchIndex");
+      const vectorIndex = tableBlock.indexOf("vectorIndex");
+      if (searchIndex !== -1) {
         report(
           file,
-          lineOfIndex(source, match.index!),
-          "toolCalls-never-searched",
-          "toolCalls declares a search index — the structural surface is never search-indexed",
+          lineOfIndex(source, match.index! + searchIndex),
+          "no-convex-search-indexes",
+          `${tableName} declares a Convex search index — LanceDB owns search indexing`,
         );
       }
-      if (tableName === "messages") {
-        const search = tableBlock.match(/searchIndex\s*\(\s*'([^']*)'\s*,\s*\{([\s\S]*?)\}\s*\)/);
-        if (search === null) {
-          report(
-            file,
-            lineOfIndex(source, match.index!),
-            "messages-search",
-            "messages must declare its search index (the search surface)",
-          );
-        } else {
-          const filterFields = [
-            ...(search[2]!.match(/filterFields\s*:\s*\[([^\]]*)\]/)?.[1] ?? "").matchAll(
-              /'([^']*)'/g,
-            ),
-          ].map((m) => m[1]!);
-          const expected = ["projectKey", "role", "sessionId"];
-          if (
-            filterFields.length !== expected.length ||
-            expected.some((field, i) => filterFields[i] !== field)
-          ) {
-            report(
-              file,
-              lineOfIndex(source, match.index! + tableBlock.indexOf("searchIndex")),
-              "messages-search-filters",
-              `messages search filterFields must be exactly [${expected.join(", ")}], found [${filterFields.join(", ")}]`,
-            );
-          }
-        }
+      if (vectorIndex !== -1) {
+        report(
+          file,
+          lineOfIndex(source, match.index! + vectorIndex),
+          "no-convex-vector-indexes",
+          `${tableName} declares a Convex vector index — LanceDB owns vector indexing`,
+        );
       }
     }
   }
