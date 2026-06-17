@@ -110,8 +110,10 @@ test("indexSessionForIngest indexes the claimed run before commit", async () => 
     secret: ACTION_SECRET,
     currentMessages: [{ sessionId, seq: 1, role: "user", text: "index me", projectKey: "p1" }],
   });
-  expect(report.status).toBe("unconfigured");
+  expect(report.status).toBe("indexed");
   expect(report.messagesSeen).toBe(1);
+  expect(report.messagesEmbedded).toBe(0);
+  expect(report.embeddingsConfigured).toBe(false);
 
   await t.mutation(api.quasar.commitSessionIngest, {
     sessionId,

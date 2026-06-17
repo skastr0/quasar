@@ -5,6 +5,7 @@ export const GOOGLE_GENERATIVE_AI_API_KEY_ENV = "GOOGLE_GENERATIVE_AI_API_KEY";
 export const GEMINI_EMBED_BATCH_MAX = 100;
 export const INDEX_PAGE_SIZE = 100;
 export const RRF_K = 60;
+export const UNEMBEDDED_CONTENT_HASH_PREFIX = "unembedded:";
 
 export const EMBEDDABLE_ROLES = ["user", "assistant"] as const;
 
@@ -79,6 +80,22 @@ export const messageContentHash = (text: string): string => {
   });
   return `${parts.join("")}:${text.length}`;
 };
+
+// Lexical-only rows use the same text/key schema but carry placeholder vectors.
+// The prefix prevents a later embedding-configured run from treating them as
+// fully indexed rows.
+export const unembeddedContentHash = (contentHash: string): string =>
+  `${UNEMBEDDED_CONTENT_HASH_PREFIX}${contentHash}`;
+
+export const lexicalOnlyPlanRows = (
+  rows: readonly ExistingSearchRow[],
+): readonly ExistingSearchRow[] =>
+  rows.map((row) => ({
+    ...row,
+    contentHash: row.contentHash?.startsWith(UNEMBEDDED_CONTENT_HASH_PREFIX)
+      ? row.contentHash.slice(UNEMBEDDED_CONTENT_HASH_PREFIX.length)
+      : row.contentHash,
+  }));
 
 export const planSessionIndex = (args: {
   readonly currentMessages: readonly CurrentMessageForIndex[];

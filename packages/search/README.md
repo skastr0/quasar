@@ -9,6 +9,9 @@ The canonical message search table stores one user/assistant turn per row:
 `sessionId`, `seq`, `role`, `projectKey`, `text`, `contentHash`, and
 `vector`. Message writes enforce the Gemini embedding width, 1536 dimensions.
 `ensureMessageTable` creates the table schema and LanceDB FTS/vector indexes.
+When Gemini credentials are unavailable, Convex may write lexical-only rows
+with placeholder vectors and create only the FTS index; their content hashes are
+marked so a later embedding-configured ingest replaces them with real vectors.
 
 Convex actions should create one runtime at module scope and reuse it:
 

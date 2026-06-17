@@ -1,6 +1,13 @@
 import { describe, expect, test } from "vitest";
 
-import { fuseMatches, messageContentHash, planSessionIndex, RRF_K } from "./searchPlan";
+import {
+  fuseMatches,
+  lexicalOnlyPlanRows,
+  messageContentHash,
+  planSessionIndex,
+  RRF_K,
+  unembeddedContentHash,
+} from "./searchPlan";
 
 describe("planSessionIndex", () => {
   test("skips unchanged content hashes before embedding", () => {
@@ -54,6 +61,38 @@ describe("planSessionIndex", () => {
     expect(plan.keysToDelete).toEqual(["s1:1:user", "s1:2:assistant"]);
     expect(plan.rowsToEmbed.map((row) => row.key)).toEqual(["s1:1:user"]);
     expect(plan.messagesReused).toBe(0);
+  });
+
+  test("treats lexical-only hashes as reusable only when embedding is unavailable", () => {
+    const text = "same message";
+    const existingRows = [
+      {
+        key: "s1:1:user",
+        contentHash: unembeddedContentHash(messageContentHash(text)),
+      },
+    ];
+    const currentMessages = [
+      {
+        sessionId: "s1",
+        seq: 1,
+        role: "user" as const,
+        projectKey: "p1",
+        text,
+      },
+    ];
+
+    expect(
+      planSessionIndex({
+        currentMessages,
+        existingRows,
+      }).rowsToEmbed.map((row) => row.key),
+    ).toEqual(["s1:1:user"]);
+    expect(
+      planSessionIndex({
+        currentMessages,
+        existingRows: lexicalOnlyPlanRows(existingRows),
+      }).rowsToEmbed,
+    ).toEqual([]);
   });
 });
 

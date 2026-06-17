@@ -161,6 +161,87 @@ describe("LanceDb", () => {
     ).rejects.toThrow("vector has dimension 3; expected 1536");
   });
 
+  test("can create a lexical-only message index without training a vector index", async () => {
+    const dataDir = await makeTempDir();
+    const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));
+    const vector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, () => 0);
+
+    const indexNames = await runtime.runPromise(
+      Effect.gen(function* () {
+        const search = yield* LanceDb;
+        yield* search.ensureMessageTable({
+          rows: [
+            {
+              sessionId: "session-a",
+              seq: 1,
+              role: "user",
+              projectKey: "project-a",
+              text: "lexical fallback row",
+              contentHash: "unembedded:hash-a",
+              vector,
+            },
+          ],
+          createIndexes: true,
+          includeVectorIndex: false,
+        });
+        const table = yield* search.openTable({});
+        return yield* Effect.tryPromise({
+          try: async () => (await table.listIndices()).map((index) => index.name).sort(),
+          catch: (cause) => cause,
+        });
+      }),
+    );
+
+    expect(indexNames).toEqual(["text_idx"]);
+  });
+
+  test("semantic search can filter out lexical-only placeholder vectors", async () => {
+    const dataDir = await makeTempDir();
+    const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));
+    const zeroVector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, () => 0);
+    const readyVector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, (_, index) =>
+      index === 0 ? 1 : 0,
+    );
+
+    const hits = await runtime.runPromise(
+      Effect.gen(function* () {
+        const search = yield* LanceDb;
+        yield* search.ensureMessageTable({
+          rows: [
+            {
+              sessionId: "session-placeholder",
+              seq: 1,
+              role: "assistant",
+              projectKey: "project-a",
+              text: "lexical-only placeholder",
+              contentHash: "unembedded:hash-placeholder",
+              vector: zeroVector,
+            },
+            {
+              sessionId: "session-ready",
+              seq: 1,
+              role: "assistant",
+              projectKey: "project-a",
+              text: "semantic-ready row",
+              contentHash: "hash-ready",
+              vector: readyVector,
+            },
+          ],
+          createIndexes: false,
+        });
+        return yield* search.vectorSearch({
+          vector: readyVector,
+          vectorDimension: GEMINI_EMBEDDING_DIMENSIONS,
+          limit: 10,
+          filter: "contentHash NOT LIKE 'unembedded:%'",
+          select: ["key", "contentHash"],
+        });
+      }),
+    );
+
+    expect(hits.map((hit) => hit.key)).toEqual(["session-ready:1:assistant"]);
+  });
+
   test("derives message identity from sessionId, seq, and role", async () => {
     const dataDir = await makeTempDir();
     const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));

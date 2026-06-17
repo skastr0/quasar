@@ -64,6 +64,7 @@ export interface EnsureMessageTableRequest extends TableRequest {
   readonly rows?: readonly MessageSearchRow[];
   readonly mode?: "create" | "overwrite";
   readonly createIndexes?: boolean;
+  readonly includeVectorIndex?: boolean;
 }
 
 export interface CreateMessageIndexesRequest extends TableRequest {
@@ -467,7 +468,10 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
           });
         }
         if (request.createIndexes !== false) {
-          yield* createMessageIndexes({ tableName, includeVector: rows.length > 0 });
+          yield* createMessageIndexes({
+            tableName,
+            includeVector: request.includeVectorIndex !== false && rows.length > 0,
+          });
         }
         return table;
       });
