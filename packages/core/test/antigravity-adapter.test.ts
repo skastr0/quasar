@@ -1,5 +1,5 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterAll, describe, expect, test } from "vitest";
@@ -28,6 +28,26 @@ afterAll(() => {
 /** Write a JSONL file where each line is a JSON-serialised object. */
 const writeJsonLines = (path: string, records: unknown[]) =>
   writeFileSync(path, records.map((r) => JSON.stringify(r)).join("\n") + "\n", "utf8");
+
+/** Collapse invariant: searchable surface is one user + one assistant per turn. */
+const assertCollapseInvariant = (
+  events: Awaited<ReturnType<typeof antigravityAdapter.read>>["sessions"][number]["events"],
+) => {
+  const userMessages = events.filter((e) => e.role === "user" && e.kind === "message");
+  const assistantMessages = events.filter((e) => e.role === "assistant" && e.kind === "message");
+  expect(userMessages.length).toBeGreaterThan(0);
+  expect(assistantMessages.length).toBeLessThanOrEqual(userMessages.length + 1);
+  expect(assistantMessages.length).toBeGreaterThanOrEqual(userMessages.length - 1);
+  // Mid-loop planner ticks must never masquerade as assistant messages.
+  const leakedMidLoop = assistantMessages.filter(
+    (e) =>
+      e.contentText?.includes("I will list the directory") === true ||
+      e.contentText?.includes("Still working") === true ||
+      e.contentText === "Done." ||
+      e.contentText?.startsWith("Reading") === true,
+  );
+  expect(leakedMidLoop).toHaveLength(0);
+};
 
 // ---------------------------------------------------------------------------
 // T1: the terminal-response rule.
@@ -293,4 +313,146 @@ describe("T3: shouldParseSession gate", () => {
     });
     expect(result.sessions).toHaveLength(1);
   });
+});
+
+// ---------------------------------------------------------------------------
+// T4: scaled cumulative-replay fixture + optional on-disk estate scan.
+//
+// Real Antigravity transcripts replay the entire prior trajectory on every
+// USER_INPUT (step_index resets to 0). A session with N user turns can carry
+// tens of thousands of raw PLANNER_RESPONSE lines; only N terminal answers may
+// surface as assistant messages. This fixture replays turn blocks the way the
+// on-disk estate does, without checking in a multi-megabyte JSONL file.
+// ---------------------------------------------------------------------------
+describe("T4: cumulative replay collapse — estate validation", () => {
+  const root = join(testRoot, "t4");
+  const brainRoot = join(root, "brain");
+  const TURNS = 8;
+  const REPLAYS_PER_TURN = 3;
+
+  const midLoopNoise = (turn: number) =>
+    Array.from({ length: REPLAYS_PER_TURN }, (_unused, replay) => {
+      const r = replay + 1;
+      const t = `2026-06-12T08:4${turn}`;
+      return [
+        {
+          type: "PLANNER_RESPONSE",
+          source: "MODEL",
+          status: "DONE",
+          created_at: `${t}:${String(10 + replay).padStart(2, "0")}Z`,
+          content: `Turn ${turn} replay ${r}: I will list the directory.`,
+          tool_calls: [{ name: "list_dir", args: { DirectoryPath: "/repo" } }],
+        },
+        {
+          type: "LIST_DIRECTORY",
+          source: "MODEL",
+          status: "DONE",
+          created_at: `${t}:${String(11 + replay).padStart(2, "0")}Z`,
+          content: "Done.",
+        },
+        {
+          type: "PLANNER_RESPONSE",
+          source: "MODEL",
+          status: "DONE",
+          created_at: `${t}:${String(12 + replay).padStart(2, "0")}Z`,
+          content: `Turn ${turn} replay ${r}: Still working.`,
+        },
+        {
+          type: "SYSTEM_MESSAGE",
+          source: "SYSTEM",
+          status: "DONE",
+          created_at: `${t}:${String(13 + replay).padStart(2, "0")}Z`,
+          content: "<SYSTEM_MESSAGE>stop hook blocked termination</SYSTEM_MESSAGE>",
+        },
+        {
+          type: "PLANNER_RESPONSE",
+          source: "MODEL",
+          status: "DONE",
+          created_at: `${t}:${String(14 + replay).padStart(2, "0")}Z`,
+          thinking: `Turn ${turn} replay ${r} reasoning trace.`,
+          content: `Turn ${turn} replay ${r}: Internal narration.`,
+        },
+      ];
+    }).flat();
+
+  const turnTrajectory = (turn: number) => {
+    const t = `2026-06-12T08:4${turn}`;
+    return [
+      { type: "CONVERSATION_HISTORY", source: "SYSTEM", status: "DONE", created_at: `${t}:01Z` },
+      ...midLoopNoise(turn),
+      {
+        type: "PLANNER_RESPONSE",
+        source: "MODEL",
+        status: "DONE",
+        created_at: `${t}:99Z`,
+        content: `Turn ${turn}: terminal answer after ${REPLAYS_PER_TURN} replay blocks.`,
+      },
+    ];
+  };
+
+  // Cumulative replay: each USER_INPUT is followed by the full trajectories of
+  // every turn so far (the on-disk estate shape that used to flood ingest).
+  const records: unknown[] = [];
+  for (let turn = 1; turn <= TURNS; turn++) {
+    const t = `2026-06-12T08:4${turn}`;
+    records.push({
+      type: "USER_INPUT",
+      source: "USER_EXPLICIT",
+      status: "DONE",
+      created_at: `${t}:00Z`,
+      content: `Turn ${turn}: investigate the repository.`,
+    });
+    for (let prior = 1; prior <= turn; prior++) {
+      records.push(...turnTrajectory(prior));
+    }
+  }
+
+  const uuid = "dddddddd-0004-0004-0004-000000000004";
+  const transcriptDir = join(brainRoot, uuid, ".system_generated", "logs");
+  mkdirSync(transcriptDir, { recursive: true });
+  writeJsonLines(join(transcriptDir, "transcript_full.jsonl"), records);
+
+  test("scaled replay fixture collapses to N user + N assistant messages", async () => {
+    const result = await antigravityAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { antigravity: root },
+    });
+    expect(result.sessions).toHaveLength(1);
+    const session = result.sessions[0]!;
+    const userMessages = session.events.filter((e) => e.role === "user" && e.kind === "message");
+    const assistantMessages = session.events.filter(
+      (e) => e.role === "assistant" && e.kind === "message",
+    );
+    expect(userMessages).toHaveLength(TURNS);
+    expect(assistantMessages).toHaveLength(TURNS);
+    assertCollapseInvariant(session.events);
+    // Raw record count is far larger than the searchable surface.
+    expect(records.length).toBeGreaterThan(TURNS * 20);
+    expect(session.events.filter((e) => e.kind === "message")).toHaveLength(TURNS * 2);
+  });
+
+  const estateRoot = process.env.ANTIGRAVITY_ESTATE_ROOT ?? join(homedir(), ".gemini/antigravity-cli");
+  const estateBrain = join(estateRoot, "brain");
+
+  test.runIf(existsSync(estateBrain))(
+    "on-disk estate: every real session satisfies collapse invariant",
+    async () => {
+      const result = await antigravityAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { antigravity: estateRoot },
+      });
+      expect(result.sessions.length).toBeGreaterThan(0);
+      for (const session of result.sessions) {
+        assertCollapseInvariant(session.events);
+        const users = session.events.filter((e) => e.role === "user" && e.kind === "message");
+        const assistants = session.events.filter(
+          (e) => e.role === "assistant" && e.kind === "message",
+        );
+        expect(assistants.length).toBe(users.length);
+      }
+    },
+    30_000,
+  );
 });

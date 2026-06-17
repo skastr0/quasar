@@ -779,3 +779,78 @@ describe("mapNormalizedSession with grok hooks", () => {
     expect(mapped.diagnostics).toHaveLength(0);
   });
 });
+
+describe("antigravity ingest hooks", () => {
+  const antigravitySession = (events: SessionEvent[]): NormalizedSession =>
+    session({
+      provider: "antigravity",
+      agentName: "antigravity-cli",
+      events,
+      toolCalls: [],
+    });
+
+  const antigravityEvent = (
+    overrides: Partial<SessionEvent> & Pick<SessionEvent, "id" | "sequence" | "role" | "kind">,
+  ): SessionEvent =>
+    baseEvent({
+      provider: "antigravity",
+      agentName: "antigravity-cli",
+      ...overrides,
+    });
+
+  test("only kind:message events become messages rows", () => {
+    const hooks = PROVIDER_INGEST_HOOKS.get("antigravity");
+    const mapped = mapNormalizedSession(
+      antigravitySession([
+        antigravityEvent({
+          id: "u0",
+          sequence: 0,
+          role: "user",
+          kind: "message",
+          contentText: "Fix the adapter.",
+        }),
+        antigravityEvent({
+          id: "a0",
+          sequence: 1,
+          role: "assistant",
+          kind: "message",
+          contentText: "Done — terminal answer only.",
+        }),
+        antigravityEvent({
+          id: "tick",
+          sequence: 2,
+          role: "unknown",
+          kind: "lifecycle",
+          rawReference: { sourcePath: SOURCE_PATH, nativeType: "PLANNER_RESPONSE" },
+        }),
+        antigravityEvent({
+          id: "tool",
+          sequence: 3,
+          role: "assistant",
+          kind: "tool_call",
+          rawReference: { sourcePath: SOURCE_PATH, nativeType: "PLANNER_RESPONSE" },
+        }),
+        antigravityEvent({
+          id: "think",
+          sequence: 4,
+          role: "thinking",
+          kind: "reasoning",
+          contentText: "Mid-loop thinking must not become a row.",
+        }),
+        antigravityEvent({
+          id: "sys",
+          sequence: 5,
+          role: "system",
+          kind: "system",
+          contentText: "SYSTEM_MESSAGE replay noise.",
+        }),
+      ]),
+      hooks,
+    );
+
+    expect(mapped.messages.map((r) => [r.seq, r.role, r.text])).toEqual([
+      [0, "user", "Fix the adapter."],
+      [1, "assistant", "Done — terminal answer only."],
+    ]);
+  });
+});
