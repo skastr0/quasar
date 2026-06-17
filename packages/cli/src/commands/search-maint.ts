@@ -84,7 +84,7 @@ export const searchMaintainCommand = Command.make(
   },
   ({ createIndexes, createVectorIndex, replaceIndexes, optimize, cleanupOlderThanMs }) =>
     executeJsonCommand(
-      "search maintain",
+      "maintain",
       Effect.tryPromise({
         try: () =>
           runSearchMaintenance({
