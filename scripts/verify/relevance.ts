@@ -15,7 +15,7 @@ import { api } from "../../convex/_generated/api";
 import { convexClient } from "./lib/estate";
 
 type SearchReport = {
-  readonly matches: readonly unknown[];
+  readonly matches: readonly SearchMatch[];
   readonly diagnostics: {
     readonly textSearched: boolean;
     readonly semanticSearched: boolean;
@@ -24,6 +24,21 @@ type SearchReport = {
     readonly error?: string;
   };
 };
+
+type SearchMatch = {
+  readonly text?: unknown;
+  readonly textRank?: unknown;
+  readonly score?: unknown;
+};
+
+const LEXICAL_PROBES = [
+  {
+    query: "stop hook blocked termination",
+    evidence: [/stop hook/i, /block/i, /termination/i],
+  },
+  { query: "terminal", evidence: [/terminal/i] },
+  { query: "Done Reading", evidence: [/done/i, /read/i] },
+] as const;
 
 const configuredActionCredential = (): string | undefined => {
   const explicit = process.env.QUASAR_ACTION_SECRET;
@@ -60,31 +75,86 @@ const assertReport = (mode: string, report: SearchReport): void => {
   }
 };
 
+const assertSubstantiveHits = (
+  mode: string,
+  probe: (typeof LEXICAL_PROBES)[number],
+  report: SearchReport,
+): void => {
+  const { query } = probe;
+  assertReport(mode, report);
+  if (!report.diagnostics.textSearched) {
+    throw new Error(`${mode}/${query}: text search did not run`);
+  }
+  if (report.matches.length === 0) {
+    throw new Error(`${mode}/${query}: expected at least one lexical hit`);
+  }
+  const first = report.matches[0]!;
+  const firstText = first.text;
+  if (typeof firstText !== "string" || firstText.trim().length < 20) {
+    throw new Error(`${mode}/${query}: top hit is not substantive text`);
+  }
+  if (typeof first.score !== "number" || !Number.isFinite(first.score)) {
+    throw new Error(`${mode}/${query}: top hit does not expose a finite score`);
+  }
+  if (typeof first.textRank !== "number" || !Number.isFinite(first.textRank)) {
+    throw new Error(`${mode}/${query}: top hit does not expose a finite textRank`);
+  }
+  for (const evidence of probe.evidence) {
+    if (!evidence.test(firstText)) {
+      throw new Error(`${mode}/${query}: top hit does not contain expected evidence ${String(evidence)}`);
+    }
+  }
+};
+
+const assertSemanticReport = (report: SearchReport): void => {
+  assertReport("semantic", report);
+  if (report.diagnostics.semanticStatus !== "unavailable") {
+    throw new Error(
+      `semantic: expected unavailable without Gemini credentials, got ${report.diagnostics.semanticStatus}`,
+    );
+  }
+  if (report.diagnostics.semanticSearched) {
+    throw new Error("semantic: unavailable report unexpectedly searched");
+  }
+  if (report.matches.length !== 0) {
+    throw new Error("semantic: unavailable report returned matches");
+  }
+};
+
 const main = async () => {
   console.log("LANCEDB SEARCH SURFACE — live Convex actions\n");
   const client = convexClient();
   const secret = requireActionCredential();
-  const base = { secret, query: "quasar search", limit: 1 };
 
-  const text = (await client.action(api.search.searchLexical, base)) as SearchReport;
-  assertReport("text", text);
-  console.log(
-    `text     matches=${text.matches.length} semantic=${text.diagnostics.semanticStatus} textSearched=${text.diagnostics.textSearched}`,
-  );
+  for (const probe of LEXICAL_PROBES) {
+    const { query } = probe;
+    const text = (await client.action(api.search.searchLexical, { secret, query, limit: 3 })) as SearchReport;
+    assertSubstantiveHits("text", probe, text);
+    console.log(
+      `text     query=${JSON.stringify(query)} matches=${text.matches.length} semantic=${text.diagnostics.semanticStatus} textSearched=${text.diagnostics.textSearched}`,
+    );
+  }
 
-  const semantic = (await client.action(api.search.searchSemantic, base)) as SearchReport;
-  assertReport("semantic", semantic);
+  const semantic = (await client.action(api.search.searchSemantic, {
+    secret,
+    query: LEXICAL_PROBES[0].query,
+    limit: 3,
+  })) as SearchReport;
+  assertSemanticReport(semantic);
   console.log(
     `semantic matches=${semantic.matches.length} semantic=${semantic.diagnostics.semanticStatus} semanticSearched=${semantic.diagnostics.semanticSearched}`,
   );
 
-  const fusion = (await client.action(api.search.searchFusion, base)) as SearchReport;
-  assertReport("fusion", fusion);
-  console.log(
-    `fusion   matches=${fusion.matches.length} semantic=${fusion.diagnostics.semanticStatus} textSearched=${fusion.diagnostics.textSearched} semanticSearched=${fusion.diagnostics.semanticSearched}`,
-  );
+  for (const probe of LEXICAL_PROBES) {
+    const { query } = probe;
+    const fusion = (await client.action(api.search.searchFusion, { secret, query, limit: 3 })) as SearchReport;
+    assertSubstantiveHits("fusion", probe, fusion);
+    console.log(
+      `fusion   query=${JSON.stringify(query)} matches=${fusion.matches.length} semantic=${fusion.diagnostics.semanticStatus} textSearched=${fusion.diagnostics.textSearched} semanticSearched=${fusion.diagnostics.semanticSearched}`,
+    );
+  }
 
-  console.log("\nLANCEDB SEARCH SURFACE: PASS — text, semantic, and fusion actions returned stable reports.");
+  console.log("\nLANCEDB SEARCH SURFACE: PASS — lexical and fusion probes returned substantive hits; semantic returned a stable report.");
 };
 
 await main();
