@@ -13,6 +13,7 @@ import { action, internalAction } from "./_generated/server";
 import { api, internal } from "./_generated/api";
 import type { DataModel } from "./_generated/dataModel";
 import { GenericActionCtx } from "convex/server";
+import { chunkMessage, type MessageChunk } from "./chunk";
 import {
   GEMINI_EMBED_BATCH_MAX,
   GEMINI_EMBEDDING_MODEL_ID,
@@ -27,6 +28,7 @@ import {
   type CurrentMessageForIndex,
   type ExistingSearchRow,
   type FusedSearchRank,
+  type IndexableChunk,
   type PlannedMessageRow,
 } from "./searchPlan";
 
@@ -453,6 +455,9 @@ const report = (args: {
   },
 });
 
+const chunksForMessages = (messages: readonly CurrentMessageForIndex[]): readonly IndexableChunk[] =>
+  messages.flatMap((message) => chunkMessage(message));
+
 const indexCurrentMessages = async (args: {
   readonly sessionId: string;
   readonly currentMessages: readonly CurrentMessageForIndex[];
@@ -461,9 +466,10 @@ const indexCurrentMessages = async (args: {
     const existingRows = await runSearchWorker<ExistingSearchRow[]>("readMessageRowsBySession", {
       sessionId: args.sessionId,
     });
+    const currentChunks = chunksForMessages(args.currentMessages);
     const embeddingsConfigured = serverEmbeddingsConfigured();
     const plan = planSessionIndex({
-      currentMessages: args.currentMessages,
+      currentChunks,
       existingRows: embeddingsConfigured ? existingRows : lexicalOnlyPlanRows(existingRows),
     });
 
@@ -478,7 +484,7 @@ const indexCurrentMessages = async (args: {
     if (plan.rowsToEmbed.length === 0) {
       return {
         status: "skipped" as const,
-        messagesSeen: plan.currentRows.length,
+        messagesSeen: args.currentMessages.length,
         messagesEmbedded: 0,
         messagesReused: plan.messagesReused,
         keysDeleted,
@@ -501,7 +507,7 @@ const indexCurrentMessages = async (args: {
       });
       return {
         status: "indexed" as const,
-        messagesSeen: plan.currentRows.length,
+        messagesSeen: args.currentMessages.length,
         messagesEmbedded: 0,
         messagesReused: plan.messagesReused,
         keysDeleted,
@@ -523,7 +529,7 @@ const indexCurrentMessages = async (args: {
     });
     return {
       status: "indexed" as const,
-      messagesSeen: plan.currentRows.length,
+      messagesSeen: args.currentMessages.length,
       messagesEmbedded: rows.length,
       messagesReused: plan.messagesReused,
       keysDeleted,
@@ -579,10 +585,11 @@ interface IndexBatchRowsReport {
 
 const parseMessageKeySessionId = (key: string): string => {
   const parts = key.split(":");
-  if (parts.length < 3) {
-    // Malformed key: fall back to the whole key so the row is grouped safely.
+  if (parts.length < 4) {
+    // Legacy or malformed key: fall back to the whole key so the row is grouped safely.
     return key;
   }
+  parts.pop(); // chunkIndex
   parts.pop(); // role
   parts.pop(); // seq
   return parts.join(":");
@@ -639,9 +646,10 @@ const indexBatchMessages = async (
       for (const sessionId of sessionIds) {
         const currentMessages = messagesBySession.get(sessionId) ?? [];
         messagesSeen += currentMessages.length;
+        const currentChunks = chunksForMessages(currentMessages);
         const existingRowsForSession = existingBySession.get(sessionId) ?? [];
         const plan = planSessionIndex({
-          currentMessages,
+          currentChunks,
           existingRows: embeddingsConfigured ? existingRowsForSession : lexicalOnlyPlanRows(existingRowsForSession),
         });
         keysToDelete.push(...plan.keysToDelete);

@@ -4,6 +4,7 @@ import {
   fuseMatches,
   lexicalOnlyPlanRows,
   messageContentHash,
+  messageSearchKey,
   planSessionIndex,
   RRF_K,
   unembeddedContentHash,
@@ -13,18 +14,19 @@ describe("planSessionIndex", () => {
   test("skips unchanged content hashes before embedding", () => {
     const text = "same message";
     const plan = planSessionIndex({
-      currentMessages: [
+      currentChunks: [
         {
           sessionId: "s1",
           seq: 1,
           role: "user",
           projectKey: "p1",
+          chunkIndex: 0,
           text,
         },
       ],
       existingRows: [
         {
-          key: "s1:1:user",
+          key: messageSearchKey({ sessionId: "s1", seq: 1, role: "user", chunkIndex: 0 }),
           contentHash: messageContentHash(text),
         },
       ],
@@ -37,29 +39,35 @@ describe("planSessionIndex", () => {
 
   test("deletes orphaned and stale keys while embedding only changed rows", () => {
     const plan = planSessionIndex({
-      currentMessages: [
+      currentChunks: [
         {
           sessionId: "s1",
           seq: 1,
           role: "user",
           projectKey: "p1",
+          chunkIndex: 0,
           text: "current text",
         },
       ],
       existingRows: [
         {
-          key: "s1:1:user",
+          key: messageSearchKey({ sessionId: "s1", seq: 1, role: "user", chunkIndex: 0 }),
           contentHash: "old-hash",
         },
         {
-          key: "s1:2:assistant",
+          key: messageSearchKey({ sessionId: "s1", seq: 2, role: "assistant", chunkIndex: 0 }),
           contentHash: "orphan-hash",
         },
       ],
     });
 
-    expect(plan.keysToDelete).toEqual(["s1:1:user", "s1:2:assistant"]);
-    expect(plan.rowsToEmbed.map((row) => row.key)).toEqual(["s1:1:user"]);
+    expect(plan.keysToDelete).toEqual([
+      messageSearchKey({ sessionId: "s1", seq: 1, role: "user", chunkIndex: 0 }),
+      messageSearchKey({ sessionId: "s1", seq: 2, role: "assistant", chunkIndex: 0 }),
+    ]);
+    expect(plan.rowsToEmbed.map((row) => row.key)).toEqual([
+      messageSearchKey({ sessionId: "s1", seq: 1, role: "user", chunkIndex: 0 }),
+    ]);
     expect(plan.messagesReused).toBe(0);
   });
 
@@ -67,29 +75,30 @@ describe("planSessionIndex", () => {
     const text = "same message";
     const existingRows = [
       {
-        key: "s1:1:user",
+        key: messageSearchKey({ sessionId: "s1", seq: 1, role: "user", chunkIndex: 0 }),
         contentHash: unembeddedContentHash(messageContentHash(text)),
       },
     ];
-    const currentMessages = [
+    const currentChunks = [
       {
         sessionId: "s1",
         seq: 1,
         role: "user" as const,
         projectKey: "p1",
+        chunkIndex: 0,
         text,
       },
     ];
 
     expect(
       planSessionIndex({
-        currentMessages,
+        currentChunks,
         existingRows,
       }).rowsToEmbed.map((row) => row.key),
-    ).toEqual(["s1:1:user"]);
+    ).toEqual([messageSearchKey({ sessionId: "s1", seq: 1, role: "user", chunkIndex: 0 })]);
     expect(
       planSessionIndex({
-        currentMessages,
+        currentChunks,
         existingRows: lexicalOnlyPlanRows(existingRows),
       }).rowsToEmbed,
     ).toEqual([]);

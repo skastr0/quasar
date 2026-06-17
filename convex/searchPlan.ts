@@ -19,7 +19,16 @@ export interface CurrentMessageForIndex {
   readonly text: string;
 }
 
-export interface PlannedMessageRow extends CurrentMessageForIndex {
+export interface IndexableChunk {
+  readonly sessionId: string;
+  readonly seq: number;
+  readonly role: EmbeddableRole;
+  readonly projectKey: string;
+  readonly chunkIndex: number;
+  readonly text: string;
+}
+
+export interface PlannedMessageRow extends IndexableChunk {
   readonly key: string;
   readonly contentHash: string;
 }
@@ -66,7 +75,8 @@ export const messageSearchKey = (args: {
   readonly sessionId: string;
   readonly seq: number;
   readonly role: EmbeddableRole;
-}): string => `${args.sessionId}:${args.seq}:${args.role}`;
+  readonly chunkIndex: number;
+}): string => `${args.sessionId}:${args.seq}:${args.role}:${args.chunkIndex}`;
 
 export const messageContentHash = (text: string): string => {
   const seeds = [0x811c9dc5, 0x01000193 ^ 0x811c9dc5] as const;
@@ -98,10 +108,10 @@ export const lexicalOnlyPlanRows = (
   }));
 
 export const planSessionIndex = (args: {
-  readonly currentMessages: readonly CurrentMessageForIndex[];
+  readonly currentChunks: readonly IndexableChunk[];
   readonly existingRows: readonly ExistingSearchRow[];
 }): SessionIndexPlan => {
-  const currentRows = args.currentMessages
+  const currentRows = args.currentChunks
     .filter((row) => row.text.trim().length > 0)
     .map((row) => ({
       ...row,
