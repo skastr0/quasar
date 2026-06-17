@@ -6,9 +6,10 @@ simple — five previous architectures failed by refusing to believe that.
 ## What this is
 
 Quasar ingests local AI-agent session histories (Claude Code, Codex, OpenCode, Grok,
-Hermes), prunes provider noise, and serves search plus deep session inspection —
+Hermes, Antigravity), prunes provider noise, and serves deep session inspection —
 including targeted tool-call retrieval — to agents via a CLI, MCP tools, and a
-self-hosted Convex backend on this machine, reached over Tailscale.
+self-hosted Convex backend on this machine, reached over Tailscale. Search is rebuilt
+through LanceDB; Convex is not the search/RAG backend.
 
 ## The data reality (measured 2026-06-11, full corpus, every row parsed)
 
@@ -22,16 +23,17 @@ Anything that does is provider garbage, not data.
 
 1. **Convex's limits are the contract.** Never invent caps, clamps, gates,
    amplification ratios, or byte budgets. Adopt Convex's limits and opinions
-   wholesale: small instantly-completing mutations, actions for external work,
-   Workpool for long jobs, RAG component for semantic search. A value beyond a Convex
-   limit is provider garbage: emit a named diagnostic
+   wholesale: small instantly-completing mutations and actions for external work.
+   Convex stores OLTP rows only; LanceDB owns lexical/vector search indexes outside
+   Convex. A value beyond a Convex limit is provider garbage: emit a named diagnostic
    `(provider, sessionId, field, observedBytes)`, write zero rows for it, continue.
    Boundary rejection, never "robust handling."
 2. **Store at the grain you read.** Rows are turns. Reading a session is a paginated
    index walk in `seq` order. No chunking, compaction, or reconstruction layers.
-3. **Indexing is a separate decision from storing.** `messages` is the search surface
-   (lexical index; Gemini embeddings in phase 2). `toolCalls` is the structural
-   surface — full inputs/outputs stored, retrieved by `(projectKey, toolName)` or
+3. **Indexing is a separate decision from storing.** `messages` is the product text
+   source for search indexing, but Convex does not own that index. LanceDB indexing
+   state must be explicit and separately owned. `toolCalls` is the structural surface
+   — full inputs/outputs stored, retrieved by `(projectKey, toolName)` or
    `(sessionId, seq)`, and **never search-indexed or embedded**, so tool payloads
    cannot pollute session search.
 
@@ -59,8 +61,8 @@ fixtures, or file paths.
 - Convex work: read `convex/_generated/ai/guidelines.md` first; load the `convex`
   skills. Grain rulings hold: index-only reads (`.filter()` is banned on growing
   tables), bounded reads (`take`/`paginate`, no unbounded `collect`), small chunked
-  mutations, actions for side effects only, vector search in actions only, argument
-  validators on every function.
+  mutations, actions for side effects only, argument validators on every function,
+  and no Convex search/RAG components.
 - Redaction (`redactSensitive` in core) is a mandatory safety line on every ingested
   text. Live SQLite sources are read without locks that could stall the owning agent.
 - Provider knowledge stays inside the provider's adapter; the shared layer owns only

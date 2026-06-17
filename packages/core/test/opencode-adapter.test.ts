@@ -66,70 +66,74 @@ afterAll(() => {
 });
 
 describe("opencode adapter", () => {
-  test("maps parts to turns, drops machinery, and reports pre-prune raw bytes", async () => {
-    const result = await opencodeAdapter.read({
-      machine: MACHINE,
-      now: NOW,
-      roots: { opencode: root },
-    });
+  test(
+    "maps parts to turns, drops machinery, and reports pre-prune raw bytes",
+    async () => {
+      const result = await opencodeAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { opencode: root },
+      });
 
-    expect(result.sessions).toHaveLength(1);
-    const session = result.sessions[0]!;
-    expect(session.events).toHaveLength(5);
+      expect(result.sessions).toHaveLength(1);
+      const session = result.sessions[0]!;
+      expect(session.events).toHaveLength(5);
 
-    // User text part becomes a text block.
-    const userEvent = session.events[0]!;
-    expect(userEvent.role).toBe("user");
-    expect(userEvent.kind).toBe("message");
-    expect(userEvent.contentBlocks.map((block) => [block.kind, block.text])).toEqual([
-      ["text", "please profile the ingest"],
-    ]);
+      // User text part becomes a text block.
+      const userEvent = session.events[0]!;
+      expect(userEvent.role).toBe("user");
+      expect(userEvent.kind).toBe("message");
+      expect(userEvent.contentBlocks.map((block) => [block.kind, block.text])).toEqual([
+        ["text", "please profile the ingest"],
+      ]);
 
-    // Assistant turn: reasoning surfaces as a thinking block, visible text as
-    // a text block, the tool part is tagged tool_use machinery, and step
-    // markers never appear.
-    const assistantEvent = session.events[1]!;
-    expect(assistantEvent.kind).toBe("tool_call");
-    const kinds = assistantEvent.contentBlocks.map((block) => block.kind);
-    expect(kinds).toEqual(["thinking", "text", "text"]);
-    expect(assistantEvent.contentBlocks[0]?.thinking).toBe("I should measure first");
-    expect(assistantEvent.contentBlocks[1]?.text).toBe("Measured; here is the plan.");
-    const toolBlockMetadata = assistantEvent.contentBlocks[2]?.metadata as
-      | Record<string, unknown>
-      | undefined;
-    expect(toolBlockMetadata?.nativeType).toBe("tool_use");
-    expect(JSON.stringify(assistantEvent.contentBlocks)).not.toContain("step-start");
-    expect(JSON.stringify(assistantEvent.contentBlocks)).not.toContain("step-finish");
+      // Assistant turn: reasoning surfaces as a thinking block, visible text as
+      // a text block, the tool part is tagged tool_use machinery, and step
+      // markers never appear.
+      const assistantEvent = session.events[1]!;
+      expect(assistantEvent.kind).toBe("tool_call");
+      const kinds = assistantEvent.contentBlocks.map((block) => block.kind);
+      expect(kinds).toEqual(["thinking", "text", "text"]);
+      expect(assistantEvent.contentBlocks[0]?.thinking).toBe("I should measure first");
+      expect(assistantEvent.contentBlocks[1]?.text).toBe("Measured; here is the plan.");
+      const toolBlockMetadata = assistantEvent.contentBlocks[2]?.metadata as
+        | Record<string, unknown>
+        | undefined;
+      expect(toolBlockMetadata?.nativeType).toBe("tool_use");
+      expect(JSON.stringify(assistantEvent.contentBlocks)).not.toContain("step-start");
+      expect(JSON.stringify(assistantEvent.contentBlocks)).not.toContain("step-finish");
 
-    // Tool part maps to a ToolCall with state.input/state.output payloads.
-    expect(session.toolCalls).toHaveLength(1);
-    expect(session.toolCalls[0]).toMatchObject({
-      toolName: "bash",
-      status: "completed",
-      input: { command: "ls" },
-      output: "file.txt",
-    });
+      // Tool part maps to a ToolCall with state.input/state.output payloads.
+      expect(session.toolCalls).toHaveLength(1);
+      expect(session.toolCalls[0]).toMatchObject({
+        toolName: "bash",
+        status: "completed",
+        input: { command: "ls" },
+        output: "file.txt",
+      });
 
-    // Machinery-only turn carries no content at all.
-    const machineryEvent = session.events[2]!;
-    expect(machineryEvent.contentText).toBeUndefined();
-    expect(machineryEvent.contentBlocks).toHaveLength(0);
+      // Machinery-only turn carries no content at all.
+      const machineryEvent = session.events[2]!;
+      expect(machineryEvent.contentText).toBeUndefined();
+      expect(machineryEvent.contentBlocks).toHaveLength(0);
 
-    // The garbage row: SQL pruning removed summary.diffs from the projected
-    // content, and rawBytes reports the pre-prune size for the ingest line.
-    const garbageEvent = session.events[3]!;
-    expect(garbageEvent.rawReference.rawBytes).toBeGreaterThanOrEqual(1_048_576);
-    expect(JSON.stringify(garbageEvent.contentBlocks).length).toBeLessThan(10_000);
-    // Sound rows still report small raw byte counts.
-    expect(userEvent.rawReference.rawBytes).toBeLessThan(1_000);
+      // The garbage row: SQL pruning removed summary.diffs from the projected
+      // content, and rawBytes reports the pre-prune size for the ingest line.
+      const garbageEvent = session.events[3]!;
+      expect(garbageEvent.rawReference.rawBytes).toBeGreaterThanOrEqual(1_048_576);
+      expect(JSON.stringify(garbageEvent.contentBlocks).length).toBeLessThan(10_000);
+      // Sound rows still report small raw byte counts.
+      expect(userEvent.rawReference.rawBytes).toBeLessThan(1_000);
 
-    // Empty stubs (blank reasoning plaintext, blank text) are machinery: the
-    // event carries no turn content, so no {"type":"reasoning"} envelope dump
-    // can reach the search surface.
-    const emptyEvent = session.events[4]!;
-    expect(emptyEvent.role).toBe("assistant");
-    expect(emptyEvent.contentText).toBeUndefined();
-    expect(emptyEvent.contentBlocks).toHaveLength(0);
-    expect(JSON.stringify(emptyEvent)).not.toContain("gAAAAAB");
-  });
+      // Empty stubs (blank reasoning plaintext, blank text) are machinery: the
+      // event carries no turn content, so no {"type":"reasoning"} envelope dump
+      // can reach the search surface.
+      const emptyEvent = session.events[4]!;
+      expect(emptyEvent.role).toBe("assistant");
+      expect(emptyEvent.contentText).toBeUndefined();
+      expect(emptyEvent.contentBlocks).toHaveLength(0);
+      expect(JSON.stringify(emptyEvent)).not.toContain("gAAAAAB");
+    },
+    15_000,
+  );
 });

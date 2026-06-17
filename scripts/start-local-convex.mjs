@@ -1,12 +1,9 @@
 import { spawn } from "node:child_process";
 import {
-  chmodSync,
   existsSync,
-  lstatSync,
   mkdirSync,
-  mkdtempSync,
-  readdirSync,
   readFileSync,
+  mkdtempSync,
   rmSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -95,29 +92,5 @@ child.on("exit", (code, signal) => {
 process.on("exit", cleanupRuntimeTmpDir);
 
 function cleanupRuntimeTmpDir() {
-  makeWritableForCleanup(runtimeTmpDir);
   rmSync(runtimeTmpDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
-}
-
-function makeWritableForCleanup(path) {
-  let stat;
-  try {
-    stat = lstatSync(path);
-  } catch {
-    return;
-  }
-
-  if (!stat.isDirectory()) {
-    try {
-      chmodSync(path, 0o600);
-    } catch {}
-    return;
-  }
-
-  try {
-    chmodSync(path, 0o700);
-  } catch {}
-  for (const entry of readdirSync(path)) {
-    makeWritableForCleanup(join(path, entry));
-  }
 }

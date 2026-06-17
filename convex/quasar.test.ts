@@ -1,20 +1,12 @@
 /// <reference types="vite/client" />
 import { convexTest } from "convex-test";
-import workpoolTest from "@convex-dev/workpool/test";
 import { expect, test } from "vitest";
 import { api } from "./_generated/api";
 import schema from "./schema";
 
 const modules = import.meta.glob("./**/*.ts");
 
-process.env.GOOGLE_API_KEY = "";
-process.env.GOOGLE_GENERATIVE_AI_API_KEY = "";
-
-const testConvex = () => {
-  const t = convexTest(schema, modules);
-  workpoolTest.register(t, "embeddingWorkpool");
-  return t;
-};
+const testConvex = () => convexTest(schema, modules);
 
 const sessionArgs = {
   sessionId: "claude:machine-a:abc123",
@@ -165,51 +157,6 @@ test("insertMessages + readSession paginates in seq ascending order", async () =
   });
   expect(page2.page.map((m) => m.seq)).toEqual([3, 4]);
   expect(page2.isDone).toBe(true);
-});
-
-test("searchMessages finds inserted text and respects projectKey filter", async () => {
-  const t = testConvex();
-  await claimSession(t, "s-search-1", "proj-alpha", "run-1");
-  await claimSession(t, "s-search-2", "proj-beta", "run-1");
-  await claimSession(t, "s-search-3", "proj-alpha", "run-1");
-  await t.mutation(api.quasar.insertMessages, {
-    messages: [
-      {
-        sessionId: "s-search-1",
-        seq: 0,
-        role: "user" as const,
-        text: "how do we configure the tailscale serving layer",
-        projectKey: "proj-alpha",
-      },
-      {
-        sessionId: "s-search-2",
-        seq: 0,
-        role: "assistant" as const,
-        text: "tailscale exposure is pinned in the platform directory",
-        projectKey: "proj-beta",
-      },
-      {
-        sessionId: "s-search-3",
-        seq: 0,
-        role: "user" as const,
-        text: "unrelated message about embeddings",
-        projectKey: "proj-alpha",
-      },
-    ],
-    runId: "run-1",
-  });
-
-  const all = await t.query(api.quasar.searchMessages, { query: "tailscale" });
-  expect(all.map((r) => r.sessionId).sort()).toEqual(["s-search-1", "s-search-2"]);
-  expect(all[0]).toHaveProperty("text");
-  expect(all[0]).toHaveProperty("seq");
-  expect(all[0]).toHaveProperty("role");
-
-  const alphaOnly = await t.query(api.quasar.searchMessages, {
-    query: "tailscale",
-    projectKey: "proj-alpha",
-  });
-  expect(alphaOnly.map((r) => r.sessionId)).toEqual(["s-search-1"]);
 });
 
 test("toolCallsByName walks the (projectKey, toolName) index", async () => {

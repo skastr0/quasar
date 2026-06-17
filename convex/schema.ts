@@ -25,13 +25,6 @@ export default defineSchema({
     // commitSessionIngest once every turn row has landed. A session is only
     // complete (and skippable on an unchanged fingerprint) when this is unset.
     ingestRunId: v.optional(v.string()),
-    // Source fingerprint at the last completed embedding pass. Embedding is
-    // session-grain like ingest: a session is embed-pending exactly when this
-    // differs from sourceFingerprint and no ingest claim is in flight.
-    embeddedFingerprint: v.optional(v.string()),
-    // Source fingerprint currently queued/running in the embedding workpool.
-    // Fingerprint-scoped so a newer ingest can supersede older queued work.
-    embeddingClaimedFingerprint: v.optional(v.string()),
   })
     .index("by_sessionId", ["sessionId"])
     .index("by_projectKey", ["projectKey"])
@@ -48,16 +41,7 @@ export default defineSchema({
     text: v.string(),
     ts: v.optional(v.string()),
     projectKey: v.string(),
-  })
-    .index("by_sessionId_and_seq", ["sessionId", "seq"])
-    // Embedding-surface walk: the embed pipeline reads ONLY through this
-    // index with role pinned to "user" or "assistant", so reasoning rows are
-    // structurally unreachable from the embedding path.
-    .index("by_sessionId_and_role_and_seq", ["sessionId", "role", "seq"])
-    .searchIndex("search_text", {
-      searchField: "text",
-      filterFields: ["projectKey", "role", "sessionId"],
-    }),
+  }).index("by_sessionId_and_seq", ["sessionId", "seq"]),
 
   // Structural surface: full tool inputs/outputs, retrieved by exact index walks.
   // NEVER search-indexed, NEVER embedded — tool payloads must not pollute search.

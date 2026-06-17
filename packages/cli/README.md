@@ -3,10 +3,10 @@
 The Quasar CLI discovers and parses local AI agent session histories,
 read-only.
 
-Status: pre-release. Only local commands exist today (doctor, capabilities,
-schema, examples, sources discover). Ingest, search, and session reads arrive
-with the v2 server (see `docs/architecture/quasar-v2-greenfield-plan-2026-06-10.md`
-in the repository).
+Status: pre-release. The CLI exposes discovery, ingest, project/session reads,
+and tool-call reads against the self-hosted Convex OLTP backend. Search is not
+currently a public command; the removed Convex Searchlight/RAG path is replaced
+by LanceDB in the next search glyphs.
 
 ## Install
 

@@ -9,7 +9,6 @@ import { capabilitiesCommand, doctorCommand } from "./commands/discovery";
 import { ingestCommand } from "./commands/ingest";
 import { projectsCommand, sessionsCommand, toolCallsCommand } from "./commands/read";
 import { examplesCommand, schemaCommand } from "./commands/schema";
-import { searchCommand } from "./commands/search";
 import { sourcesCommand } from "./commands/sources";
 import { CLI_NAME, CLI_VERSION } from "./constants";
 import { CommandInputError } from "./errors";
@@ -27,7 +26,6 @@ const publicCommands = new Set([
   "sources",
   "ingest",
   "daemon",
-  "search",
   "projects",
   "sessions",
   "tool-calls",
@@ -53,7 +51,6 @@ export const rootCommand = Command.make(CLI_NAME).pipe(
     sourcesCommand,
     ingestCommand,
     daemonCommand,
-    searchCommand,
     projectsCommand,
     sessionsCommand,
     toolCallsCommand,

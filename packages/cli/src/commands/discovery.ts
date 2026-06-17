@@ -16,7 +16,6 @@ const commandCapabilities = [
   "daemon install [--interval-seconds 300] [--binary <path>]",
   "daemon uninstall",
   "daemon status",
-  "search --query <q> [--mode text|semantic|fusion] [--project <key>] [--role user|assistant|reasoning] [--limit <n>]",
   "projects list",
   "sessions list [--project <key>] [--provider <provider>] [--limit <n>]",
   "sessions read <sessionId> [--limit <n>]",
