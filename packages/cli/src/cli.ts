@@ -29,6 +29,7 @@ const publicCommands = new Set([
   "ingest",
   "daemon",
   "search",
+  "maintain",
   "projects",
   "sessions",
   "tool-calls",
