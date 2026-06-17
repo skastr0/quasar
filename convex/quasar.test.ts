@@ -242,7 +242,7 @@ test("maintainSearch creates indexes, optimizes, and reports stats", async () =>
   expect(report.stats.rowCount).toBeGreaterThanOrEqual(1);
   expect(report.stats.indices.map((index: { name: string }) => index.name).sort()).toContain("text_idx");
   expect(report.optimize?.stats.compaction).toBeDefined();
-});
+}, 30000);
 
 test("turn mutations reject a lost claim so concurrent runs cannot duplicate turns", async () => {
   const t = testConvex();

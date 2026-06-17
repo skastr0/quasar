@@ -523,14 +523,8 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
           catch: (cause) => makeOperationError(tableName, "countRows", cause),
         });
         if (rows === 0) {
-          return yield* Effect.fail(
-            new IndexNotReady({
-              tableName,
-              indexName: MESSAGE_VECTOR_INDEX_NAME,
-              operation: "createVectorIndex",
-              message: "LanceDB cannot train a vector index before rows exist.",
-            }),
-          );
+          // Cannot train a vector index on an empty table; skip gracefully.
+          return;
         }
         yield* Effect.tryPromise({
           try: () =>
