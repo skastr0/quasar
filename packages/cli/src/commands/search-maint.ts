@@ -1,5 +1,5 @@
 import { Command, Options } from "@effect/cli";
-import { Effect, Option } from "effect";
+import { Effect } from "effect";
 
 import { api } from "../../../../convex/_generated/api";
 

@@ -471,7 +471,6 @@ export const indexMessageRows = action({
   args: {
     secret: v.string(),
     rows: v.array(messageSearchRowValidator),
-    createIndexes: v.optional(v.boolean()),
   },
   handler: async (_ctx, args) => {
     requireActionSecret(args.secret);

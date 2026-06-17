@@ -390,7 +390,7 @@ describe("LanceDb", () => {
       index === 0 ? 1 : 0,
     );
 
-    await runtime.runPromise(
+    const firstStats = await runtime.runPromise(
       Effect.gen(function* () {
         const search = yield* LanceDb;
         yield* search.upsertMessageRows({
@@ -407,10 +407,53 @@ describe("LanceDb", () => {
           ],
         });
         yield* search.createMessageIndexes();
+        return yield* search.tableStats({});
+      }),
+    );
+
+    const secondStats = await runtime.runPromise(
+      Effect.gen(function* () {
+        const search = yield* LanceDb;
         yield* search.createMessageIndexes();
         return yield* search.tableStats({});
       }),
     );
+
+    expect(firstStats.indices.map((index) => index.name).sort()).toEqual(["text_idx", "vector_idx"]);
+    expect(secondStats.indices.map((index) => index.name).sort()).toEqual(["text_idx", "vector_idx"]);
+    expect(secondStats.disk.totalBytes).toBe(firstStats.disk.totalBytes);
+  });
+
+  test("upsertMessageRows bootstraps the table without creating indexes", async () => {
+    const dataDir = await makeTempDir();
+    const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));
+    const vector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, (_, index) =>
+      index === 0 ? 1 : 0,
+    );
+
+    const stats = await runtime.runPromise(
+      Effect.gen(function* () {
+        const search = yield* LanceDb;
+        yield* search.upsertMessageRows({
+          rows: [
+            {
+              sessionId: "session-a",
+              seq: 1,
+              role: "user",
+              projectKey: "project-a",
+              text: "first text",
+              contentHash: "hash-a",
+              vector,
+            },
+          ],
+        });
+        return yield* search.tableStats({});
+      }),
+    );
+
+    expect(stats.rowCount).toBe(1);
+    expect(stats.indices).toEqual([]);
+    expect(stats.disk.indexBytes).toBe(0);
   });
 
   test("tableStats reports row count, indices, and disk sizes", async () => {
