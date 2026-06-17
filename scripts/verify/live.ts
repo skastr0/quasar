@@ -1,14 +1,12 @@
 /**
  * verify:live driver — runs every live battery against the pinned self-hosted
  * backend and aggregates exit codes, so one red battery never hides another's
- * report. Batteries: (a) reconcile, (e) fidelity.
- *
- * Relevance is restored by the LanceDB search retarget; while Convex
- * Searchlight/RAG is gone there is no live search surface to verify.
+ * report. Batteries: (a) reconcile, (e) fidelity, (r) LanceDB search surface.
  */
 const BATTERIES = [
   "scripts/verify/reconcile.ts",
   "scripts/verify/fidelity.ts",
+  "scripts/verify/relevance.ts",
 ];
 
 let failed = 0;
