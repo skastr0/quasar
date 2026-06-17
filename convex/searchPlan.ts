@@ -4,6 +4,7 @@ export const GOOGLE_API_KEY_ENV = "GOOGLE_API_KEY";
 export const GOOGLE_GENERATIVE_AI_API_KEY_ENV = "GOOGLE_GENERATIVE_AI_API_KEY";
 export const GEMINI_EMBED_BATCH_MAX = 100;
 export const INDEX_PAGE_SIZE = 100;
+export const RRF_K = 60;
 
 export const EMBEDDABLE_ROLES = ["user", "assistant"] as const;
 
@@ -32,6 +33,17 @@ export interface SessionIndexPlan {
   readonly rowsToEmbed: readonly PlannedMessageRow[];
   readonly keysToDelete: readonly string[];
   readonly messagesReused: number;
+}
+
+export interface RankedSearchKey {
+  readonly key: string;
+}
+
+export interface FusedSearchRank {
+  readonly key: string;
+  readonly score: number;
+  readonly textRank?: number;
+  readonly vectorRank?: number;
 }
 
 export type EmbeddingPurpose = "retrieval_query" | "retrieval_document";
@@ -96,4 +108,30 @@ export const planSessionIndex = (args: {
     keysToDelete,
     messagesReused: currentRows.length - rowsToEmbed.length,
   };
+};
+
+export const fuseMatches = (args: {
+  readonly textMatches: readonly RankedSearchKey[];
+  readonly vectorMatches: readonly RankedSearchKey[];
+  readonly k?: number;
+  readonly limit?: number;
+}): FusedSearchRank[] => {
+  const k = args.k ?? RRF_K;
+  const byKey = new Map<string, FusedSearchRank>();
+  const add = (key: string, rank: number, leg: "text" | "vector") => {
+    const existing = byKey.get(key) ?? { key, score: 0 };
+    byKey.set(key, {
+      ...existing,
+      score: existing.score + 1 / (k + rank),
+      ...(leg === "text" ? { textRank: rank } : { vectorRank: rank }),
+    });
+  };
+  args.textMatches.forEach((match, index) => add(match.key, index + 1, "text"));
+  args.vectorMatches.forEach((match, index) => add(match.key, index + 1, "vector"));
+  return [...byKey.values()]
+    .sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score;
+      return left.key.localeCompare(right.key);
+    })
+    .slice(0, args.limit);
 };

@@ -15,6 +15,8 @@ process.env.QUASAR_ACTION_SECRET = ACTION_SECRET;
 process.env.GOOGLE_API_KEY = "";
 process.env.GOOGLE_GENERATIVE_AI_API_KEY = "";
 process.env.QUASAR_SEARCH_DATA_DIR ??= mkdtempSync(join(tmpdir(), "quasar-convex-search-"));
+process.env.VITEST ??= "true";
+process.env.QUASAR_TEST_QUERY_EMBEDDINGS = "1";
 
 const sessionArgs = {
   sessionId: "claude:machine-a:abc123",
@@ -114,6 +116,95 @@ test("indexSessionForIngest indexes the claimed run before commit", async () => 
   await t.mutation(api.quasar.commitSessionIngest, {
     sessionId,
     runId: "run-index",
+  });
+});
+
+test("searchSemantic reports ready with query embeddings and vector ranks", async () => {
+  const t = testConvex();
+  const sessionId = "s-semantic-ready";
+  const projectKey = "p-semantic";
+  const text = "semantic ready proof";
+  const vector = Array.from({ length: 1536 }, (_, index) => (index === 0 ? 1 : 0));
+
+  await t.action(api.search.indexMessageRows, {
+    secret: ACTION_SECRET,
+    createIndexes: true,
+    rows: [
+      {
+        sessionId,
+        seq: 1,
+        role: "user",
+        projectKey,
+        text,
+        contentHash: "hash-semantic-ready",
+        vector,
+      },
+    ],
+  });
+
+  const report = await t.action(api.search.searchSemantic, {
+    secret: ACTION_SECRET,
+    query: "semantic ready",
+    projectKey,
+    limit: 5,
+  });
+
+  expect(report.diagnostics).toMatchObject({
+    semanticStatus: "ready",
+    semanticSearched: true,
+    textSearched: false,
+    embeddingDimensions: 1536,
+  });
+  expect(report.matches[0]).toMatchObject({
+    sessionId,
+    projectKey,
+    text,
+    vectorRank: 1,
+  });
+});
+
+test("searchFusion reports lexical and semantic ranks when embeddings are ready", async () => {
+  const t = testConvex();
+  const sessionId = "s-fusion-ready";
+  const projectKey = "p-fusion";
+  const text = "fusion terminal response proof";
+  const vector = Array.from({ length: 1536 }, (_, index) => (index === 0 ? 1 : 0));
+
+  await t.action(api.search.indexMessageRows, {
+    secret: ACTION_SECRET,
+    createIndexes: true,
+    rows: [
+      {
+        sessionId,
+        seq: 1,
+        role: "assistant",
+        projectKey,
+        text,
+        contentHash: "hash-fusion-ready",
+        vector,
+      },
+    ],
+  });
+
+  const report = await t.action(api.search.searchFusion, {
+    secret: ACTION_SECRET,
+    query: "terminal response",
+    projectKey,
+    limit: 5,
+  });
+
+  expect(report.diagnostics).toMatchObject({
+    semanticStatus: "ready",
+    semanticSearched: true,
+    textSearched: true,
+    embeddingDimensions: 1536,
+  });
+  expect(report.matches[0]).toMatchObject({
+    sessionId,
+    projectKey,
+    text,
+    textRank: 1,
+    vectorRank: 1,
   });
 });
 
