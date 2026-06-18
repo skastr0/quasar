@@ -12,7 +12,7 @@ import type { MappedSession } from "../src/model";
 import { Embeddings, DurableQueue, makeDurableQueueLayer } from "../src/services";
 import type { DurableQueueService } from "../src/services";
 import { LocalStore, makeLocalStoreLayer } from "../src/store";
-import { makeSyntheticEmbedder } from "../src/syntheticEmbeddings";
+import { makeSyntheticEmbedder, SyntheticEmbeddingError } from "../src/syntheticEmbeddings";
 
 const tempDirs: string[] = [];
 
@@ -200,6 +200,28 @@ describe("Embeddings", () => {
     expect(queueStats).toEqual({ pending: 0, leased: 0, failed: 1 });
   });
 
+  test("synthetic rate-limit status is treated as retryable", async () => {
+    const embedder: Embedder = {
+      embedMany: async () => {
+        throw new SyntheticEmbeddingError({ operation: "synthetic.embeddings", message: "temporarily unavailable", status: 429 });
+      },
+    };
+
+    const report = await withEmbeddings(
+      embedder,
+      Effect.gen(function* () {
+        const store = yield* LocalStore;
+        const queue = yield* DurableQueue;
+        const embeddings = yield* Embeddings;
+        yield* store.upsertSession(mappedSession());
+        yield* enqueueEmbeddingJob(queue, 1);
+        return yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
+      }),
+    );
+
+    expect(report).toMatchObject({ retried: 1, failed: 0 });
+  });
+
   test("idempotent rerun after cache write does not re-pay the provider", async () => {
     let calls = 0;
     const embedder: Embedder = {
@@ -353,5 +375,21 @@ describe("Embeddings", () => {
     expect(calls[0]?.url).toBe("https://synthetic.test/openai/v1/embeddings");
     expect(calls[0]?.authorization).toBe("Bearer test-key");
     expect(calls[0]?.body).toEqual({ model: profile.model, input: ["a", "b"], dimensions: 3 });
+  });
+
+  test("synthetic embedder rejects invalid response indexes", async () => {
+    const profile = makeEmbeddingProfile({
+      provider: "synthetic",
+      model: "hf:nomic-ai/nomic-embed-text-v1.5",
+      dimensions: 3,
+      task: "search_document",
+    });
+    const fakeFetch: typeof fetch = async () =>
+      new Response(JSON.stringify({
+        data: [{ object: "embedding", index: 2, embedding: [1, 0, 0] }],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+
+    await expect(makeSyntheticEmbedder(profile, { apiKey: "test-key", fetch: fakeFetch }).embedMany(["a"]))
+      .rejects.toThrow("Synthetic embeddings response included invalid index 2");
   });
 });
