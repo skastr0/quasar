@@ -57,8 +57,8 @@ describe("DurableQueue", () => {
       (queue) =>
         Effect.gen(function* () {
           const first = yield* queue.enqueue({ kind: "index-session", payload: { sessionId: "a" }, idempotencyKey: "index-session:a" });
-          yield* queue.leaseBatch({ workerId: "worker-a", kind: "index-session", limit: 1, leaseMs: 60_000, now: "2026-06-18T10:00:00.000Z" });
-          yield* queue.ack(first.jobId, "2026-06-18T10:00:01.000Z");
+          yield* queue.leaseBatch({ workerId: "worker-a", kind: "index-session", limit: 1, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
+          yield* queue.ack(first.jobId, "2099-06-18T10:00:01.000Z");
           const second = yield* queue.enqueue({ kind: "index-session", payload: { sessionId: "a" }, idempotencyKey: "index-session:a" });
           const stats = yield* queue.stats;
           return [first, second, stats] as const;
@@ -77,8 +77,8 @@ describe("DurableQueue", () => {
         Effect.gen(function* () {
           yield* queue.enqueue({ kind: "index", payload: { sessionId: "a" } });
           yield* queue.enqueue({ kind: "index", payload: { sessionId: "b" } });
-          const firstLease = yield* queue.leaseBatch({ workerId: "worker-a", limit: 1, leaseMs: 60_000, now: "2026-06-18T10:00:00.000Z" });
-          const secondLease = yield* queue.leaseBatch({ workerId: "worker-b", limit: 10, leaseMs: 60_000, now: "2026-06-18T10:00:01.000Z" });
+          const firstLease = yield* queue.leaseBatch({ workerId: "worker-a", limit: 1, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
+          const secondLease = yield* queue.leaseBatch({ workerId: "worker-b", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:01.000Z" });
           const stats = yield* queue.stats;
           return [firstLease, secondLease, stats] as const;
         }),
@@ -99,8 +99,8 @@ describe("DurableQueue", () => {
         Effect.gen(function* () {
           yield* queue.enqueue({ kind: "embed-message", payload: { sessionId: "a" } });
           yield* queue.enqueue({ kind: "index-session", payload: { sessionId: "a" } });
-          const embedLease = yield* queue.leaseBatch({ workerId: "embedder", kind: "embed-message", limit: 10, leaseMs: 60_000, now: "2026-06-18T10:00:00.000Z" });
-          const indexLease = yield* queue.leaseBatch({ workerId: "indexer", kind: "index-session", limit: 10, leaseMs: 60_000, now: "2026-06-18T10:00:00.000Z" });
+          const embedLease = yield* queue.leaseBatch({ workerId: "embedder", kind: "embed-message", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
+          const indexLease = yield* queue.leaseBatch({ workerId: "indexer", kind: "index-session", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
           return [embedLease, indexLease] as const;
         }),
     );
@@ -116,10 +116,10 @@ describe("DurableQueue", () => {
       (queue) =>
         Effect.gen(function* () {
           const job = yield* queue.enqueue({ kind: "embed", payload: { messageId: "a" } });
-          yield* queue.leaseBatch({ workerId: "worker-a", limit: 1, leaseMs: 60_000, now: "2026-06-18T10:00:00.000Z" });
-          yield* queue.retry(job.jobId, { error: "rate limited", delayMs: 30_000, now: "2026-06-18T10:00:10.000Z" });
-          const earlyLease = yield* queue.leaseBatch({ workerId: "worker-b", limit: 1, leaseMs: 60_000, now: "2026-06-18T10:00:20.000Z" });
-          const lateLease = yield* queue.leaseBatch({ workerId: "worker-b", limit: 1, leaseMs: 60_000, now: "2026-06-18T10:00:40.000Z" });
+          yield* queue.leaseBatch({ workerId: "worker-a", limit: 1, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
+          yield* queue.retry(job.jobId, { error: "rate limited", delayMs: 30_000, now: "2099-06-18T10:00:10.000Z" });
+          const earlyLease = yield* queue.leaseBatch({ workerId: "worker-b", limit: 1, leaseMs: 60_000, now: "2099-06-18T10:00:20.000Z" });
+          const lateLease = yield* queue.leaseBatch({ workerId: "worker-b", limit: 1, leaseMs: 60_000, now: "2099-06-18T10:00:40.000Z" });
           return [earlyLease, lateLease] as const;
         }),
     );
@@ -137,9 +137,9 @@ describe("DurableQueue", () => {
       (queue) =>
         Effect.gen(function* () {
           yield* queue.enqueue({ kind: "index", payload: { sessionId: "a" } });
-          yield* queue.leaseBatch({ workerId: "worker-a", limit: 1, leaseMs: 1_000, now: "2026-06-18T10:00:00.000Z" });
-          const recovered = yield* queue.recoverStaleLeases("2026-06-18T10:00:02.000Z");
-          const leased = yield* queue.leaseBatch({ workerId: "worker-b", limit: 1, leaseMs: 60_000, now: "2026-06-18T10:00:02.000Z" });
+          yield* queue.leaseBatch({ workerId: "worker-a", limit: 1, leaseMs: 1_000, now: "2099-06-18T10:00:00.000Z" });
+          const recovered = yield* queue.recoverStaleLeases("2099-06-18T10:00:02.000Z");
+          const leased = yield* queue.leaseBatch({ workerId: "worker-b", limit: 1, leaseMs: 60_000, now: "2099-06-18T10:00:02.000Z" });
           return [recovered, leased] as const;
         }),
     );
@@ -157,8 +157,8 @@ describe("DurableQueue", () => {
         Effect.gen(function* () {
           const completed = yield* queue.enqueue({ kind: "index", payload: { sessionId: "done" } });
           const failed = yield* queue.enqueue({ kind: "index", payload: { sessionId: "bad" } });
-          yield* queue.ack(completed.jobId, "2026-06-18T10:00:00.000Z");
-          yield* queue.fail(failed.jobId, "bad payload", "2026-06-18T10:00:00.000Z");
+          yield* queue.ack(completed.jobId, "2099-06-18T10:00:00.000Z");
+          yield* queue.fail(failed.jobId, "bad payload", "2099-06-18T10:00:00.000Z");
           return yield* queue.stats;
         }),
     );
