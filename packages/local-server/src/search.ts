@@ -7,7 +7,7 @@ import {
 } from "@skastr0/quasar-search";
 import { Context, Effect, Layer } from "effect";
 
-import { embeddingProfileFromEnv } from "./embeddingProfiles";
+import { embeddingProfileFromEnv, embeddingProfileSearchTable } from "./embeddingProfiles";
 import type { MessageRow } from "./model";
 import { decideSearchDocument, indexedContentHash, VECTOR_READY_FILTER } from "./searchPolicy";
 import { LocalStore } from "./store";
@@ -65,6 +65,7 @@ export const DerivedSearchLive = Layer.effect(
     const store = yield* LocalStore;
     const search = yield* LanceDb;
     const profile = embeddingProfileFromEnv();
+    const tableName = embeddingProfileSearchTable(profile);
 
     return DerivedSearch.of({
       indexSession: (sessionId) =>
@@ -73,6 +74,7 @@ export const DerivedSearchLive = Layer.effect(
           const rows = toSearchRows(messages, profile.dimensions);
           const existing = yield* search.readMessageRowsBySession({
             sessionId,
+            tableName,
             limit: 100_000,
             select: ["key"],
           }).pipe(Effect.catchAll(() => Effect.succeed([])));
@@ -82,10 +84,10 @@ export const DerivedSearchLive = Layer.effect(
             .filter((key): key is string => typeof key === "string" && !nextKeys.has(key));
 
           if (orphanKeys.length > 0) {
-            yield* search.deleteByKeys({ keys: orphanKeys });
+            yield* search.deleteByKeys({ tableName, keys: orphanKeys });
           }
           if (rows.length > 0) {
-            yield* search.upsertMessageRows({ rows, vectorDimension: profile.dimensions });
+            yield* search.upsertMessageRows({ rows, tableName, vectorDimension: profile.dimensions });
           }
           const semanticRowsUpserted = messages.filter((message) => decideSearchDocument(message).semantic).length;
           return {
@@ -95,14 +97,16 @@ export const DerivedSearchLive = Layer.effect(
             orphansDeleted: orphanKeys.length,
           };
         }),
-      createLexicalIndex: search.createMessageIndexes({ includeVector: false }),
+      createLexicalIndex: search.createMessageIndexes({ tableName, includeVector: false }),
       createVectorIndex: search.createMessageIndexes({
+        tableName,
         includeVector: true,
         vectorRowsFilter: VECTOR_READY_FILTER,
       }),
-      stats: search.tableStats({}),
+      stats: search.tableStats({ tableName }),
       lexicalSearch: ({ query, projectKey, limit }) =>
         search.ftsSearch({
+          tableName,
           query,
           limit,
           filter: projectFilter(projectKey),

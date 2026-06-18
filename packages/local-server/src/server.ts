@@ -4,6 +4,7 @@ import { LanceDb, MESSAGE_SEARCH_COLUMNS } from "@skastr0/quasar-search";
 import { Effect, Layer } from "effect";
 
 import { LocalServerConfig } from "./config";
+import { embeddingProfileSearchTable } from "./embeddingProfiles";
 import { ok } from "./json";
 import { SearchMaintenance } from "./maintenance";
 import { AppLayer } from "./runtime";
@@ -178,7 +179,9 @@ const semanticSearch = Effect.gen(function* () {
     return badRequest("search/semantic", "q is required");
   }
   const vector = yield* embeddings.embedText(text);
+  const tableName = embeddingProfileSearchTable(embeddings.profile);
   const matches = yield* search.vectorSearch({
+    tableName,
     vector,
     vectorDimension: embeddings.profile.dimensions,
     limit: positiveInt(params, "limit", 10),
@@ -197,7 +200,9 @@ const fusionSearch = Effect.gen(function* () {
     return badRequest("search/fusion", "q is required");
   }
   const vector = yield* embeddings.embedText(text);
+  const tableName = embeddingProfileSearchTable(embeddings.profile);
   const matches = yield* search.hybridSearch({
+    tableName,
     query: text,
     vector,
     vectorDimension: embeddings.profile.dimensions,
