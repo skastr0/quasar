@@ -221,6 +221,35 @@ describe("DerivedSearch", () => {
     expect(stats.rowCount).toBe(1);
   });
 
+  test("single-table profiles seed lexical rows with active profile dimensions", async () => {
+    const [profileTable, rows] = await withSearch(
+      Effect.gen(function* () {
+        const profile = embeddingProfileFromEnv();
+        const profileTable = embeddingProfileSearchTable(profile);
+        const store = yield* LocalStore;
+        const derived = yield* DerivedSearch;
+        const search = yield* LanceDb;
+        yield* store.upsertSession(mappedSession([message(1, "gemini short vector memory") ]));
+        yield* derived.indexSession("session-a");
+        const rows = yield* search.readMessageRowsBySession({
+          sessionId: "session-a",
+          tableName: "messages",
+          select: ["key", "vector"],
+        });
+        return [profileTable, rows] as const;
+      }),
+      {
+        QUASAR_EMBEDDING_PROVIDER: "gemini",
+        QUASAR_EMBEDDING_MODEL: "gemini-embedding-001",
+        QUASAR_EMBEDDING_DIMENSIONS: "768",
+      },
+    );
+
+    expect(profileTable).toBe("messages");
+    expect(rows).toHaveLength(1);
+    expect((rows[0]?.vector as readonly number[] | undefined)?.length).toBe(768);
+  });
+
   test("stats expose missing explicit indexes before maintenance creates them", async () => {
     const [before, after] = await withSearch(
       Effect.gen(function* () {

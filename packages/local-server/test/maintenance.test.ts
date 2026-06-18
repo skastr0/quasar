@@ -191,7 +191,7 @@ describe("SearchMaintenance", () => {
   });
 
   test("freshness checks both lexical and active profile tables", async () => {
-    const [profileTable, first, afterProfileRepair, afterLexicalDelete] = await withMaintenance(
+    const [profileTable, first, afterProfileRepair, afterProfileDelete, afterLexicalDelete] = await withMaintenance(
       Effect.gen(function* () {
         const profileTable = embeddingProfileSearchTable(embeddingProfileFromEnv());
         const store = yield* LocalStore;
@@ -202,9 +202,12 @@ describe("SearchMaintenance", () => {
         const first = yield* maintenance.reconcileFreshness({ limit: 10, now: "2026-06-18T10:00:00.000Z" });
         yield* derived.indexSession("session-a");
         const afterProfileRepair = yield* maintenance.reconcileFreshness({ limit: 10, now: "2026-06-18T10:00:01.000Z" });
+        yield* search.deleteByKeys({ tableName: profileTable, keys: ["session-a:1:user"] });
+        const afterProfileDelete = yield* maintenance.reconcileFreshness({ limit: 10, now: "2026-06-18T10:00:02.000Z" });
+        yield* derived.indexSession("session-a");
         yield* search.deleteByKeys({ tableName: "messages", keys: ["session-a:1:user"] });
-        const afterLexicalDelete = yield* maintenance.reconcileFreshness({ limit: 10, now: "2026-06-18T10:00:02.000Z" });
-        return [profileTable, first, afterProfileRepair, afterLexicalDelete] as const;
+        const afterLexicalDelete = yield* maintenance.reconcileFreshness({ limit: 10, now: "2026-06-18T10:00:03.000Z" });
+        return [profileTable, first, afterProfileRepair, afterProfileDelete, afterLexicalDelete] as const;
       }),
       {
         QUASAR_EMBEDDING_PROVIDER: "synthetic",
@@ -216,6 +219,7 @@ describe("SearchMaintenance", () => {
     expect(profileTable).not.toBe("messages");
     expect(first).toMatchObject({ sessionsChecked: 1, freshSessions: 0, staleSessions: ["session-a"] });
     expect(afterProfileRepair).toMatchObject({ sessionsChecked: 1, freshSessions: 1, staleSessions: [] });
+    expect(afterProfileDelete).toMatchObject({ sessionsChecked: 1, freshSessions: 0, staleSessions: ["session-a"] });
     expect(afterLexicalDelete).toMatchObject({ sessionsChecked: 1, freshSessions: 0, staleSessions: ["session-a"] });
   });
 });
