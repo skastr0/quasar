@@ -73,6 +73,7 @@ export interface EnsureMessageTableRequest extends TableRequest {
   readonly mode?: "create" | "overwrite";
   readonly createIndexes?: boolean;
   readonly includeVectorIndex?: boolean;
+  readonly vectorDimension?: number;
 }
 
 export interface CreateMessageIndexesRequest extends TableRequest {
@@ -94,6 +95,7 @@ export interface UpsertRowsRequest extends TableRequest {
 
 export interface UpsertMessageRowsRequest extends TableRequest {
   readonly rows: readonly MessageSearchRow[];
+  readonly vectorDimension?: number;
 }
 
 export interface DeleteByKeysRequest extends TableRequest {
@@ -624,7 +626,8 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
       Effect.gen(function* () {
         const tableName = tableNameOrDefault(request.tableName);
         const rows = request.rows ?? [];
-        yield* assertRowsVectorDimension(rows, DEFAULT_VECTOR_COLUMN, GEMINI_EMBEDDING_DIMENSIONS);
+        const vectorDimension = request.vectorDimension ?? GEMINI_EMBEDDING_DIMENSIONS;
+        yield* assertRowsVectorDimension(rows, DEFAULT_VECTOR_COLUMN, vectorDimension);
         const existing = yield* tableNames(connection, tableName);
         const tableExists = existing.includes(tableName);
         const table =
@@ -633,14 +636,14 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
             : yield* Effect.tryPromise({
                 try: () =>
                   rows.length === 0
-                    ? connection.createEmptyTable(tableName, createMessageSearchSchema(), {
+                    ? connection.createEmptyTable(tableName, createMessageSearchSchema(vectorDimension), {
                         mode: request.mode ?? "create",
                         existOk: true,
                       })
                     : connection.createTable(tableName, messageRowsForLance(rows), {
                         mode: request.mode ?? "create",
                         existOk: true,
-                        schema: createMessageSearchSchema(),
+                        schema: createMessageSearchSchema(vectorDimension),
                       }),
                 catch: (cause) => makeOperationError(tableName, "createMessageTable", cause),
               });
@@ -698,7 +701,7 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
           return;
         }
         const tableName = tableNameOrDefault(request.tableName);
-        yield* assertRowsVectorDimension(request.rows, DEFAULT_VECTOR_COLUMN, GEMINI_EMBEDDING_DIMENSIONS);
+        yield* assertRowsVectorDimension(request.rows, DEFAULT_VECTOR_COLUMN, request.vectorDimension ?? GEMINI_EMBEDDING_DIMENSIONS);
         const records = messageRowsForLance(request.rows);
         const existing = yield* tableNames(connection, tableName);
         if (!existing.includes(tableName)) {
@@ -706,6 +709,7 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
             tableName,
             rows: request.rows,
             createIndexes: false,
+            vectorDimension: request.vectorDimension,
           });
           return;
         }

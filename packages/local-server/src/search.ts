@@ -1,5 +1,4 @@
 import {
-  GEMINI_EMBEDDING_DIMENSIONS,
   LanceDb,
   MESSAGE_SEARCH_COLUMNS,
   type MessageSearchRow,
@@ -8,11 +7,10 @@ import {
 } from "@skastr0/quasar-search";
 import { Context, Effect, Layer } from "effect";
 
+import { embeddingProfileFromEnv } from "./embeddingProfiles";
 import type { MessageRow } from "./model";
 import { decideSearchDocument, indexedContentHash, VECTOR_READY_FILTER } from "./searchPolicy";
 import { LocalStore } from "./store";
-
-const ZERO_VECTOR = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, () => 0);
 
 export interface IndexSessionReport {
   readonly sessionId: string;
@@ -44,7 +42,7 @@ const projectFilter = (projectKey: string | undefined): string | undefined =>
 const keyFor = (message: Pick<MessageRow, "sessionId" | "seq" | "role">) =>
   `${message.sessionId}:${message.seq}:${message.role}`;
 
-const toSearchRows = (messages: readonly MessageRow[]): MessageSearchRow[] =>
+const toSearchRows = (messages: readonly MessageRow[], vectorDimensions: number): MessageSearchRow[] =>
   messages.flatMap((message) => {
     const decision = decideSearchDocument(message);
     if (!decision.lexical || (message.role !== "user" && message.role !== "assistant")) return [];
@@ -56,7 +54,7 @@ const toSearchRows = (messages: readonly MessageRow[]): MessageSearchRow[] =>
         projectKey: message.projectKey,
         text: message.text,
         contentHash: indexedContentHash(message),
-        vector: ZERO_VECTOR,
+        vector: Array.from({ length: vectorDimensions }, () => 0),
       },
     ];
   });
@@ -66,12 +64,13 @@ export const DerivedSearchLive = Layer.effect(
   Effect.gen(function* () {
     const store = yield* LocalStore;
     const search = yield* LanceDb;
+    const profile = embeddingProfileFromEnv();
 
     return DerivedSearch.of({
       indexSession: (sessionId) =>
         Effect.gen(function* () {
           const messages = yield* store.readMessages(sessionId, 100_000);
-          const rows = toSearchRows(messages);
+          const rows = toSearchRows(messages, profile.dimensions);
           const existing = yield* search.readMessageRowsBySession({
             sessionId,
             limit: 100_000,
@@ -86,7 +85,7 @@ export const DerivedSearchLive = Layer.effect(
             yield* search.deleteByKeys({ keys: orphanKeys });
           }
           if (rows.length > 0) {
-            yield* search.upsertMessageRows({ rows });
+            yield* search.upsertMessageRows({ rows, vectorDimension: profile.dimensions });
           }
           const semanticRowsUpserted = messages.filter((message) => decideSearchDocument(message).semantic).length;
           return {

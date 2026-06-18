@@ -1,6 +1,6 @@
 import { HttpMiddleware, HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "@effect/platform";
 import { BunHttpServer, BunRuntime } from "@effect/platform-bun";
-import { GEMINI_EMBEDDING_DIMENSIONS, LanceDb, MESSAGE_SEARCH_COLUMNS } from "@skastr0/quasar-search";
+import { LanceDb, MESSAGE_SEARCH_COLUMNS } from "@skastr0/quasar-search";
 import { Effect, Layer } from "effect";
 
 import { LocalServerConfig } from "./config";
@@ -180,7 +180,7 @@ const semanticSearch = Effect.gen(function* () {
   const vector = yield* embeddings.embedText(text);
   const matches = yield* search.vectorSearch({
     vector,
-    vectorDimension: GEMINI_EMBEDDING_DIMENSIONS,
+    vectorDimension: embeddings.profile.dimensions,
     limit: positiveInt(params, "limit", 10),
     filter: vectorReadyFilter(params.get("projectKey")),
     select: MESSAGE_SEARCH_COLUMNS,
@@ -200,7 +200,7 @@ const fusionSearch = Effect.gen(function* () {
   const matches = yield* search.hybridSearch({
     query: text,
     vector,
-    vectorDimension: GEMINI_EMBEDDING_DIMENSIONS,
+    vectorDimension: embeddings.profile.dimensions,
     limit: positiveInt(params, "limit", 10),
     filter: vectorReadyFilter(params.get("projectKey")),
     select: MESSAGE_SEARCH_COLUMNS,
