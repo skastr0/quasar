@@ -51,6 +51,19 @@ const dataFromUnknown = (value: unknown): readonly SyntheticEmbeddingData[] | un
   return parsed;
 };
 
+const validateResponseIndexes = (data: readonly SyntheticEmbeddingData[], expectedLength: number): void => {
+  const seen = new Set<number>();
+  for (const item of data) {
+    if (!Number.isInteger(item.index) || item.index < 0 || item.index >= expectedLength || seen.has(item.index)) {
+      throw new SyntheticEmbeddingError({
+        operation: "synthetic.embeddings.decode",
+        message: `Synthetic embeddings response included invalid index ${item.index}`,
+      });
+    }
+    seen.add(item.index);
+  }
+};
+
 export const makeSyntheticEmbedder = (profile: EmbeddingProfile, options: SyntheticEmbeddingClientOptions = {}): Embedder => ({
   embedMany: async (values) => {
     const apiKey = options.apiKey ?? syntheticApiKeyFromEnv();
@@ -105,6 +118,7 @@ export const makeSyntheticEmbedder = (profile: EmbeddingProfile, options: Synthe
         message: "Synthetic embeddings response did not match expected shape",
       });
     }
+    validateResponseIndexes(data, values.length);
 
     const vectors = new Array<readonly number[]>(values.length);
     for (const item of data) {

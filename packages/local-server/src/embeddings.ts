@@ -11,7 +11,7 @@ import { ensureParentDir, sqlitePath } from "./paths";
 import { isSemanticSearchDocument } from "./searchPolicy";
 import { DurableQueue, Embeddings, type EmbeddingCacheRow } from "./services";
 import { LocalStore } from "./store";
-import { makeSyntheticEmbedder } from "./syntheticEmbeddings";
+import { makeSyntheticEmbedder, SyntheticEmbeddingError } from "./syntheticEmbeddings";
 
 const textEncoder = new TextEncoder();
 const GEMINI_MAX_EMBEDDING_BATCH_SIZE = 100;
@@ -142,6 +142,14 @@ const chunksOf = <A>(items: readonly A[], size: number): readonly (readonly A[])
 
 const isRetryableEmbeddingError = (message: string): boolean =>
   /quota|rate.?limit|too many requests|resource exhausted|429/i.test(message);
+
+const isRetryableEmbeddingCause = (cause: unknown): boolean => {
+  if (cause instanceof SyntheticEmbeddingError) {
+    return cause.status === 429 || cause.status === 500 || cause.status === 502 || cause.status === 503 || cause.status === 504;
+  }
+  const message = cause instanceof Error ? cause.message : String(cause);
+  return isRetryableEmbeddingError(message);
+};
 
 const prefixed = (prefix: string | undefined, text: string): string =>
   prefix === undefined || prefix.length === 0 ? text : `${prefix}${text}`;
@@ -299,13 +307,14 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                     if (result._tag === "Left") {
                       const error = result.left instanceof Error ? result.left.message : String(result.left);
                       for (const { job } of chunk) {
-                        if (job.attempts >= job.maxAttempts && !isRetryableEmbeddingError(error)) {
+                        const retryable = isRetryableEmbeddingCause(result.left);
+                        if (job.attempts >= job.maxAttempts && !retryable) {
                           yield* queue.fail(job.jobId, error, now);
                           failed += 1;
                         } else {
                           yield* queue.retry(job.jobId, {
                             error,
-                            delayMs: isRetryableEmbeddingError(error) ? 120_000 : 30_000,
+                            delayMs: retryable ? 120_000 : 30_000,
                             now,
                           });
                           retried += 1;
