@@ -9,6 +9,7 @@ import {
 } from "@skastr0/quasar-core";
 import { Effect } from "effect";
 
+import { embeddingProfileFromEnv, embeddingProfileJobNamespace } from "./embeddingProfiles";
 import { mapSession } from "./map";
 import type { MappedSession, MessageRow } from "./model";
 import { isSemanticSearchDocument, summarizeSearchDocumentPolicy, type SearchDocumentPolicyStats } from "./searchPolicy";
@@ -85,6 +86,7 @@ const searchableMessages = (session: MappedSession): readonly MessageRow[] =>
 
 const enqueueDownstreamJobs = (queue: DurableQueueService, session: MappedSession): Effect.Effect<number, unknown> =>
   Effect.gen(function* () {
+    const embeddingJobNamespace = embeddingProfileJobNamespace(embeddingProfileFromEnv());
     const messages = searchableMessages(session);
     yield* queue.enqueue({
       kind: "index-session",
@@ -106,8 +108,9 @@ const enqueueDownstreamJobs = (queue: DurableQueueService, session: MappedSessio
             role: message.role,
             projectKey: message.projectKey,
             contentHash: message.contentHash,
+            embeddingProfile: embeddingJobNamespace,
           },
-          idempotencyKey: `embed-message:${message.contentHash}`,
+          idempotencyKey: `embed-message:${embeddingJobNamespace}:${message.contentHash}`,
         }),
       { concurrency: 16 },
     );

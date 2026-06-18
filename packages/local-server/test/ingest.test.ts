@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { Effect, Layer } from "effect";
 
+import { embeddingProfileFromEnv } from "../src/embeddingProfiles";
 import { ingest } from "../src/ingest";
 import { DurableQueue, makeDurableQueueLayer } from "../src/services";
 import { LocalStore, makeLocalStoreLayer } from "../src/store";
@@ -136,6 +137,24 @@ const adapterFor = (sessions: readonly NormalizedSession[]): SessionAdapter => (
 const withIngest = <A>(path: string, run: Effect.Effect<A, unknown, LocalStore | DurableQueue>) =>
   Effect.runPromise(run.pipe(Effect.provide(Layer.merge(makeLocalStoreLayer(path), makeDurableQueueLayer(path)))));
 
+const withEnv = async <A>(values: Record<string, string>, run: () => Promise<A>): Promise<A> => {
+  const previous = new Map(Object.keys(values).map((key) => [key, process.env[key]] as const));
+  try {
+    for (const [key, value] of Object.entries(values)) {
+      process.env[key] = value;
+    }
+    return await run();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+};
+
 describe("ingest", () => {
   test("writes sessions to SQLite and enqueues downstream jobs", async () => {
     const path = sqlitePath();
@@ -162,6 +181,44 @@ describe("ingest", () => {
     expect(storeStats.toolCalls).toBe(1);
     expect(queueStats.pending).toBe(3);
     expect(leased.map((job) => job.kind).sort()).toEqual(["embed-message", "embed-message", "index-session"]);
+    for (const job of leased.filter((job) => job.kind === "embed-message")) {
+      expect(job.payload).toMatchObject({ embeddingProfile: embeddingProfileFromEnv().cacheNamespace });
+      expect(job.idempotencyKey).toStartWith(`embed-message:${embeddingProfileFromEnv().cacheNamespace}:`);
+    }
+  });
+
+  test("embedding queue identity is active-profile scoped", async () => {
+    const path = sqlitePath();
+    adaptersByProvider.set("unknown", adapterFor([session()]));
+
+    const [sameProfileStats, changedProfileStats, changedProfileJobs] = await withEnv(
+      {
+        QUASAR_EMBEDDING_PROVIDER: "synthetic",
+        QUASAR_EMBEDDING_MODEL: "hf:nomic-ai/nomic-embed-text-v1.5",
+        QUASAR_EMBEDDING_DIMENSIONS: "768",
+        QUASAR_EMBEDDING_TASK: "search_document",
+        QUASAR_EMBEDDING_CACHE_NAMESPACE: "profile-a",
+      },
+      () => withIngest(
+        path,
+        Effect.gen(function* () {
+          yield* ingest({ provider: "unknown", force: true });
+          yield* ingest({ provider: "unknown", force: true });
+          const queue = yield* DurableQueue;
+          const sameProfileStats = yield* queue.stats;
+          process.env.QUASAR_EMBEDDING_CACHE_NAMESPACE = "profile-b";
+          yield* ingest({ provider: "unknown", force: true });
+          const changedProfileStats = yield* queue.stats;
+          const changedProfileJobs = yield* queue.leaseBatch({ workerId: "worker-a", kind: "embed-message", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:10:00.000Z" });
+          return [sameProfileStats, changedProfileStats, changedProfileJobs] as const;
+        }),
+      ),
+    );
+
+    expect(sameProfileStats.pending).toBe(3);
+    expect(changedProfileStats.pending).toBe(5);
+    expect(changedProfileJobs.map((job) => job.payload).filter((payload): payload is { embeddingProfile: string } => typeof (payload as { embeddingProfile?: unknown }).embeddingProfile === "string").map((payload) => payload.embeddingProfile).sort())
+      .toEqual(["profile-a", "profile-a", "profile-b", "profile-b"]);
   });
 
   test("enqueues embeddings for all user and assistant messages", async () => {

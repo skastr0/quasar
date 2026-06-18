@@ -39,6 +39,9 @@ const positiveIntEnv = (name: string, fallback: number): number => {
 export const profileCacheNamespace = (profile: Omit<EmbeddingProfile, "cacheNamespace">): string =>
   `${profile.provider}:${profile.model}:${profile.dimensions}:${profile.task}`;
 
+export const embeddingProfileJobNamespace = (profile: Pick<EmbeddingProfile, "cacheNamespace">): string =>
+  profile.cacheNamespace;
+
 export const embeddingProfileSearchTable = (profile: EmbeddingProfile): string => {
   if (profile.provider === "gemini" && profile.cacheNamespace === profile.model) {
     return "messages";

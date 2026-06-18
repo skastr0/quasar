@@ -124,6 +124,25 @@ docker compose --env-file platform/local-server/.env -f platform/local-server/co
   bun run --cwd packages/local-server src/cli.ts ingest --provider all
 ```
 
+## Embedding profile safety
+
+Normal runtime has exactly one active semantic embedding profile, selected by the
+`QUASAR_EMBEDDING_*` environment variables at process start. Ingest enqueues
+semantic jobs only for that active profile. Quasar does not fan out one message to
+multiple providers, and workers fail closed if a queued embedding job belongs to a
+different profile than the running process.
+
+The embedding profile is part of both cost and vector-space identity:
+
+- queue idempotency: `embed-message:<profile-cache-namespace>:<content-hash>`
+- cache key: `(profile-cache-namespace, content_hash)`
+- vector table: the active profile table, while lexical/FTS rows stay shared
+
+This means reruns for the same profile/text use the cache and do not call the
+embedding API again. Side-by-side Gemini/Nomic comparison is an explicit proof
+operation: switch the active profile deliberately, rebuild that profile's index,
+and compare result artifacts. It is not daemon-default behavior.
+
 Maintenance proof:
 
 ```bash

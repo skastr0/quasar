@@ -71,8 +71,8 @@ describe("WorkerSupervisor", () => {
         yield* store.upsertSession(mappedSession());
         yield* queue.enqueue({
           kind: "embed-message",
-          payload: { sessionId: "session-a", seq: 1, contentHash: "hash-a" },
-          idempotencyKey: "embed-message:hash-a",
+          payload: { sessionId: "session-a", seq: 1, contentHash: "hash-a", embeddingProfile: "test-worker" },
+          idempotencyKey: "embed-message:test-worker:hash-a",
         });
         const status = yield* workers.tickOnce;
         const queueStats = yield* queue.statsByKind;

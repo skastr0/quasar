@@ -115,12 +115,14 @@ const isEmbedMessagePayload = (payload: unknown): payload is {
   readonly sessionId: string;
   readonly seq: number;
   readonly contentHash: string;
+  readonly embeddingProfile: string;
 } =>
   typeof payload === "object" &&
   payload !== null &&
   typeof (payload as { sessionId?: unknown }).sessionId === "string" &&
   typeof (payload as { seq?: unknown }).seq === "number" &&
-  typeof (payload as { contentHash?: unknown }).contentHash === "string";
+  typeof (payload as { contentHash?: unknown }).contentHash === "string" &&
+  typeof (payload as { embeddingProfile?: unknown }).embeddingProfile === "string";
 
 const findMessage = (messages: readonly MessageRow[], seq: number, contentHash: string): MessageRow | undefined =>
   messages.find((message) => message.seq === seq && message.contentHash === contentHash);
@@ -264,6 +266,11 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                 for (const job of jobs) {
                   if (job.kind !== "embed-message" || !isEmbedMessagePayload(job.payload)) {
                     yield* queue.fail(job.jobId, "invalid embed-message payload", now);
+                    failed += 1;
+                    continue;
+                  }
+                  if (job.payload.embeddingProfile !== profile.cacheNamespace) {
+                    yield* queue.fail(job.jobId, `embed-message profile mismatch: job=${job.payload.embeddingProfile} active=${profile.cacheNamespace}`, now);
                     failed += 1;
                     continue;
                   }
