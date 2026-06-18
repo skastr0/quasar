@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { Effect, Layer } from "effect";
 
 import type { MappedSession } from "../src/model";
+import { embeddingProfileFromEnv, embeddingProfileSearchTable } from "../src/embeddingProfiles";
 import { DerivedSearch, DerivedSearchLive } from "../src/search";
 import { LocalStore, makeLocalStoreLayer } from "../src/store";
 
@@ -55,7 +56,28 @@ const message = (seq: number, text: string): MappedSession["messages"][number] =
 
 const longText = () => "oversized message memory\n".repeat(3_000);
 
-const withSearch = <A>(run: Effect.Effect<A, unknown, LocalStore | LanceDb | DerivedSearch>) => {
+const embeddingEnvKeys = [
+  "QUASAR_EMBEDDING_PROVIDER",
+  "QUASAR_EMBEDDING_MODEL",
+  "QUASAR_EMBEDDING_DIMENSIONS",
+  "QUASAR_EMBEDDING_TASK",
+  "QUASAR_EMBEDDING_CACHE_NAMESPACE",
+  "QUASAR_EMBEDDING_DOCUMENT_PREFIX",
+  "QUASAR_EMBEDDING_QUERY_PREFIX",
+] as const;
+
+const withSearch = <A>(
+  run: Effect.Effect<A, unknown, LocalStore | LanceDb | DerivedSearch>,
+  embeddingEnv: Partial<Record<(typeof embeddingEnvKeys)[number], string>> = {},
+) => {
+  const previousEnv = Object.fromEntries(
+    embeddingEnvKeys.map((key) => [key, process.env[key]] as const),
+  );
+  for (const key of embeddingEnvKeys) {
+    const value = embeddingEnv[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   const sqlite = join(tempDir(), "quasar.sqlite");
   const lance = join(tempDir(), "search.lance");
   const dataLayer = Layer.mergeAll(
@@ -65,7 +87,13 @@ const withSearch = <A>(run: Effect.Effect<A, unknown, LocalStore | LanceDb | Der
   const searchLayer = DerivedSearchLive.pipe(Layer.provide(dataLayer));
   return Effect.runPromise(
     run.pipe(Effect.provide(Layer.merge(dataLayer, searchLayer))),
-  );
+  ).finally(() => {
+    for (const key of embeddingEnvKeys) {
+      const value = previousEnv[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
 };
 
 describe("DerivedSearch", () => {
@@ -149,6 +177,48 @@ describe("DerivedSearch", () => {
     );
 
     expect(hits.map((hit) => hit.row.text)).toEqual(["alpha terminal"]);
+  });
+
+  test("keeps lexical rows global while alternate profiles use their own vector table", async () => {
+    const [profileTable, lexicalRows, profileRows, hits, stats] = await withSearch(
+      Effect.gen(function* () {
+        const profile = embeddingProfileFromEnv();
+        const profileTable = embeddingProfileSearchTable(profile);
+        const store = yield* LocalStore;
+        const derived = yield* DerivedSearch;
+        const search = yield* LanceDb;
+        yield* store.upsertSession(mappedSession([message(1, "nomic lexical memory") ]));
+        yield* derived.indexSession("session-a");
+        yield* derived.createLexicalIndex;
+        const lexicalRows = yield* search.readMessageRowsBySession({
+          sessionId: "session-a",
+          tableName: "messages",
+          select: ["key", "vector"],
+        });
+        const profileRows = yield* search.readMessageRowsBySession({
+          sessionId: "session-a",
+          tableName: profileTable,
+          select: ["key", "vector"],
+        });
+        const hits = yield* derived.lexicalSearch({ query: "nomic", limit: 10 });
+        const stats = yield* derived.stats;
+        return [profileTable, lexicalRows, profileRows, hits, stats] as const;
+      }),
+      {
+        QUASAR_EMBEDDING_PROVIDER: "synthetic",
+        QUASAR_EMBEDDING_MODEL: "hf:nomic-ai/nomic-embed-text-v1.5",
+        QUASAR_EMBEDDING_DIMENSIONS: "768",
+      },
+    );
+
+    expect(profileTable).not.toBe("messages");
+    expect(lexicalRows).toHaveLength(1);
+    expect(profileRows).toHaveLength(1);
+    expect((lexicalRows[0]?.vector as readonly number[] | undefined)?.length).toBe(1536);
+    expect((profileRows[0]?.vector as readonly number[] | undefined)?.length).toBe(768);
+    expect(hits.map((hit) => hit.row.text)).toEqual(["nomic lexical memory"]);
+    expect(stats.tableName).toBe(profileTable);
+    expect(stats.rowCount).toBe(1);
   });
 
   test("stats expose missing explicit indexes before maintenance creates them", async () => {
