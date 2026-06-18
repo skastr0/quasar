@@ -12,17 +12,18 @@ const commandCapabilities = [
   "schema list|show",
   "examples list|show",
   "sources discover",
-  "ingest --provider <p|all> [--root <dir>] [--limit <n>] [--force]",
-  "daemon install [--interval-seconds 300] [--binary <path>]",
+  "scan [--provider <p|all>] [--root <dir>] [--limit <n>] [--verbose]",
+  "legacy ingest --provider <p|all> [--root <dir>] [--limit <n>] [--force]",
+  "legacy daemon install [--interval-seconds 300] [--binary <path>]",
   "daemon uninstall",
   "daemon status",
-  "maintain [--create-indexes] [--create-vector-index] [--replace-indexes] [--optimize] [--cleanup-older-than-ms <n>]",
-  "projects list",
-  "sessions list [--project <key>] [--provider <provider>] [--limit <n>]",
-  "sessions read <sessionId> [--limit <n>]",
-  "tool-calls list --session <sessionId> [--limit <n>]",
-  "tool-calls list --project <key> [--provider <provider>] [--tool-name <name>] [--limit <n>]",
-  "tool-calls read <sessionId>#<seq>",
+  "legacy maintain [--create-indexes] [--create-vector-index] [--replace-indexes] [--optimize] [--cleanup-older-than-ms <n>]",
+  "legacy projects list",
+  "legacy sessions list [--project <key>] [--provider <provider>] [--limit <n>]",
+  "legacy sessions read <sessionId> [--limit <n>]",
+  "legacy tool-calls list --session <sessionId> [--limit <n>]",
+  "legacy tool-calls list --project <key> [--provider <provider>] [--tool-name <name>] [--limit <n>]",
+  "legacy tool-calls read <sessionId>#<seq>",
 ];
 
 export const doctorCommand = Command.make("doctor", {}, () =>
@@ -32,6 +33,8 @@ export const doctorCommand = Command.make("doctor", {}, () =>
       cli: { name: CLI_NAME, version: CLI_VERSION },
       runtime: { name: "bun", version: Bun.version },
       status: "ok",
+      active_data_plane: "packages/local-server",
+      legacy_data_plane: "packages/cli server-backed commands",
       checks: [
         { name: "runtime.bun", ok: true, details: { version: Bun.version } },
         {

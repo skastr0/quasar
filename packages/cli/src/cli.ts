@@ -11,6 +11,7 @@ import { projectsCommand, sessionsCommand, toolCallsCommand } from "./commands/r
 import { examplesCommand, schemaCommand } from "./commands/schema";
 import { searchCommand } from "./commands/search";
 import { searchMaintainCommand } from "./commands/search-maint";
+import { scanCommand } from "./commands/scan";
 import { sourcesCommand } from "./commands/sources";
 import { CLI_NAME, CLI_VERSION } from "./constants";
 import { CommandInputError } from "./errors";
@@ -33,6 +34,7 @@ const publicCommands = new Set([
   "projects",
   "sessions",
   "tool-calls",
+  "scan",
 ]);
 
 const userArgs = (args: readonly string[]) => args.slice(2);
@@ -54,6 +56,7 @@ export const rootCommand = Command.make(CLI_NAME).pipe(
     examplesCommand,
     sourcesCommand,
     ingestCommand,
+    scanCommand,
     daemonCommand,
     searchCommand,
     searchMaintainCommand,
