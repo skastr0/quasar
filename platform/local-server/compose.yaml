@@ -29,6 +29,7 @@ services:
       - "${QUASAR_ANTIGRAVITY_ROOT:-${HOME}/.gemini/antigravity-cli}:/history/antigravity:ro"
     environment:
       NODE_ENV: production
+      QUASAR_HOME: /data/quasar
       QUASAR_LOCAL_HOME: /data/quasar
       QUASAR_LOCAL_SQLITE: /data/quasar/quasar.sqlite
       QUASAR_SEARCH_DATA_DIR: /data/quasar/search.lance

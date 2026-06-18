@@ -221,6 +221,40 @@ describe("ingest", () => {
       .toEqual(["profile-a", "profile-a", "profile-b", "profile-b"]);
   });
 
+  test("forced reingest is idempotent for SQLite truth and active-profile queue keys", async () => {
+    const path = sqlitePath();
+    adaptersByProvider.set("unknown", adapterFor([session()]));
+
+    const [firstStats, secondStats, firstQueue, secondQueue] = await withEnv(
+      {
+        QUASAR_EMBEDDING_PROVIDER: "synthetic",
+        QUASAR_EMBEDDING_MODEL: "hf:nomic-ai/nomic-embed-text-v1.5",
+        QUASAR_EMBEDDING_DIMENSIONS: "768",
+        QUASAR_EMBEDDING_TASK: "search_document",
+        QUASAR_EMBEDDING_CACHE_NAMESPACE: "profile-a",
+      },
+      () => withIngest(
+        path,
+        Effect.gen(function* () {
+          yield* ingest({ provider: "unknown", force: true });
+          const store = yield* LocalStore;
+          const queue = yield* DurableQueue;
+          const firstStats = yield* store.stats;
+          const firstQueue = yield* queue.stats;
+          yield* ingest({ provider: "unknown", force: true });
+          const secondStats = yield* store.stats;
+          const secondQueue = yield* queue.stats;
+          return [firstStats, secondStats, firstQueue, secondQueue] as const;
+        }),
+      ),
+    );
+
+    expect(secondStats).toEqual(firstStats);
+    expect(secondStats).toMatchObject({ projects: 1, sessions: 1, messages: 2, toolCalls: 1 });
+    expect(secondQueue).toEqual(firstQueue);
+    expect(secondQueue).toEqual({ pending: 3, leased: 0, failed: 0 });
+  });
+
   test("enqueues embeddings for all user and assistant messages", async () => {
     const path = sqlitePath();
     adaptersByProvider.set("unknown", adapterFor([sessionWithLargeMessage()]));

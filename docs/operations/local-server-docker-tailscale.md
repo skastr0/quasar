@@ -49,6 +49,12 @@ QUASAR_LOCAL_PORT=6180
 
 If Docker Desktop can bind the Tailscale interface directly, use the Tailscale IP as `QUASAR_PUBLISH_HOST`. If it cannot, keep `0.0.0.0` and restrict reachability with Tailscale ACLs and macOS firewall rules. Do not rely on MagicDNS for the production proof; test it only after IP access works.
 
+The compose file pins `QUASAR_HOME=/data/quasar` inside the container. This is
+required for ingest idempotency because provider session IDs include Quasar's
+machine identity; if machine identity lives in the disposable container root,
+container recreation can make the same source corpus look like a new machine's
+sessions.
+
 Remote proof from the MacBook:
 
 ```bash
