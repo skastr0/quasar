@@ -1,0 +1,16 @@
+.git
+.atlas
+.groundwork
+.release
+.grok
+.prism
+node_modules
+dist
+coverage
+logs
+.env
+.env.local
+*.tsbuildinfo
+*.sqlite
+*.sqlite-*
+*.lance

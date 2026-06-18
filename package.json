@@ -18,15 +18,15 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "bun run --cwd packages/core build && bun run --cwd packages/search build && bun run --cwd packages/cli build",
-    "typecheck": "bun run --cwd packages/core typecheck && bun run --cwd packages/search typecheck && bun run --cwd packages/cli typecheck",
-    "test": "bun run --cwd packages/core test && bun run --cwd packages/search test && bun run --cwd packages/cli test && bun run test:convex",
-    "test:convex": "vitest run --config vitest.convex.config.ts",
-    "verify:static": "bun run typecheck && bun run test && bun scripts/verify/convex-lint.ts",
-    "verify:live": "bun scripts/verify/live.ts",
-    "verify": "bun run verify:static && bun run verify:live",
-    "deploy:local": "bun scripts/init-local-convex.mjs && bun scripts/install-launchd.mjs && bun scripts/push-local-convex.mjs",
+    "build": "bun run --cwd packages/core build && bun run --cwd packages/search build && bun run --cwd packages/local-server typecheck && bun run --cwd packages/cli build",
+    "typecheck": "bun run --cwd packages/core typecheck && bun run --cwd packages/search typecheck && bun run --cwd packages/local-server typecheck && bun run --cwd packages/cli typecheck",
+    "test": "bun run --cwd packages/core test && bun run --cwd packages/search test && bun run --cwd packages/local-server test && bun run --cwd packages/cli test",
+    "verify:static": "bun run typecheck && bun run test",
+    "verify": "bun run verify:static",
+    "park:convex": "bun scripts/park-quasar-convex.mjs park",
+    "status:convex": "bun scripts/park-quasar-convex.mjs status",
     "build:npm-packages": "bun run --cwd packages/cli build:npm-packages",
+    "install:dev": "bun run --cwd packages/cli build && bun run --cwd packages/cli install:dev",
     "pack:dry-run": "bun scripts/pack-npm.mjs",
     "publish:npm": "bun scripts/publish-npm.mjs",
     "release:check": "bun run verify && bun run build && bun run build:npm-packages && bun run pack:dry-run && bun audit && publish-scan ."
@@ -42,6 +42,7 @@
   "dependencies": {
     "@ai-sdk/google": "^3.0.83",
     "ai": "^6.0.207",
+    "effect": "^3.21.2",
     "js-tiktoken": "^1.0.21"
   }
 }
