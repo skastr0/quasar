@@ -27,6 +27,8 @@
   "scripts": {
     "dev": "bun run ./src/cli.ts",
     "build": "bun build --compile ./src/cli.ts --outfile ./dist/quasar",
+    "install:dev": "bun scripts/install-dev.mjs",
+    "install:local": "bun run install:dev",
     "build:npm-packages": "bun scripts/build-npm-packages.mjs",
     "pack:dry-run": "npm pack --dry-run",
     "typecheck": "tsc --noEmit",
