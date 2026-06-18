@@ -11,6 +11,7 @@ import { ensureParentDir, sqlitePath } from "./paths";
 import { isSemanticSearchDocument } from "./searchPolicy";
 import { DurableQueue, Embeddings, type EmbeddingCacheRow } from "./services";
 import { LocalStore } from "./store";
+import { makeSyntheticEmbedder } from "./syntheticEmbeddings";
 
 const textEncoder = new TextEncoder();
 const GEMINI_MAX_EMBEDDING_BATCH_SIZE = 100;
@@ -96,11 +97,8 @@ const liveGeminiEmbedder = (profile: EmbeddingProfile): Embedder => ({
 
 const liveEmbedderForProfile = (profile: EmbeddingProfile): Embedder => {
   if (profile.provider === "gemini") return liveGeminiEmbedder(profile);
-  return {
-    embedMany: async () => {
-      throw new Error(`Embedding provider ${profile.provider} is not configured in this build`);
-    },
-  };
+  if (profile.provider === "synthetic") return makeSyntheticEmbedder(profile);
+  return { embedMany: async () => { throw new Error(`Embedding provider ${profile.provider} is not configured in this build`); } };
 };
 
 const assertVectorDimensions = (operation: string, profile: EmbeddingProfile, vector: readonly number[]): Effect.Effect<void, EmbeddingError> =>
@@ -144,6 +142,9 @@ const chunksOf = <A>(items: readonly A[], size: number): readonly (readonly A[])
 
 const isRetryableEmbeddingError = (message: string): boolean =>
   /quota|rate.?limit|too many requests|resource exhausted|429/i.test(message);
+
+const prefixed = (prefix: string | undefined, text: string): string =>
+  prefix === undefined || prefix.length === 0 ? text : `${prefix}${text}`;
 
 export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer.Layer<Embeddings, never, LocalStore | DurableQueue | LanceDb> => {
   const profile = options.profile ?? embeddingProfileFromEnv();
@@ -218,11 +219,12 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
             profile,
             embedText: (text) =>
               Effect.gen(function* () {
-                const contentHash = contentHashForText(text);
+                const input = prefixed(profile.queryPrefix, text);
+                const contentHash = contentHashForText(input);
                 const cached = yield* getCached(contentHash);
                 if (cached !== undefined) return cached.vector;
                 const vectors = yield* Effect.tryPromise({
-                  try: () => embedder.embedMany([text]),
+                  try: () => embedder.embedMany([input]),
                   catch: (cause) => cause,
                 });
                 const vector = vectors[0];
@@ -234,7 +236,7 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                     }),
                   );
                 }
-                const row = yield* putCached({ contentHash, text, vector });
+                const row = yield* putCached({ contentHash, text: input, vector });
                 return row.vector;
               }),
             getCached,
@@ -269,7 +271,9 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                     skipped += 1;
                     continue;
                   }
-                  const cached = yield* getCached(message.contentHash);
+                  const input = prefixed(profile.documentPrefix, message.text);
+                  const cacheHash = profile.documentPrefix === undefined ? message.contentHash : contentHashForText(input);
+                  const cached = yield* getCached(cacheHash);
                   if (cached !== undefined) {
                     yield* search.upsertMessageRows({ rows: [toVectorRow(message, cached.vector)], tableName, vectorDimension: profile.dimensions });
                     yield* queue.ack(job.jobId, now);
@@ -285,7 +289,7 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                     chunksOf(misses, GEMINI_MAX_EMBEDDING_BATCH_SIZE),
                     (chunk) =>
                       Effect.tryPromise({
-                        try: () => embedder.embedMany(chunk.map((miss) => miss.message.text)),
+                        try: () => embedder.embedMany(chunk.map((miss) => prefixed(profile.documentPrefix, miss.message.text))),
                         catch: (cause) => cause,
                       }).pipe(Effect.either, Effect.map((result) => ({ chunk, result }))),
                     { concurrency: positiveIntEnv("QUASAR_EMBEDDING_API_CONCURRENCY", 4) },
@@ -315,9 +319,10 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                     for (const [index, vector] of result.right.entries()) {
                       const miss = chunk[index];
                       if (miss === undefined || vector === undefined) continue;
+                      const input = prefixed(profile.documentPrefix, miss.message.text);
                       const cached = yield* putCached({
-                        contentHash: miss.message.contentHash,
-                        text: miss.message.text,
+                        contentHash: profile.documentPrefix === undefined ? miss.message.contentHash : contentHashForText(input),
+                        text: input,
                         vector,
                         now,
                       });
