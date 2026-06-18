@@ -6,6 +6,7 @@ import { LanceDb, makeLanceDbLayer } from "@skastr0/quasar-search";
 import { afterEach, describe, expect, test } from "bun:test";
 import { Effect, Layer } from "effect";
 
+import { makeGeminiEmbeddingProfile, type EmbeddingProfile } from "../src/embeddingProfiles";
 import { makeEmbeddingsLayer, type Embedder } from "../src/embeddings";
 import type { MappedSession } from "../src/model";
 import { Embeddings, DurableQueue, makeDurableQueueLayer } from "../src/services";
@@ -61,16 +62,28 @@ const enqueueEmbeddingJob = (queue: DurableQueueService, maxAttempts = 2) =>
     maxAttempts,
   });
 
-const withEmbeddings = <A>(embedder: Embedder, run: Effect.Effect<A, unknown, LocalStore | DurableQueue | LanceDb | Embeddings>) => {
-  const sqlite = join(tempDir(), "quasar.sqlite");
-  const lance = join(tempDir(), "search.lance");
+const withEmbeddingsAt = <A>(
+  paths: { readonly sqlite: string; readonly lance: string },
+  embedder: Embedder,
+  profile: EmbeddingProfile,
+  run: Effect.Effect<A, unknown, LocalStore | DurableQueue | LanceDb | Embeddings>,
+) => {
+  const { sqlite, lance } = paths;
   const dataLayer = Layer.mergeAll(makeLocalStoreLayer(sqlite), makeLanceDbLayer({ dataDir: lance }));
   const queueLayer = makeDurableQueueLayer(sqlite);
-  const embeddingsLayer = makeEmbeddingsLayer({ sqlite, model: "test-embedding", embedder }).pipe(
+  const embeddingsLayer = makeEmbeddingsLayer({ sqlite, profile, embedder }).pipe(
     Layer.provide(Layer.merge(dataLayer, queueLayer)),
   );
   return Effect.runPromise(run.pipe(Effect.provide(Layer.mergeAll(dataLayer, queueLayer, embeddingsLayer))));
 };
+
+const withEmbeddings = <A>(embedder: Embedder, run: Effect.Effect<A, unknown, LocalStore | DurableQueue | LanceDb | Embeddings>) =>
+  withEmbeddingsAt(
+    { sqlite: join(tempDir(), "quasar.sqlite"), lance: join(tempDir(), "search.lance") },
+    embedder,
+    makeGeminiEmbeddingProfile({ model: "test-embedding" }),
+    run,
+  );
 
 describe("Embeddings", () => {
   test("embedText caches query vectors by content hash", async () => {
@@ -213,5 +226,37 @@ describe("Embeddings", () => {
     expect(calls).toBe(1);
     expect(first.embedded).toBe(1);
     expect(second.cacheHits).toBe(1);
+  });
+
+  test("embedding cache is isolated by profile namespace", async () => {
+    const sqlite = join(tempDir(), "quasar.sqlite");
+    const lance = join(tempDir(), "search.lance");
+    const embedder: Embedder = { embedMany: async () => [vector(0)] };
+    const gemini = makeGeminiEmbeddingProfile({ model: "gemini-profile" });
+    const alternate = makeGeminiEmbeddingProfile({ model: "gemini-profile", cacheNamespace: "alternate-profile" });
+
+    const cachedInGemini = await withEmbeddingsAt(
+      { sqlite, lance },
+      embedder,
+      gemini,
+      Effect.gen(function* () {
+        const embeddings = yield* Embeddings;
+        yield* embeddings.putCached({ contentHash: "hash-a", text: "alpha terminal", vector: vector(0) });
+        return yield* embeddings.getCached("hash-a");
+      }),
+    );
+
+    const cachedInAlternate = await withEmbeddingsAt(
+      { sqlite, lance },
+      embedder,
+      alternate,
+      Effect.gen(function* () {
+        const embeddings = yield* Embeddings;
+        return yield* embeddings.getCached("hash-a");
+      }),
+    );
+
+    expect(cachedInGemini?.model).toBe("gemini-profile");
+    expect(cachedInAlternate).toBeUndefined();
   });
 });

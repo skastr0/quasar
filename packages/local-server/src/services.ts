@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { Context, Effect, Layer, Schema } from "effect";
 
+import { makeGeminiEmbeddingProfile, type EmbeddingProfile } from "./embeddingProfiles";
 import type { QueueJobRow } from "./model";
 import { ensureParentDir, sqlitePath } from "./paths";
 
@@ -49,6 +50,7 @@ export interface DurableQueueService {
 export interface EmbeddingServiceStatus {
   readonly cached: number;
   readonly pending: number;
+  readonly profile: EmbeddingProfile;
 }
 
 export interface EmbeddingCacheRow {
@@ -73,6 +75,7 @@ export interface EmbeddingWorkerReport {
 
 export interface EmbeddingService {
   readonly model: string;
+  readonly profile: EmbeddingProfile;
   readonly embedText: (text: string) => Effect.Effect<readonly number[], unknown>;
   readonly getCached: (contentHash: string) => Effect.Effect<EmbeddingCacheRow | undefined, unknown>;
   readonly putCached: (row: {
@@ -295,14 +298,18 @@ export const DurableQueueLive = makeDurableQueueLayer();
 
 export const EmbeddingsLive = Layer.succeed(
   Embeddings,
-  Embeddings.of({
-    model: "unconfigured",
-    embedText: () => Effect.fail(new Error("EmbeddingsLive is not configured")),
-    getCached: () => Effect.succeed(undefined),
-    putCached: () => Effect.fail(new Error("EmbeddingsLive is not configured")),
-    processBatch: () => Effect.fail(new Error("EmbeddingsLive is not configured")),
-    status: Effect.succeed({ cached: 0, pending: 0 }),
-  }),
+  (() => {
+    const profile = makeGeminiEmbeddingProfile({ model: "unconfigured", cacheNamespace: "unconfigured" });
+    return Embeddings.of({
+      model: profile.model,
+      profile,
+      embedText: () => Effect.fail(new Error("EmbeddingsLive is not configured")),
+      getCached: () => Effect.succeed(undefined),
+      putCached: () => Effect.fail(new Error("EmbeddingsLive is not configured")),
+      processBatch: () => Effect.fail(new Error("EmbeddingsLive is not configured")),
+      status: Effect.succeed({ cached: 0, pending: 0, profile }),
+    });
+  })(),
 );
 
 export const IngestCoordinatorLive = Layer.succeed(

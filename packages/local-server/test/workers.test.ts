@@ -6,6 +6,7 @@ import { LanceDb, makeLanceDbLayer } from "@skastr0/quasar-search";
 import { afterEach, describe, expect, test } from "bun:test";
 import { Effect, Layer } from "effect";
 
+import { makeGeminiEmbeddingProfile } from "../src/embeddingProfiles";
 import { makeEmbeddingsLayer, type Embedder } from "../src/embeddings";
 import { SearchMaintenance, SearchMaintenanceLive } from "../src/maintenance";
 import type { MappedSession } from "../src/model";
@@ -53,7 +54,7 @@ const withWorkers = <A>(run: Effect.Effect<A, unknown, LocalStore | LanceDb | Du
   const dataLayer = Layer.mergeAll(makeLocalStoreLayer(sqlite), makeLanceDbLayer({ dataDir: lance }));
   const queueLayer = makeDurableQueueLayer(sqlite);
   const searchLayer = DerivedSearchLive.pipe(Layer.provide(dataLayer));
-  const embeddingsLayer = makeEmbeddingsLayer({ sqlite, model: "test-worker", embedder }).pipe(Layer.provide(Layer.merge(dataLayer, queueLayer)));
+  const embeddingsLayer = makeEmbeddingsLayer({ sqlite, profile: makeGeminiEmbeddingProfile({ model: "test-worker" }), embedder }).pipe(Layer.provide(Layer.merge(dataLayer, queueLayer)));
   const maintenanceLayer = SearchMaintenanceLive.pipe(Layer.provide(Layer.mergeAll(dataLayer, queueLayer, searchLayer)));
   const workersLayer = WorkerSupervisorLive.pipe(Layer.provide(Layer.mergeAll(embeddingsLayer, maintenanceLayer)));
   return Effect.runPromise(run.pipe(Effect.provide(Layer.mergeAll(dataLayer, queueLayer, searchLayer, embeddingsLayer, maintenanceLayer, workersLayer))));

@@ -1,17 +1,17 @@
 import { google, type GoogleEmbeddingModelOptions } from "@ai-sdk/google";
-import { GEMINI_EMBEDDING_DIMENSIONS, LanceDb } from "@skastr0/quasar-search";
+import { LanceDb } from "@skastr0/quasar-search";
 import { embedMany } from "ai";
 import { Database } from "bun:sqlite";
 import { Effect, Layer, Schema } from "effect";
 import { createHash } from "node:crypto";
 
+import { embeddingProfileFromEnv, type EmbeddingProfile } from "./embeddingProfiles";
 import type { MessageRow, QueueJobRow } from "./model";
 import { ensureParentDir, sqlitePath } from "./paths";
 import { isSemanticSearchDocument } from "./searchPolicy";
 import { DurableQueue, Embeddings, type EmbeddingCacheRow } from "./services";
 import { LocalStore } from "./store";
 
-const DEFAULT_EMBEDDING_MODEL = "gemini-embedding-001";
 const textEncoder = new TextEncoder();
 const GEMINI_MAX_EMBEDDING_BATCH_SIZE = 100;
 
@@ -30,7 +30,7 @@ export interface Embedder {
 
 export interface EmbeddingsLayerOptions {
   readonly sqlite?: string;
-  readonly model?: string;
+  readonly profile?: EmbeddingProfile;
   readonly embedder?: Embedder;
 }
 
@@ -78,15 +78,15 @@ const toCacheRow = (row: Record<string, unknown>): EmbeddingCacheRow => ({
   updatedAt: row.updatedAt as string,
 });
 
-const liveGeminiEmbedder = (model: string): Embedder => ({
+const liveGeminiEmbedder = (profile: EmbeddingProfile): Embedder => ({
   embedMany: async (values) => {
     const { embeddings } = await embedMany({
-      model: google.embedding(model),
+      model: google.embedding(profile.model),
       values: [...values],
       providerOptions: {
         google: {
-          outputDimensionality: GEMINI_EMBEDDING_DIMENSIONS,
-          taskType: "SEMANTIC_SIMILARITY",
+          outputDimensionality: profile.dimensions,
+          taskType: profile.task as GoogleEmbeddingModelOptions["taskType"],
         } satisfies GoogleEmbeddingModelOptions,
       },
     });
@@ -127,8 +127,8 @@ const isRetryableEmbeddingError = (message: string): boolean =>
   /quota|rate.?limit|too many requests|resource exhausted|429/i.test(message);
 
 export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer.Layer<Embeddings, never, LocalStore | DurableQueue | LanceDb> => {
-  const model = options.model ?? process.env.QUASAR_EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_MODEL;
-  const embedder = options.embedder ?? liveGeminiEmbedder(model);
+  const profile = options.profile ?? embeddingProfileFromEnv();
+  const embedder = options.embedder ?? liveGeminiEmbedder(profile);
   const path = options.sqlite ?? sqlitePath();
 
   return Layer.scoped(
@@ -158,16 +158,16 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
 
           const getCached = (contentHash: string) =>
             tryEmbedding("getCached", () => {
-              const row = selectCached.get(model, contentHash) as Record<string, unknown> | null;
+              const row = selectCached.get(profile.cacheNamespace, contentHash) as Record<string, unknown> | null;
               return row === null ? undefined : toCacheRow(row);
             });
 
           const putCached = (row: { readonly contentHash: string; readonly text: string; readonly vector: readonly number[]; readonly now?: string }) =>
             tryEmbedding("putCached", () => {
               const at = row.now ?? nowIso();
-              const existing = selectCached.get(model, row.contentHash) as Record<string, unknown> | null;
+              const existing = selectCached.get(profile.cacheNamespace, row.contentHash) as Record<string, unknown> | null;
               upsertCached.run({
-                $model: model,
+                $model: profile.cacheNamespace,
                 $contentHash: row.contentHash,
                 $dimensions: row.vector.length,
                 $textBytes: textEncoder.encode(row.text).byteLength,
@@ -175,7 +175,7 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                 $createdAt: existing === null ? at : existing.createdAt as string,
                 $updatedAt: at,
               });
-              return toCacheRow(selectCached.get(model, row.contentHash) as Record<string, unknown>);
+              return toCacheRow(selectCached.get(profile.cacheNamespace, row.contentHash) as Record<string, unknown>);
             });
 
           const toVectorRow = (message: MessageRow, vector: readonly number[]) => ({
@@ -189,7 +189,8 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
           });
 
           return Embeddings.of({
-            model,
+            model: profile.model,
+            profile,
             embedText: (text) =>
               Effect.gen(function* () {
                 const contentHash = contentHashForText(text);
@@ -245,7 +246,7 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                   }
                   const cached = yield* getCached(message.contentHash);
                   if (cached !== undefined) {
-                    yield* search.upsertMessageRows({ rows: [toVectorRow(message, cached.vector)] });
+                    yield* search.upsertMessageRows({ rows: [toVectorRow(message, cached.vector)], vectorDimension: profile.dimensions });
                     yield* queue.ack(job.jobId, now);
                     cacheHits += 1;
                     continue;
@@ -299,7 +300,7 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                       ackJobIds.push(miss.job.jobId);
                     }
                     if (vectorRows.length > 0) {
-                      yield* search.upsertMessageRows({ rows: vectorRows });
+                      yield* search.upsertMessageRows({ rows: vectorRows, vectorDimension: profile.dimensions });
                     }
                     for (const jobId of ackJobIds) {
                       yield* queue.ack(jobId, now);
@@ -311,8 +312,8 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                 return { leased: jobs.length, cacheHits, cacheMisses, embedded, skipped, retried, failed };
               }),
             status: tryEmbedding("status", () => {
-              const cached = (db.query("SELECT COUNT(*) AS count FROM embedding_cache WHERE model = ?").get(model) as { count: number }).count;
-              return { cached, pending: 0 };
+              const cached = (db.query("SELECT COUNT(*) AS count FROM embedding_cache WHERE model = ?").get(profile.cacheNamespace) as { count: number }).count;
+              return { cached, pending: 0, profile };
             }),
           });
         }),
