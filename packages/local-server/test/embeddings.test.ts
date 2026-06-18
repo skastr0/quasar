@@ -29,6 +29,7 @@ afterEach(() => {
 });
 
 const vector = (seed: number) => Array.from({ length: 1536 }, (_, index) => (index === seed ? 1 : 0));
+const vectorOf = (dimensions: number, seed: number) => Array.from({ length: dimensions }, (_, index) => (index === seed ? 1 : 0));
 
 const mappedSession = (text = "alpha terminal"): MappedSession => ({
   project: { projectKey: "project-a", displayName: "Project A", rawPath: "/tmp/project-a" },
@@ -339,6 +340,69 @@ describe("Embeddings", () => {
     );
 
     expect(seen).toEqual([["search_document: alpha terminal"], ["search_query: find alpha"]]);
+  });
+
+  test("split-profile embeddings update only the profile vector table", async () => {
+    const profile = makeEmbeddingProfile({
+      provider: "synthetic",
+      model: "hf:nomic-ai/nomic-embed-text-v1.5",
+      dimensions: 768,
+      task: "search_document",
+      documentPrefix: "search_document: ",
+      queryPrefix: "search_query: ",
+    });
+    const profileTable = embeddingProfileSearchTable(profile);
+    const embedder: Embedder = {
+      embedMany: async () => [vectorOf(768, 0)],
+    };
+
+    const [report, lexicalRows, profileRows] = await withEmbeddingsAt(
+      { sqlite: join(tempDir(), "quasar.sqlite"), lance: join(tempDir(), "search.lance") },
+      embedder,
+      profile,
+      Effect.gen(function* () {
+        const store = yield* LocalStore;
+        const queue = yield* DurableQueue;
+        const embeddings = yield* Embeddings;
+        const search = yield* LanceDb;
+        yield* store.upsertSession(mappedSession("alpha terminal"));
+        yield* search.upsertMessageRows({
+          tableName: "messages",
+          vectorDimension: 1536,
+          rows: [{
+            sessionId: "session-a",
+            seq: 1,
+            role: "user",
+            projectKey: "project-a",
+            text: "alpha terminal",
+            contentHash: "unembedded:hash-a",
+            vector: vector(0),
+          }],
+        });
+        yield* enqueueEmbeddingJob(queue);
+        const report = yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000 });
+        const lexicalRows = yield* search.readMessageRowsBySession({
+          sessionId: "session-a",
+          tableName: "messages",
+          select: ["contentHash", "vector"],
+        });
+        const profileRows = yield* search.readMessageRowsBySession({
+          sessionId: "session-a",
+          tableName: profileTable,
+          select: ["contentHash", "vector"],
+        });
+        return [report, lexicalRows, profileRows] as const;
+      }),
+    );
+
+    expect(profileTable).not.toBe("messages");
+    expect(report).toMatchObject({ leased: 1, cacheMisses: 1, embedded: 1, failed: 0 });
+    expect(lexicalRows).toHaveLength(1);
+    expect(lexicalRows[0]?.contentHash).toBe("unembedded:hash-a");
+    expect((lexicalRows[0]?.vector as readonly number[] | undefined)?.length).toBe(1536);
+    expect(profileRows).toHaveLength(1);
+    expect(profileRows[0]?.contentHash).toBe("hash-a");
+    expect((profileRows[0]?.vector as readonly number[] | undefined)?.length).toBe(768);
   });
 
   test("synthetic embedder preserves response order by index", async () => {

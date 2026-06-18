@@ -69,6 +69,7 @@ export const DerivedSearchLive = Layer.effect(
     const search = yield* LanceDb;
     const profile = embeddingProfileFromEnv();
     const profileTable = embeddingProfileSearchTable(profile);
+    const lexicalDimensions = profileTable === LEXICAL_TABLE ? profile.dimensions : GEMINI_EMBEDDING_DIMENSIONS;
 
     const deleteOrphans = (tableName: string, sessionId: string, nextKeys: ReadonlySet<string>) =>
       Effect.gen(function* () {
@@ -91,13 +92,13 @@ export const DerivedSearchLive = Layer.effect(
       indexSession: (sessionId) =>
         Effect.gen(function* () {
           const messages = yield* store.readMessages(sessionId, 100_000);
-          const lexicalRows = toSearchRows(messages, GEMINI_EMBEDDING_DIMENSIONS);
+          const lexicalRows = toSearchRows(messages, lexicalDimensions);
           const profileRows = profileTable === LEXICAL_TABLE ? lexicalRows : toSearchRows(messages, profile.dimensions);
           const nextKeys = new Set(profileRows.map((row) => keyFor(row)));
           const profileOrphansDeleted = yield* deleteOrphans(profileTable, sessionId, nextKeys);
           const lexicalOrphansDeleted = profileTable === LEXICAL_TABLE ? 0 : yield* deleteOrphans(LEXICAL_TABLE, sessionId, nextKeys);
           if (lexicalRows.length > 0) {
-            yield* search.upsertMessageRows({ rows: lexicalRows, tableName: LEXICAL_TABLE, vectorDimension: GEMINI_EMBEDDING_DIMENSIONS });
+            yield* search.upsertMessageRows({ rows: lexicalRows, tableName: LEXICAL_TABLE, vectorDimension: lexicalDimensions });
           }
           if (profileTable !== LEXICAL_TABLE && profileRows.length > 0) {
             yield* search.upsertMessageRows({ rows: profileRows, tableName: profileTable, vectorDimension: profile.dimensions });
