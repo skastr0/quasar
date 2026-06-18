@@ -79,6 +79,10 @@ export interface CreateMessageIndexesRequest extends TableRequest {
   readonly includeVector?: boolean;
   /** If true, replace existing indexes instead of skipping them. Defaults to false (create missing only). */
   readonly replace?: boolean;
+  /** Minimum vector-ready rows required before training the vector index. Defaults to 100. */
+  readonly minVectorRows?: number;
+  /** Optional SQL filter identifying rows that contain real vectors rather than placeholders. */
+  readonly vectorRowsFilter?: string;
 }
 
 export interface UpsertRowsRequest extends TableRequest {
@@ -524,12 +528,12 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
         if (existingIndexNames.has(MESSAGE_VECTOR_INDEX_NAME) && !replace) {
           return;
         }
-        const rows = yield* Effect.tryPromise({
-          try: () => table.countRows(),
+        const vectorRows = yield* Effect.tryPromise({
+          try: () => table.countRows(request.vectorRowsFilter),
           catch: (cause) => makeOperationError(tableName, "countRows", cause),
         });
-        if (rows === 0) {
-          // Cannot train a vector index on an empty table; skip gracefully.
+        if (vectorRows < (request.minVectorRows ?? 100)) {
+          // Cannot train a useful vector index until enough rows carry real vectors; skip gracefully.
           return;
         }
         yield* Effect.tryPromise({

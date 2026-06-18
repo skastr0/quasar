@@ -1,0 +1,62 @@
+name: quasar-local-server
+
+services:
+  local-server:
+    build:
+      context: ../..
+      dockerfile: platform/local-server/Dockerfile
+    image: quasar-local-server:latest
+    restart: unless-stopped
+    stop_grace_period: 30s
+    stop_signal: SIGTERM
+    env_file:
+      - ./.env
+    ports:
+      # For Mac mini Tailscale access, set QUASAR_PUBLISH_HOST to the Mac mini's
+      # Tailscale IP if Docker Desktop can bind it; otherwise use 0.0.0.0 and
+      # rely on Tailscale ACLs / macOS firewall. Prefer IP over MagicDNS.
+      - "${QUASAR_PUBLISH_HOST:-0.0.0.0}:${QUASAR_LOCAL_PORT:-6180}:6180"
+    volumes:
+      - quasar-data:/data/quasar
+      # Mount read-only history roots explicitly. Defaults match common local paths;
+      # override in .env on each machine.
+      - "${QUASAR_CODEX_ROOT:-${HOME}/.codex}:/history/codex:ro"
+      - "${QUASAR_CLAUDE_ROOT:-${HOME}/.claude}:/history/claude:ro"
+      - "${QUASAR_OPENCODE_ROOT:-${HOME}/.local/share/opencode}:/history/opencode:ro"
+      - "${QUASAR_GROK_ROOT:-${HOME}/.grok}:/history/grok:ro"
+      - "${QUASAR_HERMES_ROOT:-${HOME}/.hermes}:/history/hermes:ro"
+      - "${QUASAR_KIMI_ROOT:-${HOME}/.kimi-code}:/history/kimi:ro"
+      - "${QUASAR_ANTIGRAVITY_ROOT:-${HOME}/.gemini/antigravity-cli}:/history/antigravity:ro"
+    environment:
+      NODE_ENV: production
+      QUASAR_LOCAL_HOME: /data/quasar
+      QUASAR_LOCAL_SQLITE: /data/quasar/quasar.sqlite
+      QUASAR_SEARCH_DATA_DIR: /data/quasar/search.lance
+      QUASAR_LOCAL_HOST: 0.0.0.0
+      QUASAR_LOCAL_PORT: 6180
+      QUASAR_CODEX_ROOT: /history/codex
+      QUASAR_CLAUDE_ROOT: /history/claude
+      QUASAR_OPENCODE_ROOT: /history/opencode
+      QUASAR_GROK_ROOT: /history/grok
+      QUASAR_HERMES_ROOT: /history/hermes
+      QUASAR_KIMI_ROOT: /history/kimi
+      QUASAR_ANTIGRAVITY_ROOT: /history/antigravity
+      QUASAR_WORKERS_ENABLED: ${QUASAR_WORKERS_ENABLED:-false}
+      QUASAR_WORKER_INTERVAL_MS: ${QUASAR_WORKER_INTERVAL_MS:-5000}
+      QUASAR_WORKER_LEASE_MS: ${QUASAR_WORKER_LEASE_MS:-60000}
+      QUASAR_EMBEDDING_WORKER_LIMIT: ${QUASAR_EMBEDDING_WORKER_LIMIT:-32}
+      QUASAR_INDEX_WORKER_LIMIT: ${QUASAR_INDEX_WORKER_LIMIT:-100}
+      QUASAR_FRESHNESS_LIMIT: ${QUASAR_FRESHNESS_LIMIT:-500}
+      QUASAR_MAINTENANCE_VECTOR: ${QUASAR_MAINTENANCE_VECTOR:-true}
+      QUASAR_MAINTENANCE_OPTIMIZE: ${QUASAR_MAINTENANCE_OPTIMIZE:-true}
+      QUASAR_EMBEDDING_MODEL: ${QUASAR_EMBEDDING_MODEL:-gemini-embedding-001}
+      GOOGLE_GENERATIVE_AI_API_KEY: ${GOOGLE_GENERATIVE_AI_API_KEY:?set in platform/local-server/.env}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:6180/health"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 6
+
+volumes:
+  quasar-data:
