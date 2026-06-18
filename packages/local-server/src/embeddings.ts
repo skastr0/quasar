@@ -5,7 +5,7 @@ import { Database } from "bun:sqlite";
 import { Effect, Layer, Schema } from "effect";
 import { createHash } from "node:crypto";
 
-import { embeddingProfileFromEnv, type EmbeddingProfile } from "./embeddingProfiles";
+import { embeddingProfileFromEnv, embeddingProfileSearchTable, type EmbeddingProfile } from "./embeddingProfiles";
 import type { MessageRow, QueueJobRow } from "./model";
 import { ensureParentDir, sqlitePath } from "./paths";
 import { isSemanticSearchDocument } from "./searchPolicy";
@@ -94,6 +94,25 @@ const liveGeminiEmbedder = (profile: EmbeddingProfile): Embedder => ({
   },
 });
 
+const liveEmbedderForProfile = (profile: EmbeddingProfile): Embedder => {
+  if (profile.provider === "gemini") return liveGeminiEmbedder(profile);
+  return {
+    embedMany: async () => {
+      throw new Error(`Embedding provider ${profile.provider} is not configured in this build`);
+    },
+  };
+};
+
+const assertVectorDimensions = (operation: string, profile: EmbeddingProfile, vector: readonly number[]): Effect.Effect<void, EmbeddingError> =>
+  vector.length === profile.dimensions
+    ? Effect.void
+    : Effect.fail(
+        new EmbeddingError({
+          operation,
+          message: `embedding vector has dimension ${vector.length}; expected ${profile.dimensions}`,
+        }),
+      );
+
 const isEmbedMessagePayload = (payload: unknown): payload is {
   readonly sessionId: string;
   readonly seq: number;
@@ -128,8 +147,9 @@ const isRetryableEmbeddingError = (message: string): boolean =>
 
 export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer.Layer<Embeddings, never, LocalStore | DurableQueue | LanceDb> => {
   const profile = options.profile ?? embeddingProfileFromEnv();
-  const embedder = options.embedder ?? liveGeminiEmbedder(profile);
+  const embedder = options.embedder ?? liveEmbedderForProfile(profile);
   const path = options.sqlite ?? sqlitePath();
+  const tableName = embeddingProfileSearchTable(profile);
 
   return Layer.scoped(
     Embeddings,
@@ -159,11 +179,15 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
           const getCached = (contentHash: string) =>
             tryEmbedding("getCached", () => {
               const row = selectCached.get(profile.cacheNamespace, contentHash) as Record<string, unknown> | null;
-              return row === null ? undefined : toCacheRow(row);
+              if (row === null) return undefined;
+              const cached = toCacheRow(row);
+              return cached.dimensions === profile.dimensions ? cached : undefined;
             });
 
           const putCached = (row: { readonly contentHash: string; readonly text: string; readonly vector: readonly number[]; readonly now?: string }) =>
-            tryEmbedding("putCached", () => {
+            Effect.gen(function* () {
+              yield* assertVectorDimensions("putCached", profile, row.vector);
+              return yield* tryEmbedding("putCached", () => {
               const at = row.now ?? nowIso();
               const existing = selectCached.get(profile.cacheNamespace, row.contentHash) as Record<string, unknown> | null;
               upsertCached.run({
@@ -176,6 +200,7 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                 $updatedAt: at,
               });
               return toCacheRow(selectCached.get(profile.cacheNamespace, row.contentHash) as Record<string, unknown>);
+              });
             });
 
           const toVectorRow = (message: MessageRow, vector: readonly number[]) => ({
@@ -246,7 +271,7 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                   }
                   const cached = yield* getCached(message.contentHash);
                   if (cached !== undefined) {
-                    yield* search.upsertMessageRows({ rows: [toVectorRow(message, cached.vector)], vectorDimension: profile.dimensions });
+                    yield* search.upsertMessageRows({ rows: [toVectorRow(message, cached.vector)], tableName, vectorDimension: profile.dimensions });
                     yield* queue.ack(job.jobId, now);
                     cacheHits += 1;
                     continue;
@@ -300,7 +325,7 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                       ackJobIds.push(miss.job.jobId);
                     }
                     if (vectorRows.length > 0) {
-                      yield* search.upsertMessageRows({ rows: vectorRows, vectorDimension: profile.dimensions });
+                      yield* search.upsertMessageRows({ rows: vectorRows, tableName, vectorDimension: profile.dimensions });
                     }
                     for (const jobId of ackJobIds) {
                       yield* queue.ack(jobId, now);

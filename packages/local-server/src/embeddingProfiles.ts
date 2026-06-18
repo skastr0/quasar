@@ -39,6 +39,13 @@ const positiveIntEnv = (name: string, fallback: number): number => {
 export const profileCacheNamespace = (profile: Omit<EmbeddingProfile, "cacheNamespace">): string =>
   `${profile.provider}:${profile.model}:${profile.dimensions}:${profile.task}`;
 
+export const embeddingProfileSearchTable = (profile: EmbeddingProfile): string => {
+  if (profile.provider === "gemini" && profile.cacheNamespace === profile.model) {
+    return "messages";
+  }
+  return `messages_${Buffer.from(profile.cacheNamespace).toString("base64url").slice(0, 24)}`;
+};
+
 export const embeddingProfileFromEnv = (): EmbeddingProfile => {
   const provider = (process.env.QUASAR_EMBEDDING_PROVIDER?.trim() || "gemini") as EmbeddingProvider;
   if (provider === "synthetic") {

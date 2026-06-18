@@ -6,7 +6,7 @@ import { LanceDb, makeLanceDbLayer } from "@skastr0/quasar-search";
 import { afterEach, describe, expect, test } from "bun:test";
 import { Effect, Layer } from "effect";
 
-import { makeGeminiEmbeddingProfile, type EmbeddingProfile } from "../src/embeddingProfiles";
+import { embeddingProfileSearchTable, makeGeminiEmbeddingProfile, type EmbeddingProfile } from "../src/embeddingProfiles";
 import { makeEmbeddingsLayer, type Embedder } from "../src/embeddings";
 import type { MappedSession } from "../src/model";
 import { Embeddings, DurableQueue, makeDurableQueueLayer } from "../src/services";
@@ -258,5 +258,28 @@ describe("Embeddings", () => {
 
     expect(cachedInGemini?.model).toBe("gemini-profile");
     expect(cachedInAlternate).toBeUndefined();
+  });
+
+  test("embedding cache rejects vectors with the wrong profile dimension", async () => {
+    const embedder: Embedder = { embedMany: async () => [vector(0)] };
+
+    await expect(
+      withEmbeddings(
+        embedder,
+        Effect.gen(function* () {
+          const embeddings = yield* Embeddings;
+          yield* embeddings.putCached({ contentHash: "hash-a", text: "alpha terminal", vector: [1, 2, 3] });
+        }),
+      ),
+    ).rejects.toThrow("embedding vector has dimension 3; expected 1536");
+  });
+
+  test("non-default profiles use separate LanceDB message tables", () => {
+    const defaultGemini = makeGeminiEmbeddingProfile({ model: "gemini-profile" });
+    const alternate = makeGeminiEmbeddingProfile({ model: "gemini-profile", cacheNamespace: "alternate-profile" });
+
+    expect(embeddingProfileSearchTable(defaultGemini)).toBe("messages");
+    expect(embeddingProfileSearchTable(alternate)).not.toBe("messages");
+    expect(embeddingProfileSearchTable(alternate)).toStartWith("messages_");
   });
 });
