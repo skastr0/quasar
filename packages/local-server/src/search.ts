@@ -1,4 +1,5 @@
 import {
+  GEMINI_EMBEDDING_DIMENSIONS,
   LanceDb,
   MESSAGE_SEARCH_COLUMNS,
   type MessageSearchRow,
@@ -11,6 +12,8 @@ import { embeddingProfileFromEnv, embeddingProfileSearchTable } from "./embeddin
 import type { MessageRow } from "./model";
 import { decideSearchDocument, indexedContentHash, VECTOR_READY_FILTER } from "./searchPolicy";
 import { LocalStore } from "./store";
+
+const LEXICAL_TABLE = "messages";
 
 export interface IndexSessionReport {
   readonly sessionId: string;
@@ -65,48 +68,58 @@ export const DerivedSearchLive = Layer.effect(
     const store = yield* LocalStore;
     const search = yield* LanceDb;
     const profile = embeddingProfileFromEnv();
-    const tableName = embeddingProfileSearchTable(profile);
+    const profileTable = embeddingProfileSearchTable(profile);
+
+    const deleteOrphans = (tableName: string, sessionId: string, nextKeys: ReadonlySet<string>) =>
+      Effect.gen(function* () {
+        const existing = yield* search.readMessageRowsBySession({
+          sessionId,
+          tableName,
+          limit: 100_000,
+          select: ["key"],
+        }).pipe(Effect.catchAll(() => Effect.succeed([])));
+        const orphanKeys = existing
+          .map((row) => row.key)
+          .filter((key): key is string => typeof key === "string" && !nextKeys.has(key));
+        if (orphanKeys.length > 0) {
+          yield* search.deleteByKeys({ tableName, keys: orphanKeys });
+        }
+        return orphanKeys.length;
+      });
 
     return DerivedSearch.of({
       indexSession: (sessionId) =>
         Effect.gen(function* () {
           const messages = yield* store.readMessages(sessionId, 100_000);
-          const rows = toSearchRows(messages, profile.dimensions);
-          const existing = yield* search.readMessageRowsBySession({
-            sessionId,
-            tableName,
-            limit: 100_000,
-            select: ["key"],
-          }).pipe(Effect.catchAll(() => Effect.succeed([])));
-          const nextKeys = new Set(rows.map((row) => keyFor(row)));
-          const orphanKeys = existing
-            .map((row) => row.key)
-            .filter((key): key is string => typeof key === "string" && !nextKeys.has(key));
-
-          if (orphanKeys.length > 0) {
-            yield* search.deleteByKeys({ tableName, keys: orphanKeys });
+          const lexicalRows = toSearchRows(messages, GEMINI_EMBEDDING_DIMENSIONS);
+          const profileRows = profileTable === LEXICAL_TABLE ? lexicalRows : toSearchRows(messages, profile.dimensions);
+          const nextKeys = new Set(profileRows.map((row) => keyFor(row)));
+          const profileOrphansDeleted = yield* deleteOrphans(profileTable, sessionId, nextKeys);
+          const lexicalOrphansDeleted = profileTable === LEXICAL_TABLE ? 0 : yield* deleteOrphans(LEXICAL_TABLE, sessionId, nextKeys);
+          if (lexicalRows.length > 0) {
+            yield* search.upsertMessageRows({ rows: lexicalRows, tableName: LEXICAL_TABLE, vectorDimension: GEMINI_EMBEDDING_DIMENSIONS });
           }
-          if (rows.length > 0) {
-            yield* search.upsertMessageRows({ rows, tableName, vectorDimension: profile.dimensions });
+          if (profileTable !== LEXICAL_TABLE && profileRows.length > 0) {
+            yield* search.upsertMessageRows({ rows: profileRows, tableName: profileTable, vectorDimension: profile.dimensions });
           }
           const semanticRowsUpserted = messages.filter((message) => decideSearchDocument(message).semantic).length;
           return {
             sessionId,
-            rowsUpserted: rows.length,
+            rowsUpserted: profileRows.length,
             semanticRowsUpserted,
-            orphansDeleted: orphanKeys.length,
+            orphansDeleted: profileOrphansDeleted + lexicalOrphansDeleted,
           };
         }),
-      createLexicalIndex: search.createMessageIndexes({ tableName, includeVector: false }),
+      createLexicalIndex: search.createMessageIndexes({ tableName: LEXICAL_TABLE, includeVector: false }),
       createVectorIndex: search.createMessageIndexes({
-        tableName,
+        tableName: profileTable,
         includeVector: true,
         vectorRowsFilter: VECTOR_READY_FILTER,
       }),
-      stats: search.tableStats({ tableName }),
+      stats: search.tableStats({ tableName: profileTable }),
       lexicalSearch: ({ query, projectKey, limit }) =>
         search.ftsSearch({
-          tableName,
+          tableName: LEXICAL_TABLE,
           query,
           limit,
           filter: projectFilter(projectKey),

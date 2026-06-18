@@ -1,6 +1,7 @@
-import { LanceDb } from "@skastr0/quasar-search";
+import { DEFAULT_SEARCH_TABLE, LanceDb } from "@skastr0/quasar-search";
 import { Context, Effect, Layer } from "effect";
 
+import { embeddingProfileFromEnv, embeddingProfileSearchTable } from "./embeddingProfiles";
 import { DerivedSearch } from "./search";
 import { indexedContentHash, isSearchableRole, normalizeIndexedContentHash } from "./searchPolicy";
 import { DurableQueue } from "./services";
@@ -63,6 +64,8 @@ export const SearchMaintenanceLive = Layer.effect(
     const queue = yield* DurableQueue;
     const search = yield* LanceDb;
     const derived = yield* DerivedSearch;
+    const profileTable = embeddingProfileSearchTable(embeddingProfileFromEnv());
+    const activeTables = profileTable === DEFAULT_SEARCH_TABLE ? [DEFAULT_SEARCH_TABLE] : [DEFAULT_SEARCH_TABLE, profileTable];
 
     return SearchMaintenance.of({
       maintain: (options = {}) =>
@@ -74,7 +77,7 @@ export const SearchMaintenanceLive = Layer.effect(
             indexesCreated.push("vector_idx");
           }
           if (options.optimize ?? true) {
-            yield* search.optimizeTable({});
+            yield* Effect.forEach(activeTables, (tableName) => search.optimizeTable({ tableName }), { discard: true });
           }
           const stats = yield* derived.stats;
           return { indexesCreated, optimized: options.optimize ?? true, stats };
@@ -92,20 +95,29 @@ export const SearchMaintenanceLive = Layer.effect(
             const expected = messages
               .filter((message) => isSearchableRole(message.role))
               .map(indexedContentHash);
-            const rows = yield* search.readMessageRowsBySession({
-              sessionId: session.sessionId,
-              limit: 100_000,
-              select: ["contentHash"],
-            }).pipe(Effect.catchAll(() => Effect.succeed([])));
+            const rowsByTable = yield* Effect.forEach(
+              activeTables,
+              (tableName) =>
+                search.readMessageRowsBySession({
+                  sessionId: session.sessionId,
+                  tableName,
+                  limit: 100_000,
+                  select: ["contentHash"],
+                }).pipe(Effect.catchAll(() => Effect.succeed([]))),
+              { concurrency: 1 },
+            );
             const normalizedExpected = expected
               .map(normalizeIndexedContentHash)
               .filter((value): value is string => value !== undefined);
-            const actual = rows
-              .map((row) => row.contentHash)
-              .map(normalizeIndexedContentHash)
-              .filter((value): value is string => value !== undefined);
+            const tablesAreFresh = rowsByTable.every((rows) => {
+              const actual = rows
+                .map((row) => row.contentHash)
+                .map(normalizeIndexedContentHash)
+                .filter((value): value is string => value !== undefined);
+              return sameContentHashes(normalizedExpected, actual);
+            });
 
-            if (sameContentHashes(normalizedExpected, actual)) {
+            if (tablesAreFresh) {
               freshSessions += 1;
               continue;
             }
