@@ -6,12 +6,13 @@ import { LanceDb, makeLanceDbLayer } from "@skastr0/quasar-search";
 import { afterEach, describe, expect, test } from "bun:test";
 import { Effect, Layer } from "effect";
 
-import { embeddingProfileSearchTable, makeGeminiEmbeddingProfile, type EmbeddingProfile } from "../src/embeddingProfiles";
+import { embeddingProfileSearchTable, makeEmbeddingProfile, makeGeminiEmbeddingProfile, type EmbeddingProfile } from "../src/embeddingProfiles";
 import { makeEmbeddingsLayer, type Embedder } from "../src/embeddings";
 import type { MappedSession } from "../src/model";
 import { Embeddings, DurableQueue, makeDurableQueueLayer } from "../src/services";
 import type { DurableQueueService } from "../src/services";
 import { LocalStore, makeLocalStoreLayer } from "../src/store";
+import { makeSyntheticEmbedder } from "../src/syntheticEmbeddings";
 
 const tempDirs: string[] = [];
 
@@ -281,5 +282,76 @@ describe("Embeddings", () => {
     expect(embeddingProfileSearchTable(defaultGemini)).toBe("messages");
     expect(embeddingProfileSearchTable(alternate)).not.toBe("messages");
     expect(embeddingProfileSearchTable(alternate)).toStartWith("messages_");
+  });
+
+  test("synthetic profile applies Nomic document and query prefixes", async () => {
+    const seen: string[][] = [];
+    const embedder: Embedder = {
+      embedMany: async (values) => {
+        seen.push([...values]);
+        return values.map((_, offset) => vector(offset));
+      },
+    };
+    const profile = makeEmbeddingProfile({
+      provider: "synthetic",
+      model: "hf:nomic-ai/nomic-embed-text-v1.5",
+      dimensions: 1536,
+      task: "search_document",
+      documentPrefix: "search_document: ",
+      queryPrefix: "search_query: ",
+    });
+
+    await withEmbeddingsAt(
+      { sqlite: join(tempDir(), "quasar.sqlite"), lance: join(tempDir(), "search.lance") },
+      embedder,
+      profile,
+      Effect.gen(function* () {
+        const store = yield* LocalStore;
+        const queue = yield* DurableQueue;
+        const embeddings = yield* Embeddings;
+        yield* store.upsertSession(mappedSession("alpha terminal"));
+        yield* enqueueEmbeddingJob(queue);
+        yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000 });
+        yield* embeddings.embedText("find alpha");
+      }),
+    );
+
+    expect(seen).toEqual([["search_document: alpha terminal"], ["search_query: find alpha"]]);
+  });
+
+  test("synthetic embedder preserves response order by index", async () => {
+    const profile = makeEmbeddingProfile({
+      provider: "synthetic",
+      model: "hf:nomic-ai/nomic-embed-text-v1.5",
+      dimensions: 3,
+      task: "search_document",
+    });
+    const calls: Array<{ url: string; body: unknown; authorization: string | null }> = [];
+    const fakeFetch: typeof fetch = async (input, init) => {
+      calls.push({
+        url: String(input),
+        body: JSON.parse(String(init?.body)) as unknown,
+        authorization: new Headers(init?.headers).get("authorization"),
+      });
+      return new Response(JSON.stringify({
+        object: "list",
+        data: [
+          { object: "embedding", index: 1, embedding: [0, 1, 0] },
+          { object: "embedding", index: 0, embedding: [1, 0, 0] },
+        ],
+        model: profile.model,
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+
+    const vectors = await makeSyntheticEmbedder(profile, {
+      apiKey: "test-key",
+      baseUrl: "https://synthetic.test/openai/v1/",
+      fetch: fakeFetch,
+    }).embedMany(["a", "b"]);
+
+    expect(vectors).toEqual([[1, 0, 0], [0, 1, 0]]);
+    expect(calls[0]?.url).toBe("https://synthetic.test/openai/v1/embeddings");
+    expect(calls[0]?.authorization).toBe("Bearer test-key");
+    expect(calls[0]?.body).toEqual({ model: profile.model, input: ["a", "b"], dimensions: 3 });
   });
 });
