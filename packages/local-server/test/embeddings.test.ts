@@ -56,10 +56,10 @@ const mappedSession = (text = "alpha terminal"): MappedSession => ({
   toolCalls: [],
 });
 
-const enqueueEmbeddingJob = (queue: DurableQueueService, maxAttempts = 2) =>
+const enqueueEmbeddingJob = (queue: DurableQueueService, maxAttempts = 2, embeddingProfile = "test-embedding") =>
   queue.enqueue({
     kind: "embed-message",
-    payload: { sessionId: "session-a", seq: 1, contentHash: "hash-a" },
+    payload: { sessionId: "session-a", seq: 1, contentHash: "hash-a", embeddingProfile },
     idempotencyKey: `embed-message:hash-a:${crypto.randomUUID()}`,
     maxAttempts,
   });
@@ -201,6 +201,34 @@ describe("Embeddings", () => {
     expect(queueStats).toEqual({ pending: 0, leased: 0, failed: 1 });
   });
 
+  test("jobs for a different embedding profile fail closed without provider calls", async () => {
+    let calls = 0;
+    const embedder: Embedder = {
+      embedMany: async () => {
+        calls += 1;
+        return [vector(0)];
+      },
+    };
+
+    const [report, queueStats] = await withEmbeddings(
+      embedder,
+      Effect.gen(function* () {
+        const store = yield* LocalStore;
+        const queue = yield* DurableQueue;
+        const embeddings = yield* Embeddings;
+        yield* store.upsertSession(mappedSession());
+        yield* enqueueEmbeddingJob(queue, 2, "other-profile");
+        const report = yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
+        const queueStats = yield* queue.stats;
+        return [report, queueStats] as const;
+      }),
+    );
+
+    expect(calls).toBe(0);
+    expect(report).toMatchObject({ leased: 1, cacheHits: 0, cacheMisses: 0, embedded: 0, failed: 1 });
+    expect(queueStats).toEqual({ pending: 0, leased: 0, failed: 1 });
+  });
+
   test("synthetic rate-limit status is treated as retryable", async () => {
     const embedder: Embedder = {
       embedMany: async () => {
@@ -333,7 +361,7 @@ describe("Embeddings", () => {
         const queue = yield* DurableQueue;
         const embeddings = yield* Embeddings;
         yield* store.upsertSession(mappedSession("alpha terminal"));
-        yield* enqueueEmbeddingJob(queue);
+        yield* enqueueEmbeddingJob(queue, 2, profile.cacheNamespace);
         yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000 });
         yield* embeddings.embedText("find alpha");
       }),
@@ -379,7 +407,7 @@ describe("Embeddings", () => {
             vector: vector(0),
           }],
         });
-        yield* enqueueEmbeddingJob(queue);
+        yield* enqueueEmbeddingJob(queue, 2, profile.cacheNamespace);
         const report = yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000 });
         const lexicalRows = yield* search.readMessageRowsBySession({
           sessionId: "session-a",
