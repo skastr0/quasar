@@ -6,7 +6,7 @@ PASS: the Mac mini Docker local-server is serving SQLite truth, LanceDB lexical/
 
 ## Runtime target
 
-- Server URL: `http://100.96.152.41:6180`
+- Server URL: `http://<mac-mini-tailscale-ip>:6180`
 - Runtime: Docker Compose service `quasar-local-server-local-server-1`
 - Tailscale access: direct Mac mini Tailscale IP, not MagicDNS
 - Storage home inside container: `/data/quasar`
@@ -142,7 +142,7 @@ The retrieval comparison script was run against the live Tailscale endpoint:
 
 ```bash
 bun scripts/compare-local-search.mjs \
-  --server http://100.96.152.41:6180 \
+  --server http://<mac-mini-tailscale-ip>:6180 \
   --name synthetic-nomic \
   --limit 5 \
   --out docs/proofs/embedding-retrieval-comparison-2026-06-19.md \
@@ -157,7 +157,7 @@ Artifact:
 Representative live fusion query:
 
 ```bash
-curl -fsS http://100.96.152.41:6180/search/fusion \
+curl -fsS http://<mac-mini-tailscale-ip>:6180/search/fusion \
   --get \
   --data-urlencode 'q=embedding profile LanceDB messages table vector dimension mismatch' \
   --data-urlencode 'limit=3'

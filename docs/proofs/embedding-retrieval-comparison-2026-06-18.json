@@ -41,7 +41,7 @@
   "profiles": [
     {
       "name": "gemini-current",
-      "url": "http://100.96.152.41:6180",
+      "url": "http://<mac-mini-tailscale-ip>:6180",
       "status": {
         "ok": true,
         "status": 200,
@@ -822,7 +822,7 @@
                   "projectKey": "path:machine:76e148fc65f0750b08e057de1f1c3755:388780f63d66c91f72df3aa8ebfb2121",
                   "role": "assistant",
                   "seq": 62,
-                  "text": "{\"type\":\"agent_message\",\"message\":\"**Scans Complete** I did not change config. Current state: - Mac mini Tailnet IP: `100.96.152.41` - Tailnet suffix: `tail6742f6.ts.net` - Current MagicDNS: `mac-mini.tail6742f6.ts.net` - Tailscale version:"
+                  "text": "{\"type\":\"agent_message\",\"message\":\"**Scans Complete** I did not change config. Current state: - Mac mini Tailnet IP: `<mac-mini-tailscale-ip>` - Tailnet suffix: `<tailnet-suffix>` - Current MagicDNS: `mac-mini.<tailnet-suffix>` - Tailscale version:"
                 },
                 {
                   "key": "codex:machine:76e148fc65f0750b08e057de1f1c3755:90087fe28ea35c350906e2f8ec3b83fb:63:assistant",
@@ -831,7 +831,7 @@
                   "projectKey": "path:machine:76e148fc65f0750b08e057de1f1c3755:388780f63d66c91f72df3aa8ebfb2121",
                   "role": "assistant",
                   "seq": 63,
-                  "text": "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"**Scans Complete** I did not change config. Current state: - Mac mini Tailnet IP: `100.96.152.41` - Tailnet suffix: `tail6742f6.ts.net` - Current MagicDNS: `mac-m"
+                  "text": "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"**Scans Complete** I did not change config. Current state: - Mac mini Tailnet IP: `<mac-mini-tailscale-ip>` - Tailnet suffix: `<tailnet-suffix>` - Current MagicDNS: `mac-m"
                 },
                 {
                   "key": "codex:machine:76e148fc65f0750b08e057de1f1c3755:90087fe28ea35c350906e2f8ec3b83fb:129:assistant",
@@ -840,7 +840,7 @@
                   "projectKey": "path:machine:76e148fc65f0750b08e057de1f1c3755:388780f63d66c91f72df3aa8ebfb2121",
                   "role": "assistant",
                   "seq": 129,
-                  "text": "{\"type\":\"agent_message\",\"message\":\"**Goal Shape** Use one stable device tag for the Mac mini: ```text tag:mac-mini-server ``` Use Tailscale Services for each app: ```text svc:tower -> https://tower.tail6742f6.ts.net/ svc:metrics -> https://"
+                  "text": "{\"type\":\"agent_message\",\"message\":\"**Goal Shape** Use one stable device tag for the Mac mini: ```text tag:mac-mini-server ``` Use Tailscale Services for each app: ```text svc:tower -> https://tower.<tailnet-suffix>/ svc:metrics -> https://"
                 },
                 {
                   "key": "codex:machine:76e148fc65f0750b08e057de1f1c3755:90087fe28ea35c350906e2f8ec3b83fb:130:assistant",
@@ -883,7 +883,7 @@
                   "projectKey": "path:machine:76e148fc65f0750b08e057de1f1c3755:388780f63d66c91f72df3aa8ebfb2121",
                   "role": "assistant",
                   "seq": 31,
-                  "text": "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"The local machine is `mac-mini` at `100.96.152.41` on Tailscale `1.96.5`, which is new enough for Tailscale Services. The repo is clean, so any findings won’t be "
+                  "text": "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"The local machine is `mac-mini` at `<mac-mini-tailscale-ip>` on Tailscale `1.96.5`, which is new enough for Tailscale Services. The repo is clean, so any findings won’t be "
                 },
                 {
                   "key": "codex:machine:76e148fc65f0750b08e057de1f1c3755:20a34f88adfea87f1d7661aa18598d99:2:user",
@@ -910,7 +910,7 @@
                   "projectKey": "path:machine:76e148fc65f0750b08e057de1f1c3755:388780f63d66c91f72df3aa8ebfb2121",
                   "role": "assistant",
                   "seq": 30,
-                  "text": "{\"type\":\"agent_message\",\"message\":\"The local machine is `mac-mini` at `100.96.152.41` on Tailscale `1.96.5`, which is new enough for Tailscale Services. The repo is clean, so any findings won’t be mixed with uncommitted local work.\",\"phase\""
+                  "text": "{\"type\":\"agent_message\",\"message\":\"The local machine is `mac-mini` at `<mac-mini-tailscale-ip>` on Tailscale `1.96.5`, which is new enough for Tailscale Services. The repo is clean, so any findings won’t be mixed with uncommitted local work.\",\"phase\""
                 }
               ]
             },
@@ -935,7 +935,7 @@
                   "projectKey": "path:machine:76e148fc65f0750b08e057de1f1c3755:388780f63d66c91f72df3aa8ebfb2121",
                   "role": "assistant",
                   "seq": 62,
-                  "text": "{\"type\":\"agent_message\",\"message\":\"**Scans Complete** I did not change config. Current state: - Mac mini Tailnet IP: `100.96.152.41` - Tailnet suffix: `tail6742f6.ts.net` - Current MagicDNS: `mac-mini.tail6742f6.ts.net` - Tailscale version:"
+                  "text": "{\"type\":\"agent_message\",\"message\":\"**Scans Complete** I did not change config. Current state: - Mac mini Tailnet IP: `<mac-mini-tailscale-ip>` - Tailnet suffix: `<tailnet-suffix>` - Current MagicDNS: `mac-mini.<tailnet-suffix>` - Tailscale version:"
                 },
                 {
                   "key": "codex:machine:76e148fc65f0750b08e057de1f1c3755:90087fe28ea35c350906e2f8ec3b83fb:31:assistant",
@@ -944,7 +944,7 @@
                   "projectKey": "path:machine:76e148fc65f0750b08e057de1f1c3755:388780f63d66c91f72df3aa8ebfb2121",
                   "role": "assistant",
                   "seq": 31,
-                  "text": "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"The local machine is `mac-mini` at `100.96.152.41` on Tailscale `1.96.5`, which is new enough for Tailscale Services. The repo is clean, so any findings won’t be "
+                  "text": "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"The local machine is `mac-mini` at `<mac-mini-tailscale-ip>` on Tailscale `1.96.5`, which is new enough for Tailscale Services. The repo is clean, so any findings won’t be "
                 },
                 {
                   "key": "codex:machine:76e148fc65f0750b08e057de1f1c3755:90087fe28ea35c350906e2f8ec3b83fb:63:assistant",
@@ -953,7 +953,7 @@
                   "projectKey": "path:machine:76e148fc65f0750b08e057de1f1c3755:388780f63d66c91f72df3aa8ebfb2121",
                   "role": "assistant",
                   "seq": 63,
-                  "text": "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"**Scans Complete** I did not change config. Current state: - Mac mini Tailnet IP: `100.96.152.41` - Tailnet suffix: `tail6742f6.ts.net` - Current MagicDNS: `mac-m"
+                  "text": "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"**Scans Complete** I did not change config. Current state: - Mac mini Tailnet IP: `<mac-mini-tailscale-ip>` - Tailnet suffix: `<tailnet-suffix>` - Current MagicDNS: `mac-m"
                 },
                 {
                   "key": "codex:machine:76e148fc65f0750b08e057de1f1c3755:20a34f88adfea87f1d7661aa18598d99:2:user",

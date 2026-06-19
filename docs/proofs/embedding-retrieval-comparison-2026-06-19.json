@@ -41,7 +41,7 @@
   "profiles": [
     {
       "name": "synthetic-nomic",
-      "url": "http://100.96.152.41:6180",
+      "url": "http://<mac-mini-tailscale-ip>:6180",
       "status": {
         "ok": true,
         "status": 200,
@@ -179,7 +179,7 @@
                   "projectKey": "path:machine:de134fd406c9b3eb261fbf560c52390d:02f6708c6e098459d11ca6ca262bdc8f",
                   "role": "assistant",
                   "seq": 10,
-                  "text": "Quasar is a remote service over Tailscale (the API is at `quasar.tail6742f6.ts.net`), with a fallback at `100.96.152.41:8179`. The socket is dropping. There's a local convex backend. Let me try the fallback URL, and check if the convex data"
+                  "text": "Quasar is a remote service over Tailscale (the API is at `quasar.<tailnet-suffix>`), with a fallback at `<mac-mini-tailscale-ip>:8179`. The socket is dropping. There's a local convex backend. Let me try the fallback URL, and check if the convex data"
                 },
                 {
                   "key": "claude:machine:de134fd406c9b3eb261fbf560c52390d:9d429ebf7a873096b7665cbdea985a5c:7:assistant",
@@ -231,7 +231,7 @@
                   "projectKey": "path:machine:de134fd406c9b3eb261fbf560c52390d:02f6708c6e098459d11ca6ca262bdc8f",
                   "role": "assistant",
                   "seq": 10,
-                  "text": "Quasar is a remote service over Tailscale (the API is at `quasar.tail6742f6.ts.net`), with a fallback at `100.96.152.41:8179`. The socket is dropping. There's a local convex backend. Let me try the fallback URL, and check if the convex data"
+                  "text": "Quasar is a remote service over Tailscale (the API is at `quasar.<tailnet-suffix>`), with a fallback at `<mac-mini-tailscale-ip>:8179`. The socket is dropping. There's a local convex backend. Let me try the fallback URL, and check if the convex data"
                 },
                 {
                   "key": "grok:machine:de134fd406c9b3eb261fbf560c52390d:4ee9c94ad20da1ef782575f8e48445d5:4:user",
@@ -783,7 +783,7 @@
                   "projectKey": "path:machine:de134fd406c9b3eb261fbf560c52390d:388780f63d66c91f72df3aa8ebfb2121",
                   "role": "assistant",
                   "seq": 62,
-                  "text": "{\"type\":\"agent_message\",\"message\":\"**Scans Complete** I did not change config. Current state: - Mac mini Tailnet IP: `100.96.152.41` - Tailnet suffix: `tail6742f6.ts.net` - Current MagicDNS: `mac-mini.tail6742f6.ts.net` - Tailscale version:"
+                  "text": "{\"type\":\"agent_message\",\"message\":\"**Scans Complete** I did not change config. Current state: - Mac mini Tailnet IP: `<mac-mini-tailscale-ip>` - Tailnet suffix: `<tailnet-suffix>` - Current MagicDNS: `mac-mini.<tailnet-suffix>` - Tailscale version:"
                 },
                 {
                   "key": "codex:machine:de134fd406c9b3eb261fbf560c52390d:90087fe28ea35c350906e2f8ec3b83fb:63:assistant",
@@ -792,7 +792,7 @@
                   "projectKey": "path:machine:de134fd406c9b3eb261fbf560c52390d:388780f63d66c91f72df3aa8ebfb2121",
                   "role": "assistant",
                   "seq": 63,
-                  "text": "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"**Scans Complete** I did not change config. Current state: - Mac mini Tailnet IP: `100.96.152.41` - Tailnet suffix: `tail6742f6.ts.net` - Current MagicDNS: `mac-m"
+                  "text": "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"**Scans Complete** I did not change config. Current state: - Mac mini Tailnet IP: `<mac-mini-tailscale-ip>` - Tailnet suffix: `<tailnet-suffix>` - Current MagicDNS: `mac-m"
                 },
                 {
                   "key": "codex:machine:de134fd406c9b3eb261fbf560c52390d:90087fe28ea35c350906e2f8ec3b83fb:129:assistant",
@@ -801,7 +801,7 @@
                   "projectKey": "path:machine:de134fd406c9b3eb261fbf560c52390d:388780f63d66c91f72df3aa8ebfb2121",
                   "role": "assistant",
                   "seq": 129,
-                  "text": "{\"type\":\"agent_message\",\"message\":\"**Goal Shape** Use one stable device tag for the Mac mini: ```text tag:mac-mini-server ``` Use Tailscale Services for each app: ```text svc:tower -> https://tower.tail6742f6.ts.net/ svc:metrics -> https://"
+                  "text": "{\"type\":\"agent_message\",\"message\":\"**Goal Shape** Use one stable device tag for the Mac mini: ```text tag:mac-mini-server ``` Use Tailscale Services for each app: ```text svc:tower -> https://tower.<tailnet-suffix>/ svc:metrics -> https://"
                 },
                 {
                   "key": "codex:machine:de134fd406c9b3eb261fbf560c52390d:90087fe28ea35c350906e2f8ec3b83fb:130:assistant",
@@ -835,7 +835,7 @@
                   "projectKey": "path:machine:de134fd406c9b3eb261fbf560c52390d:388780f63d66c91f72df3aa8ebfb2121",
                   "role": "assistant",
                   "seq": 232,
-                  "text": "{\"type\":\"agent_message\",\"message\":\"Yes. `100.96.152.41` is the Mac mini’s **Tailscale IP**. It is **not public internet**. It is in the `100.64.0.0/10` carrier-grade NAT range that Tailscale uses for tailnet addresses. It only routes for de"
+                  "text": "{\"type\":\"agent_message\",\"message\":\"Yes. `<mac-mini-tailscale-ip>` is the Mac mini’s **Tailscale IP**. It is **not public internet**. It is in the `100.64.0.0/10` carrier-grade NAT range that Tailscale uses for tailnet addresses. It only routes for de"
                 },
                 {
                   "key": "codex:machine:de134fd406c9b3eb261fbf560c52390d:0a051ea749e424b0655b50ed67b49df6:37:assistant",
@@ -844,7 +844,7 @@
                   "projectKey": "path:machine:de134fd406c9b3eb261fbf560c52390d:bb1bdc4e6bd274f5985e0ca0086b42a7",
                   "role": "assistant",
                   "seq": 37,
-                  "text": "{\"type\":\"agent_message\",\"message\":\"**Assessment** Tailscale itself does not look broken on the Mac mini. This shell is running on `macmini.local`, and its local Tailscale IP is `100.96.152.41`. That matters because the earlier “from this cl"
+                  "text": "{\"type\":\"agent_message\",\"message\":\"**Assessment** Tailscale itself does not look broken on the Mac mini. This shell is running on `macmini.local`, and its local Tailscale IP is `<mac-mini-tailscale-ip>`. That matters because the earlier “from this cl"
                 },
                 {
                   "key": "codex:machine:de134fd406c9b3eb261fbf560c52390d:0a051ea749e424b0655b50ed67b49df6:38:assistant",
@@ -853,7 +853,7 @@
                   "projectKey": "path:machine:de134fd406c9b3eb261fbf560c52390d:bb1bdc4e6bd274f5985e0ca0086b42a7",
                   "role": "assistant",
                   "seq": 38,
-                  "text": "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"**Assessment** Tailscale itself does not look broken on the Mac mini. This shell is running on `macmini.local`, and its local Tailscale IP is `100.96.152.41`. Tha"
+                  "text": "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"**Assessment** Tailscale itself does not look broken on the Mac mini. This shell is running on `macmini.local`, and its local Tailscale IP is `<mac-mini-tailscale-ip>`. Tha"
                 },
                 {
                   "key": "codex:machine:de134fd406c9b3eb261fbf560c52390d:20a34f88adfea87f1d7661aa18598d99:233:assistant",
@@ -862,7 +862,7 @@
                   "projectKey": "path:machine:de134fd406c9b3eb261fbf560c52390d:388780f63d66c91f72df3aa8ebfb2121",
                   "role": "assistant",
                   "seq": 233,
-                  "text": "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Yes. `100.96.152.41` is the Mac mini’s **Tailscale IP**. It is **not public internet**. It is in the `100.64.0.0/10` carrier-grade NAT range that Tailscale uses f"
+                  "text": "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Yes. `<mac-mini-tailscale-ip>` is the Mac mini’s **Tailscale IP**. It is **not public internet**. It is in the `100.64.0.0/10` carrier-grade NAT range that Tailscale uses f"
                 },
                 {
                   "key": "codex:machine:de134fd406c9b3eb261fbf560c52390d:0a051ea749e424b0655b50ed67b49df6:22:assistant",
@@ -871,7 +871,7 @@
                   "projectKey": "path:machine:de134fd406c9b3eb261fbf560c52390d:bb1bdc4e6bd274f5985e0ca0086b42a7",
                   "role": "assistant",
                   "seq": 22,
-                  "text": "{\"type\":\"agent_message\",\"message\":\"I found the main source of confusion: this shell is running on `macmini.local`, not on the MacBook. `100.96.152.41` is the local Tailscale IP here, so the successful `nc` and `curl` I just ran only prove t"
+                  "text": "{\"type\":\"agent_message\",\"message\":\"I found the main source of confusion: this shell is running on `macmini.local`, not on the MacBook. `<mac-mini-tailscale-ip>` is the local Tailscale IP here, so the successful `nc` and `curl` I just ran only prove t"
                 }
               ]
             },
@@ -887,7 +887,7 @@
                   "projectKey": "path:machine:de134fd406c9b3eb261fbf560c52390d:388780f63d66c91f72df3aa8ebfb2121",
                   "role": "assistant",
                   "seq": 232,
-                  "text": "{\"type\":\"agent_message\",\"message\":\"Yes. `100.96.152.41` is the Mac mini’s **Tailscale IP**. It is **not public internet**. It is in the `100.64.0.0/10` carrier-grade NAT range that Tailscale uses for tailnet addresses. It only routes for de"
+                  "text": "{\"type\":\"agent_message\",\"message\":\"Yes. `<mac-mini-tailscale-ip>` is the Mac mini’s **Tailscale IP**. It is **not public internet**. It is in the `100.64.0.0/10` carrier-grade NAT range that Tailscale uses for tailnet addresses. It only routes for de"
                 },
                 {
                   "key": "codex:machine:de134fd406c9b3eb261fbf560c52390d:90087fe28ea35c350906e2f8ec3b83fb:62:assistant",
@@ -896,7 +896,7 @@
                   "projectKey": "path:machine:de134fd406c9b3eb261fbf560c52390d:388780f63d66c91f72df3aa8ebfb2121",
                   "role": "assistant",
                   "seq": 62,
-                  "text": "{\"type\":\"agent_message\",\"message\":\"**Scans Complete** I did not change config. Current state: - Mac mini Tailnet IP: `100.96.152.41` - Tailnet suffix: `tail6742f6.ts.net` - Current MagicDNS: `mac-mini.tail6742f6.ts.net` - Tailscale version:"
+                  "text": "{\"type\":\"agent_message\",\"message\":\"**Scans Complete** I did not change config. Current state: - Mac mini Tailnet IP: `<mac-mini-tailscale-ip>` - Tailnet suffix: `<tailnet-suffix>` - Current MagicDNS: `mac-mini.<tailnet-suffix>` - Tailscale version:"
                 },
                 {
                   "key": "codex:machine:de134fd406c9b3eb261fbf560c52390d:0a051ea749e424b0655b50ed67b49df6:37:assistant",
@@ -905,7 +905,7 @@
                   "projectKey": "path:machine:de134fd406c9b3eb261fbf560c52390d:bb1bdc4e6bd274f5985e0ca0086b42a7",
                   "role": "assistant",
                   "seq": 37,
-                  "text": "{\"type\":\"agent_message\",\"message\":\"**Assessment** Tailscale itself does not look broken on the Mac mini. This shell is running on `macmini.local`, and its local Tailscale IP is `100.96.152.41`. That matters because the earlier “from this cl"
+                  "text": "{\"type\":\"agent_message\",\"message\":\"**Assessment** Tailscale itself does not look broken on the Mac mini. This shell is running on `macmini.local`, and its local Tailscale IP is `<mac-mini-tailscale-ip>`. That matters because the earlier “from this cl"
                 },
                 {
                   "key": "codex:machine:de134fd406c9b3eb261fbf560c52390d:90087fe28ea35c350906e2f8ec3b83fb:63:assistant",
@@ -914,7 +914,7 @@
                   "projectKey": "path:machine:de134fd406c9b3eb261fbf560c52390d:388780f63d66c91f72df3aa8ebfb2121",
                   "role": "assistant",
                   "seq": 63,
-                  "text": "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"**Scans Complete** I did not change config. Current state: - Mac mini Tailnet IP: `100.96.152.41` - Tailnet suffix: `tail6742f6.ts.net` - Current MagicDNS: `mac-m"
+                  "text": "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"**Scans Complete** I did not change config. Current state: - Mac mini Tailnet IP: `<mac-mini-tailscale-ip>` - Tailnet suffix: `<tailnet-suffix>` - Current MagicDNS: `mac-m"
                 },
                 {
                   "key": "codex:machine:de134fd406c9b3eb261fbf560c52390d:0a051ea749e424b0655b50ed67b49df6:38:assistant",
@@ -923,7 +923,7 @@
                   "projectKey": "path:machine:de134fd406c9b3eb261fbf560c52390d:bb1bdc4e6bd274f5985e0ca0086b42a7",
                   "role": "assistant",
                   "seq": 38,
-                  "text": "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"**Assessment** Tailscale itself does not look broken on the Mac mini. This shell is running on `macmini.local`, and its local Tailscale IP is `100.96.152.41`. Tha"
+                  "text": "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"**Assessment** Tailscale itself does not look broken on the Mac mini. This shell is running on `macmini.local`, and its local Tailscale IP is `<mac-mini-tailscale-ip>`. Tha"
                 }
               ]
             }
