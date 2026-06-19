@@ -35,7 +35,7 @@ describe("local-server ops config", () => {
     expect(ops).toContain("QUASAR_WORKERS_ENABLED=false");
     expect(ops).toContain("QUASAR_SYNC_INGEST_LIMIT:-");
     expect(ops).toContain("limit_arg=\\\"--limit ${QUASAR_SYNC_INGEST_LIMIT}\\\"");
-    expect(ops).toContain("bun packages/local-server/src/cli.ts ingest --provider all ${limit_arg}");
+    expect(ops).toContain("bun packages/local-server/src/cli.ts ingest --provider all --summary ${limit_arg}");
     const sync = readFileSync(join(repoRoot, "scripts/install-local-server-sync.mjs"), "utf8");
     expect(sync).toContain("com.quasar.local-server-sync");
     expect(sync).toContain("StartInterval");

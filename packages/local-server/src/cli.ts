@@ -3,6 +3,7 @@ import { LanceDb } from "@skastr0/quasar-search";
 import { Effect } from "effect";
 
 import { ingest } from "./ingest";
+import type { IngestReport } from "./ingest";
 import { fail, ok, writeJson } from "./json";
 import { SearchMaintenance } from "./maintenance";
 import { AppRuntime } from "./runtime";
@@ -51,6 +52,22 @@ const fetchServer = async (name: string, path: string, params: Record<string, st
   return true;
 };
 
+const summarizeIngestReports = (reports: readonly IngestReport[]) => ({
+  reports: reports.map((report) => ({
+    provider: report.provider,
+    sessionsSeen: report.sessionsSeen,
+    sessionsWritten: report.sessionsWritten,
+    sessionsSkipped: report.sessionsSkipped,
+    sessionsFailed: report.sessionsFailed,
+    messagesWritten: report.messagesWritten,
+    toolCallsWritten: report.toolCallsWritten,
+    jobsEnqueued: report.jobsEnqueued,
+    searchDocuments: report.searchDocuments,
+    failures: report.failures,
+    durationMs: report.durationMs,
+  })),
+});
+
 const run = async (name: string, program: Effect.Effect<unknown, unknown, LocalStore | LanceDb | DurableQueue | DerivedSearch | SearchMaintenance | WorkerSupervisor | Embeddings>) => {
   try {
     writeJson(ok(name, await AppRuntime.runPromise(program)));
@@ -64,14 +81,12 @@ const run = async (name: string, program: Effect.Effect<unknown, unknown, LocalS
 
 switch (command) {
   case "ingest": {
-    await run(
-      "ingest",
-      ingest({
+    const program = ingest({
         provider: (arg("--provider") ?? "all") as never,
         limit: arg("--limit") === undefined ? undefined : intArg("--limit", 1),
         force: flag("--force"),
-      }),
-    );
+      }).pipe(Effect.map((reports) => flag("--summary") ? summarizeIngestReports(reports) : reports));
+    await run("ingest", program);
     break;
   }
   case "serve": {
@@ -301,7 +316,7 @@ switch (command) {
     writeJson(
       ok("help", {
         commands: [
-          "ingest --provider all|claude|codex|opencode|hermes|grok [--limit n] [--force]",
+          "ingest --provider all|claude|codex|opencode|hermes|grok [--limit n] [--force] [--summary]",
           "serve [--host 127.0.0.1] [--port 6180]",
           "projects [--limit n] [--offset n]",
           "sessions [--provider name] [--project-key key] [--limit n] [--offset n]",
