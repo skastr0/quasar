@@ -57,6 +57,8 @@ const run = async (name: string, program: Effect.Effect<unknown, unknown, LocalS
   } catch (error) {
     writeJson(fail(name, error));
     process.exitCode = 1;
+  } finally {
+    await AppRuntime.dispose();
   }
 };
 
