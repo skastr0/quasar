@@ -126,7 +126,7 @@ function backupTruth() {
     "rm -rf /tmp/quasar-truth-backup /tmp/quasar-truth-backup.tar",
     "mkdir -p /tmp/quasar-truth-backup",
     "cd /app/packages/local-server",
-    "bun -e 'import { Database } from \"bun:sqlite\"; const db = new Database(process.env.QUASAR_LOCAL_SQLITE); db.exec(\"VACUUM INTO '\''/tmp/quasar-truth-backup/quasar.sqlite'\''\"); db.close();'",
+    "bun -e 'import { Database } from \"bun:sqlite\"; const db = new Database(process.env.QUASAR_LOCAL_SQLITE); db.exec(\"VACUUM INTO \\\"/tmp/quasar-truth-backup/quasar.sqlite\\\"\"); db.close();'",
     "cp /data/quasar/machine.json /tmp/quasar-truth-backup/machine.json",
     "tar -cf /tmp/quasar-truth-backup.tar -C /tmp/quasar-truth-backup .",
     "rm -rf /tmp/quasar-truth-backup",
