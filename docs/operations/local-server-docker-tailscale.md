@@ -99,14 +99,14 @@ Keep this simple:
    ```
 
 3. The sync tick runs inside the container against the mounted read-only history roots:
-   - default: `ingest --provider all`
+   - default: `ingest --provider all --summary`
    - emergency/operator override: set `QUASAR_SYNC_INGEST_LIMIT=<n>` to cap a tick while diagnosing a bad source
 
 4. Freshness repair, LanceDB optimize, and index maintenance are explicit operations, not part of the minute tick. Run `bun run local-server:maintain` after large ingests or when `local-server:status` shows queued repair/index work that is not draining.
 
 5. Embedding is not a cron shell loop. The server-owned embedding worker leases queued `embed-message` jobs, batches provider calls, uses the cache, and backs off on retryable provider limits.
 
-The scheduled tick is intentionally uncapped by default and relies on adapter `shouldParseSession` probes to skip unchanged sources before expensive parse work. It disables one-shot workers in the CLI process; the long-running Docker service owns embedding and index draining/backoff.
+The scheduled tick is intentionally uncapped by default and relies on adapter `shouldParseSession` probes to skip unchanged sources before expensive parse work. It emits summary JSON so per-minute logs stay small, disables one-shot workers in the CLI process, and leaves embedding/index draining/backoff to the long-running Docker service.
 
 Recommended schedule:
 
