@@ -99,21 +99,22 @@ Keep this simple:
    ```
 
 3. The sync tick runs inside the container against the mounted read-only history roots:
-   - `ingest --provider all --limit ${QUASAR_SYNC_INGEST_LIMIT:-50}`
+   - default: `ingest --provider all`
+   - emergency/operator override: set `QUASAR_SYNC_INGEST_LIMIT=<n>` to cap a tick while diagnosing a bad source
 
-4. Freshness repair, LanceDB optimize, and index maintenance are explicit operations, not part of the 15-minute tick. Run `bun run local-server:maintain` after large ingests or when `local-server:status` shows queued repair/index work that is not draining.
+4. Freshness repair, LanceDB optimize, and index maintenance are explicit operations, not part of the minute tick. Run `bun run local-server:maintain` after large ingests or when `local-server:status` shows queued repair/index work that is not draining.
 
 5. Embedding is not a cron shell loop. The server-owned embedding worker leases queued `embed-message` jobs, batches provider calls, uses the cache, and backs off on retryable provider limits.
 
-The scheduled tick is deliberately bounded and disables one-shot workers in the CLI process; the long-running Docker service drains queued embedding and index jobs. Run `bun run local-server:ingest` manually for full all-provider scans after adding a new machine or doing a large backfill; do not make every 15-minute timer rescan the entire estate.
+The scheduled tick is intentionally uncapped by default and relies on adapter `shouldParseSession` probes to skip unchanged sources before expensive parse work. It disables one-shot workers in the CLI process; the long-running Docker service owns embedding and index draining/backoff.
 
 Recommended schedule:
 
-- every 15 minutes: `bun run local-server:sync-tick`
+- every 60 seconds: `bun run local-server:sync-tick`
 - daily or after large ingests: `bun run local-server:maintain`
 - before risky changes: `bun run local-server:backup`
 
-Launchd/cron should call only the package script; it should not inline Docker commands or provider logic. The checked-in helper installs a user LaunchAgent with `StartInterval=900` by default:
+Launchd/cron should call only the package script; it should not inline Docker commands or provider logic. The checked-in helper installs a user LaunchAgent with `StartInterval=60` by default:
 
 ```bash
 bun run local-server:sync-install
@@ -123,7 +124,7 @@ bun run local-server:sync-status
 Override the interval or stale-lock recovery window before install if needed:
 
 ```bash
-QUASAR_LOCAL_SERVER_SYNC_INTERVAL_SECONDS=1800 QUASAR_LOCAL_SERVER_SYNC_STALE_LOCK_SECONDS=3600 bun run local-server:sync-install
+QUASAR_LOCAL_SERVER_SYNC_INTERVAL_SECONDS=15 QUASAR_LOCAL_SERVER_SYNC_STALE_LOCK_SECONDS=3600 bun run local-server:sync-install
 ```
 
 Uninstall:
@@ -135,7 +136,7 @@ bun run local-server:sync-uninstall
 Equivalent cron entry if launchd is not desired; replace the repo and Bun paths for the host:
 
 ```cron
-*/15 * * * * cd /path/to/quasar && /path/to/bun run local-server:sync-tick >> logs/local-server-sync.log 2>&1
+* * * * * cd /path/to/quasar && /path/to/bun run local-server:sync-tick >> logs/local-server-sync.log 2>&1
 ```
 
 ## Worker policy

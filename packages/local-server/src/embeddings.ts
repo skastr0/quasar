@@ -352,9 +352,9 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                     seq: job.payload.seq,
                     contentHash: job.payload.contentHash,
                   });
-                  if (message === undefined) {
-                    yield* queue.fail(job.jobId, "message missing from SQLite truth", now);
-                    failed += 1;
+                  if (message == null) {
+                    yield* queue.ack(job.jobId, now);
+                    skipped += 1;
                     continue;
                   }
                   if (!isSemanticSearchDocument(message)) {

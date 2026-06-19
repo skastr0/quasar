@@ -24,7 +24,7 @@ const usage = {
     lance: "inspect all LanceDB tables and indexes directly inside the container",
     exec: "run a command inside the container after --",
     ingest: "run local-server ingest inside the container",
-    syncTick: "cheap incremental tick: bounded ingest; workers drain queued work",
+    syncTick: "cheap incremental tick: uncapped changed-session ingest; workers drain queued work",
     maintain: "run LanceDB maintenance inside the container, not through HTTP",
     backup: "write ./quasar-truth-backup.tar with SQLite truth and machine identity",
   },
@@ -92,7 +92,9 @@ switch (command) {
     sh([
       "set -eu",
       "cd /app",
-      "QUASAR_WORKERS_ENABLED=false QUASAR_EMBEDDING_WORKER_ENABLED=false QUASAR_INDEX_REPAIR_WORKER_ENABLED=false QUASAR_FRESHNESS_WORKER_ENABLED=false QUASAR_MAINTENANCE_WORKER_ENABLED=false bun packages/local-server/src/cli.ts ingest --provider all --limit ${QUASAR_SYNC_INGEST_LIMIT:-50}",
+      "limit_arg=\"\"",
+      "if [ -n \"${QUASAR_SYNC_INGEST_LIMIT:-}\" ]; then limit_arg=\"--limit ${QUASAR_SYNC_INGEST_LIMIT}\"; fi",
+      "QUASAR_WORKERS_ENABLED=false QUASAR_EMBEDDING_WORKER_ENABLED=false QUASAR_INDEX_REPAIR_WORKER_ENABLED=false QUASAR_FRESHNESS_WORKER_ENABLED=false QUASAR_MAINTENANCE_WORKER_ENABLED=false bun packages/local-server/src/cli.ts ingest --provider all ${limit_arg}",
     ].join("\n"));
     break;
   case "maintain":

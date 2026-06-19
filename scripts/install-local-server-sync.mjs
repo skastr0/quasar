@@ -15,7 +15,7 @@ const logsDir = resolve(repoRoot, "logs");
 const lockDir = resolve(logsDir, "local-server-sync.lock");
 const lockInfoPath = resolve(lockDir, "info.json");
 const bunBin = process.env.QUASAR_BUN_BIN ?? (process.versions.bun ? process.execPath : spawnOutput("which", ["bun"]));
-const intervalSeconds = Number(process.env.QUASAR_LOCAL_SERVER_SYNC_INTERVAL_SECONDS ?? "900");
+const intervalSeconds = Number(process.env.QUASAR_LOCAL_SERVER_SYNC_INTERVAL_SECONDS ?? "60");
 const staleLockSeconds = Number(process.env.QUASAR_LOCAL_SERVER_SYNC_STALE_LOCK_SECONDS ?? "3600");
 
 switch (command) {
@@ -82,7 +82,7 @@ function plist() {
   <key>RunAtLoad</key>
   <true/>
   <key>StartInterval</key>
-  <integer>${Number.isInteger(intervalSeconds) && intervalSeconds > 0 ? intervalSeconds : 900}</integer>
+  <integer>${Number.isInteger(intervalSeconds) && intervalSeconds > 0 ? intervalSeconds : 60}</integer>
   <key>StandardOutPath</key>
   <string>${xml(resolve(logsDir, "local-server-sync.out.log"))}</string>
   <key>StandardErrorPath</key>
