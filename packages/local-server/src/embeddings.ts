@@ -15,6 +15,7 @@ import { makeSyntheticEmbedder, SyntheticEmbeddingError } from "./syntheticEmbed
 
 const textEncoder = new TextEncoder();
 const DEFAULT_EMBEDDING_API_BATCH_SIZE = 100;
+const DEFAULT_EMBEDDING_DOCUMENT_CHUNK_CHARS = 12_000;
 const RETRYABLE_EMBEDDING_BASE_DELAY_MS = 30_000;
 const RETRYABLE_EMBEDDING_MAX_DELAY_MS = 10 * 60_000;
 
@@ -149,6 +150,27 @@ const chunksOf = <A>(items: readonly A[], size: number): readonly (readonly A[])
   return chunks;
 };
 
+const chunkText = (text: string, size: number): readonly string[] => {
+  if (text.length <= size) return [text];
+  const chunks: string[] = [];
+  for (let index = 0; index < text.length; index += size) {
+    chunks.push(text.slice(index, index + size));
+  }
+  return chunks;
+};
+
+const averageVectors = (vectors: readonly (readonly number[])[]): readonly number[] => {
+  if (vectors.length === 0) return [];
+  const dimensions = vectors[0]?.length ?? 0;
+  const total = Array.from({ length: dimensions }, () => 0);
+  for (const vector of vectors) {
+    for (let index = 0; index < dimensions; index += 1) {
+      total[index] += vector[index] ?? 0;
+    }
+  }
+  return total.map((value) => value / vectors.length);
+};
+
 const isRetryableEmbeddingError = (message: string): boolean =>
   /quota|rate.?limit|too many requests|resource exhausted|429/i.test(message);
 
@@ -230,6 +252,40 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
             contentHash: message.contentHash,
             vector,
           });
+
+          const documentInputs = (text: string) =>
+            chunkText(text, positiveIntEnv("QUASAR_EMBEDDING_DOCUMENT_CHUNK_CHARS", DEFAULT_EMBEDDING_DOCUMENT_CHUNK_CHARS))
+              .map((chunk) => prefixed(profile.documentPrefix, chunk));
+
+          const embedInputsAdaptive: (inputs: readonly string[]) => Effect.Effect<readonly (readonly number[])[], unknown> = (inputs) =>
+            Effect.gen(function* () {
+              const result = yield* Effect.tryPromise({
+                try: () => embedder.embedMany(inputs),
+                catch: (cause) => cause,
+              }).pipe(Effect.either);
+              if (result._tag === "Right") return result.right;
+              if (isRetryableEmbeddingCause(result.left) && inputs.length > 1) {
+                const splitAt = Math.ceil(inputs.length / 2);
+                const halves = [inputs.slice(0, splitAt), inputs.slice(splitAt)].filter((split) => split.length > 0);
+                const vectors = yield* Effect.forEach(halves, embedInputsAdaptive, { concurrency: 1 });
+                return vectors.flat();
+              }
+              return yield* Effect.fail(result.left);
+            });
+
+          const embedDocument = (text: string) =>
+            Effect.gen(function* () {
+              const inputs = documentInputs(text);
+              const vectors = yield* Effect.forEach(
+                chunksOf(inputs, positiveIntEnv("QUASAR_EMBEDDING_API_BATCH_SIZE", DEFAULT_EMBEDDING_API_BATCH_SIZE)),
+                embedInputsAdaptive,
+                { concurrency: 1 },
+              ).pipe(Effect.map((chunks) => chunks.flat()));
+              if (vectors.length < inputs.length) {
+                return yield* Effect.fail(new Error("embedder returned fewer vectors than requested"));
+              }
+              return averageVectors(vectors);
+            });
 
           return Embeddings.of({
             model: profile.model,
@@ -327,63 +383,92 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                 }
 
                 if (misses.length > 0) {
-                  const chunkReports = yield* Effect.forEach(
-                    chunksOf(misses, positiveIntEnv("QUASAR_EMBEDDING_API_BATCH_SIZE", DEFAULT_EMBEDDING_API_BATCH_SIZE)),
-                    (chunk) =>
-                      Effect.gen(function* () {
-                        let chunkEmbedded = 0;
-                        let chunkRetried = 0;
-                        let chunkFailed = 0;
-                        const result = yield* Effect.tryPromise({
-                          try: () => embedder.embedMany(chunk.map((miss) => prefixed(profile.documentPrefix, miss.message.text))),
-                          catch: (cause) => cause,
-                        }).pipe(Effect.either);
+                  type EmbeddingMiss = { readonly job: QueueJobRow; readonly message: MessageRow };
+                  type ChunkReport = { readonly embedded: number; readonly retried: number; readonly failed: number };
+                  const emptyChunkReport: ChunkReport = { embedded: 0, retried: 0, failed: 0 };
+                  const mergeChunkReport = (total: ChunkReport, report: ChunkReport): ChunkReport => ({
+                    embedded: total.embedded + report.embedded,
+                    retried: total.retried + report.retried,
+                    failed: total.failed + report.failed,
+                  });
+                  const processMissChunk: (chunk: readonly EmbeddingMiss[]) => Effect.Effect<ChunkReport, unknown> = (chunk) =>
+                    Effect.gen(function* () {
+                      let chunkEmbedded = 0;
+                      let chunkRetried = 0;
+                      let chunkFailed = 0;
+                      if (chunk.some((miss) => documentInputs(miss.message.text).length > 1) && chunk.length > 1) {
+                        const splitAt = Math.ceil(chunk.length / 2);
+                        const splitReports = yield* Effect.forEach(
+                          [chunk.slice(0, splitAt), chunk.slice(splitAt)].filter((split) => split.length > 0),
+                          processMissChunk,
+                          { concurrency: 1 },
+                        );
+                        return splitReports.reduce(mergeChunkReport, emptyChunkReport);
+                      }
+                      const result = yield* (
+                        chunk.length === 1 && documentInputs(chunk[0]?.message.text ?? "").length > 1
+                          ? embedDocument(chunk[0]?.message.text ?? "").pipe(Effect.map((vector) => [vector]))
+                          : embedInputsAdaptive(chunk.map((miss) => prefixed(profile.documentPrefix, miss.message.text)))
+                      ).pipe(Effect.either);
 
-                        if (result._tag === "Left") {
-                          const error = result.left instanceof Error ? result.left.message : String(result.left);
-                          for (const { job } of chunk) {
-                            const retryable = isRetryableEmbeddingCause(result.left);
-                            const outcome = yield* retryOrFail(job, error, retryable);
-                            if (outcome === "failed") {
-                              chunkFailed += 1;
-                            } else {
-                              chunkRetried += 1;
-                            }
+                      if (result._tag === "Left") {
+                        const retryable = isRetryableEmbeddingCause(result.left);
+                        if (retryable && chunk.length > 1) {
+                          const splitAt = Math.ceil(chunk.length / 2);
+                          const splitReports = yield* Effect.forEach(
+                            [chunk.slice(0, splitAt), chunk.slice(splitAt)].filter((split) => split.length > 0),
+                            processMissChunk,
+                            { concurrency: 1 },
+                          );
+                          return splitReports.reduce(mergeChunkReport, emptyChunkReport);
+                        }
+                        const error = result.left instanceof Error ? result.left.message : String(result.left);
+                        for (const { job } of chunk) {
+                          const outcome = yield* retryOrFail(job, error, retryable);
+                          if (outcome === "failed") {
+                            chunkFailed += 1;
+                          } else {
+                            chunkRetried += 1;
                           }
-                          return { embedded: chunkEmbedded, retried: chunkRetried, failed: chunkFailed };
-                        }
-
-                        const vectorRows = [];
-                        const ackJobIds = [];
-                        for (let index = 0; index < chunk.length; index += 1) {
-                          const miss = chunk[index];
-                          const vector = result.right[index];
-                          if (miss === undefined) continue;
-                          if (vector === undefined) {
-                            const outcome = yield* retryOrFail(miss.job, "embedder returned fewer vectors than requested", false);
-                            if (outcome === "failed") chunkFailed += 1;
-                            else chunkRetried += 1;
-                            continue;
-                          }
-                          const input = prefixed(profile.documentPrefix, miss.message.text);
-                          const cached = yield* putCached({
-                            contentHash: profile.documentPrefix === undefined ? miss.message.contentHash : contentHashForText(input),
-                            text: input,
-                            vector,
-                            now,
-                          });
-                          vectorRows.push(toVectorRow(miss.message, cached.vector));
-                          ackJobIds.push(miss.job.jobId);
-                        }
-                        if (vectorRows.length > 0) {
-                          yield* search.upsertMessageRows({ rows: vectorRows, tableName, vectorDimension: profile.dimensions });
-                        }
-                        for (const jobId of ackJobIds) {
-                          yield* queue.ack(jobId, now);
-                          chunkEmbedded += 1;
                         }
                         return { embedded: chunkEmbedded, retried: chunkRetried, failed: chunkFailed };
-                      }),
+                      }
+
+                      const vectorRows = [];
+                      const ackJobIds = [];
+                      for (let index = 0; index < chunk.length; index += 1) {
+                        const miss = chunk[index];
+                        const vector = result.right[index];
+                        if (miss === undefined) continue;
+                        if (vector === undefined) {
+                          const outcome = yield* retryOrFail(miss.job, "embedder returned fewer vectors than requested", false);
+                          if (outcome === "failed") chunkFailed += 1;
+                          else chunkRetried += 1;
+                          continue;
+                        }
+                        const input = prefixed(profile.documentPrefix, miss.message.text);
+                        const cached = yield* putCached({
+                          contentHash: profile.documentPrefix === undefined ? miss.message.contentHash : contentHashForText(input),
+                          text: input,
+                          vector,
+                          now,
+                        });
+                        vectorRows.push(toVectorRow(miss.message, cached.vector));
+                        ackJobIds.push(miss.job.jobId);
+                      }
+                      if (vectorRows.length > 0) {
+                        yield* search.upsertMessageRows({ rows: vectorRows, tableName, vectorDimension: profile.dimensions });
+                      }
+                      for (const jobId of ackJobIds) {
+                        yield* queue.ack(jobId, now);
+                        chunkEmbedded += 1;
+                      }
+                      return { embedded: chunkEmbedded, retried: chunkRetried, failed: chunkFailed };
+                    });
+
+                  const chunkReports = yield* Effect.forEach(
+                    chunksOf(misses, positiveIntEnv("QUASAR_EMBEDDING_API_BATCH_SIZE", DEFAULT_EMBEDDING_API_BATCH_SIZE)),
+                    processMissChunk,
                     { concurrency: positiveIntEnv("QUASAR_EMBEDDING_API_CONCURRENCY", 4) },
                   );
                   for (const chunkReport of chunkReports) {

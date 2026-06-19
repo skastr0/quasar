@@ -278,6 +278,95 @@ describe("Embeddings", () => {
     expect(queueStats).toEqual({ pending: 0, leased: 0, failed: 1 });
   });
 
+  test("retryable batch failures are split before delaying jobs", async () => {
+    const seen: string[][] = [];
+    const embedder: Embedder = {
+      embedMany: async (values) => {
+        seen.push([...values]);
+        if (values.length > 1) {
+          throw new SyntheticEmbeddingError({ operation: "synthetic.embeddings", message: "batch overloaded", status: 500 });
+        }
+        return [vector(0)];
+      },
+    };
+
+    const [report, queueStats] = await withEmbeddings(
+      embedder,
+      Effect.gen(function* () {
+        const store = yield* LocalStore;
+        const queue = yield* DurableQueue;
+        const embeddings = yield* Embeddings;
+        yield* store.upsertSession({
+          ...mappedSession(),
+          messages: [
+            { sessionId: "session-a", seq: 1, role: "user", text: "alpha terminal", projectKey: "project-a", contentHash: "hash-a" },
+            { sessionId: "session-a", seq: 2, role: "assistant", text: "beta terminal", projectKey: "project-a", contentHash: "hash-b" },
+          ],
+        });
+        yield* queue.enqueue({
+          kind: "embed-message",
+          payload: { sessionId: "session-a", seq: 1, contentHash: "hash-a", embeddingProfile: "test-embedding" },
+          idempotencyKey: "embed-message:test-embedding:hash-a",
+          maxAttempts: 2,
+        });
+        yield* queue.enqueue({
+          kind: "embed-message",
+          payload: { sessionId: "session-a", seq: 2, contentHash: "hash-b", embeddingProfile: "test-embedding" },
+          idempotencyKey: "embed-message:test-embedding:hash-b",
+          maxAttempts: 2,
+        });
+        const report = yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
+        const queueStats = yield* queue.stats;
+        return [report, queueStats] as const;
+      }),
+    );
+
+    expect(seen).toEqual([["alpha terminal", "beta terminal"], ["alpha terminal"], ["beta terminal"]]);
+    expect(report).toMatchObject({ leased: 2, cacheMisses: 2, embedded: 2, retried: 0, failed: 0 });
+    expect(queueStats).toEqual({ pending: 0, leased: 0, failed: 0 });
+  });
+
+  test("large messages are chunked and averaged into one cached message vector", async () => {
+    const previousChunkSize = process.env.QUASAR_EMBEDDING_DOCUMENT_CHUNK_CHARS;
+    process.env.QUASAR_EMBEDDING_DOCUMENT_CHUNK_CHARS = "5";
+    const seen: string[][] = [];
+    const embedder: Embedder = {
+      embedMany: async (values) => {
+        seen.push([...values]);
+        return values.map((_, index) => vector(index));
+      },
+    };
+
+    try {
+      const [report, cached, rows] = await withEmbeddings(
+        embedder,
+        Effect.gen(function* () {
+          const store = yield* LocalStore;
+          const queue = yield* DurableQueue;
+          const embeddings = yield* Embeddings;
+          const search = yield* LanceDb;
+          yield* store.upsertSession(mappedSession("abcdefghij"));
+          yield* enqueueEmbeddingJob(queue);
+          const report = yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
+          const cached = yield* embeddings.getCached("hash-a");
+          const rows = yield* search.readMessageRowsBySession({ sessionId: "session-a", select: ["contentHash", "vector"] });
+          return [report, cached, rows] as const;
+        }),
+      );
+
+      expect(seen).toEqual([["abcde", "fghij"]]);
+      expect(report).toMatchObject({ leased: 1, cacheMisses: 1, embedded: 1, retried: 0, failed: 0 });
+      expect(cached?.contentHash).toBe("hash-a");
+      expect(cached?.vector[0]).toBe(0.5);
+      expect(cached?.vector[1]).toBe(0.5);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.contentHash).toBe("hash-a");
+    } finally {
+      if (previousChunkSize === undefined) delete process.env.QUASAR_EMBEDDING_DOCUMENT_CHUNK_CHARS;
+      else process.env.QUASAR_EMBEDDING_DOCUMENT_CHUNK_CHARS = previousChunkSize;
+    }
+  });
+
   test("short provider responses retry unacknowledged jobs", async () => {
     const embedder: Embedder = { embedMany: async () => [] };
 
