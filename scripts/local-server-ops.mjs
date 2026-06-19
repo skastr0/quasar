@@ -1,0 +1,198 @@
+#!/usr/bin/env bun
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+
+const repoRoot = resolve(import.meta.dir, "..");
+const envFile = resolve(repoRoot, "platform/local-server/.env");
+const composeFile = resolve(repoRoot, "platform/local-server/compose.yaml");
+const command = process.argv[2] ?? "help";
+const rest = process.argv.slice(3);
+
+const compose = ["compose", "--env-file", envFile, "-f", composeFile];
+
+const usage = {
+  commands: {
+    deploy: "build/recreate the Docker local-server service",
+    up: "start the Docker local-server service without force recreate",
+    down: "stop the Docker local-server service",
+    restart: "restart the running service",
+    ps: "show compose service state",
+    logs: "follow local-server logs; pass --no-follow to print once",
+    health: "GET /health from the local server",
+    status: "GET /status from the local server; pass --lance for LanceDB stats",
+    lance: "inspect all LanceDB tables and indexes directly inside the container",
+    exec: "run a command inside the container after --",
+    ingest: "run local-server ingest inside the container",
+    syncTick: "cheap incremental tick: ingest all, reconcile freshness, repair index jobs",
+    maintain: "run LanceDB maintenance inside the container, not through HTTP",
+    backup: "write ./quasar-data-backup.tgz from the Docker data volume",
+  },
+  examples: [
+    "bun scripts/local-server-ops.mjs deploy",
+    "bun scripts/local-server-ops.mjs status --lance",
+    "bun scripts/local-server-ops.mjs lance",
+    "bun scripts/local-server-ops.mjs ingest --provider all",
+    "bun scripts/local-server-ops.mjs syncTick",
+    "bun scripts/local-server-ops.mjs maintain --vector true --optimize true",
+    "bun scripts/local-server-ops.mjs exec -- sh -lc 'ls -lah /data/quasar'",
+  ],
+};
+
+if (command === "help" || command === "--help" || command === "-h") {
+  printJson({ ok: true, ...usage });
+  process.exit(0);
+}
+
+requireFile(envFile, "copy platform/local-server/.env.example to platform/local-server/.env first");
+requireFile(composeFile, "missing local-server compose file");
+
+switch (command) {
+  case "deploy":
+    docker(["up", "-d", "--build", "--force-recreate", "local-server"], { injectShellSecrets: true });
+    break;
+  case "up":
+    docker(["up", "-d", "--build", "local-server"], { injectShellSecrets: true });
+    break;
+  case "down":
+    docker(["down"]);
+    break;
+  case "restart":
+    docker(["restart", "local-server"]);
+    break;
+  case "ps":
+    docker(["ps"]);
+    break;
+  case "logs":
+    docker(rest.includes("--no-follow") ? ["logs", "--tail=200", "local-server"] : ["logs", "-f", "--tail=200", "local-server"]);
+    break;
+  case "health":
+    if (rest.includes("--external")) await getJson("/health");
+    else containerGetJson("/health");
+    break;
+  case "status":
+    if (rest.includes("--external")) await getJson(rest.includes("--lance") ? "/status?lance=true" : "/status");
+    else containerGetJson(rest.includes("--lance") ? "/status?lance=true" : "/status");
+    break;
+  case "lance":
+    lanceTables();
+    break;
+  case "exec": {
+    const separator = rest.indexOf("--");
+    const args = separator === -1 ? rest : rest.slice(separator + 1);
+    if (args.length === 0) fail("exec requires a command after --");
+    exec(args);
+    break;
+  }
+  case "ingest":
+    cli(["ingest", ...rest]);
+    break;
+  case "syncTick":
+  case "sync-tick":
+    sh([
+      "set -eu",
+      "cd /app",
+      "bun packages/local-server/src/cli.ts ingest --provider all",
+      "bun packages/local-server/src/cli.ts freshness --limit ${QUASAR_SYNC_FRESHNESS_LIMIT:-500}",
+      "bun packages/local-server/src/cli.ts repair-index --limit ${QUASAR_SYNC_REPAIR_LIMIT:-500}",
+      "bun packages/local-server/src/cli.ts stats --server http://127.0.0.1:${QUASAR_LOCAL_PORT:-6180}",
+    ].join("\n"));
+    break;
+  case "maintain":
+    cli(["maintain", ...(rest.length === 0 ? ["--vector", "true", "--optimize", "true"] : rest)]);
+    break;
+  case "backup":
+    sh("tar -czf /tmp/quasar-data-backup.tgz -C /data quasar");
+    docker(["cp", "local-server:/tmp/quasar-data-backup.tgz", "./quasar-data-backup.tgz"]);
+    break;
+  default:
+    fail(`unknown command: ${command}`);
+}
+
+function cli(args) {
+  sh(["cd /app", ["bun", "packages/local-server/src/cli.ts", ...args.map(shellQuote)].join(" ")].join(" && "));
+}
+
+function sh(script) {
+  exec(["sh", "-lc", script]);
+}
+
+function lanceTables() {
+  sh([
+    "cd /app/packages/search",
+    "bun -e 'import * as lancedb from \"@lancedb/lancedb\"; const db = await lancedb.connect(process.env.QUASAR_SEARCH_DATA_DIR); const tables = []; for (const name of await db.tableNames()) { const table = await db.openTable(name); tables.push({ name, rows: await table.countRows(), indices: (await table.listIndices()).map((index) => ({ name: index.name, type: index.indexType, columns: index.columns, indexedRows: index.numIndexedRows, unindexedRows: index.numUnindexedRows })) }); } console.log(JSON.stringify({ ok: true, command: \"lance\", data: { tables } }, null, 2));'",
+  ].join(" && "));
+}
+
+function exec(args) {
+  docker(["exec", "-T", "local-server", ...args]);
+}
+
+function docker(args, options = {}) {
+  const rawCompose = options.rawCompose ?? true;
+  const dockerArgs = rawCompose ? [...compose, ...args] : args;
+  const env = options.injectShellSecrets ? withShellSecrets(process.env) : process.env;
+  const result = spawnSync("docker", dockerArgs, { cwd: repoRoot, stdio: "inherit", env });
+  if (result.status !== 0) process.exit(result.status ?? 1);
+}
+
+async function getJson(path) {
+  const base = process.env.QUASAR_LOCAL_SERVER_URL ?? `http://127.0.0.1:${process.env.QUASAR_LOCAL_PORT ?? "6180"}`;
+  const url = new URL(path, base.endsWith("/") ? base : `${base}/`);
+  const response = await fetch(url);
+  const body = await response.text();
+  try {
+    printJson(JSON.parse(body));
+  } catch {
+    process.stdout.write(`${body}\n`);
+  }
+  if (!response.ok) process.exit(1);
+}
+
+function containerGetJson(path) {
+  const url = `http://127.0.0.1:${process.env.QUASAR_LOCAL_PORT ?? "6180"}${path}`;
+  const dockerArgs = [...compose, "exec", "-T", "local-server", "curl", "-fsS", url];
+  const result = spawnSync("docker", dockerArgs, { cwd: repoRoot, encoding: "utf8", env: process.env });
+  if (result.stderr) process.stderr.write(result.stderr);
+  if (result.stdout) {
+    try {
+      printJson(JSON.parse(result.stdout));
+    } catch {
+      process.stdout.write(result.stdout.endsWith("\n") ? result.stdout : `${result.stdout}\n`);
+    }
+  }
+  if (result.status !== 0) process.exit(result.status ?? 1);
+}
+
+function withShellSecrets(env) {
+  const next = { ...env };
+  for (const key of ["SYNTHETIC_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"]) {
+    if (next[key]?.trim()) continue;
+    const value = readInteractiveShellEnv(key);
+    if (value) next[key] = value;
+  }
+  return next;
+}
+
+function readInteractiveShellEnv(key) {
+  const result = spawnSync("zsh", ["-ic", `printf %s \"$${key}\"`], { encoding: "utf8" });
+  return result.status === 0 ? result.stdout.trim() : "";
+}
+
+function requireFile(path, message) {
+  if (!existsSync(path)) fail(`${message}: ${path}`);
+}
+
+function shellQuote(value) {
+  if (/^[A-Za-z0-9_./:=@+-]+$/.test(value)) return value;
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function printJson(value) {
+  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+function fail(message) {
+  printJson({ ok: false, error: message, ...usage });
+  process.exit(2);
+}
