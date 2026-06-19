@@ -21,6 +21,8 @@ describe("local-server ops config", () => {
 
     expect(pkg).toContain("local-server:deploy");
     expect(pkg).toContain("local-server:sync-tick");
+    expect(pkg).toContain("local-server:sync-install");
+    expect(pkg).toContain("local-server:sync-status");
     expect(pkg).toContain("local-server:maintain");
     expect(pkg).toContain("local-server:lance");
     expect(pkg).toContain("local-server:backup");
@@ -30,8 +32,14 @@ describe("local-server ops config", () => {
     expect(ops).toContain("@lancedb/lancedb");
     expect(ops).toContain("VACUUM INTO");
     expect(ops).toContain("quasar-truth-backup.tar");
-    expect(ops).toContain("bun packages/local-server/src/cli.ts ingest --provider all");
+    expect(ops).toContain("bun packages/local-server/src/cli.ts ingest --provider all --limit ${QUASAR_SYNC_INGEST_LIMIT:-50}");
+    const sync = readFileSync(join(repoRoot, "scripts/install-local-server-sync.mjs"), "utf8");
+    expect(sync).toContain("com.quasar.local-server-sync");
+    expect(sync).toContain("StartInterval");
+    expect(sync).toContain("local-server:sync-tick");
+    expect(sync).toContain("local-server-sync.lock");
     expect(runbook).toContain("every 15 minutes: `bun run local-server:sync-tick`");
+    expect(runbook).toContain("bun run local-server:sync-install");
     expect(runbook).toContain("Avoid the HTTP maintenance endpoint for long optimize runs");
     expect(runbook).toContain("bun run local-server:lance");
     expect(runbook).toContain("does **not** archive `search.lance` by default");

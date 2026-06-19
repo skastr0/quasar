@@ -38,6 +38,7 @@ bun run local-server:status      # SQLite/queue/cache status
 bun run local-server:lance       # direct LanceDB table/index inventory
 bun run local-server:ingest      # run full provider ingest inside the container
 bun run local-server:sync-tick   # cheap incremental tick for cron/launchd
+bun run local-server:sync-status # launchd schedule status
 bun run local-server:maintain    # LanceDB indexes/optimize inside container
 bun run local-server:backup      # write ./quasar-truth-backup.tar
 ```
@@ -98,12 +99,13 @@ Keep this simple:
    ```
 
 3. The sync tick runs inside the container against the mounted read-only history roots:
-   - `ingest --provider all`
-   - `freshness --limit ${QUASAR_SYNC_FRESHNESS_LIMIT:-500}`
-   - `repair-index --limit ${QUASAR_SYNC_REPAIR_LIMIT:-500}`
-   - `stats` for a compact receipt
+   - `ingest --provider all --limit ${QUASAR_SYNC_INGEST_LIMIT:-50}`
 
-4. Embedding is not a cron shell loop. The server-owned embedding worker leases queued `embed-message` jobs, batches provider calls, uses the cache, and backs off on retryable provider limits.
+4. Freshness repair, LanceDB optimize, and index maintenance are explicit operations, not part of the 15-minute tick. Run `bun run local-server:maintain` after large ingests or when `local-server:status` shows queued repair/index work that is not draining.
+
+5. Embedding is not a cron shell loop. The server-owned embedding worker leases queued `embed-message` jobs, batches provider calls, uses the cache, and backs off on retryable provider limits.
+
+The scheduled tick is deliberately bounded. Run `bun run local-server:ingest` manually for full all-provider scans after adding a new machine or doing a large backfill; do not make every 15-minute timer rescan the entire estate.
 
 Recommended schedule:
 
@@ -111,7 +113,26 @@ Recommended schedule:
 - daily or after large ingests: `bun run local-server:maintain`
 - before risky changes: `bun run local-server:backup`
 
-Launchd/cron should call only the package script; it should not inline Docker commands or provider logic. Example cron entry:
+Launchd/cron should call only the package script; it should not inline Docker commands or provider logic. The checked-in helper installs a user LaunchAgent with `StartInterval=900` by default:
+
+```bash
+bun run local-server:sync-install
+bun run local-server:sync-status
+```
+
+Override the interval before install if needed:
+
+```bash
+QUASAR_LOCAL_SERVER_SYNC_INTERVAL_SECONDS=1800 bun run local-server:sync-install
+```
+
+Uninstall:
+
+```bash
+bun run local-server:sync-uninstall
+```
+
+Equivalent cron entry if launchd is not desired:
 
 ```cron
 */15 * * * * cd /Users/guilhermecastro/Projects/quasar && /opt/homebrew/bin/bun run local-server:sync-tick >> logs/local-server-sync.log 2>&1
@@ -128,13 +149,14 @@ QUASAR_EMBEDDING_DIMENSIONS=768
 QUASAR_EMBEDDING_TASK=search_document
 QUASAR_EMBEDDING_DOCUMENT_PREFIX="search_document: "
 QUASAR_EMBEDDING_QUERY_PREFIX="search_query: "
+QUASAR_WORKERS_ENABLED=true
 QUASAR_EMBEDDING_WORKER_ENABLED=true
-QUASAR_INDEX_REPAIR_WORKER_ENABLED=false
+QUASAR_INDEX_REPAIR_WORKER_ENABLED=true
 QUASAR_FRESHNESS_WORKER_ENABLED=false
 QUASAR_MAINTENANCE_WORKER_ENABLED=false
 ```
 
-The cache namespace and vector table are profile-scoped. Quasar does not intentionally embed one message into multiple provider spaces during ordinary operation. Side-by-side provider comparison is an explicit proof workflow, not daemon behavior.
+The embedding worker drains `embed-message` jobs; the index repair worker drains `index-session` jobs into LanceDB. The cache namespace and vector table are profile-scoped. Quasar does not intentionally embed one message into multiple provider spaces during ordinary operation. Side-by-side provider comparison is an explicit proof workflow, not daemon behavior.
 
 ## Maintenance
 
@@ -179,7 +201,7 @@ This writes `./quasar-truth-backup.tar` with:
 - `quasar.sqlite`, produced by SQLite `VACUUM INTO` so the snapshot is coherent while the server is running,
 - `machine.json`, so provider session IDs remain stable after restore.
 
-It intentionally does **not** archive `search.lance` by default. LanceDB is derived from SQLite message/search state and is rebuilt with `sync-tick` plus `maintain`; backing up it by default turns a truth backup into a slow multi-GB derived-index copy.
+It intentionally does **not** archive `search.lance` by default. LanceDB is derived from SQLite message/search state and is rebuilt with `sync-tick`, server workers, and `maintain`; backing up it by default turns a truth backup into a slow multi-GB derived-index copy.
 
 Restore is intentionally manual because it replaces the truth store:
 

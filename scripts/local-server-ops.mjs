@@ -24,7 +24,7 @@ const usage = {
     lance: "inspect all LanceDB tables and indexes directly inside the container",
     exec: "run a command inside the container after --",
     ingest: "run local-server ingest inside the container",
-    syncTick: "cheap incremental tick: ingest all, reconcile freshness, repair index jobs",
+    syncTick: "cheap incremental tick: bounded ingest; workers drain queued work",
     maintain: "run LanceDB maintenance inside the container, not through HTTP",
     backup: "write ./quasar-truth-backup.tar with SQLite truth and machine identity",
   },
@@ -92,10 +92,7 @@ switch (command) {
     sh([
       "set -eu",
       "cd /app",
-      "bun packages/local-server/src/cli.ts ingest --provider all",
-      "bun packages/local-server/src/cli.ts freshness --limit ${QUASAR_SYNC_FRESHNESS_LIMIT:-500}",
-      "bun packages/local-server/src/cli.ts repair-index --limit ${QUASAR_SYNC_REPAIR_LIMIT:-500}",
-      "bun packages/local-server/src/cli.ts stats --server http://127.0.0.1:${QUASAR_LOCAL_PORT:-6180}",
+      "bun packages/local-server/src/cli.ts ingest --provider all --limit ${QUASAR_SYNC_INGEST_LIMIT:-50}",
     ].join("\n"));
     break;
   case "maintain":
