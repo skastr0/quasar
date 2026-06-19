@@ -1,225 +1,215 @@
-# Quasar local-server Docker + Tailscale runbook
+# Quasar local-server runbook
 
-Quasar's active production path is the Effect local server:
+This is the operational path for Quasar on the Mac mini.
 
-- SQLite stores OLTP truth: projects, sessions, messages, tool calls, ingest runs, queue jobs, embedding cache.
-- LanceDB stores derived search rows and indexes under `search.lance`.
-- Docker owns process restart, data volume persistence, and container logs on the Mac mini.
-- Tailscale access is by the Mac mini's Tailscale IP first. MagicDNS is optional proof, never assumed.
+- Docker supervises the Effect local server.
+- SQLite in `/data/quasar/quasar.sqlite` is OLTP truth.
+- LanceDB in `/data/quasar/search.lance` is derived search state.
+- Access is by direct Tailscale IP first, e.g. `http://100.96.152.41:6180`.
+- `platform/local-server/.env` is local-only and must not be committed.
 
-## Files
-
-- `platform/local-server/Dockerfile`
-- `platform/local-server/compose.yaml`
-- `platform/local-server/.env.example`
-
-Copy the env template before first boot:
+## One-time setup
 
 ```bash
 cp platform/local-server/.env.example platform/local-server/.env
 chmod 600 platform/local-server/.env
 ```
 
-Fill in:
+Set at least:
 
-- `GOOGLE_GENERATIVE_AI_API_KEY`
-- `QUASAR_*_ROOT` host paths for the agent histories on that Mac
-- `QUASAR_PUBLISH_HOST`
+- `QUASAR_PUBLISH_HOST=0.0.0.0` unless Docker can bind the Tailscale IP directly.
+- `QUASAR_LOCAL_PORT=6180`.
+- `QUASAR_*_ROOT` paths for each local history source.
+- `QUASAR_EMBEDDING_PROVIDER=synthetic` and Synthetic/Nomic profile values for bulk text embeddings.
+- `SYNTHETIC_API_KEY` in the environment or the invoking shell. `scripts/local-server-ops.mjs deploy` will also read it from the Mac mini interactive zsh environment when it is not already exported.
 
-## Tailscale networking decision
+Keep `QUASAR_HOME=/data/quasar` pinned in compose. That preserves Quasar's machine identity and idempotency across container rebuilds.
 
-Preferred client URL:
+## Daily commands
 
-```text
-http://<mac-mini-tailscale-ip>:6180
-```
-
-Find the IP on the Mac mini:
+Use package scripts from the repo root:
 
 ```bash
-tailscale ip -4
+bun run local-server:deploy      # build/recreate service after code/env changes
+bun run local-server:ps          # compose service state
+bun run local-server:logs        # follow logs
+bun run local-server:health      # lightweight health check
+bun run local-server:status      # SQLite/queue/cache status
+bun run local-server:lance       # direct LanceDB table/index inventory
+bun run local-server:ingest      # run full provider ingest inside the container
+bun run local-server:sync-tick   # cheap incremental tick for cron/launchd
+bun run local-server:maintain    # LanceDB indexes/optimize inside container
+bun run local-server:backup      # write ./quasar-data-backup.tgz
 ```
 
-Docker publishes the container port to the Mac mini host. In `platform/local-server/.env`:
+Raw helper form:
+
+```bash
+bun scripts/local-server-ops.mjs status --lance
+bun scripts/local-server-ops.mjs lance
+bun scripts/local-server-ops.mjs ingest --provider claude --limit 50
+bun scripts/local-server-ops.mjs exec -- sh -lc 'du -sh /data/quasar/*'
+```
+
+## Deploy / update flow
+
+1. Pull or checkout the desired code.
+2. Run validation when code changed:
+
+   ```bash
+   bun run typecheck
+   bun run --cwd packages/local-server test
+   ```
+
+3. Rebuild/recreate Docker:
+
+   ```bash
+   bun run local-server:deploy
+   ```
+
+4. Verify:
+
+   ```bash
+   bun run local-server:ps
+   bun run local-server:health
+   bun run local-server:status
+   bun run local-server:lance
+   ```
+
+5. From another Tailnet client, verify direct Tailscale IP access:
+
+   ```bash
+   curl -fsS http://100.96.152.41:6180/health
+   curl -fsS http://100.96.152.41:6180/status
+   ```
+
+Do not make MagicDNS the proof boundary. It can work, but the known-good operator URL is the Mac mini Tailscale IP.
+
+## Incremental sync story
+
+Keep this simple:
+
+1. Docker keeps the server and enabled background workers alive.
+2. A host scheduler periodically runs one cheap sync tick:
+
+   ```bash
+   cd /Users/guilhermecastro/Projects/quasar
+   bun run local-server:sync-tick
+   ```
+
+3. The sync tick runs inside the container against the mounted read-only history roots:
+   - `ingest --provider all`
+   - `freshness --limit ${QUASAR_SYNC_FRESHNESS_LIMIT:-500}`
+   - `repair-index --limit ${QUASAR_SYNC_REPAIR_LIMIT:-500}`
+   - `stats` for a compact receipt
+
+4. Embedding is not a cron shell loop. The server-owned embedding worker leases queued `embed-message` jobs, batches provider calls, uses the cache, and backs off on retryable provider limits.
+
+Recommended schedule:
+
+- every 15 minutes: `bun run local-server:sync-tick`
+- daily or after large ingests: `bun run local-server:maintain`
+- before risky changes: `bun run local-server:backup`
+
+Launchd/cron should call only the package script; it should not inline Docker commands or provider logic. Example cron entry:
+
+```cron
+*/15 * * * * cd /Users/guilhermecastro/Projects/quasar && /opt/homebrew/bin/bun run local-server:sync-tick >> logs/local-server-sync.log 2>&1
+```
+
+## Worker policy
+
+Use one active embedding profile per running server process. For the Mac mini default:
 
 ```env
-QUASAR_PUBLISH_HOST=0.0.0.0
-QUASAR_LOCAL_PORT=6180
-```
-
-If Docker Desktop can bind the Tailscale interface directly, use the Tailscale IP as `QUASAR_PUBLISH_HOST`. If it cannot, keep `0.0.0.0` and restrict reachability with Tailscale ACLs and macOS firewall rules. Do not rely on MagicDNS for the production proof; test it only after IP access works.
-
-The compose file pins `QUASAR_HOME=/data/quasar` inside the container. This is
-required for ingest idempotency because provider session IDs include Quasar's
-machine identity; if machine identity lives in the disposable container root,
-container recreation can make the same source corpus look like a new machine's
-sessions.
-
-Remote proof from the MacBook:
-
-```bash
-curl -fsS http://<mac-mini-tailscale-ip>:6180/health
-curl -fsS http://<mac-mini-tailscale-ip>:6180/status
-```
-
-Optional MagicDNS proof:
-
-```bash
-curl -fsS http://<mac-mini-magicdns-name>:6180/health
-```
-
-## Start / stop / restart
-
-From repo root on the Mac mini:
-
-```bash
-docker compose --env-file platform/local-server/.env -f platform/local-server/compose.yaml up -d --build
-docker compose --env-file platform/local-server/.env -f platform/local-server/compose.yaml ps
-docker compose --env-file platform/local-server/.env -f platform/local-server/compose.yaml logs -f --tail=200 local-server
-```
-
-Stop:
-
-```bash
-docker compose --env-file platform/local-server/.env -f platform/local-server/compose.yaml down
-```
-
-Restart after code/env changes:
-
-```bash
-docker compose --env-file platform/local-server/.env -f platform/local-server/compose.yaml up -d --build --force-recreate
-```
-
-## First boot sequence
-
-Keep background workers disabled at first:
-
-```env
-QUASAR_WORKERS_ENABLED=false
-QUASAR_EMBEDDING_WORKER_ENABLED=false
-QUASAR_INDEX_REPAIR_WORKER_ENABLED=false
-QUASAR_FRESHNESS_WORKER_ENABLED=false
-QUASAR_MAINTENANCE_WORKER_ENABLED=false
-```
-
-Then verify manually:
-
-```bash
-curl -fsS http://127.0.0.1:6180/health
-curl -fsS http://127.0.0.1:6180/status
-docker compose --env-file platform/local-server/.env -f platform/local-server/compose.yaml exec local-server \
-  bun run --cwd packages/local-server src/cli.ts worker-tick
-```
-
-`/status` is intentionally lightweight by default; pass `?lance=true` only when you need LanceDB table stats, because fragmented Lance tables can make that scan slow during a full drain.
-
-Enable only the lanes needed for the current operation. During a large embedding drain, run the embedding worker alone so maintenance and freshness scans do not compete with provider throughput:
-
-```env
-QUASAR_WORKERS_ENABLED=false
+QUASAR_EMBEDDING_PROVIDER=synthetic
+QUASAR_EMBEDDING_MODEL=hf:nomic-ai/nomic-embed-text-v1.5
+QUASAR_EMBEDDING_DIMENSIONS=768
+QUASAR_EMBEDDING_TASK=search_document
+QUASAR_EMBEDDING_DOCUMENT_PREFIX="search_document: "
+QUASAR_EMBEDDING_QUERY_PREFIX="search_query: "
 QUASAR_EMBEDDING_WORKER_ENABLED=true
 QUASAR_INDEX_REPAIR_WORKER_ENABLED=false
 QUASAR_FRESHNESS_WORKER_ENABLED=false
 QUASAR_MAINTENANCE_WORKER_ENABLED=false
-QUASAR_EMBEDDING_WORKER_LIMIT=1000
-QUASAR_EMBEDDING_JOB_MAX_ATTEMPTS=12
-QUASAR_EMBEDDING_API_BATCH_SIZE=100
-QUASAR_EMBEDDING_API_CONCURRENCY=4
-QUASAR_WORKER_LEASE_MS=600000
-QUASAR_WORKER_BUSY_INTERVAL_MS=100
-QUASAR_EMBEDDING_RETRY_BASE_MS=30000
-QUASAR_EMBEDDING_RETRY_MAX_MS=600000
 ```
 
-The server leases ready embedding jobs continuously, uses the embedding cache before calling the provider, and retries retryable provider failures with exponential backoff. This replaces long-lived shell loops; `embed-batch` remains an operator/debug tool.
+The cache namespace and vector table are profile-scoped. Quasar does not intentionally embed one message into multiple provider spaces during ordinary operation. Side-by-side provider comparison is an explicit proof workflow, not daemon behavior.
 
-## Ingest and search operations
+## Maintenance
 
-Run read/search commands against the server from any Tailscale client:
+LanceDB maintenance is the derived-store hygiene pass:
+
+- ensure lexical FTS index exists on the shared `messages` table,
+- ensure vector index exists on the active profile table,
+- optimize/compact fragments,
+- report row/index/fragment stats.
+
+Run it inside the container:
 
 ```bash
-export QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180
-bun run --cwd packages/local-server src/cli.ts stats --server "$QUASAR_LOCAL_SERVER_URL"
-bun run --cwd packages/local-server src/cli.ts search --server "$QUASAR_LOCAL_SERVER_URL" --mode lexical --query "project identity"
+bun run local-server:maintain
 ```
 
-Run ingest inside the container so mounted history paths are consistent:
+Avoid the HTTP maintenance endpoint for long optimize runs. HTTP is fine for small inspection and repair endpoints, but optimize can outlive request lifetimes while the server itself remains healthy.
+
+Healthy proof shape:
+
+- active profile vector table has `vector_idx` and `text_idx`,
+- `numUnindexedRows` is `0`,
+- lexical `messages` table has `text_idx`,
+- queue has `0` failed jobs unless investigating a provider outage.
+
+Inspect with:
 
 ```bash
-docker compose --env-file platform/local-server/.env -f platform/local-server/compose.yaml exec local-server \
-  bun run --cwd packages/local-server src/cli.ts ingest --provider all
-```
-
-## Embedding profile safety
-
-Normal runtime has exactly one active semantic embedding profile, selected by the
-`QUASAR_EMBEDDING_*` environment variables at process start. Ingest enqueues
-semantic jobs only for that active profile. Quasar does not fan out one message to
-multiple providers, and workers fail closed if a queued embedding job belongs to a
-different profile than the running process.
-
-The embedding profile is part of both cost and vector-space identity:
-
-- queue idempotency: `embed-message:<profile-cache-namespace>:<content-hash>`
-- cache key: `(profile-cache-namespace, content_hash)`
-- vector table: the active profile table, while lexical/FTS rows stay shared
-
-This means reruns for the same profile/text use the cache and do not call the
-embedding API again. Side-by-side Gemini/Nomic comparison is an explicit proof
-operation: switch the active profile deliberately, rebuild that profile's index,
-and compare result artifacts. It is not daemon-default behavior.
-
-Maintenance proof:
-
-```bash
-docker compose --env-file platform/local-server/.env -f platform/local-server/compose.yaml exec local-server \
-  bun run --cwd packages/local-server src/cli.ts freshness --limit 500
-
-docker compose --env-file platform/local-server/.env -f platform/local-server/compose.yaml exec local-server \
-  bun run --cwd packages/local-server src/cli.ts maintain --vector true --optimize true
+bun run local-server:lance
 ```
 
 ## Backup / restore
 
-SQLite and LanceDB live in the `quasar-data` Docker volume at `/data/quasar`. Logs are read through Docker's logging driver:
-
-```bash
-docker compose --env-file platform/local-server/.env -f platform/local-server/compose.yaml logs --tail=500 local-server
-```
-
 Backup:
 
 ```bash
-docker compose --env-file platform/local-server/.env -f platform/local-server/compose.yaml exec local-server \
-  tar -czf /tmp/quasar-data-backup.tgz -C /data quasar
-
-docker cp "$(docker compose --env-file platform/local-server/.env -f platform/local-server/compose.yaml ps -q local-server)":/tmp/quasar-data-backup.tgz ./quasar-data-backup.tgz
+bun run local-server:backup
 ```
 
-Restore into a stopped service:
+This writes `./quasar-data-backup.tgz` from `/data/quasar` inside the container.
+
+Restore is intentionally manual because it replaces the truth store:
 
 ```bash
-docker compose --env-file platform/local-server/.env -f platform/local-server/compose.yaml down
+bun run local-server:down
 docker volume rm quasar-local-server_quasar-data
-docker compose --env-file platform/local-server/.env -f platform/local-server/compose.yaml up -d --no-start
-docker cp ./quasar-data-backup.tgz "$(docker compose --env-file platform/local-server/.env -f platform/local-server/compose.yaml ps -aq local-server)":/tmp/quasar-data-backup.tgz
-docker compose --env-file platform/local-server/.env -f platform/local-server/compose.yaml start local-server
-docker compose --env-file platform/local-server/.env -f platform/local-server/compose.yaml exec local-server \
-  sh -lc 'rm -rf /data/quasar && tar -xzf /tmp/quasar-data-backup.tgz -C /data'
-docker compose --env-file platform/local-server/.env -f platform/local-server/compose.yaml restart local-server
+bun run local-server:up
+bun scripts/local-server-ops.mjs exec -- sh -lc 'rm -rf /data/quasar'
+docker compose --env-file platform/local-server/.env -f platform/local-server/compose.yaml cp ./quasar-data-backup.tgz local-server:/tmp/quasar-data-backup.tgz
+bun scripts/local-server-ops.mjs exec -- sh -lc 'tar -xzf /tmp/quasar-data-backup.tgz -C /data'
+bun run local-server:restart
 ```
 
-## Launchd cutover
+## Troubleshooting checklist
 
-Docker replaces launchd as the local-server supervisor. During cutover:
+1. `bun run local-server:ps` — container running and healthy?
+2. `bun run local-server:logs` — crash loop, provider errors, SQLite/LanceDB errors?
+3. `bun run local-server:status` — queue pending/leased/failed counts?
+4. `bun run local-server:lance` — all LanceDB tables, indexes, and unindexed rows?
+5. `bun scripts/local-server-ops.mjs exec -- sh -lc 'du -sh /data/quasar/*'` — disk growth sane?
+6. If jobs are leased forever after a crash, run:
 
-1. Park old Quasar Convex with
-   [the non-destructive parking procedure](park-quasar-convex.md). This targets
-   `com.quasar.convex-local-backend` and the `platform/convex` compose project
-   only; leave Tower/Booth siblings alone.
-2. Start Docker compose with workers disabled.
-3. Prove `/health`, `/status`, and a manual `worker-tick`.
-4. Enable only the worker lane needed for the current operation and recreate the container. For embedding drains, prefer `QUASAR_EMBEDDING_WORKER_ENABLED=true` with the other lanes disabled until the queue is empty.
-5. Leave old Convex code and data on disk, but do not route active Quasar clients to it.
+   ```bash
+   bun scripts/local-server-ops.mjs exec -- sh -lc 'cd /app && bun packages/local-server/src/cli.ts recover-leases'
+   ```
 
-Do not delete historical data during QSR-107. The production proof glyph owns wipe/re-ingest decisions.
+7. If search misses fresh sessions, run:
+
+   ```bash
+   bun run local-server:sync-tick
+   bun run local-server:maintain
+   ```
+
+## Production proof artifacts
+
+- `docs/proofs/local-server-production-proof-2026-06-19.md`
+- `docs/proofs/embedding-retrieval-comparison-2026-06-19.md`
+- `docs/proofs/embedding-retrieval-comparison-2026-06-19.json`
