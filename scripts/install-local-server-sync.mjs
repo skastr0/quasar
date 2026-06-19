@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 
@@ -13,11 +13,15 @@ const launchAgentsDir = resolve(home, "Library/LaunchAgents");
 const plistPath = resolve(launchAgentsDir, `${label}.plist`);
 const logsDir = resolve(repoRoot, "logs");
 const lockDir = resolve(logsDir, "local-server-sync.lock");
+const lockInfoPath = resolve(lockDir, "info.json");
 const bunBin = process.env.QUASAR_BUN_BIN ?? (process.versions.bun ? process.execPath : spawnOutput("which", ["bun"]));
 const intervalSeconds = Number(process.env.QUASAR_LOCAL_SERVER_SYNC_INTERVAL_SECONDS ?? "900");
-const syncCommand = `lock=${shellQuote(lockDir)}; if mkdir "$lock" 2>/dev/null; then cleanup() { rmdir "$lock"; }; trap cleanup EXIT INT TERM; ${shellQuote(bunBin)} run local-server:sync-tick; code=$?; cleanup; trap - EXIT INT TERM; exit "$code"; else echo "quasar local-server sync already running; skipping"; fi`;
+const staleLockSeconds = Number(process.env.QUASAR_LOCAL_SERVER_SYNC_STALE_LOCK_SECONDS ?? "3600");
 
 switch (command) {
+  case "run":
+    runSyncTick();
+    break;
   case "install":
     requireFile(resolve(repoRoot, "platform/local-server/.env"), "copy platform/local-server/.env.example to platform/local-server/.env first");
     mkdirSync(launchAgentsDir, { recursive: true });
@@ -47,7 +51,7 @@ switch (command) {
     process.exit(result.status === 0 ? 0 : 1);
   }
   default:
-    print({ ok: false, error: `unknown command: ${command}`, commands: ["install", "uninstall", "status"] });
+    print({ ok: false, error: `unknown command: ${command}`, commands: ["install", "uninstall", "status", "run"] });
     process.exit(2);
 }
 
@@ -60,9 +64,9 @@ function plist() {
   <string>${label}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/sh</string>
-    <string>-lc</string>
-    <string>${xml(syncCommand)}</string>
+    <string>${xml(bunBin)}</string>
+    <string>${xml(resolve(repoRoot, "scripts/install-local-server-sync.mjs"))}</string>
+    <string>run</string>
   </array>
   <key>WorkingDirectory</key>
   <string>${xml(repoRoot)}</string>
@@ -88,6 +92,67 @@ function plist() {
 `;
 }
 
+function runSyncTick() {
+  mkdirSync(logsDir, { recursive: true });
+  const acquired = acquireLock();
+  if (!acquired) {
+    print({ ok: true, command, skipped: true, reason: "already_running", lockDir });
+    return;
+  }
+
+  const cleanup = () => {
+    rmSync(lockDir, { recursive: true, force: true });
+  };
+  process.once("exit", cleanup);
+  process.once("SIGINT", () => {
+    cleanup();
+    process.exit(130);
+  });
+  process.once("SIGTERM", () => {
+    cleanup();
+    process.exit(143);
+  });
+
+  const result = spawnSync(bunBin, ["run", "local-server:sync-tick"], {
+    cwd: repoRoot,
+    stdio: "inherit",
+    env: process.env,
+  });
+  cleanup();
+  process.exit(result.status ?? (result.signal === null ? 1 : 128));
+}
+
+function acquireLock() {
+  try {
+    mkdirSync(lockDir);
+    writeFileSync(lockInfoPath, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }, null, 2));
+    return true;
+  } catch {
+    if (isStaleLock()) {
+      rmSync(lockDir, { recursive: true, force: true });
+      try {
+        mkdirSync(lockDir);
+        writeFileSync(lockInfoPath, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), recoveredStaleLock: true }, null, 2));
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+}
+
+function isStaleLock() {
+  const maxAgeSeconds = Number.isInteger(staleLockSeconds) && staleLockSeconds > 0 ? staleLockSeconds : 3600;
+  try {
+    const info = JSON.parse(readFileSync(lockInfoPath, "utf8"));
+    const startedAt = Date.parse(info.startedAt);
+    return Number.isFinite(startedAt) && Date.now() - startedAt > maxAgeSeconds * 1000;
+  } catch {
+    return false;
+  }
+}
+
 function requireFile(path, message) {
   if (!existsSync(path)) throw new Error(`${message}: ${path}`);
 }
@@ -105,10 +170,6 @@ function spawnOutput(command, args) {
 
 function print(value) {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
-}
-
-function shellQuote(value) {
-  return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
 function xml(value) {

@@ -92,7 +92,7 @@ switch (command) {
     sh([
       "set -eu",
       "cd /app",
-      "bun packages/local-server/src/cli.ts ingest --provider all --limit ${QUASAR_SYNC_INGEST_LIMIT:-50}",
+      "QUASAR_WORKERS_ENABLED=false QUASAR_EMBEDDING_WORKER_ENABLED=false QUASAR_INDEX_REPAIR_WORKER_ENABLED=false QUASAR_FRESHNESS_WORKER_ENABLED=false QUASAR_MAINTENANCE_WORKER_ENABLED=false bun packages/local-server/src/cli.ts ingest --provider all --limit ${QUASAR_SYNC_INGEST_LIMIT:-50}",
     ].join("\n"));
     break;
   case "maintain":

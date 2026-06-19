@@ -5,7 +5,7 @@ This is the operational path for Quasar on the Mac mini.
 - Docker supervises the Effect local server.
 - SQLite in `/data/quasar/quasar.sqlite` is OLTP truth.
 - LanceDB in `/data/quasar/search.lance` is derived search state.
-- Access is by direct Tailscale IP first, e.g. `http://100.96.152.41:6180`.
+- Access is by direct Tailscale IP first, e.g. `http://<mac-mini-tailscale-ip>:6180`.
 - `platform/local-server/.env` is local-only and must not be committed.
 
 ## One-time setup
@@ -80,8 +80,8 @@ bun scripts/local-server-ops.mjs exec -- sh -lc 'du -sh /data/quasar/*'
 5. From another Tailnet client, verify direct Tailscale IP access:
 
    ```bash
-   curl -fsS http://100.96.152.41:6180/health
-   curl -fsS http://100.96.152.41:6180/status
+   curl -fsS http://<mac-mini-tailscale-ip>:6180/health
+   curl -fsS http://<mac-mini-tailscale-ip>:6180/status
    ```
 
 Do not make MagicDNS the proof boundary. It can work, but the known-good operator URL is the Mac mini Tailscale IP.
@@ -105,7 +105,7 @@ Keep this simple:
 
 5. Embedding is not a cron shell loop. The server-owned embedding worker leases queued `embed-message` jobs, batches provider calls, uses the cache, and backs off on retryable provider limits.
 
-The scheduled tick is deliberately bounded. Run `bun run local-server:ingest` manually for full all-provider scans after adding a new machine or doing a large backfill; do not make every 15-minute timer rescan the entire estate.
+The scheduled tick is deliberately bounded and disables one-shot workers in the CLI process; the long-running Docker service drains queued embedding and index jobs. Run `bun run local-server:ingest` manually for full all-provider scans after adding a new machine or doing a large backfill; do not make every 15-minute timer rescan the entire estate.
 
 Recommended schedule:
 
@@ -120,10 +120,10 @@ bun run local-server:sync-install
 bun run local-server:sync-status
 ```
 
-Override the interval before install if needed:
+Override the interval or stale-lock recovery window before install if needed:
 
 ```bash
-QUASAR_LOCAL_SERVER_SYNC_INTERVAL_SECONDS=1800 bun run local-server:sync-install
+QUASAR_LOCAL_SERVER_SYNC_INTERVAL_SECONDS=1800 QUASAR_LOCAL_SERVER_SYNC_STALE_LOCK_SECONDS=3600 bun run local-server:sync-install
 ```
 
 Uninstall:
@@ -132,10 +132,10 @@ Uninstall:
 bun run local-server:sync-uninstall
 ```
 
-Equivalent cron entry if launchd is not desired:
+Equivalent cron entry if launchd is not desired; replace the repo and Bun paths for the host:
 
 ```cron
-*/15 * * * * cd /Users/guilhermecastro/Projects/quasar && /opt/homebrew/bin/bun run local-server:sync-tick >> logs/local-server-sync.log 2>&1
+*/15 * * * * cd /path/to/quasar && /path/to/bun run local-server:sync-tick >> logs/local-server-sync.log 2>&1
 ```
 
 ## Worker policy
