@@ -171,11 +171,34 @@ const ingestProvider = (provider: Provider, options: IngestOptions): Effect.Effe
     const outcomes: SessionIngestOutcome[] = [];
     const failures: { sessionId: string; diagnostic: string; error: string }[] = [];
 
+    const shouldParseSession = options.force === true
+      ? undefined
+      : (probe: { readonly sessionId: string; readonly sourceFingerprint: string }) => {
+          const unchanged = Effect.runSync(
+            store.hasSessionFingerprint(probe.sessionId, probe.sourceFingerprint).pipe(
+              Effect.catchAll(() => Effect.succeed(false)),
+            ),
+          );
+          if (!unchanged) return true;
+          sessionsSeen += 1;
+          sessionsSkipped += 1;
+          outcomes.push({
+            sessionId: probe.sessionId,
+            status: "skipped",
+            diagnostic: "unchanged_source_fingerprint",
+            messagesWritten: 0,
+            toolCallsWritten: 0,
+            jobsEnqueued: 0,
+          });
+          return false;
+        };
+
     const stream = adapter.stream({
       machine: loadMachineIdentity(),
       now: new Date().toISOString(),
       roots: configuredRoots(),
       limit: options.limit,
+      shouldParseSession,
     });
 
     yield* Effect.promise(async () => {

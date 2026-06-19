@@ -120,16 +120,23 @@ const sessionWithLargeMessage = (): NormalizedSession => ({
   ],
 });
 
-const adapterFor = (sessions: readonly NormalizedSession[]): SessionAdapter => ({
+const fingerprintForSession = (item: NormalizedSession) => ({ tag: `fingerprint:${item.id}` });
+
+const adapterFor = (sessions: readonly NormalizedSession[], options: { readonly onParse?: (sessionId: string) => void } = {}): SessionAdapter => ({
   id: "fixture-adapter",
   provider: "unknown",
   displayName: "Fixture Adapter",
   stable: true,
   defaultRoot: () => undefined,
   read: async () => ({ sourceRoots: [], sessions: [...sessions], diagnostics: [] }),
-  stream: async function* () {
+  stream: async function* (discoverOptions) {
     for (const item of sessions) {
-      yield { type: "session" as const, session: item, fingerprint: { tag: `fingerprint:${item.id}` } };
+      const fingerprint = fingerprintForSession(item);
+      if (discoverOptions.shouldParseSession?.({ sessionId: item.id, sourceFingerprint: JSON.stringify(fingerprint) }) === false) {
+        continue;
+      }
+      options.onParse?.(item.id);
+      yield { type: "session" as const, session: item, fingerprint };
     }
   },
 });
@@ -292,6 +299,81 @@ describe("ingest", () => {
     expect(second[0]?.sessionsSkipped).toBe(1);
     expect(second[0]?.outcomes[0]?.status).toBe("skipped");
     expect(second[0]?.outcomes[0]?.diagnostic).toBe("unchanged_source_fingerprint");
+  });
+
+  test("skips unchanged sessions before adapter parse work", async () => {
+    const path = sqlitePath();
+    const parsed: string[] = [];
+    adaptersByProvider.set("unknown", adapterFor([session()], { onParse: (sessionId) => parsed.push(sessionId) }));
+
+    const [first, second] = await withIngest(
+      path,
+      Effect.gen(function* () {
+        const first = yield* ingest({ provider: "unknown" });
+        const second = yield* ingest({ provider: "unknown" });
+        return [first, second] as const;
+      }),
+    );
+
+    expect(parsed).toEqual(["session-a"]);
+    expect(first[0]?.sessionsWritten).toBe(1);
+    expect(second[0]?.sessionsSeen).toBe(1);
+    expect(second[0]?.sessionsSkipped).toBe(1);
+    expect(second[0]?.sessionsWritten).toBe(0);
+  });
+
+  test("changed mutable sessions reingest and replace SQLite truth without duplicating rows", async () => {
+    const path = sqlitePath();
+    let current = session();
+    adaptersByProvider.set("unknown", {
+      ...adapterFor([]),
+      stream: async function* (discoverOptions) {
+        const fingerprint = { tag: `fingerprint:${current.id}:${current.events.length}` };
+        if (discoverOptions.shouldParseSession?.({ sessionId: current.id, sourceFingerprint: JSON.stringify(fingerprint) }) === false) return;
+        yield { type: "session" as const, session: current, fingerprint };
+      },
+    });
+
+    const [first, second, stats, messages, queueStats] = await withIngest(
+      path,
+      Effect.gen(function* () {
+        const first = yield* ingest({ provider: "unknown" });
+        current = {
+          ...current,
+          events: [
+            ...(current.events ?? []),
+            {
+              id: "session-a:event-3",
+              sessionId: "session-a",
+              sequence: 2,
+              timestamp: "2026-06-18T10:03:00.000Z",
+              machineId: "machine-a",
+              provider: "unknown",
+              agentName: "test-agent",
+              projectIdentityKey: "project-a",
+              role: "assistant",
+              kind: "message",
+              contentText: "fresh appended assistant event",
+              contentBlocks: [],
+              rawReference: { sourcePath: "/history/session-a.jsonl" },
+            },
+          ],
+        };
+        const second = yield* ingest({ provider: "unknown" });
+        const store = yield* LocalStore;
+        const queue = yield* DurableQueue;
+        const stats = yield* store.stats;
+        const messages = yield* store.readMessages("session-a", 10);
+        const queueStats = yield* queue.stats;
+        return [first, second, stats, messages, queueStats] as const;
+      }),
+    );
+
+    expect(first[0]?.sessionsWritten).toBe(1);
+    expect(second[0]?.sessionsWritten).toBe(1);
+    expect(stats).toMatchObject({ projects: 1, sessions: 1, messages: 3, toolCalls: 1 });
+    expect(messages.map((message) => message.text)).toContain("fresh appended assistant event");
+    expect(queueStats.failed).toBe(0);
   });
 
   test("reports boundary diagnostics without writing failed sessions", async () => {

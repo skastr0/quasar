@@ -231,6 +231,45 @@ describe("Embeddings", () => {
     expect(queueStats).toEqual({ pending: 0, leased: 0, failed: 1 });
   });
 
+  test("stale jobs for superseded message hashes are acked as skipped", async () => {
+    let calls = 0;
+    const embedder: Embedder = {
+      embedMany: async () => {
+        calls += 1;
+        return [vector(0)];
+      },
+    };
+
+    const [report, queueStats] = await withEmbeddings(
+      embedder,
+      Effect.gen(function* () {
+        const store = yield* LocalStore;
+        const queue = yield* DurableQueue;
+        const embeddings = yield* Embeddings;
+        yield* store.upsertSession(mappedSession("old text"));
+        yield* enqueueEmbeddingJob(queue, 2);
+        yield* store.upsertSession({
+          ...mappedSession("new text"),
+          messages: [{
+            sessionId: "session-a",
+            seq: 1,
+            role: "user",
+            text: "new text",
+            projectKey: "project-a",
+            contentHash: "hash-b",
+          }],
+        });
+        const report = yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
+        const queueStats = yield* queue.stats;
+        return [report, queueStats] as const;
+      }),
+    );
+
+    expect(calls).toBe(0);
+    expect(report).toMatchObject({ leased: 1, cacheHits: 0, cacheMisses: 0, embedded: 0, skipped: 1, failed: 0 });
+    expect(queueStats).toEqual({ pending: 0, leased: 0, failed: 0 });
+  });
+
   test("synthetic rate-limit status is treated as retryable", async () => {
     const embedder: Embedder = {
       embedMany: async () => {
