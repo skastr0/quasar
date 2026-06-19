@@ -8,7 +8,7 @@ import { embeddingProfileSearchTable } from "./embeddingProfiles";
 import { ok } from "./json";
 import { SearchMaintenance } from "./maintenance";
 import { AppLayer } from "./runtime";
-import { DerivedSearch } from "./search";
+import { DerivedSearch, messageSearchFilter } from "./search";
 import { VECTOR_READY_FILTER } from "./searchPolicy";
 import { DurableQueue, Embeddings, IngestCoordinator, WorkerSupervisor } from "./services";
 import { LocalStore } from "./store";
@@ -111,6 +111,7 @@ const toolCalls = Effect.gen(function* () {
   const rows = yield* store.listToolCalls({
     sessionId: params.get("sessionId") ?? undefined,
     projectKey: params.get("projectKey") ?? undefined,
+    provider: params.get("provider") ?? undefined,
     toolName: params.get("toolName") ?? undefined,
     limit: positiveInt(params, "limit", 100),
     offset: positiveInt(params, "offset", 0),
@@ -161,15 +162,22 @@ const lexicalSearch = Effect.gen(function* () {
   const matches = yield* search.lexicalSearch({
     query: text,
     projectKey: params.get("projectKey") ?? undefined,
+    role: params.get("role") ?? undefined,
     limit: positiveInt(params, "limit", 10),
   });
   return json(ok("search/lexical", { matches }));
 });
 
-const vectorReadyFilter = (projectKey: string | null): string | undefined => {
-  const base = VECTOR_READY_FILTER;
-  if (projectKey === null || projectKey.trim() === "") return base;
-  return `${base} AND projectKey = '${projectKey.replaceAll("'", "''")}'`;
+const vectorReadyFilter = (params: URLSearchParams): string | undefined => {
+  const projectKey = params.get("projectKey");
+  const role = params.get("role");
+  return messageSearchFilter(
+    {
+      projectKey: projectKey === null || projectKey.trim() === "" ? undefined : projectKey,
+      role: role === null || role.trim() === "" ? undefined : role,
+    },
+    VECTOR_READY_FILTER,
+  );
 };
 
 const semanticSearch = Effect.gen(function* () {
@@ -187,7 +195,7 @@ const semanticSearch = Effect.gen(function* () {
     vector,
     vectorDimension: embeddings.profile.dimensions,
     limit: positiveInt(params, "limit", 10),
-    filter: vectorReadyFilter(params.get("projectKey")),
+    filter: vectorReadyFilter(params),
     select: MESSAGE_SEARCH_COLUMNS,
   });
   return json(ok("search/semantic", { matches }));
@@ -209,7 +217,7 @@ const fusionSearch = Effect.gen(function* () {
     vector,
     vectorDimension: embeddings.profile.dimensions,
     limit: positiveInt(params, "limit", 10),
-    filter: vectorReadyFilter(params.get("projectKey")),
+    filter: vectorReadyFilter(params),
     select: MESSAGE_SEARCH_COLUMNS,
   });
   return json(ok("search/fusion", { matches }));

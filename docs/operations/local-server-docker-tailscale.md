@@ -86,6 +86,39 @@ bun scripts/local-server-ops.mjs exec -- sh -lc 'du -sh /data/quasar/*'
 
 Do not make MagicDNS the proof boundary. It can work, but the known-good operator URL is the Mac mini Tailscale IP.
 
+## Agent / MCP serving contract
+
+Agent clients should treat the Docker local-server HTTP API as the canonical data
+plane and set the client wrapper environment to the Mac mini Tailscale IP:
+
+```bash
+export QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180
+```
+
+The local-server CLI mirrors the HTTP API and is safe to wrap as MCP tools. The
+serving surface is read/search only:
+
+| Agent job | CLI wrapper | HTTP route | Filters |
+| --- | --- | --- | --- |
+| Project list | `projects` | `GET /projects` | `limit`, `offset` |
+| Session list | `sessions` | `GET /sessions` | `projectKey`, `provider`, `limit`, `offset` |
+| Session read | `messages --session-id <id>` | `GET /messages` | `sessionId`, `limit` |
+| Search | `search --query <text> --mode lexical\|semantic\|fusion` | `GET /search/<mode>` | `q`/`query`, `projectKey`, `role=user\|assistant`, `limit` |
+| Tool-call list | `tool-calls` | `GET /tool-calls` | `sessionId`, `projectKey`, `provider`, `toolName`, `limit`, `offset` |
+| Tool-call read | `tool-call --id <id>` | `GET /tool-call` | `id` |
+
+Notes for wrappers:
+
+- Use `projectKey` at the HTTP layer and `--project-key` at the CLI layer.
+- `role` applies to indexed message search documents (`user`, `assistant`).
+  The current semantic corpus embeds `user` and `assistant` message rows; tool-call
+  input/output remains structural/lexical evidence, not semantic embeddings.
+- Operator-only commands: the serving layer must not expose ingest, embedding, maintenance, or backfill as
+  default agent tools. Those remain operator actions.
+- No MCP wrapper should talk to the old parked runtime. If a wrapper cannot reach
+  `QUASAR_LOCAL_SERVER_URL`, fail closed with a connection error instead of falling
+  back to stale data.
+
 ## Incremental sync story
 
 Keep this simple:

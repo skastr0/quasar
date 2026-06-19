@@ -8,8 +8,9 @@ import { Effect, Layer } from "effect";
 
 import type { MappedSession } from "../src/model";
 import { embeddingProfileFromEnv, embeddingProfileSearchTable } from "../src/embeddingProfiles";
-import { DerivedSearch, DerivedSearchLive } from "../src/search";
+import { DerivedSearch, DerivedSearchLive, messageSearchFilter } from "../src/search";
 import { LocalStore, makeLocalStoreLayer } from "../src/store";
+import { VECTOR_READY_FILTER } from "../src/searchPolicy";
 
 const tempDirs: string[] = [];
 
@@ -97,6 +98,15 @@ const withSearch = <A>(
 };
 
 describe("DerivedSearch", () => {
+  test("message search filters combine vector readiness with project and role filters", () => {
+    expect(messageSearchFilter({ projectKey: "project-a", role: "assistant" }, VECTOR_READY_FILTER)).toBe(
+      "contentHash NOT LIKE 'unembedded:%' AND projectKey = 'project-a' AND role = 'assistant'",
+    );
+    expect(messageSearchFilter({ projectKey: "project-'quoted", role: "user" })).toBe(
+      "projectKey = 'project-''quoted' AND role = 'user'",
+    );
+  });
+
   test("upserts SQLite-derived message rows and reports stats", async () => {
     const [report, stats] = await withSearch(
       Effect.gen(function* () {
@@ -177,6 +187,24 @@ describe("DerivedSearch", () => {
     );
 
     expect(hits.map((hit) => hit.row.text)).toEqual(["alpha terminal"]);
+  });
+
+  test("lexical search can filter by message role", async () => {
+    const [userHits, assistantHits] = await withSearch(
+      Effect.gen(function* () {
+        const store = yield* LocalStore;
+        const derived = yield* DerivedSearch;
+        yield* store.upsertSession(mappedSession([message(1, "shared memory token"), message(2, "shared memory token") ]));
+        yield* derived.indexSession("session-a");
+        yield* derived.createLexicalIndex;
+        const userHits = yield* derived.lexicalSearch({ query: "shared", role: "user", limit: 10 });
+        const assistantHits = yield* derived.lexicalSearch({ query: "shared", role: "assistant", limit: 10 });
+        return [userHits, assistantHits] as const;
+      }),
+    );
+
+    expect(userHits.map((hit) => hit.row.role)).toEqual(["user"]);
+    expect(assistantHits.map((hit) => hit.row.role)).toEqual(["assistant"]);
   });
 
   test("keeps lexical rows global while alternate profiles use their own vector table", async () => {
