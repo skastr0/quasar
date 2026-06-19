@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { LanceDb, makeLanceDbLayer } from "@skastr0/quasar-search";
 import { afterEach, describe, expect, test } from "bun:test";
 import { Effect, Layer } from "effect";
+import { createHash } from "node:crypto";
 
 import { embeddingProfileSearchTable, makeEmbeddingProfile, makeGeminiEmbeddingProfile, type EmbeddingProfile } from "../src/embeddingProfiles";
 import { makeEmbeddingsLayer, type Embedder } from "../src/embeddings";
@@ -30,6 +31,7 @@ afterEach(() => {
 
 const vector = (seed: number) => Array.from({ length: 1536 }, (_, index) => (index === seed ? 1 : 0));
 const vectorOf = (dimensions: number, seed: number) => Array.from({ length: dimensions }, (_, index) => (index === seed ? 1 : 0));
+const hashText = (text: string) => createHash("sha256").update(text).digest("hex");
 
 const mappedSession = (text = "alpha terminal"): MappedSession => ({
   project: { projectKey: "project-a", displayName: "Project A", rawPath: "/tmp/project-a" },
@@ -361,6 +363,88 @@ describe("Embeddings", () => {
       expect(cached?.vector[1]).toBe(0.5);
       expect(rows).toHaveLength(1);
       expect(rows[0]?.contentHash).toBe("hash-a");
+    } finally {
+      if (previousChunkSize === undefined) delete process.env.QUASAR_EMBEDDING_DOCUMENT_CHUNK_CHARS;
+      else process.env.QUASAR_EMBEDDING_DOCUMENT_CHUNK_CHARS = previousChunkSize;
+    }
+  });
+
+  test("large prefixed messages cache by full prefixed document identity", async () => {
+    const previousChunkSize = process.env.QUASAR_EMBEDDING_DOCUMENT_CHUNK_CHARS;
+    process.env.QUASAR_EMBEDDING_DOCUMENT_CHUNK_CHARS = "5";
+    const profile = makeEmbeddingProfile({
+      provider: "synthetic",
+      model: "hf:nomic-ai/nomic-embed-text-v1.5",
+      dimensions: 1536,
+      task: "search_document",
+      documentPrefix: "search_document: ",
+      queryPrefix: "search_query: ",
+    });
+    const seen: string[][] = [];
+    const embedder: Embedder = {
+      embedMany: async (values) => {
+        seen.push([...values]);
+        return values.map((_, index) => vector(index));
+      },
+    };
+
+    try {
+      const cached = await withEmbeddingsAt(
+        { sqlite: join(tempDir(), "quasar.sqlite"), lance: join(tempDir(), "search.lance") },
+        embedder,
+        profile,
+        Effect.gen(function* () {
+          const store = yield* LocalStore;
+          const queue = yield* DurableQueue;
+          const embeddings = yield* Embeddings;
+          yield* store.upsertSession(mappedSession("abcdefghij"));
+          yield* enqueueEmbeddingJob(queue, 2, profile.cacheNamespace);
+          yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
+          return yield* embeddings.getCached(hashText("search_document: abcdefghij"));
+        }),
+      );
+
+      expect(seen).toEqual([["search_document: abcde", "search_document: fghij"]]);
+      expect(cached?.vector[0]).toBe(0.5);
+      expect(cached?.vector[1]).toBe(0.5);
+    } finally {
+      if (previousChunkSize === undefined) delete process.env.QUASAR_EMBEDDING_DOCUMENT_CHUNK_CHARS;
+      else process.env.QUASAR_EMBEDDING_DOCUMENT_CHUNK_CHARS = previousChunkSize;
+    }
+  });
+
+  test("retryable failures inside one large message split document chunks", async () => {
+    const previousChunkSize = process.env.QUASAR_EMBEDDING_DOCUMENT_CHUNK_CHARS;
+    process.env.QUASAR_EMBEDDING_DOCUMENT_CHUNK_CHARS = "5";
+    const seen: string[][] = [];
+    const embedder: Embedder = {
+      embedMany: async (values) => {
+        seen.push([...values]);
+        if (values.length > 1) {
+          throw new SyntheticEmbeddingError({ operation: "synthetic.embeddings", message: "chunk batch overloaded", status: 500 });
+        }
+        return values.map((_, index) => vector(index));
+      },
+    };
+
+    try {
+      const [report, queueStats] = await withEmbeddings(
+        embedder,
+        Effect.gen(function* () {
+          const store = yield* LocalStore;
+          const queue = yield* DurableQueue;
+          const embeddings = yield* Embeddings;
+          yield* store.upsertSession(mappedSession("abcdefghij"));
+          yield* enqueueEmbeddingJob(queue, 2);
+          const report = yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
+          const queueStats = yield* queue.stats;
+          return [report, queueStats] as const;
+        }),
+      );
+
+      expect(seen).toEqual([["abcde", "fghij"], ["abcde"], ["fghij"]]);
+      expect(report).toMatchObject({ leased: 1, embedded: 1, retried: 0, failed: 0 });
+      expect(queueStats).toEqual({ pending: 0, leased: 0, failed: 0 });
     } finally {
       if (previousChunkSize === undefined) delete process.env.QUASAR_EMBEDDING_DOCUMENT_CHUNK_CHARS;
       else process.env.QUASAR_EMBEDDING_DOCUMENT_CHUNK_CHARS = previousChunkSize;
