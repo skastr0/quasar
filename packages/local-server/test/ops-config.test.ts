@@ -32,11 +32,14 @@ describe("local-server ops config", () => {
     expect(ops).toContain("@lancedb/lancedb");
     expect(ops).toContain("VACUUM INTO");
     expect(ops).toContain("quasar-truth-backup.tar");
+    expect(ops).toContain("QUASAR_WORKERS_ENABLED=false");
     expect(ops).toContain("bun packages/local-server/src/cli.ts ingest --provider all --limit ${QUASAR_SYNC_INGEST_LIMIT:-50}");
     const sync = readFileSync(join(repoRoot, "scripts/install-local-server-sync.mjs"), "utf8");
     expect(sync).toContain("com.quasar.local-server-sync");
     expect(sync).toContain("StartInterval");
     expect(sync).toContain("local-server:sync-tick");
+    expect(sync).toContain("QUASAR_LOCAL_SERVER_SYNC_STALE_LOCK_SECONDS");
+    expect(sync).toContain("recoveredStaleLock");
     expect(sync).toContain("local-server-sync.lock");
     expect(runbook).toContain("every 15 minutes: `bun run local-server:sync-tick`");
     expect(runbook).toContain("bun run local-server:sync-install");
