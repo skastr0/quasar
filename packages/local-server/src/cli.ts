@@ -165,6 +165,7 @@ switch (command) {
     if (await fetchServer("tool-calls", "/tool-calls", {
       sessionId: arg("--session-id"),
       projectKey: arg("--project-key"),
+      provider: arg("--provider"),
       toolName: arg("--tool-name"),
       limit: arg("--limit"),
       offset: arg("--offset"),
@@ -176,11 +177,31 @@ switch (command) {
         const rows = yield* store.listToolCalls({
           sessionId: arg("--session-id"),
           projectKey: arg("--project-key"),
+          provider: arg("--provider"),
           toolName: arg("--tool-name"),
           limit: intArg("--limit", 100),
           offset: intArg("--offset", 0),
         });
         return { rows };
+      }),
+    );
+    break;
+  }
+  case "tool-call": {
+    const id = arg("--id");
+    if (id === undefined) {
+      writeJson(fail("tool-call", new Error("--id is required")));
+      process.exitCode = 1;
+      break;
+    }
+    if (await fetchServer("tool-call", "/tool-call", { id })) break;
+    await run(
+      "tool-call",
+      Effect.gen(function* () {
+        const store = yield* LocalStore;
+        const row = yield* store.getToolCall(id);
+        if (row === undefined) throw new Error(`tool call not found: ${id}`);
+        return { row };
       }),
     );
     break;
@@ -291,7 +312,7 @@ switch (command) {
   case "search": {
     const query = arg("--query") ?? arg("-q") ?? "";
     const mode = arg("--mode") ?? "lexical";
-    if (await fetchServer("search", `/search/${mode}`, { q: query, limit: arg("--limit"), projectKey: arg("--project-key") })) break;
+    if (await fetchServer("search", `/search/${mode}`, { q: query, limit: arg("--limit"), projectKey: arg("--project-key"), role: arg("--role") })) break;
     if (mode !== "lexical") {
       writeJson(fail("search", new Error("local CLI semantic/fusion search requires --server")));
       process.exitCode = 1;
@@ -304,6 +325,7 @@ switch (command) {
         const matches = yield* search.lexicalSearch({
           query,
           projectKey: arg("--project-key"),
+          role: arg("--role"),
           limit: intArg("--limit", 10),
         });
         return { matches };
@@ -321,7 +343,8 @@ switch (command) {
           "projects [--limit n] [--offset n]",
           "sessions [--provider name] [--project-key key] [--limit n] [--offset n]",
           "messages --session-id id [--limit n]",
-          "tool-calls [--session-id id] [--project-key key] [--tool-name name] [--limit n]",
+          "tool-calls [--session-id id] [--project-key key] [--provider name] [--tool-name name] [--limit n] [--offset n]",
+          "tool-call --id id",
           "ingest-runs [--status running|completed|failed] [--limit n]",
           "maintain [--vector true|false] [--optimize true|false] [--server url]",
           "freshness [--limit n] [--server url]",
@@ -330,7 +353,7 @@ switch (command) {
           "worker-tick",
           "embed-batch [--limit n] [--lease-ms n] [--worker-id id]",
           "recover-leases [--now iso]",
-          "search --query text [--mode lexical|semantic|fusion] [--project-key key] [--limit n] [--server url]",
+          "search --query text [--mode lexical|semantic|fusion] [--project-key key] [--role user|assistant] [--limit n] [--server url]",
           "stats",
         ],
         env: {

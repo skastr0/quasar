@@ -51,4 +51,18 @@ describe("local-server ops config", () => {
     expect(runbook).toContain("bun run local-server:lance");
     expect(runbook).toContain("does **not** archive `search.lance` by default");
   });
+
+  test("runbook documents the agent-facing local-server tool contract", () => {
+    const cli = readFileSync(join(repoRoot, "packages/local-server/src/cli.ts"), "utf8");
+    const runbook = readFileSync(join(repoRoot, "docs/operations/local-server-docker-tailscale.md"), "utf8");
+
+    expect(cli).toContain("tool-calls [--session-id id] [--project-key key] [--provider name] [--tool-name name] [--limit n] [--offset n]");
+    expect(cli).toContain("tool-call --id id");
+    expect(cli).toContain("[--role user|assistant]");
+    expect(runbook).toContain("Agent / MCP serving contract");
+    expect(runbook).toContain("GET /search/<mode>");
+    expect(runbook).toContain("projectKey`, `role=user\\|assistant`, `limit");
+    expect(runbook).toContain("sessionId`, `projectKey`, `provider`, `toolName`, `limit`, `offset");
+    expect(runbook).toContain("Operator-only commands");
+  });
 });

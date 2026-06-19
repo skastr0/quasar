@@ -175,21 +175,25 @@ describe("LocalStore", () => {
     expect(row?.text).toBe("First message");
   });
 
-  test("looks up tool calls by session and by project/tool", async () => {
+  test("looks up tool calls by session, provider, and project/tool", async () => {
     const path = sqlitePath();
-    const [bySession, byProjectTool] = await withStore(
+    const [bySession, byProvider, byWrongProvider, byProjectTool] = await withStore(
       path,
       (store) =>
         Effect.gen(function* () {
           yield* store.upsertSession(mappedSession());
-          yield* store.upsertSession(mappedSession({ sessionId: "session-b", projectKey: "project-b" }));
+          yield* store.upsertSession(mappedSession({ sessionId: "session-b", projectKey: "project-b", provider: "grok" }));
           const bySession = yield* store.listToolCalls({ sessionId: "session-a", limit: 10 });
+          const byProvider = yield* store.listToolCalls({ provider: "codex", limit: 10 });
+          const byWrongProvider = yield* store.listToolCalls({ provider: "claude", limit: 10 });
           const byProjectTool = yield* store.listToolCalls({ projectKey: "project-a", toolName: "shell_command", limit: 10 });
-          return [bySession, byProjectTool] as const;
+          return [bySession, byProvider, byWrongProvider, byProjectTool] as const;
         }),
     );
 
     expect(bySession.map((toolCall) => toolCall.seq)).toEqual([3, 4]);
+    expect(byProvider.map((toolCall) => toolCall.provider)).toEqual(["codex", "codex"]);
+    expect(byWrongProvider).toEqual([]);
     expect(byProjectTool).toHaveLength(1);
     expect(byProjectTool[0]?.sessionId).toBe("session-a");
     expect(byProjectTool[0]?.toolName).toBe("shell_command");

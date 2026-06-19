@@ -49,12 +49,21 @@ const mappedSession = (): MappedSession => ({
       projectKey: "project-http",
       contentHash: "hash-http-1",
     },
+    {
+      sessionId: "session-http",
+      seq: 2,
+      role: "assistant",
+      text: "assistant-only http memory",
+      ts: "2026-06-18T10:00:35.000Z",
+      projectKey: "project-http",
+      contentHash: "hash-http-2",
+    },
   ],
   toolCalls: [
     {
       id: "tool-http",
       sessionId: "session-http",
-      seq: 2,
+      seq: 3,
       toolName: "shell_command",
       status: "ok",
       inputText: "echo http",
@@ -122,17 +131,26 @@ describe("HTTP server", () => {
 
     try {
       await waitFor(`http://127.0.0.1:${port}/health`);
-      const [projects, messages, toolCall, search] = await Promise.all([
+      const [projects, messages, toolCalls, wrongProviderToolCalls, toolCall, missingToolCallId, search, roleSearch] = await Promise.all([
         fetch(`http://127.0.0.1:${port}/projects`).then((response) => response.json()),
         fetch(`http://127.0.0.1:${port}/messages?sessionId=session-http`).then((response) => response.json()),
+        fetch(`http://127.0.0.1:${port}/tool-calls?provider=codex&toolName=shell_command`).then((response) => response.json()),
+        fetch(`http://127.0.0.1:${port}/tool-calls?provider=grok&toolName=shell_command`).then((response) => response.json()),
         fetch(`http://127.0.0.1:${port}/tool-call?id=tool-http`).then((response) => response.json()),
+        fetch(`http://127.0.0.1:${port}/tool-call`).then((response) => response.json()),
         fetch(`http://127.0.0.1:${port}/search/lexical?q=hello`).then((response) => response.json()),
+        fetch(`http://127.0.0.1:${port}/search/lexical?q=http&role=assistant`).then((response) => response.json()),
       ]);
 
       expect(projects.data.rows.map((row: { projectKey: string }) => row.projectKey)).toEqual(["project-http"]);
-      expect(messages.data.rows.map((row: { text: string }) => row.text)).toEqual(["hello over http"]);
+      expect(messages.data.rows.map((row: { text: string }) => row.text)).toEqual(["hello over http", "assistant-only http memory"]);
+      expect(toolCalls.data.rows.map((row: { id: string }) => row.id)).toEqual(["tool-http"]);
+      expect(wrongProviderToolCalls.data.rows).toEqual([]);
       expect(toolCall.data.row.toolName).toBe("shell_command");
+      expect(missingToolCallId.ok).toBe(false);
+      expect(missingToolCallId.error.type).toBe("BadRequest");
       expect(search.data.matches.map((hit: { row: { text: string } }) => hit.row.text)).toEqual(["hello over http"]);
+      expect(roleSearch.data.matches.map((hit: { row: { text: string } }) => hit.row.text)).toEqual(["assistant-only http memory"]);
     } finally {
       proc.kill();
       await proc.exited;

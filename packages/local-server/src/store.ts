@@ -44,6 +44,7 @@ export interface LocalStoreService {
   readonly listToolCalls: (options: {
     readonly sessionId?: string;
     readonly projectKey?: string;
+    readonly provider?: string;
     readonly toolName?: string;
     readonly limit: number;
     readonly offset?: number;
@@ -290,7 +291,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                 .query("SELECT session_id AS sessionId, seq, role, text, ts, project_key AS projectKey, content_hash AS contentHash FROM messages WHERE session_id = ? ORDER BY seq ASC LIMIT ?")
                 .all(sessionId, limit) as MessageRow[],
             ),
-          listToolCalls: ({ sessionId, projectKey, toolName, limit, offset = 0 }) =>
+          listToolCalls: ({ sessionId, projectKey, provider, toolName, limit, offset = 0 }) =>
             trySqlite("listToolCalls", () => {
               const filters: string[] = [];
               const args: Array<string | number> = [];
@@ -301,6 +302,10 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               if (projectKey !== undefined) {
                 filters.push("project_key = ?");
                 args.push(projectKey);
+              }
+              if (provider !== undefined) {
+                filters.push("provider = ?");
+                args.push(provider);
               }
               if (toolName !== undefined) {
                 filters.push("tool_name = ?");

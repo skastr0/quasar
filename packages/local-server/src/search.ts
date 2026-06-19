@@ -30,6 +30,7 @@ export interface DerivedSearchService {
   readonly lexicalSearch: (request: {
     readonly query: string;
     readonly projectKey?: string;
+    readonly role?: string;
     readonly limit?: number;
   }) => Effect.Effect<readonly SearchHit[], unknown>;
 }
@@ -39,8 +40,22 @@ export class DerivedSearch extends Context.Tag("@quasar/DerivedSearch")<
   DerivedSearchService
 >() {}
 
-const projectFilter = (projectKey: string | undefined): string | undefined =>
-  projectKey === undefined ? undefined : `projectKey = '${projectKey.replaceAll("'", "''")}'`;
+export const messageSearchFilter = (
+  options: { readonly projectKey?: string; readonly role?: string },
+  base?: string,
+): string | undefined => {
+  const filters: string[] = [];
+  if (base !== undefined && base.trim() !== "") {
+    filters.push(base);
+  }
+  if (options.projectKey !== undefined) {
+    filters.push(`projectKey = '${options.projectKey.replaceAll("'", "''")}'`);
+  }
+  if (options.role !== undefined) {
+    filters.push(`role = '${options.role.replaceAll("'", "''")}'`);
+  }
+  return filters.length === 0 ? undefined : filters.join(" AND ");
+};
 
 const keyFor = (message: Pick<MessageRow, "sessionId" | "seq" | "role">) =>
   `${message.sessionId}:${message.seq}:${message.role}`;
@@ -118,12 +133,12 @@ export const DerivedSearchLive = Layer.effect(
         vectorRowsFilter: VECTOR_READY_FILTER,
       }),
       stats: search.tableStats({ tableName: profileTable }),
-      lexicalSearch: ({ query, projectKey, limit }) =>
+      lexicalSearch: ({ query, projectKey, role, limit }) =>
         search.ftsSearch({
           tableName: LEXICAL_TABLE,
           query,
           limit,
-          filter: projectFilter(projectKey),
+          filter: messageSearchFilter({ projectKey, role }),
           select: MESSAGE_SEARCH_COLUMNS,
         }),
     });
