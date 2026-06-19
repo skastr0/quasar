@@ -23,13 +23,17 @@ describe("local-server ops config", () => {
     expect(pkg).toContain("local-server:sync-tick");
     expect(pkg).toContain("local-server:maintain");
     expect(pkg).toContain("local-server:lance");
+    expect(pkg).toContain("local-server:backup");
     expect(ops).toContain("case \"syncTick\"");
     expect(ops).toContain("case \"maintain\"");
     expect(ops).toContain("case \"lance\"");
     expect(ops).toContain("@lancedb/lancedb");
+    expect(ops).toContain("VACUUM INTO");
+    expect(ops).toContain("quasar-truth-backup.tar");
     expect(ops).toContain("bun packages/local-server/src/cli.ts ingest --provider all");
     expect(runbook).toContain("every 15 minutes: `bun run local-server:sync-tick`");
     expect(runbook).toContain("Avoid the HTTP maintenance endpoint for long optimize runs");
     expect(runbook).toContain("bun run local-server:lance");
+    expect(runbook).toContain("does **not** archive `search.lance` by default");
   });
 });
