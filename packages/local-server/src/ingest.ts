@@ -81,12 +81,20 @@ const fingerprintForItem = (item: {
 
 const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
+const positiveIntEnv = (name: string, fallback: number): number => {
+  const raw = process.env[name]?.trim();
+  if (raw === undefined || raw === "") return fallback;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+};
+
 const searchableMessages = (session: MappedSession): readonly MessageRow[] =>
   session.messages.filter(isSemanticSearchDocument);
 
 const enqueueDownstreamJobs = (queue: DurableQueueService, session: MappedSession): Effect.Effect<number, unknown> =>
   Effect.gen(function* () {
     const embeddingJobNamespace = embeddingProfileJobNamespace(embeddingProfileFromEnv());
+    const embeddingMaxAttempts = positiveIntEnv("QUASAR_EMBEDDING_JOB_MAX_ATTEMPTS", 12);
     const messages = searchableMessages(session);
     yield* queue.enqueue({
       kind: "index-session",
@@ -111,6 +119,7 @@ const enqueueDownstreamJobs = (queue: DurableQueueService, session: MappedSessio
             embeddingProfile: embeddingJobNamespace,
           },
           idempotencyKey: `embed-message:${embeddingJobNamespace}:${message.contentHash}`,
+          maxAttempts: embeddingMaxAttempts,
         }),
       { concurrency: 16 },
     );

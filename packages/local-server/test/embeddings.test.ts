@@ -243,12 +243,98 @@ describe("Embeddings", () => {
         const queue = yield* DurableQueue;
         const embeddings = yield* Embeddings;
         yield* store.upsertSession(mappedSession());
-        yield* enqueueEmbeddingJob(queue, 1);
+        yield* enqueueEmbeddingJob(queue, 2);
         return yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
       }),
     );
 
     expect(report).toMatchObject({ retried: 1, failed: 0 });
+  });
+
+  test("retryable provider failures fail after max attempts", async () => {
+    const embedder: Embedder = {
+      embedMany: async () => {
+        throw new SyntheticEmbeddingError({ operation: "synthetic.embeddings", message: "still overloaded", status: 500 });
+      },
+    };
+
+    const [first, second, queueStats] = await withEmbeddings(
+      embedder,
+      Effect.gen(function* () {
+        const store = yield* LocalStore;
+        const queue = yield* DurableQueue;
+        const embeddings = yield* Embeddings;
+        yield* store.upsertSession(mappedSession());
+        yield* enqueueEmbeddingJob(queue, 2);
+        const first = yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
+        const second = yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:01:00.000Z" });
+        const queueStats = yield* queue.stats;
+        return [first, second, queueStats] as const;
+      }),
+    );
+
+    expect(first).toMatchObject({ retried: 1, failed: 0 });
+    expect(second).toMatchObject({ retried: 0, failed: 1 });
+    expect(queueStats).toEqual({ pending: 0, leased: 0, failed: 1 });
+  });
+
+  test("short provider responses retry unacknowledged jobs", async () => {
+    const embedder: Embedder = { embedMany: async () => [] };
+
+    const [report, queueStats] = await withEmbeddings(
+      embedder,
+      Effect.gen(function* () {
+        const store = yield* LocalStore;
+        const queue = yield* DurableQueue;
+        const embeddings = yield* Embeddings;
+        yield* store.upsertSession(mappedSession());
+        yield* enqueueEmbeddingJob(queue, 2);
+        const report = yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
+        const queueStats = yield* queue.stats;
+        return [report, queueStats] as const;
+      }),
+    );
+
+    expect(report).toMatchObject({ embedded: 0, retried: 1, failed: 0 });
+    expect(queueStats).toEqual({ pending: 1, leased: 0, failed: 0 });
+  });
+
+  test("retryable provider failures use delayed exponential backoff", async () => {
+    const previousBase = process.env.QUASAR_EMBEDDING_RETRY_BASE_MS;
+    const previousMax = process.env.QUASAR_EMBEDDING_RETRY_MAX_MS;
+    process.env.QUASAR_EMBEDDING_RETRY_BASE_MS = "1000";
+    process.env.QUASAR_EMBEDDING_RETRY_MAX_MS = "1000";
+    try {
+      const embedder: Embedder = {
+        embedMany: async () => {
+          throw new SyntheticEmbeddingError({ operation: "synthetic.embeddings", message: "server overloaded", status: 500 });
+        },
+      };
+
+      const [first, tooEarly, ready] = await withEmbeddings(
+        embedder,
+        Effect.gen(function* () {
+          const store = yield* LocalStore;
+          const queue = yield* DurableQueue;
+          const embeddings = yield* Embeddings;
+          yield* store.upsertSession(mappedSession());
+          yield* enqueueEmbeddingJob(queue, 3);
+          const first = yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
+          const tooEarly = yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:00.500Z" });
+          const ready = yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:01.001Z" });
+          return [first, tooEarly, ready] as const;
+        }),
+      );
+
+      expect(first).toMatchObject({ leased: 1, retried: 1, failed: 0 });
+      expect(tooEarly).toMatchObject({ leased: 0, retried: 0, failed: 0 });
+      expect(ready).toMatchObject({ leased: 1, retried: 1, failed: 0 });
+    } finally {
+      if (previousBase === undefined) delete process.env.QUASAR_EMBEDDING_RETRY_BASE_MS;
+      else process.env.QUASAR_EMBEDDING_RETRY_BASE_MS = previousBase;
+      if (previousMax === undefined) delete process.env.QUASAR_EMBEDDING_RETRY_MAX_MS;
+      else process.env.QUASAR_EMBEDDING_RETRY_MAX_MS = previousMax;
+    }
   });
 
   test("idempotent rerun after cache write does not re-pay the provider", async () => {

@@ -161,6 +161,20 @@ describe("LocalStore", () => {
     expect(messages.map((message) => message.seq)).toEqual([1, 2]);
   });
 
+  test("gets one message by session, sequence, and content hash", async () => {
+    const path = sqlitePath();
+    const row = await withStore(
+      path,
+      (store) =>
+        Effect.gen(function* () {
+          yield* store.upsertSession(mappedSession());
+          return yield* store.getMessage({ sessionId: "session-a", seq: 1, contentHash: "hash-1" });
+        }),
+    );
+
+    expect(row?.text).toBe("First message");
+  });
+
   test("looks up tool calls by session and by project/tool", async () => {
     const path = sqlitePath();
     const [bySession, byProjectTool] = await withStore(

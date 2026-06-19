@@ -96,6 +96,10 @@ Keep background workers disabled at first:
 
 ```env
 QUASAR_WORKERS_ENABLED=false
+QUASAR_EMBEDDING_WORKER_ENABLED=false
+QUASAR_INDEX_REPAIR_WORKER_ENABLED=false
+QUASAR_FRESHNESS_WORKER_ENABLED=false
+QUASAR_MAINTENANCE_WORKER_ENABLED=false
 ```
 
 Then verify manually:
@@ -107,11 +111,27 @@ docker compose --env-file platform/local-server/.env -f platform/local-server/co
   bun run --cwd packages/local-server src/cli.ts worker-tick
 ```
 
-Enable workers only after `/status` shows the expected SQLite path, LanceDB path, and queue state:
+`/status` is intentionally lightweight by default; pass `?lance=true` only when you need LanceDB table stats, because fragmented Lance tables can make that scan slow during a full drain.
+
+Enable only the lanes needed for the current operation. During a large embedding drain, run the embedding worker alone so maintenance and freshness scans do not compete with provider throughput:
 
 ```env
-QUASAR_WORKERS_ENABLED=true
+QUASAR_WORKERS_ENABLED=false
+QUASAR_EMBEDDING_WORKER_ENABLED=true
+QUASAR_INDEX_REPAIR_WORKER_ENABLED=false
+QUASAR_FRESHNESS_WORKER_ENABLED=false
+QUASAR_MAINTENANCE_WORKER_ENABLED=false
+QUASAR_EMBEDDING_WORKER_LIMIT=1000
+QUASAR_EMBEDDING_JOB_MAX_ATTEMPTS=12
+QUASAR_EMBEDDING_API_BATCH_SIZE=100
+QUASAR_EMBEDDING_API_CONCURRENCY=4
+QUASAR_WORKER_LEASE_MS=600000
+QUASAR_WORKER_BUSY_INTERVAL_MS=100
+QUASAR_EMBEDDING_RETRY_BASE_MS=30000
+QUASAR_EMBEDDING_RETRY_MAX_MS=600000
 ```
+
+The server leases ready embedding jobs continuously, uses the embedding cache before calling the provider, and retries retryable provider failures with exponential backoff. This replaces long-lived shell loops; `embed-batch` remains an operator/debug tool.
 
 ## Ingest and search operations
 
@@ -199,7 +219,7 @@ Docker replaces launchd as the local-server supervisor. During cutover:
    only; leave Tower/Booth siblings alone.
 2. Start Docker compose with workers disabled.
 3. Prove `/health`, `/status`, and a manual `worker-tick`.
-4. Enable `QUASAR_WORKERS_ENABLED=true` and recreate the container.
+4. Enable only the worker lane needed for the current operation and recreate the container. For embedding drains, prefer `QUASAR_EMBEDDING_WORKER_ENABLED=true` with the other lanes disabled until the queue is empty.
 5. Leave old Convex code and data on disk, but do not route active Quasar clients to it.
 
 Do not delete historical data during QSR-107. The production proof glyph owns wipe/re-ingest decisions.

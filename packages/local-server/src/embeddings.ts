@@ -14,7 +14,9 @@ import { LocalStore } from "./store";
 import { makeSyntheticEmbedder, SyntheticEmbeddingError } from "./syntheticEmbeddings";
 
 const textEncoder = new TextEncoder();
-const GEMINI_MAX_EMBEDDING_BATCH_SIZE = 100;
+const DEFAULT_EMBEDDING_API_BATCH_SIZE = 100;
+const RETRYABLE_EMBEDDING_BASE_DELAY_MS = 30_000;
+const RETRYABLE_EMBEDDING_MAX_DELAY_MS = 10 * 60_000;
 
 export class EmbeddingError extends Schema.TaggedError<EmbeddingError>()(
   "EmbeddingError",
@@ -124,14 +126,19 @@ const isEmbedMessagePayload = (payload: unknown): payload is {
   typeof (payload as { contentHash?: unknown }).contentHash === "string" &&
   typeof (payload as { embeddingProfile?: unknown }).embeddingProfile === "string";
 
-const findMessage = (messages: readonly MessageRow[], seq: number, contentHash: string): MessageRow | undefined =>
-  messages.find((message) => message.seq === seq && message.contentHash === contentHash);
-
 const positiveIntEnv = (name: string, fallback: number): number => {
   const raw = process.env[name]?.trim();
   if (raw === undefined || raw === "") return fallback;
   const parsed = Number(raw);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const retryDelayMs = (attempts: number, retryable: boolean): number => {
+  if (!retryable) return 30_000;
+  const base = positiveIntEnv("QUASAR_EMBEDDING_RETRY_BASE_MS", RETRYABLE_EMBEDDING_BASE_DELAY_MS);
+  const max = positiveIntEnv("QUASAR_EMBEDDING_RETRY_MAX_MS", RETRYABLE_EMBEDDING_MAX_DELAY_MS);
+  const exponent = Math.max(0, Math.min(attempts - 1, 8));
+  return Math.min(max, base * 2 ** exponent);
 };
 
 const chunksOf = <A>(items: readonly A[], size: number): readonly (readonly A[])[] => {
@@ -262,6 +269,16 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                 let retried = 0;
                 let failed = 0;
                 const misses: Array<{ job: QueueJobRow; message: MessageRow }> = [];
+                const cachedVectorRows: Array<ReturnType<typeof toVectorRow>> = [];
+                const cachedJobIds: string[] = [];
+                const retryOrFail = (job: QueueJobRow, error: string, retryable: boolean) =>
+                  job.attempts >= job.maxAttempts
+                    ? queue.fail(job.jobId, error, now).pipe(Effect.as("failed" as const))
+                    : queue.retry(job.jobId, {
+                        error,
+                        delayMs: retryDelayMs(job.attempts, retryable),
+                        now,
+                      }).pipe(Effect.as("retried" as const));
 
                 for (const job of jobs) {
                   if (job.kind !== "embed-message" || !isEmbedMessagePayload(job.payload)) {
@@ -274,8 +291,11 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                     failed += 1;
                     continue;
                   }
-                  const messages = yield* store.readMessages(job.payload.sessionId, 100_000);
-                  const message = findMessage(messages, job.payload.seq, job.payload.contentHash);
+                  const message = yield* store.getMessage({
+                    sessionId: job.payload.sessionId,
+                    seq: job.payload.seq,
+                    contentHash: job.payload.contentHash,
+                  });
                   if (message === undefined) {
                     yield* queue.fail(job.jobId, "message missing from SQLite truth", now);
                     failed += 1;
@@ -290,8 +310,8 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                   const cacheHash = profile.documentPrefix === undefined ? message.contentHash : contentHashForText(input);
                   const cached = yield* getCached(cacheHash);
                   if (cached !== undefined) {
-                    yield* search.upsertMessageRows({ rows: [toVectorRow(message, cached.vector)], tableName, vectorDimension: profile.dimensions });
-                    yield* queue.ack(job.jobId, now);
+                    cachedVectorRows.push(toVectorRow(message, cached.vector));
+                    cachedJobIds.push(job.jobId);
                     cacheHits += 1;
                     continue;
                   }
@@ -299,59 +319,77 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                   misses.push({ job, message });
                 }
 
-                if (misses.length > 0) {
-                  const chunkResults = yield* Effect.forEach(
-                    chunksOf(misses, GEMINI_MAX_EMBEDDING_BATCH_SIZE),
-                    (chunk) =>
-                      Effect.tryPromise({
-                        try: () => embedder.embedMany(chunk.map((miss) => prefixed(profile.documentPrefix, miss.message.text))),
-                        catch: (cause) => cause,
-                      }).pipe(Effect.either, Effect.map((result) => ({ chunk, result }))),
-                    { concurrency: positiveIntEnv("QUASAR_EMBEDDING_API_CONCURRENCY", 4) },
-                  );
+                if (cachedVectorRows.length > 0) {
+                  yield* search.upsertMessageRows({ rows: cachedVectorRows, tableName, vectorDimension: profile.dimensions });
+                  for (const jobId of cachedJobIds) {
+                    yield* queue.ack(jobId, now);
+                  }
+                }
 
-                  for (const { chunk, result } of chunkResults) {
-                    if (result._tag === "Left") {
-                      const error = result.left instanceof Error ? result.left.message : String(result.left);
-                      for (const { job } of chunk) {
-                        const retryable = isRetryableEmbeddingCause(result.left);
-                        if (job.attempts >= job.maxAttempts && !retryable) {
-                          yield* queue.fail(job.jobId, error, now);
-                          failed += 1;
-                        } else {
-                          yield* queue.retry(job.jobId, {
-                            error,
-                            delayMs: retryable ? 120_000 : 30_000,
+                if (misses.length > 0) {
+                  const chunkReports = yield* Effect.forEach(
+                    chunksOf(misses, positiveIntEnv("QUASAR_EMBEDDING_API_BATCH_SIZE", DEFAULT_EMBEDDING_API_BATCH_SIZE)),
+                    (chunk) =>
+                      Effect.gen(function* () {
+                        let chunkEmbedded = 0;
+                        let chunkRetried = 0;
+                        let chunkFailed = 0;
+                        const result = yield* Effect.tryPromise({
+                          try: () => embedder.embedMany(chunk.map((miss) => prefixed(profile.documentPrefix, miss.message.text))),
+                          catch: (cause) => cause,
+                        }).pipe(Effect.either);
+
+                        if (result._tag === "Left") {
+                          const error = result.left instanceof Error ? result.left.message : String(result.left);
+                          for (const { job } of chunk) {
+                            const retryable = isRetryableEmbeddingCause(result.left);
+                            const outcome = yield* retryOrFail(job, error, retryable);
+                            if (outcome === "failed") {
+                              chunkFailed += 1;
+                            } else {
+                              chunkRetried += 1;
+                            }
+                          }
+                          return { embedded: chunkEmbedded, retried: chunkRetried, failed: chunkFailed };
+                        }
+
+                        const vectorRows = [];
+                        const ackJobIds = [];
+                        for (let index = 0; index < chunk.length; index += 1) {
+                          const miss = chunk[index];
+                          const vector = result.right[index];
+                          if (miss === undefined) continue;
+                          if (vector === undefined) {
+                            const outcome = yield* retryOrFail(miss.job, "embedder returned fewer vectors than requested", false);
+                            if (outcome === "failed") chunkFailed += 1;
+                            else chunkRetried += 1;
+                            continue;
+                          }
+                          const input = prefixed(profile.documentPrefix, miss.message.text);
+                          const cached = yield* putCached({
+                            contentHash: profile.documentPrefix === undefined ? miss.message.contentHash : contentHashForText(input),
+                            text: input,
+                            vector,
                             now,
                           });
-                          retried += 1;
+                          vectorRows.push(toVectorRow(miss.message, cached.vector));
+                          ackJobIds.push(miss.job.jobId);
                         }
-                      }
-                      continue;
-                    }
-
-                    const vectorRows = [];
-                    const ackJobIds = [];
-                    for (const [index, vector] of result.right.entries()) {
-                      const miss = chunk[index];
-                      if (miss === undefined || vector === undefined) continue;
-                      const input = prefixed(profile.documentPrefix, miss.message.text);
-                      const cached = yield* putCached({
-                        contentHash: profile.documentPrefix === undefined ? miss.message.contentHash : contentHashForText(input),
-                        text: input,
-                        vector,
-                        now,
-                      });
-                      vectorRows.push(toVectorRow(miss.message, cached.vector));
-                      ackJobIds.push(miss.job.jobId);
-                    }
-                    if (vectorRows.length > 0) {
-                      yield* search.upsertMessageRows({ rows: vectorRows, tableName, vectorDimension: profile.dimensions });
-                    }
-                    for (const jobId of ackJobIds) {
-                      yield* queue.ack(jobId, now);
-                      embedded += 1;
-                    }
+                        if (vectorRows.length > 0) {
+                          yield* search.upsertMessageRows({ rows: vectorRows, tableName, vectorDimension: profile.dimensions });
+                        }
+                        for (const jobId of ackJobIds) {
+                          yield* queue.ack(jobId, now);
+                          chunkEmbedded += 1;
+                        }
+                        return { embedded: chunkEmbedded, retried: chunkRetried, failed: chunkFailed };
+                      }),
+                    { concurrency: positiveIntEnv("QUASAR_EMBEDDING_API_CONCURRENCY", 4) },
+                  );
+                  for (const chunkReport of chunkReports) {
+                    embedded += chunkReport.embedded;
+                    retried += chunkReport.retried;
+                    failed += chunkReport.failed;
                   }
                 }
 
