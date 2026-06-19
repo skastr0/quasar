@@ -41,6 +41,8 @@ const health = Effect.gen(function* () {
 });
 
 const status = Effect.gen(function* () {
+  const params = yield* query;
+  const includeLanceStats = booleanParam(params, "lance", false) || booleanParam(params, "heavy", false);
   const [store, search, queue, embeddings, ingest, workers] = yield* Effect.all([
     LocalStore,
     LanceDb,
@@ -51,7 +53,7 @@ const status = Effect.gen(function* () {
   ]);
   const [sqlite, lance, queueStats, queueByKind, embeddingStatus, ingestStatus, workerStatus] = yield* Effect.all([
     store.stats.pipe(Effect.either),
-    search.tableStats({}).pipe(Effect.either),
+    includeLanceStats ? search.tableStats({}).pipe(Effect.either) : Effect.succeed({ _tag: "Right" as const, right: "skipped; pass ?lance=true for LanceDB table stats" }),
     queue.stats,
     queue.statsByKind,
     embeddings.status,

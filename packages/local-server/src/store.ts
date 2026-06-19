@@ -35,6 +35,11 @@ export interface LocalStoreService {
     readonly limit?: number;
     readonly offset?: number;
   }) => Effect.Effect<readonly SessionRow[], SqliteStoreError>;
+  readonly getMessage: (options: {
+    readonly sessionId: string;
+    readonly seq: number;
+    readonly contentHash: string;
+  }) => Effect.Effect<MessageRow | undefined, SqliteStoreError>;
   readonly readMessages: (sessionId: string, limit: number) => Effect.Effect<readonly MessageRow[], SqliteStoreError>;
   readonly listToolCalls: (options: {
     readonly sessionId?: string;
@@ -273,6 +278,12 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                 .query(`SELECT session_id AS sessionId, project_key AS projectKey, provider, agent_name AS agentName, title, started_at AS startedAt, updated_at AS updatedAt, source_path AS sourcePath, source_fingerprint AS sourceFingerprint, message_count AS messageCount, tool_call_count AS toolCallCount FROM sessions${where} ORDER BY COALESCE(updated_at, started_at, '') DESC LIMIT ? OFFSET ?`)
                 .all(...args, limit, offset) as SessionRow[];
             }),
+          getMessage: ({ sessionId, seq, contentHash }) =>
+            trySqlite("getMessage", () =>
+              db
+                .query("SELECT session_id AS sessionId, seq, role, text, ts, project_key AS projectKey, content_hash AS contentHash FROM messages WHERE session_id = ? AND seq = ? AND content_hash = ?")
+                .get(sessionId, seq, contentHash) as MessageRow | undefined,
+            ),
           readMessages: (sessionId, limit) =>
             trySqlite("readMessages", () =>
               db

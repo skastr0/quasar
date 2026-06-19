@@ -47,6 +47,23 @@ const mappedSession = (): MappedSession => ({
   toolCalls: [],
 });
 
+const withEnv = async <A>(values: Record<string, string | undefined>, run: () => Promise<A>): Promise<A> => {
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(values)) {
+    previous.set(key, process.env[key]);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return await run();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+};
+
 const withWorkers = <A>(run: Effect.Effect<A, unknown, LocalStore | LanceDb | DurableQueue | DerivedSearch | SearchMaintenance | Embeddings | WorkerSupervisor>) => {
   const sqlite = join(tempDir(), "quasar.sqlite");
   const lance = join(tempDir(), "search.lance");
@@ -86,5 +103,27 @@ describe("WorkerSupervisor", () => {
     expect(status.lastErrors).toEqual({});
     expect(queueStats).toEqual([]);
     expect(rows[0]?.contentHash).toBe("hash-a");
+  });
+
+  test("supports enabling only the embedding lane", async () => {
+    const status = await withEnv(
+      {
+        QUASAR_WORKERS_ENABLED: "false",
+        QUASAR_EMBEDDING_WORKER_ENABLED: "true",
+        QUASAR_INDEX_REPAIR_WORKER_ENABLED: "false",
+        QUASAR_FRESHNESS_WORKER_ENABLED: "false",
+        QUASAR_MAINTENANCE_WORKER_ENABLED: "false",
+        QUASAR_WORKER_INTERVAL_MS: "60000",
+      },
+      () => withWorkers(
+        Effect.gen(function* () {
+          const workers = yield* WorkerSupervisor;
+          return yield* workers.status;
+        }),
+      ),
+    );
+
+    expect(status.enabled).toBe(true);
+    expect(status.workers).toEqual(["embeddings"]);
   });
 });
