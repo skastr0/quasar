@@ -111,7 +111,9 @@ describe("LanceDb", () => {
             },
           ],
           createIndexes: true,
+          includeVectorIndex: false,
         });
+        yield* search.createMessageIndexes({ minVectorRows: 1 });
         const table = yield* search.openTable({});
         const indexNames = yield* Effect.tryPromise({
           try: async () => (await table.listIndices()).map((index) => index.name).sort(),
@@ -406,7 +408,7 @@ describe("LanceDb", () => {
             },
           ],
         });
-        yield* search.createMessageIndexes();
+        yield* search.createMessageIndexes({ minVectorRows: 1 });
         return yield* search.tableStats({});
       }),
     );
@@ -414,7 +416,7 @@ describe("LanceDb", () => {
     const secondStats = await runtime.runPromise(
       Effect.gen(function* () {
         const search = yield* LanceDb;
-        yield* search.createMessageIndexes();
+        yield* search.createMessageIndexes({ minVectorRows: 1 });
         return yield* search.tableStats({});
       }),
     );
@@ -479,7 +481,7 @@ describe("LanceDb", () => {
             },
           ],
         });
-        yield* search.createMessageIndexes();
+        yield* search.createMessageIndexes({ minVectorRows: 1 });
         return yield* search.tableStats({});
       }),
     );
