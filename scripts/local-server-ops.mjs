@@ -26,7 +26,7 @@ const usage = {
     ingest: "run local-server ingest inside the container",
     syncTick: "cheap incremental tick: ingest all, reconcile freshness, repair index jobs",
     maintain: "run LanceDB maintenance inside the container, not through HTTP",
-    backup: "write ./quasar-data-backup.tgz from the Docker data volume",
+    backup: "write ./quasar-truth-backup.tar with SQLite truth and machine identity",
   },
   examples: [
     "bun scripts/local-server-ops.mjs deploy",
@@ -102,8 +102,7 @@ switch (command) {
     cli(["maintain", ...(rest.length === 0 ? ["--vector", "true", "--optimize", "true"] : rest)]);
     break;
   case "backup":
-    sh("tar -czf /tmp/quasar-data-backup.tgz -C /data quasar");
-    docker(["cp", "local-server:/tmp/quasar-data-backup.tgz", "./quasar-data-backup.tgz"]);
+    backupTruth();
     break;
   default:
     fail(`unknown command: ${command}`);
@@ -122,6 +121,21 @@ function lanceTables() {
     "cd /app/packages/search",
     "bun -e 'import * as lancedb from \"@lancedb/lancedb\"; const db = await lancedb.connect(process.env.QUASAR_SEARCH_DATA_DIR); const tables = []; for (const name of await db.tableNames()) { const table = await db.openTable(name); tables.push({ name, rows: await table.countRows(), indices: (await table.listIndices()).map((index) => ({ name: index.name, type: index.indexType, columns: index.columns, indexedRows: index.numIndexedRows, unindexedRows: index.numUnindexedRows })) }); } console.log(JSON.stringify({ ok: true, command: \"lance\", data: { tables } }, null, 2));'",
   ].join(" && "));
+}
+
+function backupTruth() {
+  sh([
+    "set -eu",
+    "rm -rf /tmp/quasar-truth-backup /tmp/quasar-truth-backup.tar",
+    "mkdir -p /tmp/quasar-truth-backup",
+    "cd /app/packages/local-server",
+    "bun -e 'import { Database } from \"bun:sqlite\"; const db = new Database(process.env.QUASAR_LOCAL_SQLITE); db.exec(\"VACUUM INTO '\''/tmp/quasar-truth-backup/quasar.sqlite'\''\"); db.close();'",
+    "cp /data/quasar/machine.json /tmp/quasar-truth-backup/machine.json",
+    "tar -cf /tmp/quasar-truth-backup.tar -C /tmp/quasar-truth-backup .",
+    "rm -rf /tmp/quasar-truth-backup",
+  ].join("\n"));
+  docker(["cp", "local-server:/tmp/quasar-truth-backup.tar", "./quasar-truth-backup.tar"]);
+  sh("rm -f /tmp/quasar-truth-backup.tar");
 }
 
 function exec(args) {

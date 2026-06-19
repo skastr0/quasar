@@ -39,7 +39,7 @@ bun run local-server:lance       # direct LanceDB table/index inventory
 bun run local-server:ingest      # run full provider ingest inside the container
 bun run local-server:sync-tick   # cheap incremental tick for cron/launchd
 bun run local-server:maintain    # LanceDB indexes/optimize inside container
-bun run local-server:backup      # write ./quasar-data-backup.tgz
+bun run local-server:backup      # write ./quasar-truth-backup.tar
 ```
 
 Raw helper form:
@@ -174,7 +174,12 @@ Backup:
 bun run local-server:backup
 ```
 
-This writes `./quasar-data-backup.tgz` from `/data/quasar` inside the container.
+This writes `./quasar-truth-backup.tar` with:
+
+- `quasar.sqlite`, produced by SQLite `VACUUM INTO` so the snapshot is coherent while the server is running,
+- `machine.json`, so provider session IDs remain stable after restore.
+
+It intentionally does **not** archive `search.lance` by default. LanceDB is derived from SQLite message/search state and is rebuilt with `sync-tick` plus `maintain`; backing up it by default turns a truth backup into a slow multi-GB derived-index copy.
 
 Restore is intentionally manual because it replaces the truth store:
 
@@ -183,9 +188,11 @@ bun run local-server:down
 docker volume rm quasar-local-server_quasar-data
 bun run local-server:up
 bun scripts/local-server-ops.mjs exec -- sh -lc 'rm -rf /data/quasar'
-docker compose --env-file platform/local-server/.env -f platform/local-server/compose.yaml cp ./quasar-data-backup.tgz local-server:/tmp/quasar-data-backup.tgz
-bun scripts/local-server-ops.mjs exec -- sh -lc 'tar -xzf /tmp/quasar-data-backup.tgz -C /data'
+docker compose --env-file platform/local-server/.env -f platform/local-server/compose.yaml cp ./quasar-truth-backup.tar local-server:/tmp/quasar-truth-backup.tar
+bun scripts/local-server-ops.mjs exec -- sh -lc 'mkdir -p /data/quasar && tar -xf /tmp/quasar-truth-backup.tar -C /data/quasar'
 bun run local-server:restart
+bun run local-server:sync-tick
+bun run local-server:maintain
 ```
 
 ## Troubleshooting checklist
