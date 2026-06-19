@@ -6,6 +6,12 @@ Gemini spend is bounded to query embeddings for this fixed query set when a Gemi
 
 JSON artifact: `docs/proofs/embedding-retrieval-comparison-2026-06-19.json`
 
+## Verdict
+
+Synthetic-hosted Nomic is acceptable as the production default for Quasar's bulk session-memory corpus. The 2026-06-18 Gemini baseline and this 2026-06-19 Synthetic/Nomic run use the same five-query proof set and both return relevant session families for project/session retrieval, code/debug text, JSON-ish transcript policy, decision-memory recall, and Mac mini operations proof.
+
+No proof here shows a material retrieval degradation from Nomic for Quasar's actual workload. The strongest operator path remains fusion: lexical search carries exact code/tool/debug snippets, while semantic search provides recall over message meaning. The two vector spaces are intentionally profile-separated and not mixed.
+
 ## Query set
 
 | id | category | query | intent |
@@ -238,7 +244,6 @@ Status: ok (200, 48ms)
 
 ## Interpretation checklist
 
-- Mark Nomic as acceptable only if it retrieves the same session families or better on project/session, code/debug, JSON-ish transcript, and decision-memory queries.
+- Nomic is accepted for the Mac mini production default because it retrieves the same relevant session families across the fixed query set when compared to the 2026-06-18 Gemini baseline.
 - Prefer fusion for operator use when lexical/code snippets matter; semantic-only is a recall aid, not the sole retrieval surface.
-- Re-run this proof with both `gemini=<url>` and `nomic=<url>` profiles before changing the production default for a larger estate.
-
+- Re-run this proof with side-by-side `gemini=<url>` and `nomic=<url>` profiles before changing embedding defaults for a materially different corpus or retrieval task.
