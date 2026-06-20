@@ -31,6 +31,7 @@ Use the Mac mini's direct Tailscale IP, not MagicDNS, as the proof boundary:
 
 ```bash
 export QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180
+export QUASAR_INGEST_TOKEN=<same-token-configured-on-the-mac-mini-server>
 
 quasar stats
 quasar search --mode fusion --query "quasar local server" --limit 3
@@ -41,6 +42,8 @@ quasar workers
 `ingest` reads native local history folders on the machine running the CLI and
 POSTs mapped sessions to the configured server. The server owns idempotent SQLite
 writes, embedding cache lookup, and search-index queue draining.
+Remote ingest requires `QUASAR_INGEST_TOKEN` or `--ingest-token <token>`; read
+and search commands do not.
 
 Override provider roots when needed:
 

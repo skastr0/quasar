@@ -21,27 +21,107 @@ const json = (value: unknown, options?: { readonly status?: number }) =>
 const badRequest = (route: string, message: string) =>
   json({ ok: false, route, error: { type: "BadRequest", message } }, { status: 400 });
 
+const unauthorized = (route: string, message: string) =>
+  json({ ok: false, route, error: { type: "Unauthorized", message } }, { status: 401 });
+
+const serviceUnavailable = (route: string, message: string) =>
+  json({ ok: false, route, error: { type: "ServiceUnavailable", message } }, { status: 503 });
+
 const notFound = (route: string, message: string) =>
   json({ ok: false, route, error: { type: "NotFound", message } }, { status: 404 });
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
+const isString = (value: unknown): value is string => typeof value === "string";
+
+const isOptionalString = (value: unknown): value is string | undefined =>
+  value === undefined || typeof value === "string";
+
+const isSeq = (value: unknown): value is number =>
+  typeof value === "number" && Number.isInteger(value) && value >= 0;
+
+const isNonNegativeInt = (value: unknown): value is number =>
+  typeof value === "number" && Number.isInteger(value) && value >= 0;
+
+const providers = new Set<string>(["claude", "codex", "opencode", "grok", "hermes", "kimi", "antigravity"]);
+
+const roles = new Set<string>(["user", "assistant", "reasoning"]);
+
+const isProjectRow = (value: unknown): boolean =>
+  isRecord(value)
+  && isString(value.projectKey)
+  && isString(value.displayName)
+  && isOptionalString(value.rawPath);
+
+const isSessionRow = (value: unknown): boolean =>
+  isRecord(value)
+  && isString(value.sessionId)
+  && isString(value.projectKey)
+  && isString(value.provider)
+  && providers.has(value.provider)
+  && isString(value.agentName)
+  && isOptionalString(value.title)
+  && isOptionalString(value.startedAt)
+  && isOptionalString(value.updatedAt)
+  && isString(value.sourcePath)
+  && isString(value.sourceFingerprint)
+  && isNonNegativeInt(value.messageCount)
+  && isNonNegativeInt(value.toolCallCount);
+
+const isMessageRow = (sessionId: string, projectKey: string, value: unknown): boolean =>
+  isRecord(value)
+  && value.sessionId === sessionId
+  && value.projectKey === projectKey
+  && isSeq(value.seq)
+  && isString(value.role)
+  && roles.has(value.role)
+  && isString(value.text)
+  && isOptionalString(value.ts)
+  && isString(value.contentHash);
+
+const isToolCallRow = (sessionId: string, projectKey: string, provider: string, value: unknown): boolean =>
+  isRecord(value)
+  && isString(value.id)
+  && value.sessionId === sessionId
+  && value.projectKey === projectKey
+  && value.provider === provider
+  && isSeq(value.seq)
+  && isString(value.toolName)
+  && isOptionalString(value.status)
+  && isString(value.inputText)
+  && isString(value.outputText)
+  && isOptionalString(value.startedAt)
+  && isOptionalString(value.completedAt);
+
 const isMappedSession = (value: unknown): value is MappedSession => {
   if (!isRecord(value)) return false;
   const project = value.project;
   const session = value.session;
-  return isRecord(project) && isRecord(session)
-    && typeof project.projectKey === "string"
-    && typeof project.displayName === "string"
-    && typeof session.sessionId === "string"
-    && typeof session.projectKey === "string"
-    && typeof session.provider === "string"
-    && typeof session.agentName === "string"
-    && typeof session.sourcePath === "string"
-    && typeof session.sourceFingerprint === "string"
-    && Array.isArray(value.messages)
-    && Array.isArray(value.toolCalls);
+  if (!isRecord(project) || !isRecord(session)) return false;
+  if (!isProjectRow(project) || !isSessionRow(session)) return false;
+  if (project.projectKey !== session.projectKey) return false;
+  if (!Array.isArray(value.messages) || !Array.isArray(value.toolCalls)) return false;
+  const sessionId = session.sessionId as string;
+  const projectKey = session.projectKey as string;
+  const provider = session.provider as string;
+  const messageCount = session.messageCount as number;
+  const toolCallCount = session.toolCallCount as number;
+  if (value.messages.length !== messageCount || value.toolCalls.length !== toolCallCount) return false;
+  return value.messages.every((row) => isMessageRow(sessionId, projectKey, row))
+    && value.toolCalls.every((row) => isToolCallRow(sessionId, projectKey, provider, row));
+};
+
+const configuredIngestToken = (): string | undefined => {
+  const token = process.env.QUASAR_INGEST_TOKEN?.trim();
+  return token === undefined || token === "" ? undefined : token;
+};
+
+const requestIngestToken = (request: HttpServerRequest.HttpServerRequest): string | undefined => {
+  const header = request.headers["x-quasar-ingest-token"] ?? request.headers.authorization;
+  if (header === undefined) return undefined;
+  const trimmed = header.trim();
+  return trimmed.toLowerCase().startsWith("bearer ") ? trimmed.slice(7).trim() : trimmed;
 };
 
 const query = Effect.map(HttpServerRequest.HttpServerRequest, (request) =>
@@ -175,12 +255,25 @@ const ingestRun = Effect.gen(function* () {
 });
 
 const ingestSession = Effect.gen(function* () {
-  const body = yield* HttpServerRequest.schemaBodyJson(Schema.Unknown);
+  const request = yield* HttpServerRequest.HttpServerRequest;
+  const requiredToken = configuredIngestToken();
+  if (requiredToken === undefined) {
+    return serviceUnavailable("ingest/session", "QUASAR_INGEST_TOKEN must be configured before remote ingest is enabled");
+  }
+  if (requestIngestToken(request) !== requiredToken) {
+    return unauthorized("ingest/session", "valid x-quasar-ingest-token header is required");
+  }
+  const params = yield* query;
+  const bodyResult = yield* Effect.either(HttpServerRequest.schemaBodyJson(Schema.Unknown));
+  if (bodyResult._tag === "Left") {
+    return badRequest("ingest/session", "request body must be valid JSON");
+  }
+  const body = bodyResult.right;
   if (!isRecord(body) || !isMappedSession(body.session)) {
-    return badRequest("ingest/session", "JSON body must be { session: MappedSession }");
+    return badRequest("ingest/session", "JSON body must be { session: MappedSession } with matching row counts and row ownership");
   }
   const mapped = body.session;
-  const outcome = yield* ingestMappedSession(mapped).pipe(
+  const outcome = yield* ingestMappedSession(mapped, { force: booleanParam(params, "force", false) }).pipe(
     Effect.catchAll((error) =>
       Effect.succeed({
         sessionId: mapped.session.sessionId,

@@ -19,6 +19,7 @@ Set at least:
 
 - `QUASAR_PUBLISH_HOST=0.0.0.0` unless Docker can bind the Tailscale IP directly.
 - `QUASAR_LOCAL_PORT=6180`.
+- `QUASAR_INGEST_TOKEN=<long random token>`. Remote write ingest is disabled unless this is configured, and client machines must send the same token.
 - `QUASAR_*_ROOT` paths for each local history source.
 - `QUASAR_EMBEDDING_PROVIDER=synthetic` and Synthetic/Nomic profile values for bulk text embeddings.
 - `SYNTHETIC_API_KEY` in the environment or the invoking shell. `scripts/local-server-ops.mjs deploy` will also read it from the Mac mini interactive zsh environment when it is not already exported.
@@ -106,7 +107,7 @@ serving surface is read/search only:
 | Search | `search --query <text> --mode lexical\|semantic\|fusion` | `GET /search/<mode>` | `q`/`query`, `projectKey`, `role=user\|assistant`, `limit` |
 | Tool-call list | `tool-calls` | `GET /tool-calls` | `sessionId`, `projectKey`, `provider`, `toolName`, `limit`, `offset` |
 | Tool-call read | `tool-call --id <id>` | `GET /tool-call` | `id` |
-| Remote ingest | `ingest --provider all` | `POST /ingest/session` | operator only; set `QUASAR_LOCAL_SERVER_URL` |
+| Remote ingest | `ingest --provider all` | `POST /ingest/session` | operator only; set `QUASAR_LOCAL_SERVER_URL` and `QUASAR_INGEST_TOKEN` |
 
 Notes for wrappers:
 
@@ -153,6 +154,7 @@ LanceDB/index queue draining.
 ```bash
 npm install -g @skastr0/quasar-cli
 export QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180
+export QUASAR_INGEST_TOKEN=<same-token-as-mac-mini-platform-local-server-env>
 
 # Optional when provider roots are non-standard on that machine.
 export QUASAR_CODEX_ROOT="$HOME/.codex"
@@ -173,9 +175,11 @@ quasar workers
 quasar stats
 ```
 
-You may pass `--server http://<mac-mini-tailscale-ip>:6180` instead of exporting
-`QUASAR_LOCAL_SERVER_URL`. Do not use MagicDNS as the proof boundary; the known
-operator URL is the direct Tailscale IP.
+You may pass `--server http://<mac-mini-tailscale-ip>:6180` and
+`--ingest-token <token>` instead of exporting `QUASAR_LOCAL_SERVER_URL` and
+`QUASAR_INGEST_TOKEN`. Do not use MagicDNS as the proof boundary; the known
+operator URL is the direct Tailscale IP. The read/search API remains reachable
+without this token; `POST /ingest/session` fails closed without it.
 
 Recommended schedule:
 

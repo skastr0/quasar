@@ -35,6 +35,7 @@ services:
       QUASAR_SEARCH_DATA_DIR: /data/quasar/search.lance
       QUASAR_LOCAL_HOST: 0.0.0.0
       QUASAR_LOCAL_PORT: 6180
+      QUASAR_INGEST_TOKEN: ${QUASAR_INGEST_TOKEN:?set QUASAR_INGEST_TOKEN in platform/local-server/.env for remote ingest writes}
       QUASAR_CODEX_ROOT: /history/codex
       QUASAR_CLAUDE_ROOT: /history/claude
       QUASAR_OPENCODE_ROOT: /history/opencode
