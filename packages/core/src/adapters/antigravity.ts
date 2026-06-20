@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { collectAdapterStream, type AdapterStreamItem, type SessionAdapter } from "./types";
-import type { ToolCall } from "../schemas";
+import type { NormalizedSession, ToolCall } from "../schemas";
 import {
   buildSession,
   compactText,
@@ -411,6 +411,11 @@ const buildAntigravitySession = (
   });
 };
 
+const countMessages = (session: NormalizedSession) => ({
+  userMessages: session.events.filter((event) => event.role === "user" && event.kind === "message").length,
+  assistantMessages: session.events.filter((event) => event.role === "assistant" && event.kind === "message").length,
+});
+
 // ---------------------------------------------------------------------------
 // Stream
 // ---------------------------------------------------------------------------
@@ -491,6 +496,26 @@ async function* streamAntigravity(options: AdapterOptions): AsyncGenerator<Adapt
       conversationsDir,
       options,
     );
+    const messageCounts = countMessages(session);
+    if (messageCounts.userMessages === 0) {
+      yield {
+        type: "diagnostic",
+        diagnostic: {
+          adapterId: antigravityAdapter.id,
+          provider: "antigravity",
+          status: "unsupported",
+          parserConfidence: "observed",
+          rootPath: brainRoot,
+          message: "Skipped Antigravity transcript with no user message events.",
+          details: {
+            nativeSessionId: uuid,
+            transcriptPath,
+            ...messageCounts,
+          },
+        },
+      };
+      continue;
+    }
 
     sessionCount += 1;
     yield {
