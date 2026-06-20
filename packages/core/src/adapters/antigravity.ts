@@ -142,18 +142,21 @@ const classifyRecord = (input: {
 
 /**
  * Marks each PLANNER_RESPONSE record (by line index in the parsed-record array)
- * that is the LAST PLANNER_RESPONSE inside its turn. A turn runs from a
- * USER_INPUT (inclusive) up to the next USER_INPUT (exclusive); the trailing
- * span after the final USER_INPUT is its own turn. Antigravity transcripts are
- * cumulative replay snapshots — every USER_INPUT restarts step_index at 0 — so
- * each replay's terminal response is counted, which is exactly why the emitted
- * assistant-message count tracks the USER_INPUT count.
+ * that is the LAST PLANNER_RESPONSE inside its turn. A turn starts at a
+ * USER_INPUT and runs up to the next USER_INPUT (exclusive); the trailing span
+ * after the final USER_INPUT is its own turn. Records before the first
+ * USER_INPUT are provider preamble/noise, not assistant answers.
+ * Antigravity transcripts are cumulative replay snapshots — every USER_INPUT
+ * restarts step_index at 0 — so each replay's terminal response is counted,
+ * which is exactly why the emitted assistant-message count tracks the
+ * USER_INPUT count.
  */
 const terminalPlannerResponseIndices = (
   records: readonly { readonly type: string }[],
 ): ReadonlySet<number> => {
   const terminal = new Set<number>();
   let lastPlannerInTurn: number | undefined;
+  let seenUserInput = false;
   const flush = () => {
     if (lastPlannerInTurn !== undefined) terminal.add(lastPlannerInTurn);
     lastPlannerInTurn = undefined;
@@ -162,10 +165,12 @@ const terminalPlannerResponseIndices = (
     const type = records[i]!.type;
     if (type === "USER_INPUT") {
       // The previous turn ended at the PLANNER_RESPONSE we last saw.
-      flush();
+      if (seenUserInput) flush();
+      seenUserInput = true;
+      lastPlannerInTurn = undefined;
       continue;
     }
-    if (type === "PLANNER_RESPONSE") lastPlannerInTurn = i;
+    if (seenUserInput && type === "PLANNER_RESPONSE") lastPlannerInTurn = i;
   }
   flush();
   return terminal;
