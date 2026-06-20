@@ -24,7 +24,7 @@ afterEach(() => {
   }
 });
 
-const mappedSession = (): MappedSession => ({
+const mappedSession = (overrides: { readonly fingerprint?: string; readonly firstText?: string } = {}): MappedSession => ({
   project: { projectKey: "project-http", displayName: "HTTP Project", rawPath: "/tmp/project-http" },
   session: {
     sessionId: "session-http",
@@ -35,8 +35,8 @@ const mappedSession = (): MappedSession => ({
     startedAt: "2026-06-18T10:00:00.000Z",
     updatedAt: "2026-06-18T10:01:00.000Z",
     sourcePath: "/history/session-http.jsonl",
-    sourceFingerprint: "fingerprint-http",
-    messageCount: 1,
+    sourceFingerprint: overrides.fingerprint ?? "fingerprint-http",
+    messageCount: 2,
     toolCallCount: 1,
   },
   messages: [
@@ -44,7 +44,7 @@ const mappedSession = (): MappedSession => ({
       sessionId: "session-http",
       seq: 1,
       role: "user",
-      text: "hello over http",
+      text: overrides.firstText ?? "hello over http",
       ts: "2026-06-18T10:00:30.000Z",
       projectKey: "project-http",
       contentHash: "hash-http-1",
@@ -111,15 +111,17 @@ const waitFor = async (url: string) => {
 };
 
 describe("HTTP server", () => {
-  test("accepts remote session ingest and skips unchanged fingerprints", async () => {
+  test("accepts authenticated remote session ingest, skips unchanged fingerprints, and honors force", async () => {
     const dir = tempDir();
     const sqlite = join(dir, "quasar.sqlite");
     const lance = join(dir, "search.lance");
     const port = 20_000 + Math.floor(Math.random() * 20_000);
+    const token = "test-ingest-token";
     const proc = Bun.spawn(["bun", "run", "src/cli.ts", "serve", "--host", "127.0.0.1", "--port", String(port)], {
       cwd: join(import.meta.dir, ".."),
       env: {
         ...process.env,
+        QUASAR_INGEST_TOKEN: token,
         QUASAR_LOCAL_SQLITE: sqlite,
         QUASAR_SEARCH_DATA_DIR: lance,
       },
@@ -131,13 +133,18 @@ describe("HTTP server", () => {
       await waitFor(`http://127.0.0.1:${port}/health`);
       const first = await fetch(`http://127.0.0.1:${port}/ingest/session`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "x-quasar-ingest-token": token },
         body: JSON.stringify({ session: mappedSession() }),
       }).then((response) => response.json());
       const second = await fetch(`http://127.0.0.1:${port}/ingest/session`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "x-quasar-ingest-token": token },
         body: JSON.stringify({ session: mappedSession() }),
+      }).then((response) => response.json());
+      const forced = await fetch(`http://127.0.0.1:${port}/ingest/session?force=true`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-quasar-ingest-token": token },
+        body: JSON.stringify({ session: mappedSession({ firstText: "forced http rewrite" }) }),
       }).then((response) => response.json());
       const messages = await fetch(`http://127.0.0.1:${port}/messages?sessionId=session-http`).then((response) => response.json());
       const status = await fetch(`http://127.0.0.1:${port}/status`).then((response) => response.json());
@@ -147,8 +154,54 @@ describe("HTTP server", () => {
       expect(first.data.outcome.toolCallsWritten).toBe(1);
       expect(first.data.outcome.jobsEnqueued).toBe(3);
       expect(second.data.outcome.status).toBe("skipped");
-      expect(messages.data.rows.map((row: { text: string }) => row.text)).toEqual(["hello over http", "assistant-only http memory"]);
+      expect(forced.data.outcome.status).toBe("ok");
+      expect(messages.data.rows.map((row: { text: string }) => row.text)).toEqual(["forced http rewrite", "assistant-only http memory"]);
       expect(status.data.queue.pending).toBe(3);
+    } finally {
+      proc.kill();
+      await proc.exited;
+    }
+  });
+
+  test("remote session ingest fails closed without token and returns bad request for malformed JSON", async () => {
+    const dir = tempDir();
+    const sqlite = join(dir, "quasar.sqlite");
+    const lance = join(dir, "search.lance");
+    const port = 20_000 + Math.floor(Math.random() * 20_000);
+    const token = "test-ingest-token";
+    const proc = Bun.spawn(["bun", "run", "src/cli.ts", "serve", "--host", "127.0.0.1", "--port", String(port)], {
+      cwd: join(import.meta.dir, ".."),
+      env: {
+        ...process.env,
+        QUASAR_INGEST_TOKEN: token,
+        QUASAR_LOCAL_SQLITE: sqlite,
+        QUASAR_SEARCH_DATA_DIR: lance,
+      },
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+
+    try {
+      await waitFor(`http://127.0.0.1:${port}/health`);
+      const missingToken = await fetch(`http://127.0.0.1:${port}/ingest/session`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ session: mappedSession() }),
+      });
+      const malformed = await fetch(`http://127.0.0.1:${port}/ingest/session`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-quasar-ingest-token": token },
+        body: "{",
+      });
+      const wrongShape = await fetch(`http://127.0.0.1:${port}/ingest/session`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-quasar-ingest-token": token },
+        body: JSON.stringify({ session: { ...mappedSession(), messages: [] } }),
+      });
+
+      expect(missingToken.status).toBe(401);
+      expect(malformed.status).toBe(400);
+      expect(wrongShape.status).toBe(400);
     } finally {
       proc.kill();
       await proc.exited;

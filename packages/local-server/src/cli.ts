@@ -85,6 +85,7 @@ switch (command) {
       provider: (arg("--provider") ?? "all") as never,
       limit: arg("--limit") === undefined ? undefined : intArg("--limit", 1),
       force: flag("--force"),
+      ingestToken: arg("--ingest-token") ?? process.env.QUASAR_INGEST_TOKEN,
     };
     const base = server();
     if (base !== undefined) {

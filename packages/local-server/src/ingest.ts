@@ -20,6 +20,7 @@ export interface IngestOptions {
   readonly provider: Provider | "all";
   readonly limit?: number;
   readonly force?: boolean;
+  readonly ingestToken?: string;
 }
 
 const providerRootEnv: Partial<Record<Provider, string>> = {
@@ -126,14 +127,19 @@ export const enqueueDownstreamJobs = (queue: DurableQueueService, session: Mappe
     return 1 + messages.length;
   });
 
-export const ingestMappedSession = (mapped: MappedSession): Effect.Effect<SessionIngestOutcome, unknown, LocalStore | DurableQueue> =>
+export const ingestMappedSession = (
+  mapped: MappedSession,
+  options: { readonly force?: boolean } = {},
+): Effect.Effect<SessionIngestOutcome, unknown, LocalStore | DurableQueue> =>
   Effect.gen(function* () {
     const store = yield* LocalStore;
     const queue = yield* DurableQueue;
-    const unchanged = yield* store.hasSessionFingerprint(
-      mapped.session.sessionId,
-      mapped.session.sourceFingerprint,
-    ).pipe(Effect.catchAll(() => Effect.succeed(false)));
+    const unchanged = options.force === true
+      ? false
+      : yield* store.hasSessionFingerprint(
+        mapped.session.sessionId,
+        mapped.session.sourceFingerprint,
+      ).pipe(Effect.catchAll(() => Effect.succeed(false)));
     if (unchanged) {
       return {
         sessionId: mapped.session.sessionId,
@@ -157,11 +163,20 @@ export const ingestMappedSession = (mapped: MappedSession): Effect.Effect<Sessio
     };
   });
 
-const postMappedSession = async (base: string, mapped: MappedSession): Promise<SessionIngestOutcome> => {
+const postMappedSession = async (
+  base: string,
+  mapped: MappedSession,
+  options: { readonly force?: boolean; readonly ingestToken?: string },
+): Promise<SessionIngestOutcome> => {
   const url = new URL("/ingest/session", base.endsWith("/") ? base : `${base}/`);
+  if (options.force === true) url.searchParams.set("force", "true");
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (options.ingestToken !== undefined && options.ingestToken.trim() !== "") {
+    headers["x-quasar-ingest-token"] = options.ingestToken;
+  }
   const response = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers,
     body: JSON.stringify({ session: mapped }),
   });
   const body = await response.json() as { ok?: boolean; data?: { outcome?: SessionIngestOutcome }; error?: { message?: string } };
@@ -437,7 +452,7 @@ const ingestProviderRemote = async (
       continue;
     }
     try {
-      const outcome = await postMappedSession(serverUrl, mapped);
+      const outcome = await postMappedSession(serverUrl, mapped, options);
       outcomes.push(outcome);
       if (outcome.status === "ok") {
         sessionsWritten += 1;
