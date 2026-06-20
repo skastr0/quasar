@@ -85,7 +85,7 @@ switch (command) {
     break;
   }
   case "ingest":
-    cli(["ingest", ...rest]);
+    cli(["operator-ingest", ...rest]);
     break;
   case "syncTick":
   case "sync-tick":
@@ -94,11 +94,11 @@ switch (command) {
       "cd /app",
       "limit_arg=\"\"",
       "if [ -n \"${QUASAR_SYNC_INGEST_LIMIT:-}\" ]; then limit_arg=\"--limit ${QUASAR_SYNC_INGEST_LIMIT}\"; fi",
-      "QUASAR_WORKERS_ENABLED=false QUASAR_EMBEDDING_WORKER_ENABLED=false QUASAR_INDEX_REPAIR_WORKER_ENABLED=false QUASAR_FRESHNESS_WORKER_ENABLED=false QUASAR_MAINTENANCE_WORKER_ENABLED=false bun packages/cli/src/cli.ts ingest --provider all --summary ${limit_arg}",
+      "QUASAR_WORKERS_ENABLED=false QUASAR_EMBEDDING_WORKER_ENABLED=false QUASAR_INDEX_REPAIR_WORKER_ENABLED=false QUASAR_FRESHNESS_WORKER_ENABLED=false QUASAR_MAINTENANCE_WORKER_ENABLED=false bun packages/cli/src/cli.ts operator-ingest --provider all --summary ${limit_arg}",
     ].join("\n"));
     break;
   case "maintain":
-    cli(["maintain", ...(rest.length === 0 ? ["--vector", "true", "--optimize", "true"] : rest)]);
+    cli(["operator-maintain", ...(rest.length === 0 ? ["--vector", "true", "--optimize", "true"] : rest)]);
     break;
   case "backup":
     backupTruth();

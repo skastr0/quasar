@@ -15,7 +15,7 @@ Proof for the local-server incremental sync path after switching scheduled inges
 - `packages/local-server/src/ingest.ts` passes `shouldParseSession` to provider streams unless `--force` is set.
 - unchanged session probes are counted as `skipped` before adapter parse/yield work.
 - `packages/local-server/src/embeddings.ts` acknowledges stale embed jobs whose `(sessionId, seq, contentHash)` no longer exists in SQLite truth; these are superseded jobs, not provider failures.
-- `scripts/local-server-ops.mjs syncTick` runs `ingest --provider all --summary` without a default `--limit`.
+- `scripts/local-server-ops.mjs syncTick` runs `operator-ingest --provider all --summary` without a default `--limit`.
 - `scripts/install-local-server-sync.mjs` installs launchd with `StartInterval=60` unless overridden.
 
 ## Automated validation

@@ -150,5 +150,6 @@ Results:
 - The current checked-in `.prism` directory only contains workflow state, not a
   generated Quasar MCP wrapper. MCP adapters should wrap the HTTP/CLI contract above.
 - This proof intentionally does not test the parked runtime or assert its absence.
-- Operator-only commands (`ingest`, `maintain`, `worker-tick`, `embed-batch`,
-  `recover-leases`) are not part of the default agent tool surface.
+- Operator-only commands (`operator-ingest`, `operator-maintain`,
+  `operator-worker-tick`, `operator-embed-batch`, `operator-recover-leases`) are not
+  part of the default agent tool surface.

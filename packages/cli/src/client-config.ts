@@ -4,8 +4,6 @@ import { join, resolve } from "node:path";
 
 export interface QuasarClientConfig {
   readonly localServerUrl?: string;
-  readonly apiUrl?: string;
-  readonly url?: string;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -18,8 +16,6 @@ const asClientConfig = (value: unknown): QuasarClientConfig => {
   if (!isRecord(value)) return {};
   return {
     localServerUrl: asString(value.localServerUrl),
-    apiUrl: asString(value.apiUrl),
-    url: asString(value.url),
   };
 };
 
@@ -37,5 +33,5 @@ export const configuredServerUrl = (env: NodeJS.ProcessEnv = process.env): strin
 
   const config = loadClientConfig(defaultClientConfigPath(env));
   if (config === undefined) return undefined;
-  return config.localServerUrl ?? config.apiUrl ?? config.url;
+  return config.localServerUrl;
 };

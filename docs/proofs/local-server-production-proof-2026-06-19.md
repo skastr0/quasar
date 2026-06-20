@@ -80,7 +80,7 @@ Final maintenance was run in-container rather than over the HTTP request path:
 docker compose --env-file platform/local-server/.env \
   -f platform/local-server/compose.yaml \
   exec -T local-server sh -lc \
-  "cd /app && timeout 240s bun packages/cli/src/cli.ts maintain --vector true --optimize true"
+  "cd /app && timeout 240s bun packages/cli/src/cli.ts operator-maintain --vector true --optimize true"
 ```
 
 Active Synthetic/Nomic table stats from that maintenance pass:
