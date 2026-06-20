@@ -7,6 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { LanceDb } from "@skastr0/quasar-search";
 import { Effect } from "effect";
 
+import { configuredServerUrl } from "./client-config";
 import { ingest, ingestRemote } from "./ingest";
 import type { IngestReport } from "./ingest";
 import { fail, ok, writeJson } from "./json";
@@ -33,7 +34,7 @@ const intArg = (name: string, fallback: number): number => {
 
 const command = process.argv[2] ?? "help";
 
-const server = (): string | undefined => arg("--server") ?? process.env.QUASAR_LOCAL_SERVER_URL;
+const server = (): string | undefined => arg("--server") ?? configuredServerUrl();
 
 const daemonLabel = "com.quasar.remote-ingest";
 const daemonHome = () => resolve(process.env.QUASAR_DAEMON_HOME ?? join(homedir(), ".config", "quasar"));
@@ -583,6 +584,7 @@ switch (command) {
         ],
         env: {
           QUASAR_LOCAL_HOME: "override ~/.config/quasar/local-server",
+          QUASAR_CONFIG: "override ~/.config/quasar/config.json for default server routing",
           QUASAR_LOCAL_SQLITE: "override SQLite file path",
           QUASAR_SEARCH_DATA_DIR: "override LanceDB directory",
           QUASAR_CODEX_ROOT: "override Codex history root",

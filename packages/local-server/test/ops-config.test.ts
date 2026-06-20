@@ -56,6 +56,7 @@ describe("local-server ops config", () => {
 
   test("runbook documents the agent-facing local-server tool contract", () => {
     const cli = readFileSync(join(repoRoot, "packages/local-server/src/cli.ts"), "utf8");
+    const clientConfig = readFileSync(join(repoRoot, "packages/local-server/src/client-config.ts"), "utf8");
     const runbook = readFileSync(join(repoRoot, "docs/operations/local-server-docker-tailscale.md"), "utf8");
 
     expect(cli).toContain("tool-calls [--session-id id] [--project-key key] [--provider name] [--tool-name name] [--limit n] [--offset n]");
@@ -64,6 +65,10 @@ describe("local-server ops config", () => {
     expect(cli).toContain("daemon install --server http://<mac-mini-tailscale-ip>:6180 --ingest-token <token> [--interval-seconds 60]");
     expect(cli).toContain("com.quasar.remote-ingest");
     expect(cli).toContain("already_running");
+    expect(cli).toContain("config.json");
+    expect(clientConfig).toContain("localServerUrl");
+    expect(clientConfig).toContain("apiUrl");
+    expect(clientConfig).toContain("url");
     expect(runbook).toContain("Agent / MCP serving contract");
     expect(runbook).toContain("GET /search/<mode>");
     expect(runbook).toContain("projectKey`, `role=user\\|assistant`, `limit");
