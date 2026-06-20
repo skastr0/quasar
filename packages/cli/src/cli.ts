@@ -39,7 +39,7 @@ const command =
   : rawCommand;
 const cliPackage = {
   name: "@skastr0/quasar-cli",
-  version: "0.1.5",
+  version: "0.1.6",
 };
 
 const server = (): string | undefined => arg("--server") ?? configuredServerUrl();
@@ -522,9 +522,9 @@ switch (command) {
     writeJson(
       ok("help", {
         commands: [
-          "ingest --provider all|claude|codex|opencode|hermes|grok --server http://<mac-mini-tailscale-ip>:6180 [--limit n] [--force] [--summary]",
+          "ingest --provider all|claude|codex|opencode|hermes|grok --server https://<quasar-service-tailnet-hostname> [--limit n] [--force] [--summary]",
           "operator-ingest --provider all|claude|codex|opencode|hermes|grok [--limit n] [--force] [--summary]",
-          "daemon install --server http://<mac-mini-tailscale-ip>:6180 --ingest-token <token> [--interval-seconds 60]",
+          "daemon install --server https://<quasar-service-tailnet-hostname> --ingest-token <token> [--interval-seconds 60]",
           "daemon status",
           "daemon uninstall",
           "serve [--host 127.0.0.1] [--port 6180]",

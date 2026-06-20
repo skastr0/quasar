@@ -5,7 +5,7 @@ This is the operational path for Quasar on the Mac mini.
 - Docker supervises the Effect local server.
 - SQLite in `/data/quasar/quasar.sqlite` is OLTP truth.
 - LanceDB in `/data/quasar/search.lance` is derived search state.
-- Access is by direct Tailscale IP first, e.g. `http://<mac-mini-tailscale-ip>:6180`.
+- Client access is through the Tailscale Service hostname assigned to `svc:quasar`.
 - `platform/local-server/.env` is local-only and must not be committed.
 
 ## One-time setup
@@ -78,22 +78,24 @@ bun scripts/local-server-ops.mjs exec -- sh -lc 'du -sh /data/quasar/*'
    bun run local-server:lance
    ```
 
-5. From another Tailnet client, verify direct Tailscale IP access:
+5. From another Tailnet client, verify the `svc:quasar` Tailscale Service:
 
    ```bash
-   curl -fsS http://<mac-mini-tailscale-ip>:6180/health
-   curl -fsS http://<mac-mini-tailscale-ip>:6180/status
+   curl -fsS https://<quasar-service-tailnet-hostname>/health
+   curl -fsS https://<quasar-service-tailnet-hostname>/status
    ```
 
-Do not make MagicDNS the proof boundary. It can work, but the known-good operator URL is the Mac mini Tailscale IP.
+If hostname resolution fails, debug Tailscale Services/DNS. Do not switch client
+configuration back to the Mac mini device IP as the long-term path.
 
 ## Agent / MCP serving contract
 
 Agent clients should treat the Docker local-server HTTP API as the canonical data
-plane and set the client wrapper environment to the Mac mini Tailscale IP:
+plane and set the client wrapper environment to the `svc:quasar` Tailscale
+Service hostname:
 
 ```bash
-export QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180
+export QUASAR_LOCAL_SERVER_URL=https://<quasar-service-tailnet-hostname>
 ```
 
 Equivalent client config:
@@ -102,7 +104,7 @@ Equivalent client config:
 {
   "schemaVersion": 3,
   "projectKey": "quasar",
-  "localServerUrl": "http://<mac-mini-tailscale-ip>:6180"
+  "localServerUrl": "https://<quasar-service-tailnet-hostname>"
 }
 ```
 
@@ -154,15 +156,15 @@ The scheduled tick is intentionally uncapped by default and relies on adapter `s
 
 ## Ingesting from another Tailscale machine
 
-Install the released CLI on the other machine, point it at the Mac mini's direct
-Tailscale IP, then run ingest. The CLI reads local history folders on that
-machine and POSTs mapped sessions to the Mac mini server. The server is still
-the authority for idempotency, SQLite writes, embedding-cache lookup, and
+Install the released CLI on the other machine, point it at the `svc:quasar`
+Tailscale Service hostname, then run ingest. The CLI reads local history folders
+on that machine and POSTs mapped sessions to the Mac mini server. The server is
+still the authority for idempotency, SQLite writes, embedding-cache lookup, and
 LanceDB/index queue draining.
 
 ```bash
 npm install -g @skastr0/quasar-cli
-export QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180
+export QUASAR_LOCAL_SERVER_URL=https://<quasar-service-tailnet-hostname>
 export QUASAR_INGEST_TOKEN=<same-token-as-mac-mini-platform-local-server-env>
 
 # Optional when provider roots are non-standard on that machine.
@@ -184,11 +186,10 @@ quasar workers
 quasar stats
 ```
 
-You may pass `--server http://<mac-mini-tailscale-ip>:6180` and
+You may pass `--server https://<quasar-service-tailnet-hostname>` and
 `--ingest-token <token>` instead of exporting `QUASAR_LOCAL_SERVER_URL` and
-`QUASAR_INGEST_TOKEN`. Do not use MagicDNS as the proof boundary; the known
-operator URL is the direct Tailscale IP. The read/search API remains reachable
-without this token; `POST /ingest/session` fails closed without it.
+`QUASAR_INGEST_TOKEN`. The read/search API remains reachable without this
+token; `POST /ingest/session` fails closed without it.
 
 Recommended schedule:
 
@@ -204,7 +205,7 @@ ingest cannot overlap the next minute tick.
 
 ```bash
 npm install -g @skastr0/quasar-cli
-export QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180
+export QUASAR_LOCAL_SERVER_URL=https://<quasar-service-tailnet-hostname>
 export QUASAR_INGEST_TOKEN=<same-token-as-mac-mini-platform-local-server-env>
 
 quasar daemon install --interval-seconds 60
@@ -215,7 +216,7 @@ Override through flags when you do not want to export environment variables:
 
 ```bash
 quasar daemon install \
-  --server http://<mac-mini-tailscale-ip>:6180 \
+  --server https://<quasar-service-tailnet-hostname> \
   --ingest-token <token> \
   --interval-seconds 60
 ```

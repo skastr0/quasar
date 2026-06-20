@@ -34,8 +34,8 @@ const querySet = [
   {
     id: "operations",
     category: "operations proof",
-    query: "Mac mini Tailscale IP Docker local server full corpus ingest proof",
-    intent: "Find operational proof sessions about Mac mini deployment and full ingest readiness.",
+    query: "Mac mini Tailscale Service Docker local server full corpus ingest proof",
+    intent: "Find operational proof sessions about Mac mini service deployment and full ingest readiness.",
   },
 ];
 
@@ -77,8 +77,8 @@ const usage = () => {
   bun scripts/compare-local-search.mjs [--server URL] [--name active] [--profile name=URL ...] [--limit 5] [--modes lexical,semantic,fusion] [--out path.md] [--json path.json]
 
 Examples:
-  QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180 bun scripts/compare-local-search.mjs --name active
-  bun scripts/compare-local-search.mjs --profile gemini=http://<mac-mini-tailscale-ip>:6180 --profile nomic=http://<mac-mini-tailscale-ip>:6181
+  QUASAR_LOCAL_SERVER_URL=https://<quasar-service-tailnet-hostname> bun scripts/compare-local-search.mjs --name active
+  bun scripts/compare-local-search.mjs --profile gemini=http://127.0.0.1:6180 --profile nomic=http://127.0.0.1:6181
 `);
 };
 

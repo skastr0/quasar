@@ -43,13 +43,14 @@ Production ingest/search/read operations use the `quasar` CLI against the Mac
 mini local-server service:
 
 ```bash
-export QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180
-bun packages/cli/src/cli.ts stats
-bun packages/cli/src/cli.ts search --mode lexical --query "project identity" --limit 3
+export QUASAR_LOCAL_SERVER_URL=https://<quasar-service-tailnet-hostname>
+quasar stats
+quasar search --mode lexical --query "project identity" --limit 3
 ```
 
 The client config file is `~/.config/quasar/config.json`; its canonical server
-field is `localServerUrl`.
+field is `localServerUrl`. Client machines should point that field at the
+Tailscale Service hostname for `svc:quasar`, not the Mac mini device IP.
 
 Once published, install the CLI package with:
 

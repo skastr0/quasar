@@ -62,7 +62,7 @@ describe("local-server ops config", () => {
     expect(cli).toContain("tool-calls [--session-id id] [--project-key key] [--provider name] [--tool-name name] [--limit n] [--offset n]");
     expect(cli).toContain("tool-call --id id");
     expect(cli).toContain("[--role user|assistant]");
-    expect(cli).toContain("daemon install --server http://<mac-mini-tailscale-ip>:6180 --ingest-token <token> [--interval-seconds 60]");
+    expect(cli).toContain("daemon install --server https://<quasar-service-tailnet-hostname> --ingest-token <token> [--interval-seconds 60]");
     expect(cli).toContain("com.quasar.remote-ingest");
     expect(cli).toContain("already_running");
     expect(cli).toContain("operator-worker-tick");
