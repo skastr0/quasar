@@ -7,7 +7,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { Effect, Layer } from "effect";
 
 import { embeddingProfileFromEnv } from "../src/embeddingProfiles";
-import { ingest } from "../src/ingest";
+import { ingest, ingestRemote } from "../src/ingest";
 import { DurableQueue, makeDurableQueueLayer } from "../src/services";
 import { LocalStore, makeLocalStoreLayer } from "../src/store";
 
@@ -191,6 +191,58 @@ describe("ingest", () => {
     for (const job of leased.filter((job) => job.kind === "embed-message")) {
       expect(job.payload).toMatchObject({ embeddingProfile: embeddingProfileFromEnv().cacheNamespace });
       expect(job.idempotencyKey).toStartWith(`embed-message:${embeddingProfileFromEnv().cacheNamespace}:`);
+    }
+  });
+
+  test("remote ingest retries transient server write failures", async () => {
+    adaptersByProvider.set("unknown", adapterFor([session("remote-retry")]));
+    let attempts = 0;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: async (request) => {
+        attempts += 1;
+        if (request.headers.get("x-quasar-ingest-token") !== "token-a") {
+          return Response.json({ ok: false, error: { message: "missing token" } }, { status: 401 });
+        }
+        if (attempts === 1) {
+          return Response.json({ ok: false, error: { message: "temporary write failure" } }, { status: 500 });
+        }
+        const payload = await request.json() as {
+          readonly session: {
+            readonly session: { readonly sessionId: string };
+            readonly messages: readonly unknown[];
+            readonly toolCalls: readonly unknown[];
+          };
+        };
+        return Response.json({
+          ok: true,
+          data: {
+            outcome: {
+              sessionId: payload.session.session.sessionId,
+              status: "ok",
+              messagesWritten: payload.session.messages.length,
+              toolCallsWritten: payload.session.toolCalls.length,
+              jobsEnqueued: payload.session.messages.length + payload.session.toolCalls.length + 1,
+            },
+          },
+        });
+      },
+    });
+
+    try {
+      const reports = await ingestRemote(
+        { provider: "unknown" as never, ingestToken: "token-a" },
+        `http://127.0.0.1:${server.port}`,
+      );
+
+      expect(attempts).toBe(2);
+      expect(reports[0]?.sessionsWritten).toBe(1);
+      expect(reports[0]?.sessionsFailed).toBe(0);
+      expect(reports[0]?.messagesWritten).toBe(2);
+      expect(reports[0]?.toolCallsWritten).toBe(1);
+    } finally {
+      server.stop(true);
     }
   });
 

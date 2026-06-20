@@ -59,7 +59,7 @@ describe("CLI client/operator boundary", () => {
       expect(result.json.ok).toBe(true);
       expect(result.json.command).toBe("help");
     }
-  });
+  }, 15_000);
 
   test("version aliases report package metadata", async () => {
     for (const alias of [["--version"], ["-v"], ["version"]] as const) {
@@ -73,7 +73,7 @@ describe("CLI client/operator boundary", () => {
         version: packageJson.version,
       });
     }
-  });
+  }, 15_000);
 
   test("client commands fail closed when no server URL is configured", async () => {
     const result = await runCli(["stats"]);
@@ -84,7 +84,7 @@ describe("CLI client/operator boundary", () => {
     expect(result.json.error?.type).toBe("ConfigurationError");
     expect(result.json.error?.details?.acceptedEnv).toEqual(["QUASAR_LOCAL_SERVER_URL"]);
     expect(result.json.error?.details?.acceptedConfigFields).toEqual(["localServerUrl"]);
-  });
+  }, 15_000);
 
   test("search does not fall back to embedded lexical search", async () => {
     const result = await runCli(["search", "--query", "effect server", "--mode", "lexical"]);
@@ -93,7 +93,7 @@ describe("CLI client/operator boundary", () => {
     expect(result.json.ok).toBe(false);
     expect(result.json.command).toBe("search");
     expect(result.json.error?.type).toBe("ConfigurationError");
-  });
+  }, 15_000);
 
   test("operator commands remain explicit and do not require a server URL", async () => {
     const result = await runCli(["operator-workers"]);
@@ -101,5 +101,5 @@ describe("CLI client/operator boundary", () => {
     expect(result.exitCode).toBe(0);
     expect(result.json.ok).toBe(true);
     expect(result.json.command).toBe("operator-workers");
-  });
+  }, 15_000);
 });

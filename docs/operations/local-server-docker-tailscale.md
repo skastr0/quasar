@@ -136,8 +136,8 @@ curl -fsS https://<quasar-service-tailnet-hostname>/health
 
 tmp="$(mktemp -d)"
 printf '%s\n' '{"schemaVersion":3,"projectKey":"quasar","localServerUrl":"https://<quasar-service-tailnet-hostname>"}' > "$tmp/config.json"
-QUASAR_CONFIG="$tmp/config.json" npx -y @skastr0/quasar-cli@0.1.6 stats
-QUASAR_CONFIG="$tmp/config.json" npx -y @skastr0/quasar-cli@0.1.6 search \
+QUASAR_CONFIG="$tmp/config.json" npx -y @skastr0/quasar-cli@0.1.7 stats
+QUASAR_CONFIG="$tmp/config.json" npx -y @skastr0/quasar-cli@0.1.7 search \
   --query "effect server" \
   --mode fusion \
   --limit 3

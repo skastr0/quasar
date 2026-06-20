@@ -81,6 +81,26 @@ const fingerprintForItem = (item: {
 };
 
 const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+const remoteWriteAttempts = 3;
+const remoteWriteRetryDelayMs = 250;
+
+class RemoteIngestError extends Error {
+  override readonly name = "RemoteIngestError";
+
+  constructor(
+    message: string,
+    readonly retryable: boolean,
+  ) {
+    super(message);
+  }
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+const retryableRemoteWriteError = (error: unknown): boolean => {
+  if (error instanceof RemoteIngestError) return error.retryable;
+  return /socket|connection|closed|reset|timeout|timed out|econnreset|epipe|etimedout|fetch failed/i.test(errorMessage(error));
+};
 
 const positiveIntEnv = (name: string, fallback: number): number => {
   const raw = process.env[name]?.trim();
@@ -163,7 +183,7 @@ export const ingestMappedSession = (
     };
   });
 
-const postMappedSession = async (
+const postMappedSessionOnce = async (
   base: string,
   mapped: MappedSession,
   options: { readonly force?: boolean; readonly ingestToken?: string },
@@ -179,11 +199,35 @@ const postMappedSession = async (
     headers,
     body: JSON.stringify({ session: mapped }),
   });
-  const body = await response.json() as { ok?: boolean; data?: { outcome?: SessionIngestOutcome }; error?: { message?: string } };
+  let body: { ok?: boolean; data?: { outcome?: SessionIngestOutcome }; error?: { message?: string } };
+  try {
+    body = await response.json() as { ok?: boolean; data?: { outcome?: SessionIngestOutcome }; error?: { message?: string } };
+  } catch {
+    throw new RemoteIngestError(`remote ingest returned invalid JSON with HTTP ${response.status}`, response.status >= 500);
+  }
   if (!response.ok || body.ok === false || body.data?.outcome === undefined) {
-    throw new Error(body.error?.message ?? `remote ingest failed with HTTP ${response.status}`);
+    throw new RemoteIngestError(
+      body.error?.message ?? body.data?.outcome?.detail ?? `remote ingest failed with HTTP ${response.status}`,
+      response.status >= 500,
+    );
   }
   return body.data.outcome;
+};
+
+const postMappedSession = async (
+  base: string,
+  mapped: MappedSession,
+  options: { readonly force?: boolean; readonly ingestToken?: string },
+): Promise<SessionIngestOutcome> => {
+  for (let attempt = 1; attempt <= remoteWriteAttempts; attempt += 1) {
+    try {
+      return await postMappedSessionOnce(base, mapped, options);
+    } catch (error) {
+      if (attempt === remoteWriteAttempts || !retryableRemoteWriteError(error)) throw error;
+      await sleep(remoteWriteRetryDelayMs * attempt);
+    }
+  }
+  throw new Error("remote ingest retry loop exited unexpectedly");
 };
 
 const ingestProvider = (provider: Provider, options: IngestOptions): Effect.Effect<IngestReport, never, LocalStore | DurableQueue> =>

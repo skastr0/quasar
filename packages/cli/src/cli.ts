@@ -8,8 +8,8 @@ import { LanceDb } from "@skastr0/quasar-search";
 import { Effect } from "effect";
 
 import { configuredServerUrl, defaultClientConfigPath } from "./client-config";
+import { ingestFailureError, ingestReportPayload } from "./ingest-report";
 import { ingest, ingestRemote } from "../../local-server/src/ingest";
-import type { IngestReport } from "../../local-server/src/ingest";
 import { fail, ok, writeJson } from "../../local-server/src/json";
 import { SearchMaintenance } from "../../local-server/src/maintenance";
 import { AppRuntime } from "../../local-server/src/runtime";
@@ -39,7 +39,7 @@ const command =
   : rawCommand;
 const cliPackage = {
   name: "@skastr0/quasar-cli",
-  version: "0.1.6",
+  version: "0.1.7",
 };
 
 const server = (): string | undefined => arg("--server") ?? configuredServerUrl();
@@ -279,22 +279,6 @@ const fetchServer = async (name: string, path: string, params: Record<string, st
   }
 };
 
-const summarizeIngestReports = (reports: readonly IngestReport[]) => ({
-  reports: reports.map((report) => ({
-    provider: report.provider,
-    sessionsSeen: report.sessionsSeen,
-    sessionsWritten: report.sessionsWritten,
-    sessionsSkipped: report.sessionsSkipped,
-    sessionsFailed: report.sessionsFailed,
-    messagesWritten: report.messagesWritten,
-    toolCallsWritten: report.toolCallsWritten,
-    jobsEnqueued: report.jobsEnqueued,
-    searchDocuments: report.searchDocuments,
-    failures: report.failures,
-    durationMs: report.durationMs,
-  })),
-});
-
 const run = async (name: string, program: Effect.Effect<unknown, unknown, LocalStore | LanceDb | DurableQueue | DerivedSearch | SearchMaintenance | WorkerSupervisor | Embeddings>) => {
   try {
     writeJson(ok(name, await AppRuntime.runPromise(program)));
@@ -332,7 +316,9 @@ switch (command) {
     if (base === undefined) break;
     try {
       const reports = await ingestRemote(options, base);
-      writeJson(ok("ingest", flag("--summary") ? summarizeIngestReports(reports) : reports));
+      const failure = ingestFailureError(reports);
+      if (failure !== undefined) throw failure;
+      writeJson(ok("ingest", ingestReportPayload(reports, flag("--summary"))));
     } catch (error) {
       writeJson(fail("ingest", error));
       process.exitCode = 1;
@@ -347,7 +333,12 @@ switch (command) {
       ingestToken: arg("--ingest-token") ?? process.env.QUASAR_INGEST_TOKEN,
     };
     const program = ingest(options).pipe(
-      Effect.map((reports) => flag("--summary") ? summarizeIngestReports(reports) : reports),
+      Effect.flatMap((reports) => {
+        const failure = ingestFailureError(reports);
+        return failure === undefined
+          ? Effect.succeed(ingestReportPayload(reports, flag("--summary")))
+          : Effect.fail(failure);
+      }),
     );
     await run("operator-ingest", program);
     break;
