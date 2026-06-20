@@ -35,7 +35,7 @@ describe("local-server ops config", () => {
     expect(ops).toContain("QUASAR_WORKERS_ENABLED=false");
     expect(ops).toContain("QUASAR_SYNC_INGEST_LIMIT:-");
     expect(ops).toContain("limit_arg=\\\"--limit ${QUASAR_SYNC_INGEST_LIMIT}\\\"");
-    expect(ops).toContain("bun packages/local-server/src/cli.ts ingest --provider all --summary ${limit_arg}");
+    expect(ops).toContain("bun packages/cli/src/cli.ts ingest --provider all --summary ${limit_arg}");
     const sync = readFileSync(join(repoRoot, "scripts/install-local-server-sync.mjs"), "utf8");
     expect(sync).toContain("com.quasar.local-server-sync");
     expect(sync).toContain("StartInterval");
@@ -55,8 +55,8 @@ describe("local-server ops config", () => {
   });
 
   test("runbook documents the agent-facing local-server tool contract", () => {
-    const cli = readFileSync(join(repoRoot, "packages/local-server/src/cli.ts"), "utf8");
-    const clientConfig = readFileSync(join(repoRoot, "packages/local-server/src/client-config.ts"), "utf8");
+    const cli = readFileSync(join(repoRoot, "packages/cli/src/cli.ts"), "utf8");
+    const clientConfig = readFileSync(join(repoRoot, "packages/cli/src/client-config.ts"), "utf8");
     const runbook = readFileSync(join(repoRoot, "docs/operations/local-server-docker-tailscale.md"), "utf8");
 
     expect(cli).toContain("tool-calls [--session-id id] [--project-key key] [--provider name] [--tool-name name] [--limit n] [--offset n]");

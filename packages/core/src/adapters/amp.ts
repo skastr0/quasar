@@ -30,7 +30,7 @@ const MAX_LIST_PAGES = 100;
  * scope for the current dogfood (the owner cleans older threads up first). This
  * is a SCOPE filter on which remote threads we enumerate — not a byte budget,
  * clamp, or truncation of any value. Threads at or after it are exported in
- * full and rejected only at the Convex boundary if a value is oversized.
+ * full and rejected only at the ingest boundary if a value is provider garbage.
  */
 const RECENT_THREAD_CUTOFF = new Date("2026-03-16T00:00:00.000Z");
 

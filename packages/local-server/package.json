@@ -5,11 +5,7 @@
   "description": "Effect-owned local Quasar data plane: SQLite OLTP plus LanceDB search.",
   "license": "MIT",
   "type": "module",
-  "bin": {
-    "quasar-local": "src/cli.ts"
-  },
   "scripts": {
-    "dev": "bun run ./src/cli.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },

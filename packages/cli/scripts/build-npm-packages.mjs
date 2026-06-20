@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const packageDir = resolve(scriptDir, "..");
 const repoRoot = resolve(packageDir, "..", "..");
-const productionCliEntrypoint = resolve(repoRoot, "packages", "local-server", "src", "cli.ts");
+const productionCliEntrypoint = resolve(packageDir, "src", "cli.ts");
 const releaseRoot = resolve(repoRoot, ".release", "npm");
 const cliPackage = JSON.parse(
   readFileSync(resolve(packageDir, "package.json"), "utf8"),

@@ -1,8 +1,9 @@
 # Quasar — Data-Reality Plan
 
-Date: 2026-06-11; updated 2026-06-17 for the LanceDB search cutover.
-Status: **canonical**. This is the only live architecture document, together with the
-platform rulings in [convex-grain-quasar-v2.md](convex-grain-quasar-v2.md).
+Date: 2026-06-11; updated 2026-06-18 for the Effect local-server direction.
+Status: **canonical evidence**. This document owns measured corpus reality, provider
+mapping rules, and the normalized entity model. The implementation architecture lives in
+[quasar-effect-local-server-plan-2026-06-18.md](quasar-effect-local-server-plan-2026-06-18.md).
 Provenance: owner decisions of 2026-06-11 after a full-corpus measurement (every file
 and row of all five providers parsed), superseding the v2 greenfield plan and the
 sync-contract/stop-line apparatus.
@@ -10,9 +11,8 @@ sync-contract/stop-line apparatus.
 ## Product sentence
 
 Agents assess and research sessions for a project via deep session inspection and
-targeted tool-call retrieval in a fast CLI, MCP tools, and a Prism plugin. Convex
-stores the OLTP session rows; LanceDB owns the replacement lexical/vector/fusion
-search indexes.
+targeted tool-call retrieval in a fast CLI, MCP tools, and a local server. SQLite stores
+the session rows and durable queue. LanceDB owns lexical/vector/fusion search indexes.
 
 ## The data reality (measured 2026-06-11)
 
@@ -29,8 +29,9 @@ Hard facts that bound all design:
 
 - **No legitimate session value over 1 MB exists anywhere.** Worst real payload:
   185 KB (codex tool output). A session is context-window-bounded; a single turn
-  physically cannot approach Convex limits. Anything that does is provider garbage
-  (e.g. the infamous 105 MB opencode `message` row — agent machinery, not session data).
+  physically cannot approach the storage boundaries that matter for this project.
+  Anything that does is provider garbage (e.g. the infamous 105 MB opencode `message`
+  row — agent machinery, not session data).
 - The infamous 42 GB was the blob-import architecture's own amplified state, never
   source data. Amplification in the record-stream era was self-inflicted schema
   overhead (identity fields = 47.7% of wire bytes), never the data.
@@ -42,19 +43,17 @@ Any future shape decision starts from a measurement of real data, in absolute MB
 
 ## Three principles
 
-1. **Convex's limits are the contract.** No invented caps, clamps, gates, ratios, or
-   byte budgets — ever. Convex's document/value/transaction limits and its
-   architectural opinions (small instantly-completing mutations, actions for external
-   work) are adopted wholesale for OLTP storage.
-   A value beyond a Convex limit is, by the physics above, provider garbage: emit a
-   named diagnostic `(provider, sessionId, field, observedBytes)`, write zero rows for
-   it, continue the run. Boundary rejection, never "robust handling."
+1. **Measured data is the contract.** No invented caps, clamps, gates, ratios, or byte
+   budgets — ever. A value beyond measured session reality is, by the physics above,
+   provider garbage: emit a named diagnostic `(provider, sessionId, field,
+   observedBytes)`, write zero rows for that session, continue the run. Boundary
+   rejection, never "robust handling."
 2. **Store at the grain you read.** Rows are turns. Reading a session is a paginated
    index walk in `seq` order. No chunking, no compaction, no reconstruction layer.
-3. **Indexing is a separate decision from storing.** Convex stores the canonical
-   rows; LanceDB owns the search index and its indexing state. Search surfaces and
-   structural retrieval surfaces are different tables. Tool payloads (an agent
-   reading 100 files) can never pollute session search, structurally.
+3. **Indexing is a separate decision from storing.** SQLite stores the canonical rows;
+   LanceDB owns the search index and its indexing state. Search surfaces and structural
+   retrieval surfaces are different tables. Tool payloads (an agent reading 100 files)
+   can never pollute session search, structurally.
 
 ## Entity model and schema
 
@@ -72,7 +71,7 @@ sessions   sessionId, projectKey, provider, agentName, title, startedAt, updated
 
 messages   sessionId, seq, role (user|assistant|reasoning), text, ts, projectKey
            index: by_sessionId_and_seq
-           — source rows for LanceDB indexing; no Convex search index
+           — source rows for LanceDB indexing
 
 toolCalls  sessionId, seq, toolName, status, inputText, outputText,
            startedAt, completedAt, projectKey, provider
@@ -80,9 +79,9 @@ toolCalls  sessionId, seq, toolName, status, inputText, outputText,
            — structural surface; NEVER search-indexed, NEVER embedded
 ```
 
-Tool inputs and outputs are stored **in full** — Convex limits are the only boundary.
-Use case for `toolCalls`: "grab all calls to tool X in project Y and analyze
-inputs/outputs" — an exact index walk, not a search.
+Tool inputs and outputs are stored **in full** unless the provider row is diagnosed as
+garbage by measured session reality. Use case for `toolCalls`: "grab all calls to tool
+X in project Y and analyze inputs/outputs" — an exact index walk, not a search.
 
 ## Turn-mapping rules per provider
 
@@ -112,33 +111,24 @@ Redaction (`redactSensitive` in core) is a mandatory line on every ingested text
 
 ## Ingest pipeline
 
-`quasar ingest --provider <p>` (Effect CLI, JSON envelope): adapter stream →
-turn mapping → redaction → batched mutations via ConvexHttpClient against the pinned
-self-hosted backend (`http://127.0.0.1:4210`; images and ports in `platform/convex/`).
-Batches of a few hundred rows, sequential or low bounded concurrency. Idempotency:
-unchanged `sourceFingerprint` skips the session; changed sessions delete-then-reinsert
-their turns (chunked per Convex guidelines). `TooManyWrites` (S16 4 MiB/s, a documented
-platform property) gets bounded retry/backoff and is expected never to fire at
-sequential pace — the full estate is ~4 minutes of writes. Run reports speak absolute
-numbers: sessions written/skipped, rows, MB, diagnostics, duration.
+`quasar ingest --provider <p>`: adapter stream → turn mapping → redaction → SQLite
+truth-store write → durable downstream jobs for indexing and embeddings. Batches are
+bounded by runtime memory and SQLite transaction behavior, not by a remote argument
+transport. Idempotency: unchanged `sourceFingerprint` skips the session; changed
+sessions replace their stored turns atomically. Run reports speak absolute numbers:
+sessions written/skipped, rows, MB, diagnostics, duration, and queued derived work.
 
 ## Search
 
-Convex Searchlight/RAG is retired. Do not restore `searchIndex`, `@convex-dev/rag`,
-Workpool embedding queues, Gemini environment sync, `searchMessages`, or compatibility
-CLI search placeholders. Existing Convex search/vector state is disposable and is not
-exported or reused.
-
-LanceDB owns the replacement search stack on the Mac mini filesystem. It gets its own
-explicit indexing state, invalidation rules, FTS/vector indexes, and verification
-batteries. Convex actions may call the in-repo LanceDB client directly; there is no
-separate Bun HTTP daemon.
+LanceDB owns the search stack on the Mac mini filesystem. It gets explicit indexing
+state, invalidation rules, FTS/vector indexes, freshness reconciliation, and
+verification batteries. It is derived from SQLite truth and can be rebuilt.
 
 ## Build sequence (Tower, project `quasar`, forge orbit)
 
-The original Convex/RAG sequence is historical. Current work continues in Tower with
-the LanceDB cutover: remove Convex search/RAG, keep Convex OLTP, add in-repo LanceDB
-indexing/search, then re-ingest clean data.
+Current work continues in Tower with the Effect local-server sequence: SQLite truth
+store, durable queue, LanceDB indexing/search, embedding cache, Docker/Tailscale
+deployment, then full-corpus proof.
 
 ## Historical documents
 

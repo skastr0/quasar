@@ -8,34 +8,33 @@ simple — five previous architectures failed by refusing to believe that.
 Quasar ingests local AI-agent session histories (Claude Code, Codex, OpenCode, Grok,
 Hermes, Antigravity), prunes provider noise, and serves deep session inspection —
 including targeted tool-call retrieval — to agents via a CLI, MCP tools, and a
-self-hosted Convex backend on this machine, reached over Tailscale. Search is rebuilt
-through LanceDB; Convex is not the search/RAG backend.
+local Effect server on the Mac mini, reached over Tailscale. SQLite is the truth store
+and durable queue. LanceDB is the derived lexical/vector/fusion search index.
 
 ## The data reality (measured 2026-06-11, full corpus, every row parsed)
 
 The entire five-provider estate is **≈ 1.8 GB raw → ≈ 650 MB of product text**
 (claude 35 MB, codex 240 MB, opencode ~300 MB, hermes ~20 MB, grok ~5 MB; ~2,360
 sessions). **No legitimate session value over 1 MB exists anywhere** — a session is
-context-window-bounded, so a single turn physically cannot approach Convex limits.
-Anything that does is provider garbage, not data.
+context-window-bounded, so a single turn physically cannot approach the storage
+boundaries that matter for this project. Anything that does is provider garbage, not
+data.
 
 ## Three principles
 
-1. **Convex's limits are the contract.** Never invent caps, clamps, gates,
-   amplification ratios, or byte budgets. Adopt Convex's limits and opinions
-   wholesale: small instantly-completing mutations and actions for external work.
-   Convex stores OLTP rows only; LanceDB owns lexical/vector search indexes outside
-   Convex. A value beyond a Convex limit is provider garbage: emit a named diagnostic
-   `(provider, sessionId, field, observedBytes)`, write zero rows for it, continue.
-   Boundary rejection, never "robust handling."
+1. **Measured data is the contract.** Never invent caps, clamps, gates,
+   amplification ratios, or byte budgets. The local store should accept legitimate
+   session data directly. A value beyond measured corpus reality is provider garbage:
+   emit a named diagnostic `(provider, sessionId, field, observedBytes)`, write zero
+   rows for that session, continue. Boundary rejection, never "robust handling."
 2. **Store at the grain you read.** Rows are turns. Reading a session is a paginated
    index walk in `seq` order. No chunking, compaction, or reconstruction layers.
-3. **Indexing is a separate decision from storing.** `messages` is the product text
-   source for search indexing, but Convex does not own that index. LanceDB indexing
-   state must be explicit and separately owned. `toolCalls` is the structural surface
-   — full inputs/outputs stored, retrieved by `(projectKey, toolName)` or
-   `(sessionId, seq)`, and **never search-indexed or embedded**, so tool payloads
-   cannot pollute session search.
+3. **Indexing is a separate decision from storing.** `messages` in SQLite is the
+   product text source for search indexing, but SQLite does not own the search index.
+   LanceDB indexing state must be explicit and separately owned. `toolCalls` is the
+   structural surface — full inputs/outputs stored, retrieved by `(projectKey,
+   toolName)` or `(sessionId, seq)`, and **never search-indexed or embedded** by
+   default, so tool payloads cannot pollute session search.
 
 If you find yourself designing byte budgets, ratios, compaction, clamp taxonomies, or
 "robust handling" of oversized data: stop. You are repeating a documented failure
@@ -44,11 +43,13 @@ any shape decision.
 
 ## Canonical direction
 
-Exactly one: `docs/architecture/quasar-data-reality-plan-2026-06-11.md`, plus the
-platform rulings in `docs/architecture/convex-grain-quasar-v2.md`. Every other
-architecture document is historical evidence — no instruction in one is live work.
+Exactly one implementation direction:
+`docs/architecture/quasar-effect-local-server-plan-2026-06-18.md`. The measured corpus
+facts and normalized entity model in
+`docs/architecture/quasar-data-reality-plan-2026-06-11.md` remain live evidence.
 
-Work is tracked in Tower (project `quasar`, forge orbit), sequence QSR-053..062. Read
+Work is tracked in Tower (project `quasar`, forge orbit), current migration sequence
+QSR-096..108. Read
 the glyph before building; never put board identifiers into code, tests, schemas,
 fixtures, or file paths.
 
@@ -56,13 +57,9 @@ fixtures, or file paths.
 
 - Runtime: bun. Validation: `bun run typecheck && bun run test` at the root. Keep it
   green through every change.
-- CLI is Effect + @effect/cli with JSON envelopes; load the `effect` and
-  `agentic-cli-authoring` skills for that work.
-- Convex work: read `convex/_generated/ai/guidelines.md` first; load the `convex`
-  skills. Grain rulings hold: index-only reads (`.filter()` is banned on growing
-  tables), bounded reads (`take`/`paginate`, no unbounded `collect`), small chunked
-  mutations, actions for side effects only, argument validators on every function,
-  and no Convex search/RAG components.
+- Local server and CLI are Effect-first; load the `effect` and
+  `agentic-cli-authoring` skills for that work. Use services/layers, one
+  ManagedRuntime, typed errors, Effect Schema at boundaries, and bounded workers.
 - Redaction (`redactSensitive` in core) is a mandatory safety line on every ingested
   text. Live SQLite sources are read without locks that could stall the owning agent.
 - Provider knowledge stays inside the provider's adapter; the shared layer owns only
@@ -72,17 +69,3 @@ fixtures, or file paths.
   yet.
 - Commit hygiene: atomic conventional commits; never commit secrets, session data, or
   tailnet hostnames.
-
-<!-- convex-ai-start -->
-
-This project uses [Convex](https://convex.dev) as its backend.
-
-When working on Convex code, **always read
-`convex/_generated/ai/guidelines.md` first** for important guidelines on
-how to correctly use Convex APIs and patterns. The file contains rules that
-override what you may have learned about Convex from training data.
-
-Convex agent skills for common tasks can be installed by running
-`npx convex ai-files install`.
-
-<!-- convex-ai-end -->

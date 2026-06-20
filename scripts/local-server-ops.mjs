@@ -94,7 +94,7 @@ switch (command) {
       "cd /app",
       "limit_arg=\"\"",
       "if [ -n \"${QUASAR_SYNC_INGEST_LIMIT:-}\" ]; then limit_arg=\"--limit ${QUASAR_SYNC_INGEST_LIMIT}\"; fi",
-      "QUASAR_WORKERS_ENABLED=false QUASAR_EMBEDDING_WORKER_ENABLED=false QUASAR_INDEX_REPAIR_WORKER_ENABLED=false QUASAR_FRESHNESS_WORKER_ENABLED=false QUASAR_MAINTENANCE_WORKER_ENABLED=false bun packages/local-server/src/cli.ts ingest --provider all --summary ${limit_arg}",
+      "QUASAR_WORKERS_ENABLED=false QUASAR_EMBEDDING_WORKER_ENABLED=false QUASAR_INDEX_REPAIR_WORKER_ENABLED=false QUASAR_FRESHNESS_WORKER_ENABLED=false QUASAR_MAINTENANCE_WORKER_ENABLED=false bun packages/cli/src/cli.ts ingest --provider all --summary ${limit_arg}",
     ].join("\n"));
     break;
   case "maintain":
@@ -108,7 +108,7 @@ switch (command) {
 }
 
 function cli(args) {
-  sh(["cd /app", ["bun", "packages/local-server/src/cli.ts", ...args.map(shellQuote)].join(" ")].join(" && "));
+  sh(["cd /app", ["bun", "packages/cli/src/cli.ts", ...args.map(shellQuote)].join(" ")].join(" && "));
 }
 
 function sh(script) {

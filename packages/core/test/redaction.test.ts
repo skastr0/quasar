@@ -40,8 +40,8 @@ describe("redaction", () => {
 
   test("preserves control-character-dense text instead of discarding it by heuristic", () => {
     // No invented binary-detection budget: control characters normalize to
-    // spaces and the content survives. Convex limits, enforced at the ingest
-    // boundary, are the only line at which data is rejected.
+    // spaces and the content survives. The ingest boundary is the only line at
+    // which provider garbage is rejected.
     const binaryOutput = `${"\u0000".repeat(32)}mach-o`;
     expect(compactText(binaryOutput.repeat(8))).toBe(
       Array.from({ length: 8 }, () => "mach-o").join(" "),

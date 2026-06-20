@@ -10,24 +10,17 @@ formats may still change.
 
 ### Changed
 
-- Reoriented the repository to the v2 architecture direction
-  (`docs/architecture/quasar-v2-greenfield-plan-2026-06-10.md`). Superseded
-  architecture documents are marked historical; live server ingest remains
-  gated until the v2 sync contract lands and its measured gates pass.
+- Reoriented the repository to the Effect local-server architecture direction:
+  SQLite truth store, durable queue, LanceDB search, package-owned CLI, and
+  Docker/Tailscale deployment.
 
 ### Removed
 
-- The Convex control app and dashboard (`apps/control`) in their entirety, the
-  CLI server client, and the server-backed CLI commands (ingest, search,
-  sessions, tool-calls, projects). The project has no users and no live data;
-  nothing v1-shaped earns life by working. The CLI keeps only local read-only
-  commands; the v2 server and surfaces are built fresh per the architecture
-  plan.
+- Abandoned backend/runtime surfaces and stale CLI implementation paths from
+  the active source tree.
 - The entire abandoned record-stream ingest plane: the v1 record taxonomy and
-  envelope machinery, the adapter record bridge, the CLI ingest ledger and
-  runner, the Convex record-ingest endpoint and its `recordStates`/`tombstones`
-  tables, and the `/api/ingest/records` route. Parsing knowledge remains
-  minable from git history (see `docs/architecture/README.md`, Graveyard).
+  envelope machinery, adapter record bridge, old CLI ingest ledger and runner,
+  and `/api/ingest/records` route.
 - The six provider adapters with no data on any real host (Amp, Pi, Kimi,
   Factory/Droid, Antigravity, Cursor); re-admitted only when data and a
   consuming endpoint exist.
@@ -46,5 +39,3 @@ formats may still change.
 - Initial public Quasar CLI package preparation.
 - Local agent session discovery, planning, ingestion, search, and inspection
   commands.
-- Convex-backed local control app and dashboard kept outside the npm publish
-  surface.

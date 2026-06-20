@@ -11,7 +11,7 @@ const querySet = [
     id: "project-retrieval",
     category: "project/session retrieval",
     query: "Quasar local server Effect architecture SQLite LanceDB Docker Tailscale",
-    intent: "Find sessions about the Convex-to-Effect local-server architecture shift.",
+    intent: "Find sessions about the Effect local-server architecture.",
   },
   {
     id: "code-debug",
@@ -28,7 +28,7 @@ const querySet = [
   {
     id: "decision-memory",
     category: "decision-memory recall",
-    query: "Convex limits are the contract store at turn grain indexing separate decision",
+    query: "measured data contract store at turn grain indexing separate decision",
     intent: "Find the durable architecture rulings that shaped Quasar's data model.",
   },
   {

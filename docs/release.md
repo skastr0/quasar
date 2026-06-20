@@ -1,7 +1,7 @@
 # Release Checklist
 
 Publishing is paused until the v2 product gates are green (see
-`docs/architecture/quasar-v2-greenfield-plan-2026-06-10.md`). Public artifacts
+`docs/architecture/quasar-effect-local-server-plan-2026-06-18.md`). Public artifacts
 must describe a working system, not aspirations.
 
 Quasar uses CI-first npm publishing for the CLI package. Do not publish locally
@@ -11,8 +11,8 @@ unless the maintainer explicitly approves a specific package/version exception.
 
 - Confirm the repository license and copyright holder.
 - Confirm no private agent histories, Tailscale hostnames, Tailnet IPs, local
-  Convex state, `.env*` files, `.groundwork/`, or generated release artifacts
-  are tracked.
+  runtime data, `.env*` files, `.groundwork/`, or generated release artifacts are
+  tracked.
 - Run `bun run verify`.
 - Run the readiness and package audits.
 

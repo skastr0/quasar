@@ -150,8 +150,8 @@ const HERMES_SESSION_COLUMNS = [
   "title",
   "cwd",
 ].join(", ");
-// Columns are read in full — never byte caps. Convex limits are the only
-// boundary; oversized values surface as named diagnostics at the ingest layer.
+// Columns are read in full — never byte caps. Provider garbage surfaces as
+// named diagnostics at the ingest layer.
 const HERMES_MESSAGE_COLUMNS = [
   "id",
   "session_id",

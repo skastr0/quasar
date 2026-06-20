@@ -96,7 +96,7 @@ plane and set the client wrapper environment to the Mac mini Tailscale IP:
 export QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180
 ```
 
-The local-server CLI mirrors the HTTP API and is safe to wrap as MCP tools. The
+The `quasar` CLI mirrors the HTTP API and is safe to wrap as MCP tools. The
 serving surface is read/search only:
 
 | Agent job | CLI wrapper | HTTP route | Filters |
@@ -117,9 +117,8 @@ Notes for wrappers:
   input/output remains structural/lexical evidence, not semantic embeddings.
 - Operator-only commands: agent wrappers should not expose ingest, embedding,
   maintenance, or backfill as default tools. Those remain operator actions.
-- No MCP wrapper should talk to the old parked runtime. If a wrapper cannot reach
-  `QUASAR_LOCAL_SERVER_URL`, fail closed with a connection error instead of falling
-  back to stale data.
+- If a wrapper cannot reach `QUASAR_LOCAL_SERVER_URL`, fail closed with a connection
+  error instead of falling back to stale data.
 
 ## Incremental sync story
 
@@ -315,7 +314,7 @@ bun run local-server:maintain
 6. If jobs are leased forever after a crash, run:
 
    ```bash
-   bun scripts/local-server-ops.mjs exec -- sh -lc 'cd /app && bun packages/local-server/src/cli.ts recover-leases'
+   bun scripts/local-server-ops.mjs exec -- sh -lc 'cd /app && bun packages/cli/src/cli.ts recover-leases'
    ```
 
 7. If search misses fresh sessions, run:

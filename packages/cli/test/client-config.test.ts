@@ -14,7 +14,7 @@ describe("client config", () => {
   test("loads only supported local-server URL fields from config", () => {
     const dir = mkdtempSync(join(tmpdir(), "quasar-client-config-"));
     const path = join(dir, "config.json");
-    writeFileSync(path, JSON.stringify({ localServerUrl: " http://127.0.0.1:6180 ", convexUrl: "ignored" }));
+    writeFileSync(path, JSON.stringify({ localServerUrl: " http://127.0.0.1:6180 ", legacyApiUrl: "ignored" }));
 
     expect(loadClientConfig(path)).toEqual({
       localServerUrl: "http://127.0.0.1:6180",
