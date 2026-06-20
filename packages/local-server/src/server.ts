@@ -1,12 +1,14 @@
 import { HttpMiddleware, HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "@effect/platform";
 import { BunHttpServer, BunRuntime } from "@effect/platform-bun";
 import { LanceDb, MESSAGE_SEARCH_COLUMNS } from "@skastr0/quasar-search";
-import { Effect, Layer } from "effect";
+import { Effect, Layer, Schema } from "effect";
 
 import { LocalServerConfig } from "./config";
 import { embeddingProfileSearchTable } from "./embeddingProfiles";
+import { ingestMappedSession } from "./ingest";
 import { ok } from "./json";
 import { SearchMaintenance } from "./maintenance";
+import type { MappedSession } from "./model";
 import { AppLayer } from "./runtime";
 import { DerivedSearch, messageSearchFilter } from "./search";
 import { VECTOR_READY_FILTER } from "./searchPolicy";
@@ -21,6 +23,26 @@ const badRequest = (route: string, message: string) =>
 
 const notFound = (route: string, message: string) =>
   json({ ok: false, route, error: { type: "NotFound", message } }, { status: 404 });
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
+
+const isMappedSession = (value: unknown): value is MappedSession => {
+  if (!isRecord(value)) return false;
+  const project = value.project;
+  const session = value.session;
+  return isRecord(project) && isRecord(session)
+    && typeof project.projectKey === "string"
+    && typeof project.displayName === "string"
+    && typeof session.sessionId === "string"
+    && typeof session.projectKey === "string"
+    && typeof session.provider === "string"
+    && typeof session.agentName === "string"
+    && typeof session.sourcePath === "string"
+    && typeof session.sourceFingerprint === "string"
+    && Array.isArray(value.messages)
+    && Array.isArray(value.toolCalls);
+};
 
 const query = Effect.map(HttpServerRequest.HttpServerRequest, (request) =>
   new URL(request.url, "http://quasar.local").searchParams,
@@ -152,6 +174,29 @@ const ingestRun = Effect.gen(function* () {
   return row === undefined ? notFound("ingest-run", `ingest run not found: ${runId}`) : json(ok("ingest-run", { row }));
 });
 
+const ingestSession = Effect.gen(function* () {
+  const body = yield* HttpServerRequest.schemaBodyJson(Schema.Unknown);
+  if (!isRecord(body) || !isMappedSession(body.session)) {
+    return badRequest("ingest/session", "JSON body must be { session: MappedSession }");
+  }
+  const mapped = body.session;
+  const outcome = yield* ingestMappedSession(mapped).pipe(
+    Effect.catchAll((error) =>
+      Effect.succeed({
+        sessionId: mapped.session.sessionId,
+        status: "failed" as const,
+        diagnostic: "write_or_enqueue_failed",
+        detail: error instanceof Error ? error.message : String(error),
+        messagesWritten: 0,
+        toolCallsWritten: 0,
+        jobsEnqueued: 0,
+      }),
+    ),
+  );
+  const status = outcome.status === "failed" ? 500 : 200;
+  return json(ok("ingest/session", { outcome }), { status });
+});
+
 const lexicalSearch = Effect.gen(function* () {
   const search = yield* DerivedSearch;
   const params = yield* query;
@@ -270,6 +315,7 @@ const routes = HttpRouter.empty.pipe(
   HttpRouter.get("/tool-call", toolCall),
   HttpRouter.get("/ingest-runs", ingestRuns),
   HttpRouter.get("/ingest-run", ingestRun),
+  HttpRouter.post("/ingest/session", ingestSession),
   HttpRouter.get("/search/lexical", lexicalSearch),
   HttpRouter.get("/search/semantic", semanticSearch),
   HttpRouter.get("/search/fusion", fusionSearch),

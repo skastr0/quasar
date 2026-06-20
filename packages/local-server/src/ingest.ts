@@ -91,7 +91,7 @@ const positiveIntEnv = (name: string, fallback: number): number => {
 const searchableMessages = (session: MappedSession): readonly MessageRow[] =>
   session.messages.filter(isSemanticSearchDocument);
 
-const enqueueDownstreamJobs = (queue: DurableQueueService, session: MappedSession): Effect.Effect<number, unknown> =>
+export const enqueueDownstreamJobs = (queue: DurableQueueService, session: MappedSession): Effect.Effect<number, unknown> =>
   Effect.gen(function* () {
     const embeddingJobNamespace = embeddingProfileJobNamespace(embeddingProfileFromEnv());
     const embeddingMaxAttempts = positiveIntEnv("QUASAR_EMBEDDING_JOB_MAX_ATTEMPTS", 12);
@@ -125,6 +125,51 @@ const enqueueDownstreamJobs = (queue: DurableQueueService, session: MappedSessio
     );
     return 1 + messages.length;
   });
+
+export const ingestMappedSession = (mapped: MappedSession): Effect.Effect<SessionIngestOutcome, unknown, LocalStore | DurableQueue> =>
+  Effect.gen(function* () {
+    const store = yield* LocalStore;
+    const queue = yield* DurableQueue;
+    const unchanged = yield* store.hasSessionFingerprint(
+      mapped.session.sessionId,
+      mapped.session.sourceFingerprint,
+    ).pipe(Effect.catchAll(() => Effect.succeed(false)));
+    if (unchanged) {
+      return {
+        sessionId: mapped.session.sessionId,
+        status: "skipped" as const,
+        diagnostic: "unchanged_source_fingerprint",
+        messagesWritten: 0,
+        toolCallsWritten: 0,
+        jobsEnqueued: 0,
+      };
+    }
+    const jobsEnqueued = yield* store.upsertSession(mapped).pipe(
+      Effect.zipRight(enqueueDownstreamJobs(queue, mapped)),
+    );
+    return {
+      sessionId: mapped.session.sessionId,
+      status: "ok" as const,
+      messagesWritten: mapped.messages.length,
+      toolCallsWritten: mapped.toolCalls.length,
+      jobsEnqueued,
+      searchDocuments: summarizeSearchDocumentPolicy(mapped.messages),
+    };
+  });
+
+const postMappedSession = async (base: string, mapped: MappedSession): Promise<SessionIngestOutcome> => {
+  const url = new URL("/ingest/session", base.endsWith("/") ? base : `${base}/`);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ session: mapped }),
+  });
+  const body = await response.json() as { ok?: boolean; data?: { outcome?: SessionIngestOutcome }; error?: { message?: string } };
+  if (!response.ok || body.ok === false || body.data?.outcome === undefined) {
+    throw new Error(body.error?.message ?? `remote ingest failed with HTTP ${response.status}`);
+  }
+  return body.data.outcome;
+};
 
 const ingestProvider = (provider: Provider, options: IngestOptions): Effect.Effect<IngestReport, never, LocalStore | DurableQueue> =>
   Effect.gen(function* () {
@@ -323,4 +368,125 @@ export const ingest = (options: IngestOptions): Effect.Effect<readonly IngestRep
       ? stableAdapters.map((adapter) => adapter.provider).filter((provider) => provider !== "amp")
       : [options.provider];
   return Effect.forEach(providers, (provider) => ingestProvider(provider, options), { concurrency: 1 });
+};
+
+const ingestProviderRemote = async (
+  provider: Provider,
+  options: IngestOptions,
+  serverUrl: string,
+): Promise<IngestReport> => {
+  const startedAt = Date.now();
+  const adapter = adaptersByProvider.get(provider);
+  if (adapter?.stream === undefined) {
+    return {
+      provider,
+      sessionsSeen: 0,
+      sessionsWritten: 0,
+      sessionsSkipped: 0,
+      sessionsFailed: 1,
+      messagesWritten: 0,
+      toolCallsWritten: 0,
+      jobsEnqueued: 0,
+      searchDocuments: { total: 0, semanticEligible: 0, ignored: 0 },
+      outcomes: [],
+      failures: [{ sessionId: provider, diagnostic: "provider_stream_unavailable", error: `Provider ${provider} does not expose a stream` }],
+      durationMs: Date.now() - startedAt,
+    };
+  }
+
+  let sessionsSeen = 0;
+  let sessionsWritten = 0;
+  let sessionsSkipped = 0;
+  let sessionsFailed = 0;
+  let messagesWritten = 0;
+  let toolCallsWritten = 0;
+  let jobsEnqueued = 0;
+  let semanticEligible = 0;
+  let ignored = 0;
+  const outcomes: SessionIngestOutcome[] = [];
+  const failures: { sessionId: string; diagnostic: string; error: string }[] = [];
+
+  const stream = adapter.stream({
+    machine: loadMachineIdentity(),
+    now: new Date().toISOString(),
+    roots: configuredRoots(),
+    limit: options.limit,
+  });
+
+  for await (const item of stream) {
+    if (item.type !== "session") continue;
+    sessionsSeen += 1;
+    let sourceFingerprint: string;
+    try {
+      sourceFingerprint = fingerprintForItem(item);
+    } catch (error) {
+      const detail = errorMessage(error);
+      sessionsFailed += 1;
+      failures.push({ sessionId: item.session.id, diagnostic: "source_fingerprint_failed", error: detail });
+      outcomes.push({ sessionId: item.session.id, status: "failed", diagnostic: "source_fingerprint_failed", detail, messagesWritten: 0, toolCallsWritten: 0, jobsEnqueued: 0 });
+      continue;
+    }
+    let mapped: MappedSession;
+    try {
+      mapped = mapSession(item.session, sourceFingerprint);
+    } catch (error) {
+      const detail = errorMessage(error);
+      sessionsFailed += 1;
+      failures.push({ sessionId: item.session.id, diagnostic: "map_session_failed", error: detail });
+      outcomes.push({ sessionId: item.session.id, status: "failed", diagnostic: "map_session_failed", detail, messagesWritten: 0, toolCallsWritten: 0, jobsEnqueued: 0 });
+      continue;
+    }
+    try {
+      const outcome = await postMappedSession(serverUrl, mapped);
+      outcomes.push(outcome);
+      if (outcome.status === "ok") {
+        sessionsWritten += 1;
+        messagesWritten += outcome.messagesWritten;
+        toolCallsWritten += outcome.toolCallsWritten;
+        jobsEnqueued += outcome.jobsEnqueued;
+        const searchDocuments = outcome.searchDocuments ?? summarizeSearchDocumentPolicy(mapped.messages);
+        semanticEligible += searchDocuments.semanticEligible;
+        ignored += searchDocuments.ignored;
+      } else if (outcome.status === "skipped") {
+        sessionsSkipped += 1;
+      } else {
+        sessionsFailed += 1;
+      }
+    } catch (error) {
+      const detail = errorMessage(error);
+      sessionsFailed += 1;
+      failures.push({ sessionId: mapped.session.sessionId, diagnostic: "remote_write_failed", error: detail });
+      outcomes.push({ sessionId: mapped.session.sessionId, status: "failed", diagnostic: "remote_write_failed", detail, messagesWritten: 0, toolCallsWritten: 0, jobsEnqueued: 0 });
+    }
+  }
+
+  return {
+    provider,
+    sessionsSeen,
+    sessionsWritten,
+    sessionsSkipped,
+    sessionsFailed,
+    messagesWritten,
+    toolCallsWritten,
+    jobsEnqueued,
+    searchDocuments: { total: messagesWritten, semanticEligible, ignored },
+    outcomes,
+    failures,
+    durationMs: Date.now() - startedAt,
+  };
+};
+
+export const ingestRemote = async (
+  options: IngestOptions,
+  serverUrl: string,
+): Promise<readonly IngestReport[]> => {
+  const providers =
+    options.provider === "all"
+      ? stableAdapters.map((adapter) => adapter.provider).filter((provider) => provider !== "amp")
+      : [options.provider];
+  const reports: IngestReport[] = [];
+  for (const provider of providers) {
+    reports.push(await ingestProviderRemote(provider, options, serverUrl));
+  }
+  return reports;
 };

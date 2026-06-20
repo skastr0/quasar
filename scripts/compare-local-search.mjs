@@ -3,7 +3,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
-const DEFAULT_SERVER = process.env.QUASAR_LOCAL_SERVER_URL ?? "http://100.96.152.41:6180";
+const DEFAULT_SERVER = process.env.QUASAR_LOCAL_SERVER_URL ?? "http://127.0.0.1:6180";
 const DEFAULT_LIMIT = 5;
 
 const querySet = [
@@ -77,8 +77,8 @@ const usage = () => {
   bun scripts/compare-local-search.mjs [--server URL] [--name active] [--profile name=URL ...] [--limit 5] [--modes lexical,semantic,fusion] [--out path.md] [--json path.json]
 
 Examples:
-  bun scripts/compare-local-search.mjs --server http://100.96.152.41:6180 --name gemini
-  bun scripts/compare-local-search.mjs --profile gemini=http://100.96.152.41:6180 --profile nomic=http://100.96.152.41:6181
+  QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180 bun scripts/compare-local-search.mjs --name active
+  bun scripts/compare-local-search.mjs --profile gemini=http://<mac-mini-tailscale-ip>:6180 --profile nomic=http://<mac-mini-tailscale-ip>:6181
 `);
 };
 

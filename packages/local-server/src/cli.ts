@@ -2,7 +2,7 @@
 import { LanceDb } from "@skastr0/quasar-search";
 import { Effect } from "effect";
 
-import { ingest } from "./ingest";
+import { ingest, ingestRemote } from "./ingest";
 import type { IngestReport } from "./ingest";
 import { fail, ok, writeJson } from "./json";
 import { SearchMaintenance } from "./maintenance";
@@ -81,11 +81,25 @@ const run = async (name: string, program: Effect.Effect<unknown, unknown, LocalS
 
 switch (command) {
   case "ingest": {
-    const program = ingest({
-        provider: (arg("--provider") ?? "all") as never,
-        limit: arg("--limit") === undefined ? undefined : intArg("--limit", 1),
-        force: flag("--force"),
-      }).pipe(Effect.map((reports) => flag("--summary") ? summarizeIngestReports(reports) : reports));
+    const options = {
+      provider: (arg("--provider") ?? "all") as never,
+      limit: arg("--limit") === undefined ? undefined : intArg("--limit", 1),
+      force: flag("--force"),
+    };
+    const base = server();
+    if (base !== undefined) {
+      try {
+        const reports = await ingestRemote(options, base);
+        writeJson(ok("ingest", flag("--summary") ? summarizeIngestReports(reports) : reports));
+      } catch (error) {
+        writeJson(fail("ingest", error));
+        process.exitCode = 1;
+      }
+      break;
+    }
+    const program = ingest(options).pipe(
+      Effect.map((reports) => flag("--summary") ? summarizeIngestReports(reports) : reports),
+    );
     await run("ingest", program);
     break;
   }
@@ -339,6 +353,7 @@ switch (command) {
       ok("help", {
         commands: [
           "ingest --provider all|claude|codex|opencode|hermes|grok [--limit n] [--force] [--summary]",
+          "ingest --provider all --server http://<mac-mini-tailscale-ip>:6180",
           "serve [--host 127.0.0.1] [--port 6180]",
           "projects [--limit n] [--offset n]",
           "sessions [--provider name] [--project-key key] [--limit n] [--offset n]",

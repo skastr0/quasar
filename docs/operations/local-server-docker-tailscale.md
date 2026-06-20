@@ -106,6 +106,7 @@ serving surface is read/search only:
 | Search | `search --query <text> --mode lexical\|semantic\|fusion` | `GET /search/<mode>` | `q`/`query`, `projectKey`, `role=user\|assistant`, `limit` |
 | Tool-call list | `tool-calls` | `GET /tool-calls` | `sessionId`, `projectKey`, `provider`, `toolName`, `limit`, `offset` |
 | Tool-call read | `tool-call --id <id>` | `GET /tool-call` | `id` |
+| Remote ingest | `ingest --provider all` | `POST /ingest/session` | operator only; set `QUASAR_LOCAL_SERVER_URL` |
 
 Notes for wrappers:
 
@@ -113,8 +114,8 @@ Notes for wrappers:
 - `role` applies to indexed message search documents (`user`, `assistant`).
   The current semantic corpus embeds `user` and `assistant` message rows; tool-call
   input/output remains structural/lexical evidence, not semantic embeddings.
-- Operator-only commands: the serving layer must not expose ingest, embedding, maintenance, or backfill as
-  default agent tools. Those remain operator actions.
+- Operator-only commands: agent wrappers should not expose ingest, embedding,
+  maintenance, or backfill as default tools. Those remain operator actions.
 - No MCP wrapper should talk to the old parked runtime. If a wrapper cannot reach
   `QUASAR_LOCAL_SERVER_URL`, fail closed with a connection error instead of falling
   back to stale data.
@@ -140,6 +141,41 @@ Keep this simple:
 5. Embedding is not a cron shell loop. The server-owned embedding worker leases queued `embed-message` jobs, batches provider calls, uses the cache, and backs off on retryable provider limits.
 
 The scheduled tick is intentionally uncapped by default and relies on adapter `shouldParseSession` probes to skip unchanged sources before expensive parse work. It emits summary JSON so per-minute logs stay small, disables one-shot workers in the CLI process, and leaves embedding/index draining/backoff to the long-running Docker service.
+
+## Ingesting from another Tailscale machine
+
+Install the released CLI on the other machine, point it at the Mac mini's direct
+Tailscale IP, then run ingest. The CLI reads local history folders on that
+machine and POSTs mapped sessions to the Mac mini server. The server is still
+the authority for idempotency, SQLite writes, embedding-cache lookup, and
+LanceDB/index queue draining.
+
+```bash
+npm install -g @skastr0/quasar-cli
+export QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180
+
+# Optional when provider roots are non-standard on that machine.
+export QUASAR_CODEX_ROOT="$HOME/.codex"
+export QUASAR_CLAUDE_ROOT="$HOME/.claude"
+export QUASAR_OPENCODE_ROOT="$HOME/.local/share/opencode"
+export QUASAR_GROK_ROOT="$HOME/.grok"
+export QUASAR_HERMES_ROOT="$HOME/.hermes"
+
+# First smoke test.
+quasar stats
+quasar search --mode fusion --query "quasar local server" --limit 3
+
+# Ingest this machine's corpus into the Mac mini server.
+quasar ingest --provider all --summary
+
+# Watch server-owned workers drain embeddings/indexing.
+quasar workers
+quasar stats
+```
+
+You may pass `--server http://<mac-mini-tailscale-ip>:6180` instead of exporting
+`QUASAR_LOCAL_SERVER_URL`. Do not use MagicDNS as the proof boundary; the known
+operator URL is the direct Tailscale IP.
 
 Recommended schedule:
 
