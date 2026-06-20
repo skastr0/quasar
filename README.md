@@ -48,6 +48,9 @@ bun packages/cli/src/cli.ts stats
 bun packages/cli/src/cli.ts search --mode lexical --query "project identity" --limit 3
 ```
 
+The client config file is `~/.config/quasar/config.json`; its canonical server
+field is `localServerUrl`.
+
 Once published, install the CLI package with:
 
 ```bash

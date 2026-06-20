@@ -96,6 +96,16 @@ plane and set the client wrapper environment to the Mac mini Tailscale IP:
 export QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180
 ```
 
+Equivalent client config:
+
+```json
+{
+  "schemaVersion": 3,
+  "projectKey": "quasar",
+  "localServerUrl": "http://<mac-mini-tailscale-ip>:6180"
+}
+```
+
 The `quasar` CLI mirrors the HTTP API and is safe to wrap as MCP tools. The
 serving surface is read/search only:
 

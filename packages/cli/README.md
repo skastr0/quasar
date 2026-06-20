@@ -39,6 +39,16 @@ quasar ingest --provider all --summary
 quasar workers
 ```
 
+Or configure the default server once:
+
+```json
+{
+  "schemaVersion": 3,
+  "projectKey": "quasar",
+  "localServerUrl": "https://quasar.tail6742f6.ts.net"
+}
+```
+
 `ingest` reads native local history folders on the machine running the CLI and
 POSTs mapped sessions to the configured server. The server owns idempotent SQLite
 writes, embedding cache lookup, and search-index queue draining.
