@@ -31,7 +31,7 @@ jobs:
           package-manager-cache: false
 
       - name: Install
-        run: bun install --frozen-lockfile --cpu='*' --os='*'
+        run: bun install --frozen-lockfile
 
       - name: Verify static package surface
         run: bun run verify:static
