@@ -88,6 +88,61 @@ bun scripts/local-server-ops.mjs exec -- sh -lc 'du -sh /data/quasar/*'
 If hostname resolution fails, debug Tailscale Services/DNS. Do not switch client
 configuration back to the Mac mini device IP as the long-term path.
 
+## Tailscale Service proof
+
+There are two separate proof boundaries:
+
+- Mac mini service-host proof: the server and Tailscale Service proxy are wired.
+- Remote client proof: a different tailnet device resolves and reaches the service
+  hostname without `--resolve` or hosts-file edits.
+
+Tailscale Services are reached by MagicDNS name or TailVIP by clients with the
+necessary access permissions; keep Quasar client configuration aligned with that
+model. Reference:
+<https://tailscale.com/docs/features/tailscale-services>.
+
+On the Mac mini, verify the service host:
+
+```bash
+tailscale serve get-config --all
+tailscale serve status --json
+tailscale status --json | jq -r '.Self.CapMap."service-host"[0]."svc:quasar"[]'
+curl -fsS http://127.0.0.1:6180/health
+```
+
+If the service hostname does not resolve on the Mac mini itself, inspect the
+netmap before changing client config. Service access is policy-shaped, and the
+service host may not be listed as a source client for its own TailVIP:
+
+```bash
+tailscale debug resolve <quasar-service-tailnet-hostname>
+tailscale debug netmap | jq '.PacketFilterRules // .PacketFilter'
+```
+
+To prove the Mac mini proxy path without relying on local service-host DNS, use
+the TailVIP advertised for `svc:quasar`:
+
+```bash
+tailvip="$(tailscale status --json | jq -r '.Self.CapMap."service-host"[0]."svc:quasar"[0]')"
+curl -fsS --resolve <quasar-service-tailnet-hostname>:443:"$tailvip" \
+  https://<quasar-service-tailnet-hostname>/health
+```
+
+That proves only the service host and SNI proxy. It does not replace remote
+client proof. From a remote tailnet client with service access:
+
+```bash
+curl -fsS https://<quasar-service-tailnet-hostname>/health
+
+tmp="$(mktemp -d)"
+printf '%s\n' '{"schemaVersion":3,"projectKey":"quasar","localServerUrl":"https://<quasar-service-tailnet-hostname>"}' > "$tmp/config.json"
+QUASAR_CONFIG="$tmp/config.json" npx -y @skastr0/quasar-cli@0.1.6 stats
+QUASAR_CONFIG="$tmp/config.json" npx -y @skastr0/quasar-cli@0.1.6 search \
+  --query "effect server" \
+  --mode fusion \
+  --limit 3
+```
+
 ## Agent / MCP serving contract
 
 Agent clients should treat the Docker local-server HTTP API as the canonical data
