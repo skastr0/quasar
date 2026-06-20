@@ -55,6 +55,7 @@ Once published, install the CLI package with:
 
 ```bash
 npm install -g @skastr0/quasar-cli
+quasar --version
 quasar --help
 ```
 

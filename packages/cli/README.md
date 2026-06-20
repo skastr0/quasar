@@ -11,15 +11,16 @@ CLI as a prebuilt Bun standalone binary behind a small Node launcher.
 
 ```bash
 npm install -g @skastr0/quasar-cli
+quasar --version
 quasar --help
 ```
 
 Ephemeral runner examples:
 
 ```bash
-npx --package @skastr0/quasar-cli quasar --help
-bunx -p @skastr0/quasar-cli quasar --help
-pnpm --package @skastr0/quasar-cli dlx quasar --help
+npx --package @skastr0/quasar-cli quasar --version
+bunx -p @skastr0/quasar-cli quasar --version
+pnpm --package @skastr0/quasar-cli dlx quasar --version
 ```
 
 The npm package ships a Node launcher plus prebuilt Bun standalone binaries for

@@ -4,6 +4,8 @@ import { join } from "node:path";
 
 import { describe, expect, test } from "bun:test";
 
+import packageJson from "../package.json";
+
 const packageRoot = join(import.meta.dir, "..");
 
 const runCli = async (args: readonly string[], env: Record<string, string> = {}) => {
@@ -49,6 +51,30 @@ const runCli = async (args: readonly string[], env: Record<string, string> = {})
 };
 
 describe("CLI client/operator boundary", () => {
+  test("help aliases are explicit", async () => {
+    for (const alias of [["--help"], ["-h"]] as const) {
+      const result = await runCli(alias);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.json.ok).toBe(true);
+      expect(result.json.command).toBe("help");
+    }
+  });
+
+  test("version aliases report package metadata", async () => {
+    for (const alias of [["--version"], ["-v"], ["version"]] as const) {
+      const result = await runCli(alias);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.json.ok).toBe(true);
+      expect(result.json.command).toBe("version");
+      expect(result.json.data).toEqual({
+        name: packageJson.name,
+        version: packageJson.version,
+      });
+    }
+  });
+
   test("client commands fail closed when no server URL is configured", async () => {
     const result = await runCli(["stats"]);
 

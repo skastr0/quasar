@@ -274,10 +274,56 @@ describe("T2: missing root", () => {
 });
 
 // ---------------------------------------------------------------------------
-// T3: shouldParseSession gate skips already-seen sessions
+// T3: malformed transcript with no user turn → named diagnostic, zero session
 // ---------------------------------------------------------------------------
-describe("T3: shouldParseSession gate", () => {
-  const root = join(testRoot, "t3");
+describe("T3: no-user transcript", () => {
+  const root = join(testRoot, "t3-no-user");
+  const brainRoot = join(root, "brain");
+  const uuid = "eeeeeeee-0003-0003-0003-000000000003";
+  const transcriptDir = join(brainRoot, uuid, ".system_generated", "logs");
+  mkdirSync(transcriptDir, { recursive: true });
+
+  writeJsonLines(join(transcriptDir, "transcript_full.jsonl"), [
+    {
+      type: "GENERIC",
+      source: "MODEL",
+      status: "DONE",
+      created_at: "2026-05-02T09:00:00Z",
+      content: "Tool output without a user turn.",
+    },
+    {
+      type: "PLANNER_RESPONSE",
+      source: "MODEL",
+      status: "DONE",
+      created_at: "2026-05-02T09:00:01Z",
+      content: "Assistant response without a user turn.",
+    },
+  ]);
+
+  test("skips the session instead of yielding assistant-only message rows", async () => {
+    const result = await antigravityAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { antigravity: root },
+    });
+
+    expect(result.sessions).toHaveLength(0);
+    const unsupported = result.diagnostics.filter((d) => d.status === "unsupported");
+    expect(unsupported).toHaveLength(1);
+    expect(unsupported[0]!.message).toBe("Skipped Antigravity transcript with no user message events.");
+    expect(unsupported[0]!.details).toMatchObject({
+      nativeSessionId: uuid,
+      userMessages: 0,
+      assistantMessages: 1,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T4: shouldParseSession gate skips already-seen sessions
+// ---------------------------------------------------------------------------
+describe("T4: shouldParseSession gate", () => {
+  const root = join(testRoot, "t4-gate");
   const brainRoot = join(root, "brain");
   const uuid = "cccccccc-0003-0003-0003-000000000003";
   const transcriptDir = join(brainRoot, uuid, ".system_generated", "logs");
@@ -316,7 +362,7 @@ describe("T3: shouldParseSession gate", () => {
 });
 
 // ---------------------------------------------------------------------------
-// T4: scaled cumulative-replay fixture + optional on-disk estate scan.
+// T5: scaled cumulative-replay fixture + optional on-disk estate scan.
 //
 // Real Antigravity transcripts replay the entire prior trajectory on every
 // USER_INPUT (step_index resets to 0). A session with N user turns can carry
@@ -324,8 +370,8 @@ describe("T3: shouldParseSession gate", () => {
 // surface as assistant messages. This fixture replays turn blocks the way the
 // on-disk estate does, without checking in a multi-megabyte JSONL file.
 // ---------------------------------------------------------------------------
-describe("T4: cumulative replay collapse — estate validation", () => {
-  const root = join(testRoot, "t4");
+describe("T5: cumulative replay collapse — estate validation", () => {
+  const root = join(testRoot, "t5");
   const brainRoot = join(root, "brain");
   const TURNS = 8;
   const REPLAYS_PER_TURN = 3;

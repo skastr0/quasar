@@ -32,7 +32,15 @@ const intArg = (name: string, fallback: number): number => {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 };
 
-const command = process.argv[2] ?? "help";
+const rawCommand = process.argv[2];
+const command =
+  rawCommand === undefined || rawCommand === "--help" || rawCommand === "-h" ? "help"
+  : rawCommand === "--version" || rawCommand === "-v" ? "version"
+  : rawCommand;
+const cliPackage = {
+  name: "@skastr0/quasar-cli",
+  version: "0.1.5",
+};
 
 const server = (): string | undefined => arg("--server") ?? configuredServerUrl();
 
@@ -505,6 +513,10 @@ switch (command) {
     await fetchServer("search", `/search/${mode}`, { q: query, limit: arg("--limit"), projectKey: arg("--project-key"), role: arg("--role") });
     break;
   }
+  case "version": {
+    writeJson(ok("version", cliPackage));
+    break;
+  }
   case "help":
   default:
     writeJson(
@@ -535,6 +547,7 @@ switch (command) {
           "operator-recover-leases [--now iso]",
           "search --query text [--mode lexical|semantic|fusion] [--project-key key] [--role user|assistant] [--limit n] [--server url]",
           "stats",
+          "version",
         ],
         env: {
           QUASAR_LOCAL_HOME: "override ~/.config/quasar/local-server",
