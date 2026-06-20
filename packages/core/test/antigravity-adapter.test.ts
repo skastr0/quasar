@@ -258,6 +258,62 @@ describe("T1: terminal-response rule — one assistant message per turn", () => 
 });
 
 // ---------------------------------------------------------------------------
+// Pre-user planner records are provider preamble, not assistant answers.
+// ---------------------------------------------------------------------------
+describe("pre-user planner preamble", () => {
+  const root = join(testRoot, "pre-user-preamble");
+  const brainRoot = join(root, "brain");
+  const uuid = "ffffffff-0006-0006-0006-000000000006";
+  const transcriptDir = join(brainRoot, uuid, ".system_generated", "logs");
+  mkdirSync(transcriptDir, { recursive: true });
+
+  writeJsonLines(join(transcriptDir, "transcript_full.jsonl"), [
+    {
+      type: "PLANNER_RESPONSE",
+      source: "MODEL",
+      status: "DONE",
+      created_at: "2026-05-02T09:00:00Z",
+      content: "Planner preamble before the first user turn.",
+    },
+    {
+      type: "USER_INPUT",
+      source: "USER_EXPLICIT",
+      status: "DONE",
+      created_at: "2026-05-02T09:00:01Z",
+      content: "Now start the real turn.",
+    },
+    {
+      type: "PLANNER_RESPONSE",
+      source: "MODEL",
+      status: "DONE",
+      created_at: "2026-05-02T09:00:02Z",
+      content: "Real answer to the user turn.",
+    },
+  ]);
+
+  test("does not emit an assistant message before the first user turn", async () => {
+    const result = await antigravityAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { antigravity: root },
+    });
+
+    expect(result.sessions).toHaveLength(1);
+    const session = result.sessions[0]!;
+    const userMessages = session.events.filter((e) => e.role === "user" && e.kind === "message");
+    const assistantMessages = session.events.filter(
+      (e) => e.role === "assistant" && e.kind === "message",
+    );
+    expect(userMessages).toHaveLength(1);
+    expect(assistantMessages).toHaveLength(1);
+    expect(assistantMessages[0]!.contentText).toBe("Real answer to the user turn.");
+    expect(session.events.some((e) => e.contentText === "Planner preamble before the first user turn.")).toBe(
+      false,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // T2: missing root → no sessions + no_data_found diagnostic
 // ---------------------------------------------------------------------------
 describe("T2: missing root", () => {
@@ -314,7 +370,7 @@ describe("T3: no-user transcript", () => {
     expect(unsupported[0]!.details).toMatchObject({
       nativeSessionId: uuid,
       userMessages: 0,
-      assistantMessages: 1,
+      assistantMessages: 0,
     });
   });
 });
