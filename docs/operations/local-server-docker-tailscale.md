@@ -133,7 +133,7 @@ Keep this simple:
    ```
 
 3. The sync tick runs inside the container against the mounted read-only history roots:
-   - default: `ingest --provider all --summary`
+   - default: `operator-ingest --provider all --summary`
    - emergency/operator override: set `QUASAR_SYNC_INGEST_LIMIT=<n>` to cap a tick while diagnosing a bad source
 
 4. Freshness repair, LanceDB optimize, and index maintenance are explicit operations, not part of the minute tick. Run `bun run local-server:maintain` after large ingests or when `local-server:status` shows queued repair/index work that is not draining.
@@ -314,7 +314,7 @@ bun run local-server:maintain
 6. If jobs are leased forever after a crash, run:
 
    ```bash
-   bun scripts/local-server-ops.mjs exec -- sh -lc 'cd /app && bun packages/cli/src/cli.ts recover-leases'
+   bun scripts/local-server-ops.mjs exec -- sh -lc 'cd /app && bun packages/cli/src/cli.ts operator-recover-leases'
    ```
 
 7. If search misses fresh sessions, run:

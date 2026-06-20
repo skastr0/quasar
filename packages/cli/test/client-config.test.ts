@@ -18,29 +18,25 @@ describe("client config", () => {
 
     expect(loadClientConfig(path)).toEqual({
       localServerUrl: "http://127.0.0.1:6180",
-      apiUrl: undefined,
-      url: undefined,
     });
   });
 
-  test("uses explicit env before config and config before local embedded mode", () => {
+  test("uses explicit env before config and otherwise returns undefined", () => {
     const dir = mkdtempSync(join(tmpdir(), "quasar-client-config-"));
     const path = join(dir, "config.json");
-    writeFileSync(path, JSON.stringify({ localServerUrl: "http://config:6180", apiUrl: "http://api:6180", url: "http://url:6180" }));
+    writeFileSync(path, JSON.stringify({ localServerUrl: "http://config:6180" }));
 
     expect(configuredServerUrl({ QUASAR_CONFIG: path })).toBe("http://config:6180");
     expect(configuredServerUrl({ QUASAR_CONFIG: path, QUASAR_LOCAL_SERVER_URL: " http://env:6180 " })).toBe("http://env:6180");
     expect(configuredServerUrl({ QUASAR_CONFIG: join(dir, "missing.json") })).toBeUndefined();
   });
 
-  test("falls back from localServerUrl to apiUrl to url", () => {
+  test("ignores legacy URL aliases", () => {
     const dir = mkdtempSync(join(tmpdir(), "quasar-client-config-"));
-    const apiPath = join(dir, "api.json");
-    const urlPath = join(dir, "url.json");
-    writeFileSync(apiPath, JSON.stringify({ apiUrl: "http://api:6180", url: "http://url:6180" }));
-    writeFileSync(urlPath, JSON.stringify({ url: "http://url:6180" }));
+    const path = join(dir, "legacy.json");
+    writeFileSync(path, JSON.stringify({ serviceUrl: "http://service:6180", tailnetServerUrl: "http://tailnet:6180" }));
 
-    expect(configuredServerUrl({ QUASAR_CONFIG: apiPath })).toBe("http://api:6180");
-    expect(configuredServerUrl({ QUASAR_CONFIG: urlPath })).toBe("http://url:6180");
+    expect(loadClientConfig(path)).toEqual({});
+    expect(configuredServerUrl({ QUASAR_CONFIG: path })).toBeUndefined();
   });
 });

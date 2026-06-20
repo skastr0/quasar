@@ -35,7 +35,7 @@ describe("local-server ops config", () => {
     expect(ops).toContain("QUASAR_WORKERS_ENABLED=false");
     expect(ops).toContain("QUASAR_SYNC_INGEST_LIMIT:-");
     expect(ops).toContain("limit_arg=\\\"--limit ${QUASAR_SYNC_INGEST_LIMIT}\\\"");
-    expect(ops).toContain("bun packages/cli/src/cli.ts ingest --provider all --summary ${limit_arg}");
+    expect(ops).toContain("bun packages/cli/src/cli.ts operator-ingest --provider all --summary ${limit_arg}");
     const sync = readFileSync(join(repoRoot, "scripts/install-local-server-sync.mjs"), "utf8");
     expect(sync).toContain("com.quasar.local-server-sync");
     expect(sync).toContain("StartInterval");
@@ -65,10 +65,10 @@ describe("local-server ops config", () => {
     expect(cli).toContain("daemon install --server http://<mac-mini-tailscale-ip>:6180 --ingest-token <token> [--interval-seconds 60]");
     expect(cli).toContain("com.quasar.remote-ingest");
     expect(cli).toContain("already_running");
+    expect(cli).toContain("operator-worker-tick");
+    expect(cli).toContain("operator-maintain");
     expect(cli).toContain("config.json");
     expect(clientConfig).toContain("localServerUrl");
-    expect(clientConfig).toContain("apiUrl");
-    expect(clientConfig).toContain("url");
     expect(runbook).toContain("Agent / MCP serving contract");
     expect(runbook).toContain("GET /search/<mode>");
     expect(runbook).toContain("projectKey`, `role=user\\|assistant`, `limit");

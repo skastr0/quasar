@@ -22,6 +22,9 @@ export const fail = (command: string, error: unknown): JsonErrorEnvelope => ({
   error: {
     type: error instanceof Error ? error.name : "Error",
     message: error instanceof Error ? error.message : String(error),
+    details: typeof error === "object" && error !== null && "details" in error
+      ? (error as { readonly details?: unknown }).details
+      : undefined,
   },
 });
 

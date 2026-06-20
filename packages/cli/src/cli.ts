@@ -7,7 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { LanceDb } from "@skastr0/quasar-search";
 import { Effect } from "effect";
 
-import { configuredServerUrl } from "./client-config";
+import { configuredServerUrl, defaultClientConfigPath } from "./client-config";
 import { ingest, ingestRemote } from "../../local-server/src/ingest";
 import type { IngestReport } from "../../local-server/src/ingest";
 import { fail, ok, writeJson } from "../../local-server/src/json";
@@ -35,6 +35,25 @@ const intArg = (name: string, fallback: number): number => {
 const command = process.argv[2] ?? "help";
 
 const server = (): string | undefined => arg("--server") ?? configuredServerUrl();
+
+class ConfigurationError extends Error {
+  override readonly name = "ConfigurationError";
+  readonly details: unknown;
+
+  constructor(commandName: string) {
+    super(`quasar ${commandName} requires a configured local server URL`);
+    this.details = {
+      configPath: defaultClientConfigPath(),
+      acceptedEnv: ["QUASAR_LOCAL_SERVER_URL"],
+      acceptedConfigFields: ["localServerUrl"],
+      examples: [
+        "quasar <command> --server http://127.0.0.1:6180",
+        "export QUASAR_LOCAL_SERVER_URL=http://127.0.0.1:6180",
+        `write {"localServerUrl":"http://127.0.0.1:6180"} to ${defaultClientConfigPath()}`,
+      ],
+    };
+  }
+}
 
 const daemonLabel = "com.quasar.remote-ingest";
 const daemonHome = () => resolve(process.env.QUASAR_DAEMON_HOME ?? join(homedir(), ".config", "quasar"));
@@ -231,9 +250,17 @@ const urlFor = (base: string, path: string, params: Record<string, string | unde
   return url;
 };
 
-const fetchServer = async (name: string, path: string, params: Record<string, string | undefined> = {}) => {
+const requireServer = (name: string): string | undefined => {
   const base = server();
-  if (base === undefined) return false;
+  if (base !== undefined) return base;
+  writeJson(fail(name, new ConfigurationError(name)));
+  process.exitCode = 2;
+  return undefined;
+};
+
+const fetchServer = async (name: string, path: string, params: Record<string, string | undefined> = {}) => {
+  const base = requireServer(name);
+  if (base === undefined) return;
   try {
     const response = await fetch(urlFor(base, path, params));
     writeJson(await response.json());
@@ -242,7 +269,6 @@ const fetchServer = async (name: string, path: string, params: Record<string, st
     writeJson(fail(name, error));
     process.exitCode = 1;
   }
-  return true;
 };
 
 const summarizeIngestReports = (reports: readonly IngestReport[]) => ({
@@ -294,21 +320,28 @@ switch (command) {
       force: flag("--force"),
       ingestToken: arg("--ingest-token") ?? process.env.QUASAR_INGEST_TOKEN,
     };
-    const base = server();
-    if (base !== undefined) {
-      try {
-        const reports = await ingestRemote(options, base);
-        writeJson(ok("ingest", flag("--summary") ? summarizeIngestReports(reports) : reports));
-      } catch (error) {
-        writeJson(fail("ingest", error));
-        process.exitCode = 1;
-      }
-      break;
+    const base = requireServer("ingest");
+    if (base === undefined) break;
+    try {
+      const reports = await ingestRemote(options, base);
+      writeJson(ok("ingest", flag("--summary") ? summarizeIngestReports(reports) : reports));
+    } catch (error) {
+      writeJson(fail("ingest", error));
+      process.exitCode = 1;
     }
+    break;
+  }
+  case "operator-ingest": {
+    const options = {
+      provider: (arg("--provider") ?? "all") as never,
+      limit: arg("--limit") === undefined ? undefined : intArg("--limit", 1),
+      force: flag("--force"),
+      ingestToken: arg("--ingest-token") ?? process.env.QUASAR_INGEST_TOKEN,
+    };
     const program = ingest(options).pipe(
       Effect.map((reports) => flag("--summary") ? summarizeIngestReports(reports) : reports),
     );
-    await run("ingest", program);
+    await run("operator-ingest", program);
     break;
   }
   case "serve": {
@@ -316,53 +349,20 @@ switch (command) {
     break;
   }
   case "stats": {
-    if (await fetchServer("stats", "/status")) break;
-    await run(
-      "stats",
-      Effect.gen(function* () {
-        const store = yield* LocalStore;
-        const search = yield* LanceDb;
-        const [sqlite, lance] = yield* Effect.all([
-          store.stats.pipe(Effect.either),
-          search.tableStats({}).pipe(Effect.either),
-        ]);
-        return { sqlite, lance };
-      }),
-    );
+    await fetchServer("stats", "/status");
     break;
   }
   case "projects": {
-    if (await fetchServer("projects", "/projects", { limit: arg("--limit"), offset: arg("--offset") })) break;
-    await run(
-      "projects",
-      Effect.gen(function* () {
-        const store = yield* LocalStore;
-        const rows = yield* store.listProjects({ limit: intArg("--limit", 100), offset: intArg("--offset", 0) });
-        return { rows };
-      }),
-    );
+    await fetchServer("projects", "/projects", { limit: arg("--limit"), offset: arg("--offset") });
     break;
   }
   case "sessions": {
-    if (await fetchServer("sessions", "/sessions", {
+    await fetchServer("sessions", "/sessions", {
       provider: arg("--provider"),
       projectKey: arg("--project-key"),
       limit: arg("--limit"),
       offset: arg("--offset"),
-    })) break;
-    await run(
-      "sessions",
-      Effect.gen(function* () {
-        const store = yield* LocalStore;
-        const rows = yield* store.listSessions({
-          provider: arg("--provider"),
-          projectKey: arg("--project-key"),
-          limit: intArg("--limit", 100),
-          offset: intArg("--offset", 0),
-        });
-        return { rows };
-      }),
-    );
+    });
     break;
   }
   case "messages": {
@@ -372,41 +372,18 @@ switch (command) {
       process.exitCode = 1;
       break;
     }
-    if (await fetchServer("messages", "/messages", { sessionId, limit: arg("--limit") })) break;
-    await run(
-      "messages",
-      Effect.gen(function* () {
-        const store = yield* LocalStore;
-        const rows = yield* store.readMessages(sessionId, intArg("--limit", 1000));
-        return { sessionId, rows };
-      }),
-    );
+    await fetchServer("messages", "/messages", { sessionId, limit: arg("--limit") });
     break;
   }
   case "tool-calls": {
-    if (await fetchServer("tool-calls", "/tool-calls", {
+    await fetchServer("tool-calls", "/tool-calls", {
       sessionId: arg("--session-id"),
       projectKey: arg("--project-key"),
       provider: arg("--provider"),
       toolName: arg("--tool-name"),
       limit: arg("--limit"),
       offset: arg("--offset"),
-    })) break;
-    await run(
-      "tool-calls",
-      Effect.gen(function* () {
-        const store = yield* LocalStore;
-        const rows = yield* store.listToolCalls({
-          sessionId: arg("--session-id"),
-          projectKey: arg("--project-key"),
-          provider: arg("--provider"),
-          toolName: arg("--tool-name"),
-          limit: intArg("--limit", 100),
-          offset: intArg("--offset", 0),
-        });
-        return { rows };
-      }),
-    );
+    });
     break;
   }
   case "tool-call": {
@@ -416,38 +393,20 @@ switch (command) {
       process.exitCode = 1;
       break;
     }
-    if (await fetchServer("tool-call", "/tool-call", { id })) break;
-    await run(
-      "tool-call",
-      Effect.gen(function* () {
-        const store = yield* LocalStore;
-        const row = yield* store.getToolCall(id);
-        if (row === undefined) throw new Error(`tool call not found: ${id}`);
-        return { row };
-      }),
-    );
+    await fetchServer("tool-call", "/tool-call", { id });
     break;
   }
   case "ingest-runs": {
-    if (await fetchServer("ingest-runs", "/ingest-runs", { status: arg("--status"), limit: arg("--limit"), offset: arg("--offset") })) break;
-    await run(
-      "ingest-runs",
-      Effect.gen(function* () {
-        const store = yield* LocalStore;
-        const rows = yield* store.listIngestRuns({
-          status: arg("--status") as never,
-          limit: intArg("--limit", 100),
-          offset: intArg("--offset", 0),
-        });
-        return { rows };
-      }),
-    );
+    await fetchServer("ingest-runs", "/ingest-runs", { status: arg("--status"), limit: arg("--limit"), offset: arg("--offset") });
     break;
   }
   case "maintain": {
-    if (await fetchServer("maintain", "/maintenance/run", { vector: arg("--vector"), optimize: arg("--optimize") })) break;
+    await fetchServer("maintain", "/maintenance/run", { vector: arg("--vector"), optimize: arg("--optimize") });
+    break;
+  }
+  case "operator-maintain": {
     await run(
-      "maintain",
+      "operator-maintain",
       Effect.gen(function* () {
         const maintenance = yield* SearchMaintenance;
         return yield* maintenance.maintain({
@@ -459,9 +418,12 @@ switch (command) {
     break;
   }
   case "freshness": {
-    if (await fetchServer("freshness", "/maintenance/freshness", { limit: arg("--limit") })) break;
+    await fetchServer("freshness", "/maintenance/freshness", { limit: arg("--limit") });
+    break;
+  }
+  case "operator-freshness": {
     await run(
-      "freshness",
+      "operator-freshness",
       Effect.gen(function* () {
         const maintenance = yield* SearchMaintenance;
         return yield* maintenance.reconcileFreshness({ limit: intArg("--limit", 500) });
@@ -470,9 +432,12 @@ switch (command) {
     break;
   }
   case "repair-index": {
-    if (await fetchServer("repair-index", "/maintenance/repair", { limit: arg("--limit"), leaseMs: arg("--lease-ms") })) break;
+    await fetchServer("repair-index", "/maintenance/repair", { limit: arg("--limit"), leaseMs: arg("--lease-ms") });
+    break;
+  }
+  case "operator-repair-index": {
     await run(
-      "repair-index",
+      "operator-repair-index",
       Effect.gen(function* () {
         const maintenance = yield* SearchMaintenance;
         return yield* maintenance.repairOnce({
@@ -485,9 +450,12 @@ switch (command) {
     break;
   }
   case "workers": {
-    if (await fetchServer("workers", "/status")) break;
+    await fetchServer("workers", "/status");
+    break;
+  }
+  case "operator-workers": {
     await run(
-      "workers",
+      "operator-workers",
       Effect.gen(function* () {
         const workers = yield* WorkerSupervisor;
         return yield* workers.status;
@@ -495,9 +463,9 @@ switch (command) {
     );
     break;
   }
-  case "worker-tick": {
+  case "operator-worker-tick": {
     await run(
-      "worker-tick",
+      "operator-worker-tick",
       Effect.gen(function* () {
         const workers = yield* WorkerSupervisor;
         return yield* workers.tickOnce;
@@ -505,9 +473,9 @@ switch (command) {
     );
     break;
   }
-  case "embed-batch": {
+  case "operator-embed-batch": {
     await run(
-      "embed-batch",
+      "operator-embed-batch",
       Effect.gen(function* () {
         const embeddings = yield* Embeddings;
         return yield* embeddings.processBatch({
@@ -519,9 +487,9 @@ switch (command) {
     );
     break;
   }
-  case "recover-leases": {
+  case "operator-recover-leases": {
     await run(
-      "recover-leases",
+      "operator-recover-leases",
       Effect.gen(function* () {
         const queue = yield* DurableQueue;
         const recovered = yield* queue.recoverStaleLeases(arg("--now"));
@@ -534,25 +502,7 @@ switch (command) {
   case "search": {
     const query = arg("--query") ?? arg("-q") ?? "";
     const mode = arg("--mode") ?? "lexical";
-    if (await fetchServer("search", `/search/${mode}`, { q: query, limit: arg("--limit"), projectKey: arg("--project-key"), role: arg("--role") })) break;
-    if (mode !== "lexical") {
-      writeJson(fail("search", new Error("local CLI semantic/fusion search requires --server")));
-      process.exitCode = 1;
-      break;
-    }
-    await run(
-      "search",
-      Effect.gen(function* () {
-        const search = yield* DerivedSearch;
-        const matches = yield* search.lexicalSearch({
-          query,
-          projectKey: arg("--project-key"),
-          role: arg("--role"),
-          limit: intArg("--limit", 10),
-        });
-        return { matches };
-      }),
-    );
+    await fetchServer("search", `/search/${mode}`, { q: query, limit: arg("--limit"), projectKey: arg("--project-key"), role: arg("--role") });
     break;
   }
   case "help":
@@ -560,8 +510,8 @@ switch (command) {
     writeJson(
       ok("help", {
         commands: [
-          "ingest --provider all|claude|codex|opencode|hermes|grok [--limit n] [--force] [--summary]",
-          "ingest --provider all --server http://<mac-mini-tailscale-ip>:6180",
+          "ingest --provider all|claude|codex|opencode|hermes|grok --server http://<mac-mini-tailscale-ip>:6180 [--limit n] [--force] [--summary]",
+          "operator-ingest --provider all|claude|codex|opencode|hermes|grok [--limit n] [--force] [--summary]",
           "daemon install --server http://<mac-mini-tailscale-ip>:6180 --ingest-token <token> [--interval-seconds 60]",
           "daemon status",
           "daemon uninstall",
@@ -576,9 +526,13 @@ switch (command) {
           "freshness [--limit n] [--server url]",
           "repair-index [--limit n] [--lease-ms n] [--server url]",
           "workers [--server url]",
-          "worker-tick",
-          "embed-batch [--limit n] [--lease-ms n] [--worker-id id]",
-          "recover-leases [--now iso]",
+          "operator-maintain [--vector true|false] [--optimize true|false]",
+          "operator-freshness [--limit n]",
+          "operator-repair-index [--limit n] [--lease-ms n]",
+          "operator-workers",
+          "operator-worker-tick",
+          "operator-embed-batch [--limit n] [--lease-ms n] [--worker-id id]",
+          "operator-recover-leases [--now iso]",
           "search --query text [--mode lexical|semantic|fusion] [--project-key key] [--role user|assistant] [--limit n] [--server url]",
           "stats",
         ],
@@ -594,7 +548,7 @@ switch (command) {
           QUASAR_HERMES_ROOT: "override Hermes history root",
           QUASAR_KIMI_ROOT: "override Kimi history root",
           QUASAR_ANTIGRAVITY_ROOT: "override Antigravity history root",
-          QUASAR_LOCAL_SERVER_URL: "route read/search commands through an already-running local server",
+          QUASAR_LOCAL_SERVER_URL: "route client commands through an already-running local server",
           QUASAR_INGEST_TOKEN: "required for remote write ingest and daemon install/run",
         },
       }),
