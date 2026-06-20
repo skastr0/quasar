@@ -40,6 +40,26 @@ class FakeConvex implements IngestMutationClient {
     const name = getFunctionName(reference as Parameters<typeof getFunctionName>[0]);
     this.calls.push(name);
     const payload = args as Record<string, unknown>;
+    if (name === "quasar:upsertProject") return Promise.resolve({});
+    if (name === "quasar:beginSessionIngest") {
+      const sessionId = payload.sessionId as string;
+      const fingerprint = payload.sourceFingerprint as string;
+      const force = payload.force === true;
+      return Promise.resolve({ skipped: !force && this.committed.get(sessionId) === fingerprint });
+    }
+    if (name === "quasar:deleteSessionTurns") return Promise.resolve({ deleted: 0, batchSize: 250 });
+    if (name === "quasar:insertMessages") return Promise.resolve({});
+    if (name === "quasar:insertToolCalls") return Promise.resolve({});
+    if (name === "quasar:commitSessionIngest") return Promise.resolve({});
+    if (name === "quasar:pruneEmptyProjects") return Promise.resolve({});
+    if (name === "search:indexBatchForIngest") {
+      const sessionIds = payload.sessionIds as string[];
+      return Promise.resolve({
+        status: this.indexStatus,
+        sessionsSeen: sessionIds.length,
+        messagesSeen: sessionIds.length,
+      });
+    }
     if (name === "ingest:ingestBatch") {
       const force = payload.force === true;
       const sessions = payload.sessions as Array<{
