@@ -63,8 +63,8 @@ type OpenCodePartRow = {
 type SQLiteColumnRow = { name: string };
 type SQLiteCountRow = { count: number };
 
-// Machinery-key pruning only — never byte caps. Convex limits are the only
-// boundary; oversized values surface as named diagnostics at the ingest layer.
+// Machinery-key pruning only — never byte caps. Provider garbage surfaces as
+// named diagnostics at the ingest layer.
 const OPENCODE_PRUNED_MESSAGE_DATA_SQL = [
   "case",
   "when json_valid(data) then",

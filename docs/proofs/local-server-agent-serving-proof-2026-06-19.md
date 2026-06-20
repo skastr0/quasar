@@ -97,14 +97,14 @@ Project list via `QUASAR_LOCAL_SERVER_URL`:
 
 ```bash
 QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180 \
-  bun packages/local-server/src/cli.ts projects --limit 1
+  bun packages/cli/src/cli.ts projects --limit 1
 ```
 
 Fusion search via `QUASAR_LOCAL_SERVER_URL`:
 
 ```bash
 QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180 \
-  bun packages/local-server/src/cli.ts search \
+  bun packages/cli/src/cli.ts search \
     --mode fusion \
     --query "incremental sync local-server" \
     --project-key git:github.com/skastr0/quasar \
@@ -116,7 +116,7 @@ Tool-call list via `QUASAR_LOCAL_SERVER_URL`:
 
 ```bash
 QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180 \
-  bun packages/local-server/src/cli.ts tool-calls \
+  bun packages/cli/src/cli.ts tool-calls \
     --project-key git:github.com/skastr0/quasar \
     --provider grok \
     --tool-name list_dir \
@@ -127,7 +127,7 @@ Tool-call read via `QUASAR_LOCAL_SERVER_URL`:
 
 ```bash
 QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180 \
-  bun packages/local-server/src/cli.ts tool-call \
+  bun packages/cli/src/cli.ts tool-call \
     --id grok:tool:machine:de134fd406c9b3eb261fbf560c52390d:d259a2b6ef9ebaf565f6e71878dff67f
 ```
 

@@ -157,8 +157,8 @@ const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 /**
  * Normalizes a string for compact rendering: control characters become
  * spaces and whitespace runs collapse. No content is ever discarded by a
- * heuristic — Convex limits, enforced at the ingest boundary, are the only
- * line at which data is rejected.
+ * heuristic — the ingest boundary is the only line at which provider garbage
+ * is rejected with a named diagnostic.
  */
 const compactString = (value: string) => {
   const text = value.replace(CONTROL_CHARS, " ").replace(/\s+/g, " ").trim();
@@ -184,9 +184,9 @@ export const projectSessionPatchNativeValue = (value: unknown): NativeValue | un
 };
 
 /**
- * Tool payloads are stored in full — Convex limits are the only boundary, and
- * the ingest layer enforces them with a named diagnostic. The adapter only
- * redacts and prunes provider machinery keys; it never truncates.
+ * Tool payloads are stored in full. The ingest layer rejects provider garbage
+ * with a named diagnostic. The adapter only redacts and prunes provider
+ * machinery keys; it never truncates.
  */
 export const projectToolPayloadNativeValue = (value: unknown): NativeValue | undefined => {
   const decoded = Option.getOrElse(

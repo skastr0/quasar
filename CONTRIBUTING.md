@@ -20,7 +20,7 @@ bun run test
 bun run build
 ```
 
-Do not include native agent histories, local Convex state, Tailscale hostnames,
-tokens, or private session data in issues, pull requests, fixtures, or logs.
+Do not include native agent histories, Tailscale hostnames, tokens, or private
+session data in issues, pull requests, fixtures, or logs.
 
 Contributions are accepted under the repository license.

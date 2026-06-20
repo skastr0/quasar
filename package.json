@@ -23,8 +23,6 @@
     "test": "bun run --cwd packages/core test && bun run --cwd packages/search test && bun run --cwd packages/local-server test && bun run --cwd packages/cli test",
     "verify:static": "bun run typecheck && bun run test",
     "verify": "bun run verify:static",
-    "park:convex": "bun scripts/park-quasar-convex.mjs park",
-    "status:convex": "bun scripts/park-quasar-convex.mjs status",
     "local-server:deploy": "bun scripts/local-server-ops.mjs deploy",
     "local-server:up": "bun scripts/local-server-ops.mjs up",
     "local-server:down": "bun scripts/local-server-ops.mjs down",
@@ -49,10 +47,7 @@
     "release:check": "bun run verify && bun run build && bun run build:npm-packages && bun run pack:dry-run && bun audit && publish-scan ."
   },
   "devDependencies": {
-    "@edge-runtime/vm": "^5.0.0",
     "@types/bun": "^1.3.1",
-    "convex": "1.41.0",
-    "convex-test": "^0.0.53",
     "typescript": "^6.0.3",
     "vitest": "^4.1.5"
   },
