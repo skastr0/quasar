@@ -45,7 +45,7 @@ Or configure the default server once:
 {
   "schemaVersion": 3,
   "projectKey": "quasar",
-  "localServerUrl": "https://<redacted-tailnet-hostname>"
+  "localServerUrl": "http://<mac-mini-tailscale-ip>:6180"
 }
 ```
 
