@@ -1,4 +1,9 @@
 #!/usr/bin/env bun
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir, platform } from "node:os";
+import { dirname, join, resolve } from "node:path";
+
 import { LanceDb } from "@skastr0/quasar-search";
 import { Effect } from "effect";
 
@@ -29,6 +34,193 @@ const intArg = (name: string, fallback: number): number => {
 const command = process.argv[2] ?? "help";
 
 const server = (): string | undefined => arg("--server") ?? process.env.QUASAR_LOCAL_SERVER_URL;
+
+const daemonLabel = "com.quasar.remote-ingest";
+const daemonHome = () => resolve(process.env.QUASAR_DAEMON_HOME ?? join(homedir(), ".config", "quasar"));
+const daemonPaths = () => {
+  const home = daemonHome();
+  return {
+    home,
+    logs: join(home, "logs"),
+    lock: join(home, "remote-ingest.lock"),
+    lockInfo: join(home, "remote-ingest.lock", "info.json"),
+    plist: join(homedir(), "Library", "LaunchAgents", `${daemonLabel}.plist`),
+    stdout: join(home, "logs", "remote-ingest.out.log"),
+    stderr: join(home, "logs", "remote-ingest.err.log"),
+  };
+};
+
+const launchDomain = () => `gui/${typeof process.getuid === "function" ? process.getuid() : spawnText("id", ["-u"])}`;
+
+const xml = (value: string) => value
+  .replaceAll("&", "&amp;")
+  .replaceAll("<", "&lt;")
+  .replaceAll(">", "&gt;")
+  .replaceAll('"', "&quot;")
+  .replaceAll("'", "&apos;");
+
+const daemonBinary = () => arg("--binary") ?? process.env.QUASAR_DAEMON_BINARY ?? process.execPath;
+
+const daemonInterval = () => {
+  const raw = arg("--interval-seconds") ?? process.env.QUASAR_DAEMON_INTERVAL_SECONDS ?? "60";
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 60) {
+    throw new Error(`--interval-seconds must be an integer >= 60, got ${raw}`);
+  }
+  return parsed;
+};
+
+const daemonToken = () => arg("--ingest-token") ?? process.env.QUASAR_INGEST_TOKEN;
+
+const daemonPlist = (options: { readonly binary: string; readonly serverUrl: string; readonly ingestToken: string; readonly intervalSeconds: number }) => {
+  const paths = daemonPaths();
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${daemonLabel}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${xml(options.binary)}</string>
+    <string>daemon</string>
+    <string>run</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>${xml(homedir())}</string>
+    <key>PATH</key>
+    <string>${xml(`${dirname(options.binary)}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`)}</string>
+    <key>QUASAR_DAEMON_BINARY</key>
+    <string>${xml(options.binary)}</string>
+    <key>QUASAR_LOCAL_SERVER_URL</key>
+    <string>${xml(options.serverUrl)}</string>
+    <key>QUASAR_INGEST_TOKEN</key>
+    <string>${xml(options.ingestToken)}</string>
+    <key>QUASAR_DAEMON_HOME</key>
+    <string>${xml(paths.home)}</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>${options.intervalSeconds}</integer>
+  <key>StandardOutPath</key>
+  <string>${xml(paths.stdout)}</string>
+  <key>StandardErrorPath</key>
+  <string>${xml(paths.stderr)}</string>
+</dict>
+</plist>
+`;
+};
+
+const installDaemon = () => {
+  if (platform() !== "darwin") throw new Error("daemon install is only supported on macOS launchd");
+  const serverUrl = server();
+  if (serverUrl === undefined) throw new Error("--server or QUASAR_LOCAL_SERVER_URL is required");
+  const ingestToken = daemonToken();
+  if (ingestToken === undefined) throw new Error("--ingest-token or QUASAR_INGEST_TOKEN is required");
+  const binary = resolve(daemonBinary());
+  const intervalSeconds = daemonInterval();
+  const paths = daemonPaths();
+  mkdirSync(dirname(paths.plist), { recursive: true });
+  mkdirSync(paths.logs, { recursive: true, mode: 0o700 });
+  writeFileSync(paths.plist, daemonPlist({ binary, serverUrl, ingestToken, intervalSeconds }), { encoding: "utf8", mode: 0o600 });
+  spawnSync("launchctl", ["bootout", launchDomain(), paths.plist], { stdio: "ignore" });
+  runLaunchctl(["bootstrap", launchDomain(), paths.plist]);
+  runLaunchctl(["enable", `${launchDomain()}/${daemonLabel}`]);
+  runLaunchctl(["kickstart", "-k", `${launchDomain()}/${daemonLabel}`]);
+  return { label: daemonLabel, plist: paths.plist, intervalSeconds, serverUrl, lock: paths.lock, logs: { stdout: paths.stdout, stderr: paths.stderr } };
+};
+
+const uninstallDaemon = () => {
+  const paths = daemonPaths();
+  if (platform() === "darwin") spawnSync("launchctl", ["bootout", launchDomain(), paths.plist], { stdio: "ignore" });
+  if (existsSync(paths.plist)) unlinkSync(paths.plist);
+  return { label: daemonLabel, plist: paths.plist, installed: false };
+};
+
+const daemonStatus = () => {
+  const paths = daemonPaths();
+  const result = platform() === "darwin" ? spawnSync("launchctl", ["print", `${launchDomain()}/${daemonLabel}`], { encoding: "utf8" }) : undefined;
+  return {
+    label: daemonLabel,
+    plist: paths.plist,
+    installed: existsSync(paths.plist),
+    loaded: result?.status === 0,
+    lock: { path: paths.lock, held: existsSync(paths.lock) },
+    logs: { stdout: paths.stdout, stderr: paths.stderr },
+    output: result?.status === 0 ? result.stdout : result?.stderr,
+  };
+};
+
+const runDaemonTick = () => {
+  const paths = daemonPaths();
+  mkdirSync(paths.logs, { recursive: true, mode: 0o700 });
+  if (!acquireDaemonLock(paths)) {
+    writeJson(ok("daemon run", { skipped: true, reason: "already_running", lock: paths.lock }));
+    return;
+  }
+  const cleanup = () => rmSync(paths.lock, { recursive: true, force: true });
+  process.once("exit", cleanup);
+  process.once("SIGINT", () => { cleanup(); process.exit(130); });
+  process.once("SIGTERM", () => { cleanup(); process.exit(143); });
+
+  const binary = process.env.QUASAR_DAEMON_BINARY ?? process.execPath;
+  const serverUrl = server();
+  const ingestToken = daemonToken();
+  if (serverUrl === undefined || ingestToken === undefined) {
+    cleanup();
+    throw new Error("daemon run requires QUASAR_LOCAL_SERVER_URL and QUASAR_INGEST_TOKEN");
+  }
+  const result = spawnSync(binary, ["ingest", "--provider", "all", "--summary", "--server", serverUrl, "--ingest-token", ingestToken], {
+    stdio: "inherit",
+    env: process.env,
+  });
+  cleanup();
+  process.exit(result.status ?? (result.signal === null ? 1 : 128));
+};
+
+const acquireDaemonLock = (paths: ReturnType<typeof daemonPaths>) => {
+  try {
+    mkdirSync(paths.lock);
+    writeFileSync(paths.lockInfo, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
+    return true;
+  } catch {
+    if (!daemonLockIsStale(paths)) return false;
+    rmSync(paths.lock, { recursive: true, force: true });
+    try {
+      mkdirSync(paths.lock);
+      writeFileSync(paths.lockInfo, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), recoveredStaleLock: true }, null, 2), { mode: 0o600 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+};
+
+const daemonLockIsStale = (paths: ReturnType<typeof daemonPaths>) => {
+  const staleSeconds = Number(process.env.QUASAR_DAEMON_STALE_LOCK_SECONDS ?? "3600");
+  try {
+    const info = JSON.parse(readFileSync(paths.lockInfo, "utf8")) as { startedAt?: unknown };
+    if (typeof info.startedAt !== "string") return false;
+    const startedAt = Date.parse(info.startedAt);
+    return Number.isFinite(startedAt) && Date.now() - startedAt > staleSeconds * 1000;
+  } catch {
+    return false;
+  }
+};
+
+const runLaunchctl = (args: readonly string[]) => {
+  const result = spawnSync("launchctl", [...args], { encoding: "utf8" });
+  if (result.status !== 0) throw new Error(`launchctl ${args.join(" ")} failed: ${result.stderr || result.stdout}`);
+};
+
+const spawnText = (command: string, args: readonly string[]) => {
+  const result = spawnSync(command, [...args], { encoding: "utf8" });
+  if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed`);
+  return result.stdout.trim();
+};
 
 const urlFor = (base: string, path: string, params: Record<string, string | undefined>) => {
   const url = new URL(path, base.endsWith("/") ? base : `${base}/`);
@@ -80,6 +272,20 @@ const run = async (name: string, program: Effect.Effect<unknown, unknown, LocalS
 };
 
 switch (command) {
+  case "daemon": {
+    const subcommand = process.argv[3] ?? "status";
+    try {
+      if (subcommand === "install") writeJson(ok("daemon install", installDaemon()));
+      else if (subcommand === "uninstall") writeJson(ok("daemon uninstall", uninstallDaemon()));
+      else if (subcommand === "status") writeJson(ok("daemon status", daemonStatus()));
+      else if (subcommand === "run") runDaemonTick();
+      else throw new Error(`unknown daemon subcommand: ${subcommand}`);
+    } catch (error) {
+      writeJson(fail(`daemon ${subcommand}`, error));
+      process.exitCode = 1;
+    }
+    break;
+  }
   case "ingest": {
     const options = {
       provider: (arg("--provider") ?? "all") as never,
@@ -355,6 +561,9 @@ switch (command) {
         commands: [
           "ingest --provider all|claude|codex|opencode|hermes|grok [--limit n] [--force] [--summary]",
           "ingest --provider all --server http://<mac-mini-tailscale-ip>:6180",
+          "daemon install --server http://<mac-mini-tailscale-ip>:6180 --ingest-token <token> [--interval-seconds 60]",
+          "daemon status",
+          "daemon uninstall",
           "serve [--host 127.0.0.1] [--port 6180]",
           "projects [--limit n] [--offset n]",
           "sessions [--provider name] [--project-key key] [--limit n] [--offset n]",
@@ -384,6 +593,7 @@ switch (command) {
           QUASAR_KIMI_ROOT: "override Kimi history root",
           QUASAR_ANTIGRAVITY_ROOT: "override Antigravity history root",
           QUASAR_LOCAL_SERVER_URL: "route read/search commands through an already-running local server",
+          QUASAR_INGEST_TOKEN: "required for remote write ingest and daemon install/run",
         },
       }),
     );

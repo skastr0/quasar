@@ -46,7 +46,9 @@ describe("local-server ops config", () => {
     expect(sync).toContain("local-server-sync.lock");
     expect(runbook).toContain("every 60 seconds: `bun run local-server:sync-tick`");
     expect(runbook).toContain("adapter `shouldParseSession` probes");
-    expect(runbook).toContain("bun run local-server:sync-install");
+    expect(runbook).toContain("quasar daemon install --interval-seconds 60");
+    expect(runbook).toContain("quasar daemon uninstall");
+    expect(runbook).toContain("so a slow first");
     expect(runbook).toContain("Avoid the HTTP maintenance endpoint for long optimize runs");
     expect(runbook).toContain("bun run local-server:lance");
     expect(runbook).toContain("does **not** archive `search.lance` by default");
@@ -59,6 +61,9 @@ describe("local-server ops config", () => {
     expect(cli).toContain("tool-calls [--session-id id] [--project-key key] [--provider name] [--tool-name name] [--limit n] [--offset n]");
     expect(cli).toContain("tool-call --id id");
     expect(cli).toContain("[--role user|assistant]");
+    expect(cli).toContain("daemon install --server http://<mac-mini-tailscale-ip>:6180 --ingest-token <token> [--interval-seconds 60]");
+    expect(cli).toContain("com.quasar.remote-ingest");
+    expect(cli).toContain("already_running");
     expect(runbook).toContain("Agent / MCP serving contract");
     expect(runbook).toContain("GET /search/<mode>");
     expect(runbook).toContain("projectKey`, `role=user\\|assistant`, `limit");
