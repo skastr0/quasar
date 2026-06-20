@@ -187,24 +187,38 @@ Recommended schedule:
 - daily or after large ingests: `bun run local-server:maintain`
 - before risky changes: `bun run local-server:backup`
 
-Launchd/cron should call only the package script; it should not inline Docker commands or provider logic. The checked-in helper installs a user LaunchAgent with `StartInterval=60` by default:
+On remote Macs, use the released CLI's production daemon installer. It installs a
+user LaunchAgent with `StartInterval=60` by default. The LaunchAgent calls
+`quasar daemon run`, which holds a local lock and then runs the remote ingest
+path (`quasar ingest --provider all --summary --server ...`) so a slow first
+ingest cannot overlap the next minute tick.
 
 ```bash
-bun run local-server:sync-install
-bun run local-server:sync-status
+npm install -g @skastr0/quasar-cli
+export QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180
+export QUASAR_INGEST_TOKEN=<same-token-as-mac-mini-platform-local-server-env>
+
+quasar daemon install --interval-seconds 60
+quasar daemon status
 ```
 
-Override the interval or stale-lock recovery window before install if needed:
+Override through flags when you do not want to export environment variables:
 
 ```bash
-QUASAR_LOCAL_SERVER_SYNC_INTERVAL_SECONDS=15 QUASAR_LOCAL_SERVER_SYNC_STALE_LOCK_SECONDS=3600 bun run local-server:sync-install
+quasar daemon install \
+  --server http://<mac-mini-tailscale-ip>:6180 \
+  --ingest-token <token> \
+  --interval-seconds 60
 ```
 
 Uninstall:
 
 ```bash
-bun run local-server:sync-uninstall
+quasar daemon uninstall
 ```
+
+The Mac mini repo-local `bun run local-server:sync-install` helper is only for
+the server host's own mounted corpus. Do not use it for remote client machines.
 
 Equivalent cron entry if launchd is not desired; replace the repo and Bun paths for the host:
 
