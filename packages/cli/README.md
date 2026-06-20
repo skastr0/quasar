@@ -28,10 +28,10 @@ macOS and Linux on arm64/x64.
 
 ## Connect to a Mac mini Quasar server
 
-Use the Mac mini's direct Tailscale IP, not MagicDNS, as the proof boundary:
+Use the Tailscale Service hostname assigned to `svc:quasar`:
 
 ```bash
-export QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180
+export QUASAR_LOCAL_SERVER_URL=https://<quasar-service-tailnet-hostname>
 export QUASAR_INGEST_TOKEN=<same-token-configured-on-the-mac-mini-server>
 
 quasar stats
@@ -46,7 +46,7 @@ Or configure the default server once:
 {
   "schemaVersion": 3,
   "projectKey": "quasar",
-  "localServerUrl": "http://<mac-mini-tailscale-ip>:6180"
+  "localServerUrl": "https://<quasar-service-tailnet-hostname>"
 }
 ```
 
