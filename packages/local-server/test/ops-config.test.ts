@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { describe, expect, test } from "bun:test";
@@ -17,44 +17,43 @@ describe("local-server ops config", () => {
     expect(dockerfile).not.toContain("packages/local-server/src/cli.ts");
   });
 
-  test("operator scripts keep deploy, sync, and maintenance repeatable", () => {
+  test("operator scripts keep deploy and maintenance repeatable", () => {
     const pkg = readFileSync(join(repoRoot, "package.json"), "utf8");
     const ops = readFileSync(join(repoRoot, "scripts/local-server-ops.mjs"), "utf8");
     const runbook = readFileSync(join(repoRoot, "docs/operations/local-server-docker-tailscale.md"), "utf8");
 
     expect(pkg).toContain("local-server:deploy");
-    expect(pkg).toContain("local-server:sync-tick");
-    expect(pkg).toContain("local-server:sync-install");
-    expect(pkg).toContain("local-server:sync-status");
     expect(pkg).toContain("local-server:maintain");
     expect(pkg).toContain("local-server:lance");
     expect(pkg).toContain("local-server:backup");
-    expect(ops).toContain("case \"syncTick\"");
     expect(ops).toContain("case \"maintain\"");
     expect(ops).toContain("case \"lance\"");
     expect(ops).toContain("@lancedb/lancedb");
     expect(ops).toContain("VACUUM INTO");
     expect(ops).toContain("quasar-truth-backup.tar");
-    expect(ops).toContain("QUASAR_WORKERS_ENABLED=false");
-    expect(ops).toContain("QUASAR_SYNC_INGEST_LIMIT:-");
-    expect(ops).toContain("limit_arg=\\\"--limit ${QUASAR_SYNC_INGEST_LIMIT}\\\"");
-    expect(ops).toContain("bun packages/cli/src/cli.ts operator-ingest --provider all --summary ${limit_arg}");
-    const sync = readFileSync(join(repoRoot, "scripts/install-local-server-sync.mjs"), "utf8");
-    expect(sync).toContain("com.quasar.local-server-sync");
-    expect(sync).toContain("StartInterval");
-    expect(sync).toContain("QUASAR_LOCAL_SERVER_SYNC_INTERVAL_SECONDS ?? \"60\"");
-    expect(sync).toContain("local-server:sync-tick");
-    expect(sync).toContain("QUASAR_LOCAL_SERVER_SYNC_STALE_LOCK_SECONDS");
-    expect(sync).toContain("recoveredStaleLock");
-    expect(sync).toContain("local-server-sync.lock");
-    expect(runbook).toContain("every 60 seconds: `bun run local-server:sync-tick`");
-    expect(runbook).toContain("adapter `shouldParseSession` probes");
     expect(runbook).toContain("quasar daemon install --interval-seconds 60");
     expect(runbook).toContain("quasar daemon uninstall");
     expect(runbook).toContain("so a slow first");
     expect(runbook).toContain("Avoid the HTTP maintenance endpoint for long optimize runs");
     expect(runbook).toContain("bun run local-server:lance");
     expect(runbook).toContain("does **not** archive `search.lance` by default");
+  });
+
+  test("server-side history ingestion paths are removed", () => {
+    const pkg = readFileSync(join(repoRoot, "package.json"), "utf8");
+    const ops = readFileSync(join(repoRoot, "scripts/local-server-ops.mjs"), "utf8");
+    const compose = readFileSync(join(repoRoot, "platform/local-server/compose.yaml"), "utf8");
+
+    expect(pkg).not.toContain("local-server:ingest");
+    expect(pkg).not.toContain("local-server:sync-tick");
+    expect(pkg).not.toContain("local-server:sync-install");
+    expect(pkg).not.toContain("local-server:sync-status");
+    expect(ops).not.toContain("operator-ingest");
+    expect(ops).not.toContain("syncTick");
+    expect(ops).not.toContain("QUASAR_SYNC_INGEST_LIMIT");
+    expect(compose).not.toContain("/history/");
+    expect(compose).not.toContain("QUASAR_CLAUDE_ROOT");
+    expect(existsSync(join(repoRoot, "scripts/install-local-server-sync.mjs"))).toBe(false);
   });
 
   test("runbook documents the agent-facing local-server tool contract", () => {

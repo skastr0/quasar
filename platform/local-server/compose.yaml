@@ -18,15 +18,6 @@ services:
       - "${QUASAR_PUBLISH_HOST:-0.0.0.0}:${QUASAR_LOCAL_PORT:-6180}:6180"
     volumes:
       - quasar-data:/data/quasar
-      # Mount read-only history roots explicitly. Defaults match common local paths;
-      # override in .env on each machine.
-      - "${QUASAR_CODEX_ROOT:-${HOME}/.codex}:/history/codex:ro"
-      - "${QUASAR_CLAUDE_ROOT:-${HOME}/.claude}:/history/claude:ro"
-      - "${QUASAR_OPENCODE_ROOT:-${HOME}/.local/share/opencode}:/history/opencode:ro"
-      - "${QUASAR_GROK_ROOT:-${HOME}/.grok}:/history/grok:ro"
-      - "${QUASAR_HERMES_ROOT:-${HOME}/.hermes}:/history/hermes:ro"
-      - "${QUASAR_KIMI_ROOT:-${HOME}/.kimi-code}:/history/kimi:ro"
-      - "${QUASAR_ANTIGRAVITY_ROOT:-${HOME}/.gemini/antigravity-cli}:/history/antigravity:ro"
     environment:
       NODE_ENV: production
       QUASAR_HOME: /data/quasar
@@ -36,13 +27,6 @@ services:
       QUASAR_LOCAL_HOST: 0.0.0.0
       QUASAR_LOCAL_PORT: 6180
       QUASAR_INGEST_TOKEN: ${QUASAR_INGEST_TOKEN:?set QUASAR_INGEST_TOKEN in platform/local-server/.env for remote ingest writes}
-      QUASAR_CODEX_ROOT: /history/codex
-      QUASAR_CLAUDE_ROOT: /history/claude
-      QUASAR_OPENCODE_ROOT: /history/opencode
-      QUASAR_GROK_ROOT: /history/grok
-      QUASAR_HERMES_ROOT: /history/hermes
-      QUASAR_KIMI_ROOT: /history/kimi
-      QUASAR_ANTIGRAVITY_ROOT: /history/antigravity
       QUASAR_WORKERS_ENABLED: ${QUASAR_WORKERS_ENABLED:-false}
       QUASAR_EMBEDDING_WORKER_ENABLED: ${QUASAR_EMBEDDING_WORKER_ENABLED:-}
       QUASAR_INDEX_REPAIR_WORKER_ENABLED: ${QUASAR_INDEX_REPAIR_WORKER_ENABLED:-}
