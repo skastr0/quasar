@@ -25,8 +25,13 @@ import {
   AntigravityRecordSchema,
   agentNameFromRole,
   childUuidsFromInvokeContent,
+  classifyRecord,
   classifyToolCall,
+  isToolExecutionType,
+  isToolResultType,
   rolesFromInvokeToolCall,
+  type AntigravityKind,
+  type AntigravityRole,
   type SubagentRole,
 } from "./antigravity-schema";
 
@@ -62,15 +67,8 @@ type AntigravityEventDraft = {
   readonly nativeEventId?: string;
   readonly sequence: number;
   readonly timestamp?: string;
-  readonly role: "user" | "assistant" | "system" | "thinking" | "unknown";
-  readonly kind:
-    | "message"
-    | "tool_call"
-    | "tool_result"
-    | "reasoning"
-    | "system"
-    | "lifecycle"
-    | "unknown";
+  readonly role: AntigravityRole;
+  readonly kind: AntigravityKind;
   readonly contentText?: string;
   readonly contentSource?: NativeValue;
   readonly toolCallId?: string;
@@ -86,92 +84,16 @@ type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
 
 // ---------------------------------------------------------------------------
 // Role + kind mapping
+//
+// The record-level signal/drop dispatch is DECLARATIVE and lives ENTIRELY in
+// antigravity-schema.ts (`classifyRecord`): every one of the 15 on-disk record
+// types is explicitly signal(role/kind) or drop(named reason), with a
+// compile-time exhaustiveness guard. This adapter no longer carries any local
+// kind/role heuristic — it decodes fail-closed, then routes each record through
+// that single declarative dispatch. Only the turn-segmentation pass
+// (`terminalPlannerResponseIndices`) stays here, because it depends on the
+// ordering of records, not on any one record's shape.
 // ---------------------------------------------------------------------------
-
-// Non-PLANNER_RESPONSE tool execution records. Their content is a tool result
-// (a directory listing, a file body, a command transcript) — structural, never
-// an assistant message and never embedded.
-const TOOL_EXECUTION_TYPES = new Set([
-  "VIEW_FILE",
-  "LIST_DIRECTORY",
-  "GENERIC",
-  "CODE_ACTION",
-  "RUN_COMMAND",
-]);
-
-/**
- * Classification of a single transcript record AFTER turn segmentation. The
- * driving rule is structural, not content-length based (AGENTS.md: no invented
- * budgets):
- *
- *   USER_INPUT
- *     → role user / kind message (searchable). One per user turn.
- *
- *   PLANNER_RESPONSE that is the LAST one before the next USER_INPUT (or the
- *   end of the session) — the turn-TERMINAL response
- *     → role assistant / kind message (searchable). One per user turn. This is
- *       the model's real answer. Its tool_calls (if any) still emit as session
- *       toolCalls, but the record itself is the answer, so it stays a message.
- *
- *   PLANNER_RESPONSE (mid-loop) carrying tool_calls
- *     → kind tool_call / role assistant. The narration ("I will read X") is the
- *       call's context, NOT a standalone message; structural, not searchable.
- *
- *   PLANNER_RESPONSE (mid-loop) carrying thinking but no tool_calls
- *     → role thinking / kind reasoning. Off the embedding surface, like every
- *       other adapter's reasoning.
- *
- *   PLANNER_RESPONSE (mid-loop) bare — no tool_calls, no thinking
- *     → role unknown / kind lifecycle. A mid-loop tick: NOT a message, NOT
- *       embedded.
- *
- *   VIEW_FILE / LIST_DIRECTORY / GENERIC / CODE_ACTION / RUN_COMMAND
- *     → kind tool_call / role assistant (tool execution result; structural).
- *
- *   CHECKPOINT / SYSTEM_MESSAGE
- *     → role system / kind system.
- *
- *   CONVERSATION_HISTORY
- *     → SKIP (content is null — a replay marker, never content of its own).
- */
-type AntigravityClassification = {
-  readonly role: AntigravityEventDraft["role"];
-  readonly kind: AntigravityEventDraft["kind"];
-};
-
-const classifyRecord = (input: {
-  readonly type: string;
-  readonly hasToolCalls: boolean;
-  readonly hasThinking: boolean;
-  readonly isTerminalPlannerResponse: boolean;
-}): AntigravityClassification | "SKIP" => {
-  const { type, hasToolCalls, hasThinking, isTerminalPlannerResponse } = input;
-
-  if (type === "CONVERSATION_HISTORY") return "SKIP";
-  if (type === "USER_INPUT") return { role: "user", kind: "message" };
-
-  if (type === "PLANNER_RESPONSE") {
-    // The turn-terminal response is the assistant's real answer — searchable,
-    // exactly one per user turn. Terminal classification wins even if the
-    // record also carries tool_calls (an aborted/incomplete final turn): the
-    // tool_calls are still emitted, but the record is the answer.
-    if (isTerminalPlannerResponse) return { role: "assistant", kind: "message" };
-    // Mid-loop responses: tool narration, reasoning, or a bare tick. None are
-    // messages; none reach the embedding surface.
-    if (hasToolCalls) return { role: "assistant", kind: "tool_call" };
-    if (hasThinking) return { role: "thinking", kind: "reasoning" };
-    return { role: "unknown", kind: "lifecycle" };
-  }
-
-  if (TOOL_EXECUTION_TYPES.has(type)) return { role: "assistant", kind: "tool_call" };
-  if (type === "CHECKPOINT" || type === "SYSTEM_MESSAGE") return { role: "system", kind: "system" };
-  // INVOKE_SUBAGENT is the spawn record (content = the child brain uuid blurb).
-  // It is a first-class subagent lifecycle event, NOT "unknown": it is the
-  // structural marker that this parent forked a child session. Its content is
-  // consumed for cross-session lineage (buildLineageMap), not for search.
-  if (type === "INVOKE_SUBAGENT") return { role: "system", kind: "lifecycle" };
-  return { role: "unknown", kind: "unknown" };
-};
 
 /**
  * Marks each PLANNER_RESPONSE record (by line index in the parsed-record array)
@@ -402,17 +324,20 @@ const buildAntigravitySession = (
     const createdAt = typeof record.created_at === "string" ? record.created_at : undefined;
     const stepIndex = typeof record.step_index === "number" ? record.step_index : undefined;
 
-    // CONVERSATION_HISTORY records have null content — skip entirely.
     const rawToolCalls = record.tool_calls ?? [];
     const hasThinking = typeof record.thinking === "string" && record.thinking.length > 0;
-    const classification = classifyRecord({
-      type,
+
+    // Single declarative dispatch: every record type is EXPLICITLY signal or
+    // drop (no "unknown" pass-through). A drop (e.g. CONVERSATION_HISTORY replay
+    // marker) emits no row; the named reason is structural, not provider garbage,
+    // so it does not raise a decode diagnostic (only schema decode failures do).
+    const decision = classifyRecord(type, {
       hasToolCalls: rawToolCalls.length > 0,
       hasThinking,
       isTerminalPlannerResponse: terminalIndices.has(recordIndex),
     });
-    if (classification === "SKIP") continue;
-    const { role, kind } = classification;
+    if (!isSignal(decision)) continue;
+    const { role, kind } = decision.value;
 
     const eventId = eventIdFor(
       sessionId,
@@ -480,13 +405,20 @@ const buildAntigravitySession = (
       firstToolCallId ??= nativeToolId;
     }
 
-    // Tool result events (VIEW_FILE, LIST_DIRECTORY, etc. following a PLANNER_RESPONSE):
-    // Link result content back to the matching tool call when we can find it
-    // by matching the step that initiated the tool call.
+    // Tool result events (VIEW_FILE, LIST_DIRECTORY, GREP_SEARCH, FIND,
+    // SEARCH_WEB, etc. following a PLANNER_RESPONSE): link result content back to
+    // the matching tool call when we can find it by matching the step that
+    // initiated the tool call. A record is an execution RESULT (never an
+    // initiation) when its type is one of the declared tool-execution or
+    // tool-result types — derived from the same schema dispatch, not a local
+    // heuristic.
     let linkedToolCallId: string | undefined = firstToolCallId;
-    if (kind === "tool_call" && rawToolCalls.length === 0 && type !== "PLANNER_RESPONSE") {
-      // This is an execution result (VIEW_FILE etc.), not an initiation.
-      // Try to find the nearest preceding tool-call record that hasn't yet been completed.
+    if (
+      rawToolCalls.length === 0 &&
+      (isToolExecutionType(type) || isToolResultType(type))
+    ) {
+      // This is an execution result (VIEW_FILE, GREP_SEARCH, …), not an
+      // initiation. Find the nearest preceding tool call not yet completed.
       for (const [existingId, existing] of toolCallsById) {
         if (existing.status === "started") {
           const output = projectToolPayloadNativeValue(contentRaw);
