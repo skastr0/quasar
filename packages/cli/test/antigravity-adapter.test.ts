@@ -623,3 +623,321 @@ describe("T5: cumulative replay collapse — estate validation", () => {
     30_000,
   );
 });
+
+// ---------------------------------------------------------------------------
+// QSR-220: first-class subagents.
+//
+// Antigravity subagents are spawned via invoke_subagent and get their OWN brain
+// dir + uuid + transcript_full.jsonl (ingested flat). The parent link lives ONLY
+// in the PARENT's content: an INVOKE_SUBAGENT record carries the child brain
+// uuid(s) in a content blurb, preceded by the invoke_subagent tool call whose
+// Subagents[] carry the Role/TypeName. The adapter scans the whole brain root,
+// builds child→parent lineage, and on the CHILD emits a canonical `subagent_of`
+// SessionEdge (fromId = parent canonical SessionId) plus an agentName drawn from
+// the subagent Role. The fixtures below are synthetic, with fabricated uuids and
+// content — they mirror the real on-disk shape without any real session data.
+// ---------------------------------------------------------------------------
+describe("QSR-220: cross-session subagent lineage", () => {
+  const root = join(testRoot, "qsr220-lineage");
+  const brainRoot = join(root, "brain");
+
+  // Fabricated parent + two fabricated children.
+  const PARENT_UUID = "10000000-0000-4000-8000-00000000aaaa";
+  const CHILD_A_UUID = "20000000-0000-4000-8000-00000000bbbb";
+  const CHILD_B_UUID = "30000000-0000-4000-8000-00000000cccc";
+
+  const writeTranscript = (uuid: string, records: unknown[]) => {
+    const dir = join(brainRoot, uuid, ".system_generated", "logs");
+    mkdirSync(dir, { recursive: true });
+    writeJsonLines(join(dir, "transcript_full.jsonl"), records);
+  };
+
+  // Parent transcript: a normal turn, then an invoke_subagent tool call that
+  // spawns TWO subagents, then the INVOKE_SUBAGENT record carrying both child
+  // uuids (concatenated JSON objects, irregular whitespace — exactly as on disk).
+  // It also contains the manage_task / manage_subagents Action="list" POLLING
+  // NOISE that must be dropped, and the define_subagent control call.
+  const invokeContent = [
+    "Created At: 2026-06-20T07:24:32Z",
+    "Completed At: 2026-06-20T07:24:33Z",
+    "Created the following subagents:",
+    "{",
+    `  "conversationId":  "${CHILD_A_UUID}",`,
+    `  "logAbsoluteUri":  "file:///brain/${CHILD_A_UUID}/.system_generated/logs/transcript.jsonl",`,
+    '  "workspaceUris":  [',
+    '    "file:///work/repo-a"',
+    "  ]",
+    "}",
+    "{",
+    `  "conversationId":  "${CHILD_B_UUID}",`,
+    `  "logAbsoluteUri":  "file:///brain/${CHILD_B_UUID}/.system_generated/logs/transcript.jsonl",`,
+    '  "workspaceUris":  [',
+    '    "file:///work/repo-b"',
+    "  ]",
+    "}",
+  ].join("\n");
+
+  writeTranscript(PARENT_UUID, [
+    {
+      type: "USER_INPUT",
+      source: "USER_EXPLICIT",
+      status: "DONE",
+      created_at: "2026-06-20T07:24:00Z",
+      content: "Spawn two subagents to analyze the repos.",
+    },
+    // define_subagent control call (classified explicitly, kept).
+    {
+      type: "PLANNER_RESPONSE",
+      source: "MODEL",
+      status: "DONE",
+      created_at: "2026-06-20T07:24:10Z",
+      thinking: "Defining the subagents.",
+      tool_calls: [
+        { name: "define_subagent", args: { name: "codebase-analyst", description: "analyze" } },
+      ],
+    },
+    // manage_task Action="list" POLLING NOISE → dropped.
+    {
+      type: "PLANNER_RESPONSE",
+      source: "MODEL",
+      status: "DONE",
+      created_at: "2026-06-20T07:24:11Z",
+      tool_calls: [
+        { name: "manage_task", args: { Action: "list", toolSummary: "Listing tasks" } },
+      ],
+    },
+    // manage_subagents Action="list" POLLING NOISE → dropped.
+    {
+      type: "PLANNER_RESPONSE",
+      source: "MODEL",
+      status: "DONE",
+      created_at: "2026-06-20T07:24:12Z",
+      tool_calls: [
+        { name: "manage_subagents", args: { Action: "list", toolSummary: "Listing subagents" } },
+      ],
+    },
+    // The invoke_subagent tool call: Subagents[] carry Role/TypeName in the same
+    // order as the child uuids in the INVOKE_SUBAGENT content below.
+    {
+      type: "PLANNER_RESPONSE",
+      source: "MODEL",
+      status: "DONE",
+      created_at: "2026-06-20T07:24:30Z",
+      content: "Invoking both subagents.",
+      tool_calls: [
+        {
+          name: "invoke_subagent",
+          args: {
+            Subagents: [
+              { Prompt: "analyze repo a", Role: "Codebase Analyst", TypeName: "self" },
+              { Prompt: "audit repo b", Role: "Adversarial API Auditor", TypeName: "api_auditor" },
+            ],
+          },
+        },
+      ],
+    },
+    // The INVOKE_SUBAGENT spawn record carrying both child brain uuids.
+    {
+      type: "INVOKE_SUBAGENT",
+      source: "MODEL",
+      status: "DONE",
+      created_at: "2026-06-20T07:24:32Z",
+      content: invokeContent,
+    },
+    // Terminal answer.
+    {
+      type: "PLANNER_RESPONSE",
+      source: "MODEL",
+      status: "DONE",
+      created_at: "2026-06-20T07:24:40Z",
+      content: "Both subagents have been dispatched.",
+    },
+  ]);
+
+  // Each child is its own flat session with a user + terminal answer.
+  const childRecords = (label: string) => [
+    {
+      type: "USER_INPUT",
+      source: "USER_EXPLICIT",
+      status: "DONE",
+      created_at: "2026-06-20T07:24:35Z",
+      content: `Subagent task: ${label}.`,
+    },
+    {
+      type: "PLANNER_RESPONSE",
+      source: "MODEL",
+      status: "DONE",
+      created_at: "2026-06-20T07:24:36Z",
+      content: `Subagent answer for ${label}.`,
+    },
+  ];
+  writeTranscript(CHILD_A_UUID, childRecords("repo a"));
+  writeTranscript(CHILD_B_UUID, childRecords("repo b"));
+
+  const read = () =>
+    antigravityAdapter.read({ machine: MACHINE, now: NOW, roots: { antigravity: root } });
+
+  const sessionByUuid = async (uuid: string) => {
+    const result = await read();
+    const expectedId = result.sessions.find(
+      (s) => s.nativeSessionId === uuid,
+    );
+    return { result, session: expectedId };
+  };
+
+  test("discovers parent + both child sessions", async () => {
+    const result = await read();
+    const uuids = result.sessions.map((s) => s.nativeSessionId).sort();
+    expect(uuids).toEqual([PARENT_UUID, CHILD_A_UUID, CHILD_B_UUID].sort());
+  });
+
+  test("child emits subagent_of edge with fromId = parent canonical SessionId", async () => {
+    const { result, session: childA } = await sessionByUuid(CHILD_A_UUID);
+    expect(childA).toBeDefined();
+    const parent = result.sessions.find((s) => s.nativeSessionId === PARENT_UUID)!;
+
+    const subagentEdges = childA!.sessionEdges.filter((e) => e.kind === "subagent_of");
+    expect(subagentEdges).toHaveLength(1);
+    const edge = subagentEdges[0]!;
+    // The canonical lineage: fromId = parent SessionId, toId = child SessionId.
+    expect(edge.fromId).toBe(parent.id);
+    expect(edge.toId).toBe(childA!.id);
+  });
+
+  test("child parentSessionId (via subagent_of) === parent canonical SessionId", async () => {
+    // The mapSession layer projects subagent_of.fromId onto SessionRow
+    // .parentSessionId; here we assert the edge the adapter emits carries exactly
+    // the parent's canonical SessionId, which is what that projection reads.
+    const { result, session: childB } = await sessionByUuid(CHILD_B_UUID);
+    const parent = result.sessions.find((s) => s.nativeSessionId === PARENT_UUID)!;
+    const edge = childB!.sessionEdges.find((e) => e.kind === "subagent_of")!;
+    expect(edge.fromId).toBe(parent.id);
+    // It must be the canonical (machine-independent) id, never the raw uuid.
+    expect(edge.fromId).not.toBe(PARENT_UUID);
+  });
+
+  test("child agentName reflects the subagent Role, paired by index", async () => {
+    const { session: childA } = await sessionByUuid(CHILD_A_UUID);
+    const { session: childB } = await sessionByUuid(CHILD_B_UUID);
+    // First Subagent Role → first child uuid; second → second child.
+    expect(childA!.agentName).toBe("Codebase Analyst");
+    expect(childB!.agentName).toBe("Adversarial API Auditor");
+  });
+
+  test("subagent_of edge carries the native parent uuid in rawReference", async () => {
+    const { session: childA } = await sessionByUuid(CHILD_A_UUID);
+    const edge = childA!.sessionEdges.find((e) => e.kind === "subagent_of")!;
+    expect(edge.rawReference).toMatchObject({
+      nativeType: "INVOKE_SUBAGENT",
+      rowId: PARENT_UUID,
+    });
+  });
+
+  test("the parent session carries NO subagent_of edge (it is the root)", async () => {
+    const { result } = await sessionByUuid(PARENT_UUID);
+    const parent = result.sessions.find((s) => s.nativeSessionId === PARENT_UUID)!;
+    expect(parent.sessionEdges.filter((e) => e.kind === "subagent_of")).toHaveLength(0);
+    expect(parent.agentName).toBe("antigravity-cli");
+  });
+
+  test("manage_task / manage_subagents Action=list polling noise is DROPPED", async () => {
+    const { result } = await sessionByUuid(PARENT_UUID);
+    const parent = result.sessions.find((s) => s.nativeSessionId === PARENT_UUID)!;
+    const toolNames = parent.toolCalls.map((tc) => tc.toolName);
+    // The list-poll noise never becomes a ToolCall record.
+    expect(toolNames).not.toContain("manage_task");
+    expect(toolNames).not.toContain("manage_subagents");
+    // But the first-class subagent control calls ARE kept.
+    expect(toolNames).toContain("define_subagent");
+    expect(toolNames).toContain("invoke_subagent");
+  });
+
+  test("INVOKE_SUBAGENT records are classified explicitly (lifecycle), not unknown", async () => {
+    const { result } = await sessionByUuid(PARENT_UUID);
+    const parent = result.sessions.find((s) => s.nativeSessionId === PARENT_UUID)!;
+    const invokeEvents = parent.events.filter(
+      (e) => e.rawReference.nativeType === "INVOKE_SUBAGENT",
+    );
+    expect(invokeEvents).toHaveLength(1);
+    expect(invokeEvents[0]!.kind).toBe("lifecycle");
+    expect(invokeEvents[0]!.role).toBe("system");
+    // None of the parent's events should be the catch-all "unknown".
+    expect(parent.events.filter((e) => e.kind === "unknown")).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// QSR-220: a non-list manage_subagents op is real (kept), and a malformed
+// transcript line becomes a NAMED decode diagnostic + a dropped record.
+// ---------------------------------------------------------------------------
+describe("QSR-220: subagent_admin op kept + fail-closed decode", () => {
+  const root = join(testRoot, "qsr220-decode");
+  const brainRoot = join(root, "brain");
+  const uuid = "40000000-0000-4000-8000-00000000dddd";
+  const dir = join(brainRoot, uuid, ".system_generated", "logs");
+  mkdirSync(dir, { recursive: true });
+
+  // One line is intentionally malformed (type is not a string) → must drop with
+  // a named antigravity.record.decode_failed diagnostic, never abort the file.
+  const records = [
+    {
+      type: "USER_INPUT",
+      source: "USER_EXPLICIT",
+      status: "DONE",
+      created_at: "2026-06-20T08:00:00Z",
+      content: "Do work.",
+    },
+    // A non-"list" manage_subagents action is a real op, kept as a tool call.
+    {
+      type: "PLANNER_RESPONSE",
+      source: "MODEL",
+      status: "DONE",
+      created_at: "2026-06-20T08:00:01Z",
+      tool_calls: [{ name: "manage_subagents", args: { Action: "send_message" } }],
+    },
+    // Malformed: `type` violates the schema (must be a string).
+    { type: 12345, content: "garbage record" },
+    {
+      type: "PLANNER_RESPONSE",
+      source: "MODEL",
+      status: "DONE",
+      created_at: "2026-06-20T08:00:02Z",
+      content: "Final answer.",
+    },
+  ];
+  writeFileSync(
+    join(dir, "transcript_full.jsonl"),
+    records.map((r) => JSON.stringify(r)).join("\n") + "\n",
+    "utf8",
+  );
+
+  test("non-list manage_subagents op is kept as a tool call", async () => {
+    const result = await antigravityAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { antigravity: root },
+    });
+    const session = result.sessions.find((s) => s.nativeSessionId === uuid)!;
+    expect(session.toolCalls.map((tc) => tc.toolName)).toContain("manage_subagents");
+  });
+
+  test("malformed line drops with a named decode diagnostic; the file still ingests", async () => {
+    const result = await antigravityAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { antigravity: root },
+    });
+    // The session still ingests (the garbage line did not abort the file).
+    const session = result.sessions.find((s) => s.nativeSessionId === uuid);
+    expect(session).toBeDefined();
+    expect(session!.events.some((e) => e.contentText === "Final answer.")).toBe(true);
+    // And the drop surfaces as a NAMED diagnostic.
+    const decodeDiag = result.diagnostics.filter(
+      (d) =>
+        d.status === "unsupported" &&
+        typeof d.message === "string" &&
+        d.message.includes("antigravity.record.decode_failed"),
+    );
+    expect(decodeDiag.length).toBeGreaterThan(0);
+  });
+});
