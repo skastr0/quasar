@@ -6,8 +6,8 @@ import { dirname, join, resolve } from "node:path";
 
 import { configuredIngestToken, configuredServerUrl, defaultClientConfigPath } from "./client-config";
 import { ingestFailureError, ingestReportPayload } from "./ingest-report";
-import { ingestRemote } from "../../server/src/ingest";
-import { fail, ok, writeJson } from "../../server/src/json";
+import { ingestRemote } from "./ingest";
+import { fail, ok, writeJson } from "./json";
 
 const arg = (name: string): string | undefined => {
   const index = process.argv.indexOf(name);

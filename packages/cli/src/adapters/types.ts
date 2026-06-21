@@ -4,7 +4,7 @@ import type {
   NormalizedSession,
   Provider,
   SourceRoot,
-} from "../schemas";
+} from "@skastr0/quasar-core";
 
 /**
  * Cheap pre-parse probe: an adapter computes this (source path + statSync

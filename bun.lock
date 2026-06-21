@@ -22,9 +22,10 @@
       "bin": {
         "quasar": "bin/quasar.js",
       },
+      "dependencies": {
+        "@skastr0/quasar-core": "workspace:*",
+      },
       "devDependencies": {
-        "@skastr0/quasar-search": "workspace:*",
-        "@skastr0/quasar-server": "workspace:*",
         "@types/bun": "^1.3.1",
         "effect": "^3.21.2",
         "typescript": "^6.0.3",

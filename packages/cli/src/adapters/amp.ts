@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
 
-import { stableWideHash } from "../hash";
+import { stableWideHash } from "@skastr0/quasar-core";
 import { collectAdapterStream, type AdapterStreamItem, type SessionAdapter } from "./types";
-import type { ToolCall } from "../schemas";
+import type { ToolCall } from "@skastr0/quasar-core";
 import {
   buildSession,
   compactText,
