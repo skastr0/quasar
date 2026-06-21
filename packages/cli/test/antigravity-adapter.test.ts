@@ -3,8 +3,17 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterAll, describe, expect, test } from "bun:test";
+import { Schema } from "effect";
 
 import { antigravityAdapter } from "../src/adapters/antigravity";
+import {
+  ANTIGRAVITY_RECORD_TYPES,
+  AntigravityRecordSchema,
+  classifyRecord,
+  type AntigravityRecord,
+  type AntigravityRecordType,
+} from "../src/adapters/antigravity-schema";
+import { isSignal } from "../src/adapters/harness-schema";
 
 const MACHINE = {
   machineId: "machine:test",
@@ -939,5 +948,334 @@ describe("QSR-220: subagent_admin op kept + fail-closed decode", () => {
         d.message.includes("antigravity.record.decode_failed"),
     );
     expect(decodeDiag.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// QSR-220 FULL DATA FIDELITY.
+//
+// The complete on-disk inventory is 15 distinct record types (measured against
+// the real estate 2026-06-21: PLANNER_RESPONSE, SYSTEM_MESSAGE, VIEW_FILE,
+// GENERIC, LIST_DIRECTORY, USER_INPUT, CONVERSATION_HISTORY, CHECKPOINT,
+// RUN_COMMAND, GREP_SEARCH, CODE_ACTION, ERROR_MESSAGE, FIND, SEARCH_WEB,
+// INVOKE_SUBAGENT). Every one is modeled by the fail-closed
+// AntigravityRecordSchema and routed through the SINGLE declarative
+// classifyRecord dispatch: each type is EXPLICITLY signal(kind) or drop(reason),
+// with ZERO records falling through to an "unknown" pass-through.
+//
+// Fixtures here are built FROM the Effect schema (`makeRecord` is typed as
+// AntigravityRecord and encoded through AntigravityRecordSchema), so a schema
+// change breaks the fixture rather than letting hand-typed loose JSON drift. All
+// content + identifiers are SYNTHETIC and fabricated (grep-verified to resolve
+// to zero real on-disk data).
+// ---------------------------------------------------------------------------
+describe("QSR-220 full data fidelity: declarative per-record-type dispatch", () => {
+  // Schema-driven fixture constructor: a typed record encoded through the schema.
+  // If the schema's shape changes (a field added/removed/retyped), this stops
+  // type-checking — the fixture is bound to the schema, not loose JSON.
+  const makeRecord = (record: AntigravityRecord): Record<string, unknown> =>
+    Schema.encodeSync(AntigravityRecordSchema)(record) as Record<string, unknown>;
+
+  // The full inventory and its EXPECTED record-level classification. This table
+  // is the executable spec: every on-disk type is here, each pinned to a signal
+  // kind or a named drop. CONVERSATION_HISTORY is the only drop (a replay
+  // marker); everything else is a signal under a mapped kind.
+  type Expected =
+    | { readonly outcome: "signal"; readonly kind: string; readonly role: string }
+    | { readonly outcome: "drop"; readonly reason: string };
+
+  const PURE_TYPE_EXPECTATIONS: Record<
+    Exclude<AntigravityRecordType, "PLANNER_RESPONSE">,
+    Expected
+  > = {
+    USER_INPUT: { outcome: "signal", kind: "message", role: "user" },
+    CONVERSATION_HISTORY: {
+      outcome: "drop",
+      reason: "antigravity.record.conversation_history_replay_marker",
+    },
+    INVOKE_SUBAGENT: { outcome: "signal", kind: "lifecycle", role: "system" },
+    CHECKPOINT: { outcome: "signal", kind: "system", role: "system" },
+    SYSTEM_MESSAGE: { outcome: "signal", kind: "system", role: "system" },
+    ERROR_MESSAGE: { outcome: "signal", kind: "lifecycle", role: "system" },
+    VIEW_FILE: { outcome: "signal", kind: "tool_call", role: "assistant" },
+    LIST_DIRECTORY: { outcome: "signal", kind: "tool_call", role: "assistant" },
+    GENERIC: { outcome: "signal", kind: "tool_call", role: "assistant" },
+    CODE_ACTION: { outcome: "signal", kind: "tool_call", role: "assistant" },
+    RUN_COMMAND: { outcome: "signal", kind: "tool_call", role: "assistant" },
+    GREP_SEARCH: { outcome: "signal", kind: "tool_result", role: "assistant" },
+    FIND: { outcome: "signal", kind: "tool_result", role: "assistant" },
+    SEARCH_WEB: { outcome: "signal", kind: "tool_result", role: "assistant" },
+  };
+
+  const NEUTRAL_CTX = {
+    hasToolCalls: false,
+    hasThinking: false,
+    isTerminalPlannerResponse: false,
+  };
+
+  test("the modeled inventory is exactly the 15 on-disk record types", () => {
+    expect([...ANTIGRAVITY_RECORD_TYPES].sort() as string[]).toEqual(
+      [
+        "CHECKPOINT",
+        "CODE_ACTION",
+        "CONVERSATION_HISTORY",
+        "ERROR_MESSAGE",
+        "FIND",
+        "GENERIC",
+        "GREP_SEARCH",
+        "INVOKE_SUBAGENT",
+        "LIST_DIRECTORY",
+        "PLANNER_RESPONSE",
+        "RUN_COMMAND",
+        "SEARCH_WEB",
+        "SYSTEM_MESSAGE",
+        "USER_INPUT",
+        "VIEW_FILE",
+      ].sort(),
+    );
+    expect(ANTIGRAVITY_RECORD_TYPES).toHaveLength(15);
+  });
+
+  // One assertion per pure-`type` record: its declared signal(kind)/drop(reason).
+  for (const [type, expected] of Object.entries(PURE_TYPE_EXPECTATIONS) as [
+    AntigravityRecordType,
+    Expected,
+  ][]) {
+    test(`record type ${type} classifies as ${expected.outcome}`, () => {
+      const decision = classifyRecord(type, NEUTRAL_CTX);
+      if (expected.outcome === "signal") {
+        expect(isSignal(decision)).toBe(true);
+        if (isSignal(decision)) {
+          expect(decision.kind as string).toBe(expected.kind);
+          expect(decision.value.role as string).toBe(expected.role);
+          expect(decision.value.kind as string).toBe(expected.kind);
+        }
+      } else {
+        expect(decision._tag).toBe("drop");
+        if (decision._tag === "drop") expect(decision.reason).toBe(expected.reason);
+      }
+    });
+  }
+
+  // PLANNER_RESPONSE is the one context-sensitive type: its 4 distinct outcomes.
+  test("PLANNER_RESPONSE: terminal → assistant message", () => {
+    const d = classifyRecord("PLANNER_RESPONSE", { ...NEUTRAL_CTX, isTerminalPlannerResponse: true });
+    expect(isSignal(d) && d.value.role).toBe("assistant");
+    expect(isSignal(d) && d.value.kind).toBe("message");
+  });
+  test("PLANNER_RESPONSE: mid-loop with tool_calls → assistant tool_call", () => {
+    const d = classifyRecord("PLANNER_RESPONSE", { ...NEUTRAL_CTX, hasToolCalls: true });
+    expect(isSignal(d) && d.value.kind).toBe("tool_call");
+  });
+  test("PLANNER_RESPONSE: mid-loop with thinking → thinking reasoning", () => {
+    const d = classifyRecord("PLANNER_RESPONSE", { ...NEUTRAL_CTX, hasThinking: true });
+    expect(isSignal(d) && d.value.role).toBe("thinking");
+    expect(isSignal(d) && d.value.kind).toBe("reasoning");
+  });
+  test("PLANNER_RESPONSE: mid-loop bare → unknown lifecycle tick", () => {
+    const d = classifyRecord("PLANNER_RESPONSE", NEUTRAL_CTX);
+    expect(isSignal(d) && d.value.role).toBe("unknown");
+    expect(isSignal(d) && d.value.kind).toBe("lifecycle");
+  });
+
+  test("ZERO record type classifies as unknown pass-through", () => {
+    for (const type of ANTIGRAVITY_RECORD_TYPES) {
+      const decision = classifyRecord(type, NEUTRAL_CTX);
+      if (isSignal(decision)) {
+        // The narrow kind union has no "unknown" arm; assert it explicitly too.
+        expect(decision.value.kind).not.toBe("unknown");
+        expect(decision.value.role === "unknown" && decision.value.kind !== "lifecycle").toBe(false);
+      }
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // End-to-end through the adapter: the 4 newly-modeled types surface with the
+  // right kind, none as "unknown". A fabricated session with one of every
+  // newly-modeled type plus the turn scaffold.
+  // -------------------------------------------------------------------------
+  describe("end-to-end: newly-modeled tool-result + error types", () => {
+    const root = join(testRoot, "qsr220-fidelity");
+    const brainRoot = join(root, "brain");
+    const uuid = "90000000-0000-4000-8000-0000000ffff1";
+    const dir = join(brainRoot, uuid, ".system_generated", "logs");
+    mkdirSync(dir, { recursive: true });
+
+    const records: Record<string, unknown>[] = [
+      makeRecord({
+        type: "USER_INPUT",
+        source: "USER_EXPLICIT",
+        status: "DONE",
+        created_at: "2026-06-20T09:00:00Z",
+        content: "Fabricated request: search the synthetic repo.",
+      }),
+      // Mid-loop planner that initiates a grep — its result follows as GREP_SEARCH.
+      makeRecord({
+        type: "PLANNER_RESPONSE",
+        source: "MODEL",
+        status: "DONE",
+        created_at: "2026-06-20T09:00:01Z",
+        content: "Fabricated: I will grep.",
+        tool_calls: [{ name: "grep_search", args: { Query: "Fabricated grep needle" } }],
+      }),
+      makeRecord({
+        type: "GREP_SEARCH",
+        source: "MODEL",
+        status: "DONE",
+        created_at: "2026-06-20T09:00:02Z",
+        content: 'Created At: 2026-06-20T09:00:02Z\n{"File":"/fab/synthetic/repo/a.ts","Line":1}',
+      }),
+      makeRecord({
+        type: "FIND",
+        source: "MODEL",
+        status: "DONE",
+        created_at: "2026-06-20T09:00:03Z",
+        content: "Found 1 results\n/fab/synthetic/repo/found.ts",
+      }),
+      makeRecord({
+        type: "SEARCH_WEB",
+        source: "MODEL",
+        status: "DONE",
+        created_at: "2026-06-20T09:00:04Z",
+        content: 'The search for "Fabricated web search needle" returned nothing real.',
+      }),
+      // ERROR_MESSAGE with a numeric error_code (transport failure shape).
+      makeRecord({
+        type: "ERROR_MESSAGE",
+        source: "SYSTEM",
+        status: "ERROR",
+        created_at: "2026-06-20T09:00:05Z",
+        error: "Fabricated error blurb: the model API is synthetic.",
+        error_code: 429,
+      }),
+      // CHECKPOINT + INVOKE_SUBAGENT (no children) — lifecycle/system coverage.
+      makeRecord({
+        type: "CHECKPOINT",
+        source: "SYSTEM",
+        status: "DONE",
+        created_at: "2026-06-20T09:00:06Z",
+        content: "Fabricated checkpoint.",
+      }),
+      makeRecord({
+        type: "PLANNER_RESPONSE",
+        source: "MODEL",
+        status: "DONE",
+        created_at: "2026-06-20T09:00:07Z",
+        content: "Fabricated terminal answer.",
+      }),
+    ];
+    writeJsonLines(join(dir, "transcript_full.jsonl"), records);
+
+    const read = () =>
+      antigravityAdapter.read({ machine: MACHINE, now: NOW, roots: { antigravity: root } });
+
+    test("GREP_SEARCH / FIND / SEARCH_WEB surface as tool_result events", async () => {
+      const session = (await read()).sessions.find((s) => s.nativeSessionId === uuid)!;
+      const byType = (t: string) =>
+        session.events.filter((e) => e.rawReference.nativeType === t);
+      for (const t of ["GREP_SEARCH", "FIND", "SEARCH_WEB"]) {
+        const events = byType(t);
+        expect(events).toHaveLength(1);
+        expect(events[0]!.kind).toBe("tool_result");
+        expect(events[0]!.role).toBe("assistant");
+      }
+    });
+
+    test("ERROR_MESSAGE surfaces as a system lifecycle event (not unknown)", async () => {
+      const session = (await read()).sessions.find((s) => s.nativeSessionId === uuid)!;
+      const errs = session.events.filter((e) => e.rawReference.nativeType === "ERROR_MESSAGE");
+      expect(errs).toHaveLength(1);
+      expect(errs[0]!.kind).toBe("lifecycle");
+      expect(errs[0]!.role).toBe("system");
+    });
+
+    test("NO event in the session is the catch-all unknown kind", async () => {
+      const session = (await read()).sessions.find((s) => s.nativeSessionId === uuid)!;
+      expect(session.events.filter((e) => e.kind === "unknown")).toHaveLength(0);
+      expect(session.events.length).toBeGreaterThan(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Malformed-record tests per major type: a schema-violating line becomes a
+  // NAMED antigravity.record.decode_failed diagnostic + a dropped record, never
+  // a throw, and the rest of the transcript still ingests.
+  // -------------------------------------------------------------------------
+  describe("fail-closed decode: malformed records drop with a named diagnostic", () => {
+    const buildAndRead = async (label: string, malformed: unknown) => {
+      const root = join(testRoot, `qsr220-malformed-${label}`);
+      const dir = join(root, "brain", "90000000-0000-4000-8000-0000000ffff2", ".system_generated", "logs");
+      mkdirSync(dir, { recursive: true });
+      const good = [
+        makeRecord({
+          type: "USER_INPUT",
+          source: "USER_EXPLICIT",
+          status: "DONE",
+          created_at: "2026-06-20T10:00:00Z",
+          content: "Fabricated user turn.",
+        }),
+        makeRecord({
+          type: "PLANNER_RESPONSE",
+          source: "MODEL",
+          status: "DONE",
+          created_at: "2026-06-20T10:00:02Z",
+          content: "Fabricated terminal answer.",
+        }),
+      ];
+      // Insert the malformed line between two valid records.
+      writeJsonLines(join(dir, "transcript_full.jsonl"), [good[0], malformed, good[1]]);
+      return antigravityAdapter.read({ machine: MACHINE, now: NOW, roots: { antigravity: root } });
+    };
+
+    const namedDropPresent = (result: Awaited<ReturnType<typeof antigravityAdapter.read>>) =>
+      result.diagnostics.some(
+        (d) =>
+          d.status === "unsupported" &&
+          typeof d.message === "string" &&
+          d.message.includes("antigravity.record.decode_failed"),
+      );
+
+    test("unknown record type (not in the closed union) is rejected + named", async () => {
+      // An invented provider type must NOT pass through as unknown — the closed
+      // literal union rejects it at the schema boundary.
+      const result = await buildAndRead("unknown-type", {
+        type: "TOTALLY_NEW_PROVIDER_TYPE",
+        content: "Fabricated rambling from an unmodeled type.",
+      });
+      expect(namedDropPresent(result)).toBe(true);
+      const session = result.sessions.find(
+        (s) => s.nativeSessionId === "90000000-0000-4000-8000-0000000ffff2",
+      );
+      // The file still ingests; the valid records survive.
+      expect(session).toBeDefined();
+      expect(session!.events.some((e) => e.contentText === "Fabricated terminal answer.")).toBe(true);
+    });
+
+    test("ERROR_MESSAGE with a string error_code (schema wants number|null) drops + named", async () => {
+      const result = await buildAndRead("bad-error-code", {
+        type: "ERROR_MESSAGE",
+        source: "SYSTEM",
+        status: "ERROR",
+        error: "Fabricated error blurb.",
+        error_code: "not-a-number",
+      });
+      expect(namedDropPresent(result)).toBe(true);
+    });
+
+    test("PLANNER_RESPONSE with a malformed tool_calls shape drops + named", async () => {
+      const result = await buildAndRead("bad-toolcalls", {
+        type: "PLANNER_RESPONSE",
+        source: "MODEL",
+        status: "DONE",
+        // tool_calls must be an array of {name,args}; a number violates the schema.
+        tool_calls: 12345,
+      });
+      expect(namedDropPresent(result)).toBe(true);
+    });
+
+    test("non-string type drops + named (never throws, file still ingests)", async () => {
+      const result = await buildAndRead("nonstring-type", { type: 999, content: "garbage" });
+      expect(namedDropPresent(result)).toBe(true);
+    });
   });
 });

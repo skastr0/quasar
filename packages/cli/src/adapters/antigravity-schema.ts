@@ -26,13 +26,52 @@ const AntigravityToolCallSchema = Schema.Struct({
 });
 
 /**
- * The transcript record schema. `type` is the load-bearing discriminator and
- * is required; the rest are optional because Antigravity records are
- * heterogeneous (a USER_INPUT carries content, a PLANNER_RESPONSE may carry
- * thinking + tool_calls, an INVOKE_SUBAGENT carries a content blurb, etc.).
+ * The CLOSED set of on-disk transcript record `type` discriminators, grounded
+ * against the entire real estate (76,111 records / 15 distinct types, measured
+ * 2026-06-21). This is the FULL DATA FIDELITY inventory (QSR-220): every record
+ * that exists on disk MUST appear here, and the per-record dispatch below MUST
+ * classify each one EXPLICITLY as signal(kind) or drop(reason) — zero records
+ * may fall through to an "unknown" pass-through.
+ *
+ * Modeling `type` as a literal union (not a free `Schema.String`) makes the
+ * schema fail-closed on a NEW provider record type: an unrecognised `type`
+ * fails to decode → becomes a NAMED `antigravity.record.decode_failed`
+ * diagnostic + a dropped record, which is exactly the contract ("a model
+ * rambling must never be mistaken for a legitimate response"). When the provider
+ * adds a genuinely new type, the decode failure surfaces it loudly rather than
+ * silently swallowing it as unknown.
+ */
+export const ANTIGRAVITY_RECORD_TYPES = [
+  "USER_INPUT",
+  "PLANNER_RESPONSE",
+  "CONVERSATION_HISTORY",
+  "INVOKE_SUBAGENT",
+  "CHECKPOINT",
+  "SYSTEM_MESSAGE",
+  "ERROR_MESSAGE",
+  "VIEW_FILE",
+  "LIST_DIRECTORY",
+  "GENERIC",
+  "CODE_ACTION",
+  "RUN_COMMAND",
+  "GREP_SEARCH",
+  "FIND",
+  "SEARCH_WEB",
+] as const;
+
+export type AntigravityRecordType = (typeof ANTIGRAVITY_RECORD_TYPES)[number];
+
+/**
+ * The transcript record schema. `type` is the load-bearing discriminator and is
+ * a CLOSED literal union (fail-closed: an unknown type is rejected at the
+ * boundary). The rest are optional because Antigravity records are heterogeneous
+ * (a USER_INPUT carries content, a PLANNER_RESPONSE may carry thinking +
+ * tool_calls, an INVOKE_SUBAGENT carries a content blurb, an ERROR_MESSAGE
+ * carries `error`/`error_code`). Every field present anywhere in the real estate
+ * is modeled here so a schema change breaks the adapter loudly.
  */
 export const AntigravityRecordSchema = Schema.Struct({
-  type: Schema.String,
+  type: Schema.Literal(...ANTIGRAVITY_RECORD_TYPES),
   step_index: Schema.optional(Schema.NullOr(Schema.Number)),
   source: Schema.optional(Schema.NullOr(Schema.String)),
   status: Schema.optional(Schema.NullOr(Schema.String)),
@@ -40,10 +79,149 @@ export const AntigravityRecordSchema = Schema.Struct({
   content: Schema.optional(Schema.NullOr(Schema.String)),
   thinking: Schema.optional(Schema.NullOr(Schema.String)),
   tool_calls: Schema.optional(Schema.NullOr(Schema.Array(AntigravityToolCallSchema))),
+  // ERROR_MESSAGE-only fields (modeled for full fidelity; optional everywhere
+  // else): `error` is the human error blurb, `error_code` the HTTP-ish numeric
+  // code (429/503) when the failure was a transport/provider error.
+  error: Schema.optional(Schema.NullOr(Schema.String)),
+  error_code: Schema.optional(Schema.NullOr(Schema.Number)),
 });
 
 export type AntigravityRecord = typeof AntigravityRecordSchema.Type;
 export type AntigravityToolCallRecord = typeof AntigravityToolCallSchema.Type;
+
+// ---------------------------------------------------------------------------
+// Declarative per-record-type signal/drop dispatch (QSR-220 FULL DATA FIDELITY)
+//
+// Replaces the ad-hoc kind/role heuristic. Every one of the 15 on-disk record
+// types is EXPLICITLY either:
+//   - signal(role, kind) — kept on a mapped surface, or
+//   - drop(reason)       — discarded with a NAMED reason.
+// There is NO catch-all "unknown" arm. PLANNER_RESPONSE is the one type whose
+// classification depends on runtime turn context (terminal vs mid-loop, whether
+// it carries tool_calls / thinking), so its sub-dispatch takes that context;
+// every other type maps purely from its `type`.
+// ---------------------------------------------------------------------------
+
+/** The narrow role/kind surface this adapter emits (subset of the core enums). */
+export type AntigravityRole = "user" | "assistant" | "system" | "thinking" | "unknown";
+export type AntigravityKind =
+  | "message"
+  | "tool_call"
+  | "tool_result"
+  | "reasoning"
+  | "system"
+  | "lifecycle";
+
+export interface AntigravityRecordClassification {
+  readonly role: AntigravityRole;
+  readonly kind: AntigravityKind;
+}
+
+/** Context the PLANNER_RESPONSE arm needs; pure-`type` arms ignore it. */
+export interface AntigravityClassifyContext {
+  readonly hasToolCalls: boolean;
+  readonly hasThinking: boolean;
+  readonly isTerminalPlannerResponse: boolean;
+}
+
+// Tool-result record types: their `content` is a tool execution result (a
+// directory listing, a file body, a command transcript, a grep/find hit list, a
+// web-search summary) — structural provenance, never an assistant message and
+// never embedded. GREP_SEARCH / FIND / SEARCH_WEB are read-only retrieval tools,
+// so they map to `tool_result`; the mutating/observing ones (VIEW_FILE,
+// LIST_DIRECTORY, RUN_COMMAND, CODE_ACTION, GENERIC) keep `tool_call` for parity
+// with the existing started/completed pairing logic in the adapter.
+const TOOL_RESULT_TYPES = new Set<AntigravityRecordType>([
+  "GREP_SEARCH",
+  "FIND",
+  "SEARCH_WEB",
+]);
+const TOOL_EXECUTION_TYPES = new Set<AntigravityRecordType>([
+  "VIEW_FILE",
+  "LIST_DIRECTORY",
+  "GENERIC",
+  "CODE_ACTION",
+  "RUN_COMMAND",
+]);
+
+/**
+ * Classify a single decoded record into signal(role/kind) or drop(reason). This
+ * is the SOLE record-level dispatch: every `AntigravityRecordType` is handled by
+ * an explicit arm and the function is exhaustive (the trailing `never` check
+ * proves at compile time that no type is missing), so a new on-disk type can
+ * never silently fall through to "unknown".
+ */
+export const classifyRecord = (
+  type: AntigravityRecordType,
+  ctx: AntigravityClassifyContext,
+): SignalDecision<AntigravityRecordClassification, AntigravityKind> => {
+  switch (type) {
+    case "CONVERSATION_HISTORY":
+      // Replay marker with null content — a pointer into the cumulative replay,
+      // never content of its own. Dropped with a named reason (no row emitted).
+      return drop("antigravity.record.conversation_history_replay_marker");
+
+    case "USER_INPUT":
+      return signal("message", { role: "user", kind: "message" });
+
+    case "PLANNER_RESPONSE": {
+      // The turn-terminal response is the assistant's real answer — searchable,
+      // one per user turn. Terminal classification wins even when it also
+      // carries tool_calls (an aborted/incomplete final turn); the calls still
+      // emit, but the record itself is the answer.
+      if (ctx.isTerminalPlannerResponse) {
+        return signal("message", { role: "assistant", kind: "message" });
+      }
+      // Mid-loop: tool narration, reasoning, or a bare lifecycle tick. None are
+      // messages; none reach the embedding surface.
+      if (ctx.hasToolCalls) return signal("tool_call", { role: "assistant", kind: "tool_call" });
+      if (ctx.hasThinking) return signal("reasoning", { role: "thinking", kind: "reasoning" });
+      return signal("lifecycle", { role: "unknown", kind: "lifecycle" });
+    }
+
+    case "INVOKE_SUBAGENT":
+      // First-class subagent lifecycle event (the spawn marker). Content is
+      // consumed for cross-session lineage, not for search.
+      return signal("lifecycle", { role: "system", kind: "lifecycle" });
+
+    case "CHECKPOINT":
+    case "SYSTEM_MESSAGE":
+      return signal("system", { role: "system", kind: "system" });
+
+    case "ERROR_MESSAGE":
+      // A model/transport failure lifecycle record (e.g. 429/503, or a tool-call
+      // parse failure). It is NOT an assistant message and is NOT searchable; it
+      // is a named lifecycle signal so the failure is preserved as provenance.
+      return signal("lifecycle", { role: "system", kind: "lifecycle" });
+
+    case "VIEW_FILE":
+    case "LIST_DIRECTORY":
+    case "GENERIC":
+    case "CODE_ACTION":
+    case "RUN_COMMAND":
+      return signal("tool_call", { role: "assistant", kind: "tool_call" });
+
+    case "GREP_SEARCH":
+    case "FIND":
+    case "SEARCH_WEB":
+      return signal("tool_result", { role: "assistant", kind: "tool_result" });
+
+    default: {
+      // Exhaustiveness guard: if a new AntigravityRecordType is added to the
+      // literal union without a classification arm here, this fails to compile.
+      const _exhaustive: never = type;
+      return drop(`antigravity.record.unclassified:${String(_exhaustive)}`);
+    }
+  }
+};
+
+/** True when this record type carries a tool-execution result `content` body. */
+export const isToolExecutionType = (type: AntigravityRecordType): boolean =>
+  TOOL_EXECUTION_TYPES.has(type);
+
+/** True when this record type is a read-only retrieval tool result. */
+export const isToolResultType = (type: AntigravityRecordType): boolean =>
+  TOOL_RESULT_TYPES.has(type);
 
 // ---------------------------------------------------------------------------
 // Tool-call classification (SignalDecision)
