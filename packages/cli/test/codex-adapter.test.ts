@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { afterAll, describe, expect, test } from "bun:test";
 
 import { codexAdapter } from "../src/adapters/codex";
+import { sessionIdFor } from "../src/adapters/common";
+import { CodexSessionId } from "../src/core/identity";
+import { mapSession } from "../src/map";
 
 const MACHINE = {
   machineId: "machine:test",
@@ -503,6 +506,236 @@ describe("codex adapter", () => {
       expect(rejection.status).toBe("error");
     } finally {
       rmSync(rejectRoot, { recursive: true, force: true });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // QSR-220 — first-class subagents.
+  //
+  // Codex subagents are separate rollout-*.jsonl files, each with its own
+  // UUIDv7. A subagent rollout records its spawning parent at
+  // session_meta.payload.source.subagent.thread_spawn.parent_thread_id and its
+  // identity at agent_nickname (fallback agent_role). The adapter emits a
+  // canonical `subagent_of` edge whose fromId is the parent's canonical
+  // SessionId; mapSession projects it onto SessionRow.parentSessionId.
+  //
+  // Real-shape fixture: a parent rollout + a subagent rollout whose
+  // parent_thread_id points at the parent. All ids are fabricated.
+  // ---------------------------------------------------------------------------
+  test("subagent rollout maps parentSessionId to the parent canonical SessionId and sets agentName", async () => {
+    const lineageRoot = mkdtempSync(join(tmpdir(), "quasar-codex-subagent-"));
+    try {
+      const dir = join(lineageRoot, "sessions", "2026", "06", "21");
+      mkdirSync(dir, { recursive: true });
+      const PARENT_UUID = "01900000-0000-7000-8000-0000000000a1";
+      const CHILD_UUID = "01900000-0000-7000-8000-0000000000a2";
+
+      // Parent rollout: a plain main session, no source.subagent.
+      writeFileSync(
+        join(dir, rolloutFilename("2026-06-21T07-00-00", PARENT_UUID)),
+        [
+          line({
+            timestamp: NOW,
+            type: "session_meta",
+            payload: {
+              id: PARENT_UUID,
+              timestamp: NOW,
+              cwd: "/tmp/proj",
+              originator: "codex-tui",
+              cli_version: "0.140.0",
+              type: "session_meta",
+            },
+          }),
+          line({
+            timestamp: NOW,
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "spawn a subagent please" }],
+            },
+          }),
+        ].join("\n"),
+      );
+
+      // Subagent rollout: source.subagent.thread_spawn.parent_thread_id points
+      // at the parent's native id; agent_nickname carries the human label.
+      writeFileSync(
+        join(dir, rolloutFilename("2026-06-21T07-05-00", CHILD_UUID)),
+        [
+          line({
+            timestamp: NOW,
+            type: "session_meta",
+            payload: {
+              id: CHILD_UUID,
+              timestamp: NOW,
+              cwd: "/tmp/proj",
+              originator: "codex-tui",
+              cli_version: "0.140.0",
+              type: "session_meta",
+              source: {
+                subagent: {
+                  agent_nickname: "researcher",
+                  agent_role: "research",
+                  thread_spawn: { parent_thread_id: PARENT_UUID },
+                },
+              },
+            },
+          }),
+          line({
+            timestamp: NOW,
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "subagent doing the research" }],
+            },
+          }),
+        ].join("\n"),
+      );
+
+      const result = await codexAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { codex: lineageRoot },
+      });
+      expect(result.sessions).toHaveLength(2);
+
+      const parent = result.sessions.find((session) =>
+        session.nativeSessionId === PARENT_UUID,
+      )!;
+      const child = result.sessions.find((session) =>
+        session.nativeSessionId === CHILD_UUID,
+      )!;
+      expect(parent).toBeDefined();
+      expect(child).toBeDefined();
+
+      // The canonical edge is subagent_of (never "parent"), fromId = the parent
+      // canonical SessionId = the parent session's own id, toId = the child.
+      const edge = child.sessionEdges.find((candidate) => candidate.kind === "subagent_of")!;
+      expect(edge).toBeDefined();
+      expect(edge.fromId).toBe(parent.id);
+      expect(edge.toId).toBe(child.id);
+
+      // mapSession projects the edge onto SessionRow.parentSessionId.
+      const mappedChild = mapSession(child, "fp-child");
+      const mappedParent = mapSession(parent, "fp-parent");
+      expect(mappedChild.session.parentSessionId).toBe(parent.id);
+      expect(mappedChild.session.agentName).toBe("researcher");
+
+      // A main session carries no parentSessionId and the default agentName.
+      expect(mappedParent.session.parentSessionId).toBeUndefined();
+      expect(mappedParent.session.agentName).toBe("codex");
+    } finally {
+      rmSync(lineageRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("agentName falls back to agent_role when no nickname is recorded", async () => {
+    const roleRoot = mkdtempSync(join(tmpdir(), "quasar-codex-role-"));
+    try {
+      const dir = join(roleRoot, "sessions", "2026", "06", "21");
+      mkdirSync(dir, { recursive: true });
+      const PARENT_UUID = "01900000-0000-7000-8000-0000000000b1";
+      const CHILD_UUID = "01900000-0000-7000-8000-0000000000b2";
+      writeFileSync(
+        join(dir, rolloutFilename("2026-06-21T08-05-00", CHILD_UUID)),
+        [
+          line({
+            timestamp: NOW,
+            type: "session_meta",
+            payload: {
+              id: CHILD_UUID,
+              timestamp: NOW,
+              cwd: "/tmp/proj",
+              type: "session_meta",
+              source: {
+                subagent: {
+                  agent_role: "reviewer",
+                  thread_spawn: { parent_thread_id: PARENT_UUID },
+                },
+              },
+            },
+          }),
+          line({
+            timestamp: NOW,
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "reviewing" }],
+            },
+          }),
+        ].join("\n"),
+      );
+
+      const result = await codexAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { codex: roleRoot },
+      });
+      const child = result.sessions.find((session) =>
+        session.nativeSessionId === CHILD_UUID,
+      )!;
+      expect(mapSession(child, "fp").session.agentName).toBe("reviewer");
+      const parentSessionId = sessionIdFor("codex", CodexSessionId(PARENT_UUID));
+      expect(child.sessionEdges.find((edge) => edge.kind === "subagent_of")!.fromId).toBe(
+        parentSessionId,
+      );
+    } finally {
+      rmSync(roleRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("a malformed session_meta emits codex.session_meta.decode_failed and is dropped", async () => {
+    const badRoot = mkdtempSync(join(tmpdir(), "quasar-codex-decode-"));
+    try {
+      const dir = join(badRoot, "sessions", "2026", "06", "21");
+      mkdirSync(dir, { recursive: true });
+      // payload.id is present (so it passes the native-id boundary gate) but the
+      // record-level `type` literal is corrupted to a non-string, so the Effect
+      // Schema rejects it: a named decode_failed diagnostic + a dropped decode.
+      writeFileSync(
+        join(dir, rolloutFilename("2026-06-21T09-00-00", "01900000-0000-7000-8000-0000000000c1")),
+        [
+          // Two records both look like session_meta to the cheap native-id probe
+          // (record.type === "session_meta", payload.id present), but the second
+          // field shape here corrupts payload.source into a non-object so the
+          // strict subagent branch rejects the decode.
+          JSON.stringify({
+            timestamp: NOW,
+            type: "session_meta",
+            payload: {
+              id: "01900000-0000-7000-8000-0000000000c1",
+              cwd: "/tmp/proj",
+              type: "session_meta",
+              source: "this should be an object, not a string",
+            },
+          }),
+          line({
+            timestamp: NOW,
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "still has turn content" }],
+            },
+          }),
+        ].join("\n"),
+      );
+
+      const result = await codexAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { codex: badRoot },
+      });
+      const diagnostic = result.diagnostics.find((candidate) =>
+        candidate.message.includes("codex.session_meta.decode_failed"),
+      )!;
+      expect(diagnostic).toBeDefined();
+      expect(diagnostic.status).toBe("unsupported");
+    } finally {
+      rmSync(badRoot, { recursive: true, force: true });
     }
   });
 });
