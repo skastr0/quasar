@@ -34,6 +34,88 @@ const writeJson = (path: string, data: unknown) =>
   writeFileSync(path, JSON.stringify(data, null, 2), "utf8");
 
 // ---------------------------------------------------------------------------
+// AC#5 — idempotency proof (content-id provider, sessionId from session_index)
+//
+// Kimi native id = the `sessionId` field in session_index.jsonl.  The same
+// value at two DIFFERENT root paths (different mounts, different machines)
+// must produce byte-identical canonical session.id values.  The sessionDir
+// paths differ between the two roots but the `sessionId` string is the same.
+// ---------------------------------------------------------------------------
+describe("AC#5 idempotency: same sessionId value at different root paths → byte-identical session.id", () => {
+  // Two independent roots — host vs Docker /history mount.
+  const hostRoot = mkdtempSync(join(tmpdir(), "quasar-kimi-host-"));
+  const dockerRoot = mkdtempSync(join(tmpdir(), "quasar-kimi-docker-"));
+
+  afterAll(() => {
+    rmSync(hostRoot, { recursive: true, force: true });
+    rmSync(dockerRoot, { recursive: true, force: true });
+  });
+
+  // The native id — same across both roots.
+  const NATIVE_SESSION_ID = "session_idem0001";
+
+  // Build minimal session content under each root.
+  const buildRoot = (root: string) => {
+    const sessionsDir = join(root, "sessions");
+    const sessionDir = join(sessionsDir, "wd_proj_idem", NATIVE_SESSION_ID);
+    const agentDir = join(sessionDir, "agents", "main");
+    mkdirSync(agentDir, { recursive: true });
+
+    writeJson(join(sessionDir, "state.json"), {
+      createdAt: "2026-06-21T10:00:00.000Z",
+      updatedAt: "2026-06-21T10:01:00.000Z",
+      title: "Idempotency session",
+      isCustomTitle: true,
+      agents: { main: { homedir: agentDir, type: "main", parentAgentId: null } },
+      custom: {},
+    });
+
+    writeJsonLines(join(agentDir, "wire.jsonl"), [
+      {
+        type: "context.append_message",
+        message: { role: "user", content: [{ type: "text", text: "idempotency check" }] },
+        origin: { kind: "user" },
+        time: 1000,
+      },
+    ]);
+
+    // session_index.jsonl — the `sessionId` field is the native id;
+    // the `sessionDir` is a per-root absolute path so the two roots differ.
+    writeJsonLines(join(root, "session_index.jsonl"), [
+      {
+        sessionId: NATIVE_SESSION_ID,
+        sessionDir: sessionDir,
+        workDir: "/home/user/projects/myapp",
+      },
+    ]);
+  };
+
+  buildRoot(hostRoot);
+  buildRoot(dockerRoot);
+
+  test("host and docker reads produce byte-identical session.id", async () => {
+    const hostResult = await kimiAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { kimi: hostRoot },
+    });
+    const dockerResult = await kimiAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { kimi: dockerRoot },
+    });
+
+    expect(hostResult.sessions).toHaveLength(1);
+    expect(dockerResult.sessions).toHaveLength(1);
+    // Canonical session.id is derived from the `sessionId` field in the index,
+    // not from the directory path — must be byte-identical across roots.
+    expect(hostResult.sessions[0]!.id).toBe(dockerResult.sessions[0]!.id);
+    // The sourcePaths differ (different root → different sessionDir in index).
+    expect(hostResult.sessions[0]!.sourcePath).not.toBe(dockerResult.sessions[0]!.sourcePath);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // T1: basic single-agent session with user, assistant, reasoning, tool call/result
 // ---------------------------------------------------------------------------
 describe("T1: single-agent session — user, assistant, reasoning, tool events", () => {

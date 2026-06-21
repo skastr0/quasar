@@ -234,6 +234,56 @@ describe("LocalStore", () => {
     expect(toolCall?.inputText).toBe("model.ts");
   });
 
+  // ---------------------------------------------------------------------------
+  // AC#6 — upsert / no-parallel-rows
+  //
+  // Upserting the SAME sessionId multiple times (including with a different
+  // sourcePath to simulate a host→Docker path change) must never accrue more
+  // than ONE row in the sessions table for that id.  The last writer's
+  // sourcePath wins; earlier writes are replaced, not duplicated.
+  // ---------------------------------------------------------------------------
+  test("AC#6: three upserts with same sessionId produce exactly one sessions row; last sourcePath wins", async () => {
+    const path = sqlitePath();
+    const CANONICAL_SESSION_ID = "upsert-idem-session-001";
+
+    const firstWrite = mappedSession({
+      sessionId: CANONICAL_SESSION_ID,
+      sourcePath: "/Users/alice/Library/codex/sessions/2026/rollout-idem.jsonl",
+      title: "First write — host path",
+    });
+    const secondWrite = mappedSession({
+      sessionId: CANONICAL_SESSION_ID,
+      sourcePath: "/Users/alice/Library/codex/sessions/2026/rollout-idem.jsonl",
+      title: "Second write — same path, updated title",
+    });
+    // Third write simulates the Docker /history mount: different sourcePath,
+    // same canonical sessionId — must still converge to one row.
+    const thirdWrite = mappedSession({
+      sessionId: CANONICAL_SESSION_ID,
+      sourcePath: "/history/codex/sessions/2026/rollout-idem.jsonl",
+      title: "Third write — docker path",
+    });
+
+    const [rowCount, lastSourcePath] = await withStore(
+      path,
+      (store) =>
+        Effect.gen(function* () {
+          yield* store.upsertSession(firstWrite);
+          yield* store.upsertSession(secondWrite);
+          yield* store.upsertSession(thirdWrite);
+          const sessions = yield* store.listSessions({ limit: 100 });
+          // Filter to just the sessions with our canonical id.
+          const matching = sessions.filter((s) => s.sessionId === CANONICAL_SESSION_ID);
+          return [matching.length, matching[0]?.sourcePath] as const;
+        }),
+    );
+
+    // Exactly ONE row — no parallel rows for one canonical identity.
+    expect(rowCount).toBe(1);
+    // The last writer's sourcePath is reflected.
+    expect(lastSourcePath).toBe("/history/codex/sessions/2026/rollout-idem.jsonl");
+  });
+
   test("records ingest runs idempotently", async () => {
     const path = sqlitePath();
     const run: IngestRunRow = {

@@ -50,6 +50,71 @@ const assertCollapseInvariant = (
 };
 
 // ---------------------------------------------------------------------------
+// AC#5 — idempotency proof (dirname-id provider)
+//
+// Antigravity native id = the uuid directory name under brain/.  The same
+// uuid dir name at TWO DIFFERENT brain root paths must produce byte-identical
+// canonical session.id values.  Only the parent path differs.
+// ---------------------------------------------------------------------------
+describe("AC#5 idempotency: same uuid dir name at different brain paths → byte-identical session.id", () => {
+  const hostRoot = mkdtempSync(join(tmpdir(), "quasar-ag-host-"));
+  const dockerRoot = mkdtempSync(join(tmpdir(), "quasar-ag-docker-"));
+
+  afterAll(() => {
+    rmSync(hostRoot, { recursive: true, force: true });
+    rmSync(dockerRoot, { recursive: true, force: true });
+  });
+
+  // The session uuid — same string at both roots; this is the native id.
+  const SESSION_UUID = "11111111-aaaa-aaaa-aaaa-idem00000001";
+
+  const buildRoot = (root: string) => {
+    const transcriptDir = join(root, "brain", SESSION_UUID, ".system_generated", "logs");
+    mkdirSync(transcriptDir, { recursive: true });
+    writeJsonLines(join(transcriptDir, "transcript_full.jsonl"), [
+      {
+        type: "USER_INPUT",
+        source: "USER_EXPLICIT",
+        status: "DONE",
+        created_at: "2026-06-21T10:00:00Z",
+        content: "idempotency check",
+      },
+      {
+        type: "PLANNER_RESPONSE",
+        source: "MODEL",
+        status: "DONE",
+        created_at: "2026-06-21T10:00:01Z",
+        content: "idempotency response",
+      },
+    ]);
+  };
+
+  buildRoot(hostRoot);
+  buildRoot(dockerRoot);
+
+  test("host and docker reads produce byte-identical session.id", async () => {
+    const hostResult = await antigravityAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { antigravity: hostRoot },
+    });
+    const dockerResult = await antigravityAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { antigravity: dockerRoot },
+    });
+
+    expect(hostResult.sessions).toHaveLength(1);
+    expect(dockerResult.sessions).toHaveLength(1);
+    // The canonical session.id is derived from the uuid directory name alone —
+    // must be byte-identical across different parent paths.
+    expect(hostResult.sessions[0]!.id).toBe(dockerResult.sessions[0]!.id);
+    // The sourcePaths differ (different brain root → different absolute paths).
+    expect(hostResult.sessions[0]!.sourcePath).not.toBe(dockerResult.sessions[0]!.sourcePath);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // T1: the terminal-response rule.
 //
 // A turn runs from a USER_INPUT up to the next USER_INPUT. Inside each turn the
