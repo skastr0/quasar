@@ -40,8 +40,9 @@ describe("AC#5 idempotency: same session dir name at different parent paths → 
     rmSync(dockerRoot, { recursive: true, force: true });
   });
 
-  // The session directory name (uuid) is the native id — only the parent path differs.
-  const SESSION_UUID = "session-idem-0001";
+  // Real on-disk shape: the grok session directory is named with a UUIDv7 and
+  // that name is the native id. Only the parent path differs between the trees.
+  const SESSION_UUID = "01900000-0000-7000-8000-000000000002";
   const PROJECT_KEY = encodeURIComponent("/repo/myapp");
 
   const writeSession = (root: string) => {
@@ -50,6 +51,18 @@ describe("AC#5 idempotency: same session dir name at different parent paths → 
     writeJsonLines(join(sessionDir, "chat_history.jsonl"), [
       { type: "user", content: "hello from idempotency test" },
       { type: "assistant", content: "hello back" },
+    ]);
+    // Real sidecar shape: events.jsonl carries a turn_started record whose
+    // session_id equals the directory name (the native id).
+    writeJsonLines(join(sessionDir, "events.jsonl"), [
+      {
+        ts: NOW,
+        type: "turn_started",
+        session_id: SESSION_UUID,
+        turn_number: 0,
+        model_id: "grok-build",
+        schema_version: "1.0",
+      },
     ]);
   };
 
@@ -80,11 +93,17 @@ describe("AC#5 idempotency: same session dir name at different parent paths → 
 describe("grok adapter", () => {
   test("missing optional sidecars do not abort and later sidecar creation invalidates the fingerprint", async () => {
     const root = join(testRoot, "optional-sidecars");
-    const sessionDir = join(root, "sessions", encodeURIComponent("/repo"), "session-1");
+    // Real on-disk shape: the session directory is a UUIDv7, not "session-1".
+    const sessionUuid = "01900000-0000-7000-8000-000000000007";
+    const sessionDir = join(root, "sessions", encodeURIComponent("/repo"), sessionUuid);
     mkdirSync(sessionDir, { recursive: true });
     writeJsonLines(join(sessionDir, "chat_history.jsonl"), [
       { type: "user", content: "please inspect this terminal run" },
       { type: "assistant", content: "Done Reading the terminal output." },
+    ]);
+    // events.jsonl turn_started carries session_id equal to the dir name.
+    writeJsonLines(join(sessionDir, "events.jsonl"), [
+      { ts: NOW, type: "turn_started", session_id: sessionUuid, turn_number: 0, schema_version: "1.0" },
     ]);
 
     const firstProbes: string[] = [];

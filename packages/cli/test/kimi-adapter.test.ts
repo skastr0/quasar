@@ -52,7 +52,7 @@ describe("AC#5 idempotency: same sessionId value at different root paths → byt
   });
 
   // The native id — same across both roots.
-  const NATIVE_SESSION_ID = "session_idem0001";
+  const NATIVE_SESSION_ID = "session_test0001";
 
   // Build minimal session content under each root.
   const buildRoot = (root: string) => {
@@ -121,7 +121,7 @@ describe("AC#5 idempotency: same sessionId value at different root paths → byt
 describe("T1: single-agent session — user, assistant, reasoning, tool events", () => {
   const root = join(testRoot, "t1");
   const sessionsDir = join(root, "sessions");
-  const sessionDir = join(sessionsDir, "wd_proj_aabb1122", "session_abc123");
+  const sessionDir = join(sessionsDir, "wd_proj_aabb1122", "session_test0002");
   const agentDir = join(sessionDir, "agents", "main");
 
   mkdirSync(agentDir, { recursive: true });
@@ -145,7 +145,7 @@ describe("T1: single-agent session — user, assistant, reasoning, tool events",
   // session_index.jsonl
   writeJsonLines(join(root, "session_index.jsonl"), [
     {
-      sessionId: "session_abc123",
+      sessionId: "session_test0002",
       sessionDir: sessionDir,
       workDir: "/home/user/projects/myapp",
     },
@@ -314,7 +314,7 @@ describe("T1: single-agent session — user, assistant, reasoning, tool events",
 describe("T2: multi-agent session — time-ordered merge", () => {
   const root = join(testRoot, "t2");
   const sessionsDir = join(root, "sessions");
-  const sessionDir = join(sessionsDir, "wd_proj_ccdd3344", "session_multi99");
+  const sessionDir = join(sessionsDir, "wd_proj_ccdd3344", "session_test0003");
   const mainDir = join(sessionDir, "agents", "main");
   const agent0Dir = join(sessionDir, "agents", "agent-0");
 
@@ -335,7 +335,7 @@ describe("T2: multi-agent session — time-ordered merge", () => {
 
   writeJsonLines(join(root, "session_index.jsonl"), [
     {
-      sessionId: "session_multi99",
+      sessionId: "session_test0003",
       sessionDir: sessionDir,
       workDir: "/home/user/projects/other",
     },
@@ -422,7 +422,7 @@ describe("T3: missing root", () => {
 describe("T4: stub session — empty content, valid session", () => {
   const root = join(testRoot, "t4");
   const sessionsDir = join(root, "sessions");
-  const sessionDir = join(sessionsDir, "wd_quasar_stub", "session_stub01");
+  const sessionDir = join(sessionsDir, "wd_quasar_stub", "session_test0004");
   const agentDir = join(sessionDir, "agents", "main");
 
   mkdirSync(agentDir, { recursive: true });
@@ -437,7 +437,7 @@ describe("T4: stub session — empty content, valid session", () => {
   });
 
   writeJsonLines(join(root, "session_index.jsonl"), [
-    { sessionId: "session_stub01", sessionDir: sessionDir, workDir: "/home/user/empty" },
+    { sessionId: "session_test0004", sessionDir: sessionDir, workDir: "/home/user/empty" },
   ]);
 
   // wire.jsonl with only lifecycle/metadata events (no user or assistant content)
@@ -467,7 +467,7 @@ describe("T4: stub session — empty content, valid session", () => {
 describe("T5: shouldParseSession gate", () => {
   const root = join(testRoot, "t5");
   const sessionsDir = join(root, "sessions");
-  const sessionDir = join(sessionsDir, "wd_proj_gate", "session_gate01");
+  const sessionDir = join(sessionsDir, "wd_proj_gate", "session_test0005");
   const agentDir = join(sessionDir, "agents", "main");
 
   mkdirSync(agentDir, { recursive: true });
@@ -482,7 +482,7 @@ describe("T5: shouldParseSession gate", () => {
   });
 
   writeJsonLines(join(root, "session_index.jsonl"), [
-    { sessionId: "session_gate01", sessionDir: sessionDir, workDir: "/home/user/gate" },
+    { sessionId: "session_test0005", sessionDir: sessionDir, workDir: "/home/user/gate" },
   ]);
 
   writeJsonLines(join(agentDir, "wire.jsonl"), [
