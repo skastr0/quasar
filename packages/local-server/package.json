@@ -1,7 +1,7 @@
 {
   "name": "@skastr0/quasar-local-server",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.7",
   "description": "Effect-owned local Quasar data plane: SQLite OLTP plus LanceDB search.",
   "license": "MIT",
   "type": "module",

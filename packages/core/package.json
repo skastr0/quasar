@@ -1,7 +1,7 @@
 {
   "name": "@skastr0/quasar-core",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.7",
   "description": "Shared schemas, adapters, and ingestion logic for Quasar.",
   "license": "MIT",
   "type": "module",
