@@ -37,6 +37,8 @@ const mappedSession = (sessionId = "session-a", text = "alpha terminal"): Mapped
     agentName: "codex",
     sourcePath: `/history/${sessionId}.jsonl`,
     sourceFingerprint: `fingerprint-${sessionId}`,
+    host: "host-a",
+    identitySchemeVersion: 1,
     messageCount: 1,
     toolCallCount: 0,
   },

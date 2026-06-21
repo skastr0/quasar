@@ -146,6 +146,11 @@ describe("codex adapter", () => {
     });
     const session = result.sessions[0]!;
 
+    // Provenance: host carries the readable machine hostname (not the id), and
+    // every session is stamped with the canonical identity scheme version.
+    expect(session.host).toBe("test-host");
+    expect(session.identitySchemeVersion).toBe(1);
+
     const wrapper = session.events.find((event) =>
       event.rawReference.line === 2,
     )!;

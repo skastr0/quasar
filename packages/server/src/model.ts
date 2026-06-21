@@ -50,6 +50,8 @@ export interface SessionRow {
   readonly updatedAt?: string;
   readonly sourcePath: string;
   readonly sourceFingerprint: string;
+  readonly host: string;
+  readonly identitySchemeVersion: number;
   readonly messageCount: number;
   readonly toolCallCount: number;
 }

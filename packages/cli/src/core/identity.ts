@@ -49,3 +49,11 @@ export type NativeSessionId =
  * constructor.
  */
 export type SessionId = string & Brand.Brand<"SessionId">;
+
+/**
+ * The version of the canonical session-identity scheme. Every stored session is
+ * stamped with this so a future change to how `sessionIdFor` derives ids is an
+ * explicit, versioned migration rather than silent duplication of sessions
+ * under two different identity schemes.
+ */
+export const IDENTITY_SCHEME_VERSION = 1;

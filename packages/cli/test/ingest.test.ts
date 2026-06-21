@@ -17,6 +17,8 @@ const session = (id = "session-a"): NormalizedSession => ({
   provider: "claude",
   agentName: "test-agent",
   machineId: "machine-a",
+  host: "host-a",
+  identitySchemeVersion: 1,
   projectIdentity: {
     projectIdentityKey: "project-a",
     displayName: "Project A",
