@@ -6,6 +6,7 @@ import {
   sourceFingerprintFor,
   stableAdapters,
   type Provider,
+  type SessionParseProbe,
 } from "@skastr0/quasar-core";
 import { Effect } from "effect";
 
@@ -228,6 +229,28 @@ const postMappedSession = async (
     }
   }
   throw new Error("remote ingest retry loop exited unexpectedly");
+};
+
+const postFingerprintProbe = async (
+  base: string,
+  probe: SessionParseProbe,
+  options: { readonly ingestToken?: string },
+): Promise<boolean> => {
+  const url = new URL("/ingest/fingerprint", base.endsWith("/") ? base : `${base}/`);
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (options.ingestToken !== undefined && options.ingestToken.trim() !== "") {
+    headers["x-quasar-ingest-token"] = options.ingestToken;
+  }
+  const response = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ probe }),
+  });
+  const body = await response.json() as { ok?: boolean; data?: { unchanged?: boolean }; error?: { message?: string } };
+  if (!response.ok || body.ok === false || typeof body.data?.unchanged !== "boolean") {
+    throw new RemoteIngestError(body.error?.message ?? `remote fingerprint probe failed with HTTP ${response.status}`, response.status >= 500);
+  }
+  return body.data.unchanged;
 };
 
 const ingestProvider = (provider: Provider, options: IngestOptions): Effect.Effect<IngestReport, never, LocalStore | DurableQueue> =>
@@ -465,11 +488,34 @@ const ingestProviderRemote = async (
   const outcomes: SessionIngestOutcome[] = [];
   const failures: { sessionId: string; diagnostic: string; error: string }[] = [];
 
+  const shouldParseSession = options.force === true
+    ? undefined
+    : async (probe: SessionParseProbe) => {
+        try {
+          const unchanged = await postFingerprintProbe(serverUrl, probe, options);
+          if (!unchanged) return true;
+          sessionsSeen += 1;
+          sessionsSkipped += 1;
+          outcomes.push({
+            sessionId: probe.sessionId,
+            status: "skipped",
+            diagnostic: "unchanged_source_fingerprint",
+            messagesWritten: 0,
+            toolCallsWritten: 0,
+            jobsEnqueued: 0,
+          });
+          return false;
+        } catch {
+          return true;
+        }
+      };
+
   const stream = adapter.stream({
     machine: loadMachineIdentity(),
     now: new Date().toISOString(),
     roots: configuredRoots(),
     limit: options.limit,
+    shouldParseSession,
   });
 
   for await (const item of stream) {

@@ -579,7 +579,7 @@ async function* streamGrok(options: AdapterOptions): AsyncGenerator<AdapterStrea
         sessionId: sessionIdFor("grok", options.machine.machineId, basename(sessionDir), sessionDir),
         sourceFingerprint: sourceFingerprintFor(fingerprint),
       };
-      if (options.shouldParseSession(probe) === false) continue;
+      if ((await options.shouldParseSession(probe)) === false) continue;
     }
     const session = buildGrokSessionFromChatPath(chatPath, sessionsRoot, options);
     yield {

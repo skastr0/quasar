@@ -132,7 +132,7 @@ const adapterFor = (sessions: readonly NormalizedSession[], options: { readonly 
   stream: async function* (discoverOptions) {
     for (const item of sessions) {
       const fingerprint = fingerprintForSession(item);
-      if (discoverOptions.shouldParseSession?.({ sessionId: item.id, sourceFingerprint: JSON.stringify(fingerprint) }) === false) {
+      if ((await discoverOptions.shouldParseSession?.({ sessionId: item.id, sourceFingerprint: JSON.stringify(fingerprint) })) === false) {
         continue;
       }
       options.onParse?.(item.id);
@@ -196,16 +196,19 @@ describe("ingest", () => {
 
   test("remote ingest retries transient server write failures", async () => {
     adaptersByProvider.set("unknown", adapterFor([session("remote-retry")]));
-    let attempts = 0;
+    let writeAttempts = 0;
     const server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
       fetch: async (request) => {
-        attempts += 1;
         if (request.headers.get("x-quasar-ingest-token") !== "token-a") {
           return Response.json({ ok: false, error: { message: "missing token" } }, { status: 401 });
         }
-        if (attempts === 1) {
+        if (new URL(request.url).pathname === "/ingest/fingerprint") {
+          return Response.json({ ok: true, data: { unchanged: false } });
+        }
+        writeAttempts += 1;
+        if (writeAttempts === 1) {
           return Response.json({ ok: false, error: { message: "temporary write failure" } }, { status: 500 });
         }
         const payload = await request.json() as {
@@ -236,11 +239,50 @@ describe("ingest", () => {
         `http://127.0.0.1:${server.port}`,
       );
 
-      expect(attempts).toBe(2);
+      expect(writeAttempts).toBe(2);
       expect(reports[0]?.sessionsWritten).toBe(1);
       expect(reports[0]?.sessionsFailed).toBe(0);
       expect(reports[0]?.messagesWritten).toBe(2);
       expect(reports[0]?.toolCallsWritten).toBe(1);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("remote ingest probes fingerprints before parsing unchanged sessions", async () => {
+    const parsed: string[] = [];
+    adaptersByProvider.set("unknown", adapterFor([session("remote-skip")], { onParse: (sessionId) => parsed.push(sessionId) }));
+    let probes = 0;
+    let writes = 0;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: async (request) => {
+        if (request.headers.get("x-quasar-ingest-token") !== "token-a") {
+          return Response.json({ ok: false, error: { message: "missing token" } }, { status: 401 });
+        }
+        if (new URL(request.url).pathname === "/ingest/fingerprint") {
+          probes += 1;
+          return Response.json({ ok: true, data: { unchanged: true } });
+        }
+        writes += 1;
+        return Response.json({ ok: false, error: { message: "unexpected write" } }, { status: 500 });
+      },
+    });
+
+    try {
+      const reports = await ingestRemote(
+        { provider: "unknown" as never, ingestToken: "token-a" },
+        `http://127.0.0.1:${server.port}`,
+      );
+
+      expect(probes).toBe(1);
+      expect(writes).toBe(0);
+      expect(parsed).toEqual([]);
+      expect(reports[0]?.sessionsSeen).toBe(1);
+      expect(reports[0]?.sessionsSkipped).toBe(1);
+      expect(reports[0]?.sessionsWritten).toBe(0);
+      expect(reports[0]?.sessionsFailed).toBe(0);
     } finally {
       server.stop(true);
     }
@@ -381,7 +423,7 @@ describe("ingest", () => {
       ...adapterFor([]),
       stream: async function* (discoverOptions) {
         const fingerprint = { tag: `fingerprint:${current.id}:${current.events.length}` };
-        if (discoverOptions.shouldParseSession?.({ sessionId: current.id, sourceFingerprint: JSON.stringify(fingerprint) }) === false) return;
+        if ((await discoverOptions.shouldParseSession?.({ sessionId: current.id, sourceFingerprint: JSON.stringify(fingerprint) })) === false) return;
         yield { type: "session" as const, session: current, fingerprint };
       },
     });

@@ -44,6 +44,13 @@ const isSeq = (value: unknown): value is number =>
 const isNonNegativeInt = (value: unknown): value is number =>
   typeof value === "number" && Number.isInteger(value) && value >= 0;
 
+const isFingerprintProbe = (value: unknown): value is { readonly sessionId: string; readonly sourceFingerprint: string } =>
+  isRecord(value)
+  && isString(value.sessionId)
+  && value.sessionId.trim() !== ""
+  && isString(value.sourceFingerprint)
+  && value.sourceFingerprint.trim() !== "";
+
 const providers = new Set<string>(["claude", "codex", "opencode", "grok", "hermes", "kimi", "antigravity"]);
 
 const roles = new Set<string>(["user", "assistant", "reasoning"]);
@@ -254,6 +261,30 @@ const ingestRun = Effect.gen(function* () {
   return row === undefined ? notFound("ingest-run", `ingest run not found: ${runId}`) : json(ok("ingest-run", { row }));
 });
 
+const ingestFingerprint = Effect.gen(function* () {
+  const request = yield* HttpServerRequest.HttpServerRequest;
+  const requiredToken = configuredIngestToken();
+  if (requiredToken === undefined) {
+    return serviceUnavailable("ingest/fingerprint", "QUASAR_INGEST_TOKEN must be configured before remote ingest is enabled");
+  }
+  if (requestIngestToken(request) !== requiredToken) {
+    return unauthorized("ingest/fingerprint", "valid x-quasar-ingest-token header is required");
+  }
+  const bodyResult = yield* Effect.either(HttpServerRequest.schemaBodyJson(Schema.Unknown));
+  if (bodyResult._tag === "Left") {
+    return badRequest("ingest/fingerprint", "request body must be valid JSON");
+  }
+  const body = bodyResult.right;
+  if (!isRecord(body) || !isFingerprintProbe(body.probe)) {
+    return badRequest("ingest/fingerprint", "JSON body must be { probe: { sessionId, sourceFingerprint } }");
+  }
+  const store = yield* LocalStore;
+  const unchanged = yield* store.hasSessionFingerprint(body.probe.sessionId, body.probe.sourceFingerprint).pipe(
+    Effect.catchAll(() => Effect.succeed(false)),
+  );
+  return json(ok("ingest/fingerprint", { unchanged }));
+});
+
 const ingestSession = Effect.gen(function* () {
   const request = yield* HttpServerRequest.HttpServerRequest;
   const requiredToken = configuredIngestToken();
@@ -367,6 +398,12 @@ const booleanParam = (params: URLSearchParams, name: string, fallback: boolean):
   return raw === "true" || raw === "1" || raw === "yes";
 };
 
+const httpIdleTimeoutSeconds = (): number => {
+  const raw = process.env.QUASAR_HTTP_IDLE_TIMEOUT_SECONDS ?? "120";
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 120;
+};
+
 const maintenanceRun = Effect.gen(function* () {
   const maintenance = yield* SearchMaintenance;
   const params = yield* query;
@@ -408,6 +445,7 @@ const routes = HttpRouter.empty.pipe(
   HttpRouter.get("/tool-call", toolCall),
   HttpRouter.get("/ingest-runs", ingestRuns),
   HttpRouter.get("/ingest-run", ingestRun),
+  HttpRouter.post("/ingest/fingerprint", ingestFingerprint),
   HttpRouter.post("/ingest/session", ingestSession),
   HttpRouter.get("/search/lexical", lexicalSearch),
   HttpRouter.get("/search/semantic", semanticSearch),
@@ -424,7 +462,7 @@ export const makeHttpLayer = (options: { readonly port: number; readonly hostnam
     HttpServer.serve(HttpMiddleware.logger),
     HttpServer.withLogAddress,
     Layer.provide(AppLayer),
-    Layer.provide(BunHttpServer.layer({ port: options.port, hostname: options.hostname ?? "127.0.0.1" })),
+    Layer.provide(BunHttpServer.layer({ port: options.port, hostname: options.hostname ?? "127.0.0.1", idleTimeout: httpIdleTimeoutSeconds() })),
   );
 
 export const serve = (options: { readonly port: number; readonly hostname?: string }): void => {

@@ -8,10 +8,13 @@ const repoRoot = join(import.meta.dir, "..", "..", "..");
 describe("local-server ops config", () => {
   test("Docker persists Quasar machine identity in the data volume", () => {
     const compose = readFileSync(join(repoRoot, "platform/local-server/compose.yaml"), "utf8");
+    const dockerfile = readFileSync(join(repoRoot, "platform/local-server/Dockerfile"), "utf8");
 
     expect(compose).toContain("QUASAR_HOME: /data/quasar");
     expect(compose).toContain("QUASAR_LOCAL_SQLITE: /data/quasar/quasar.sqlite");
     expect(compose).toContain("QUASAR_SEARCH_DATA_DIR: /data/quasar/search.lance");
+    expect(dockerfile).toContain('CMD ["bun", "packages/cli/src/cli.ts", "serve"');
+    expect(dockerfile).not.toContain("packages/local-server/src/cli.ts");
   });
 
   test("operator scripts keep deploy, sync, and maintenance repeatable", () => {
@@ -69,8 +72,10 @@ describe("local-server ops config", () => {
     expect(cli).toContain("operator-maintain");
     expect(cli).toContain("config.json");
     expect(clientConfig).toContain("localServerUrl");
+    expect(clientConfig).toContain("ingestToken");
     expect(runbook).toContain("Agent / MCP serving contract");
     expect(runbook).toContain("GET /search/<mode>");
+    expect(runbook).toContain("remote write ingest fails closed before provider scanning");
     expect(runbook).toContain("projectKey`, `role=user\\|assistant`, `limit");
     expect(runbook).toContain("sessionId`, `projectKey`, `provider`, `toolName`, `limit`, `offset");
     expect(runbook).toContain("Operator-only commands");

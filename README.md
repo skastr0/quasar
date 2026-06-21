@@ -50,7 +50,9 @@ quasar search --mode lexical --query "project identity" --limit 3
 
 The client config file is `~/.config/quasar/config.json`; its canonical server
 field is `localServerUrl`. Client machines should point that field at the
-Tailscale Service hostname for `svc:quasar`, not the Mac mini device IP.
+Tailscale Service hostname for `svc:quasar`, not the Mac mini device IP. Remote
+write ingest and daemon installs also require `ingestToken` in that config, or
+`QUASAR_INGEST_TOKEN` / `--ingest-token`.
 
 Once published, install the CLI package with:
 

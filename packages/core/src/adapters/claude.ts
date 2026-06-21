@@ -406,7 +406,7 @@ async function* streamClaude(options: AdapterOptions) {
         sessionId: sessionIdFor("claude", options.machine.machineId, nativeSessionIdFromPath(sourcePath), sourcePath),
         sourceFingerprint: sourceFingerprintFor(stat),
       };
-      if (options.shouldParseSession(probe) === false) continue;
+      if ((await options.shouldParseSession(probe)) === false) continue;
     }
     const session = buildClaudeSessionFromFile(
       path,

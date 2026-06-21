@@ -7,7 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { LanceDb } from "@skastr0/quasar-search";
 import { Effect } from "effect";
 
-import { configuredServerUrl, defaultClientConfigPath } from "./client-config";
+import { configuredIngestToken, configuredServerUrl, defaultClientConfigPath } from "./client-config";
 import { ingestFailureError, ingestReportPayload } from "./ingest-report";
 import { ingest, ingestRemote } from "../../local-server/src/ingest";
 import { fail, ok, writeJson } from "../../local-server/src/json";
@@ -32,6 +32,12 @@ const intArg = (name: string, fallback: number): number => {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 };
 
+const positiveInt = (raw: string | undefined, fallback: number): number => {
+  if (raw === undefined) return fallback;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+};
+
 const rawCommand = process.argv[2];
 const command =
   rawCommand === undefined || rawCommand === "--help" || rawCommand === "-h" ? "help"
@@ -39,27 +45,44 @@ const command =
   : rawCommand;
 const cliPackage = {
   name: "@skastr0/quasar-cli",
-  version: "0.1.7",
+  version: "0.1.11",
 };
 
 const server = (): string | undefined => arg("--server") ?? configuredServerUrl();
+
+type ConfigurationRequirement = "server" | "ingestToken";
 
 class ConfigurationError extends Error {
   override readonly name = "ConfigurationError";
   readonly details: unknown;
 
-  constructor(commandName: string) {
-    super(`quasar ${commandName} requires a configured local server URL`);
-    this.details = {
-      configPath: defaultClientConfigPath(),
-      acceptedEnv: ["QUASAR_LOCAL_SERVER_URL"],
-      acceptedConfigFields: ["localServerUrl"],
-      examples: [
-        "quasar <command> --server http://127.0.0.1:6180",
-        "export QUASAR_LOCAL_SERVER_URL=http://127.0.0.1:6180",
-        `write {"localServerUrl":"http://127.0.0.1:6180"} to ${defaultClientConfigPath()}`,
-      ],
-    };
+  constructor(commandName: string, requirement: ConfigurationRequirement) {
+    const details =
+      requirement === "server"
+        ? {
+            configPath: defaultClientConfigPath(),
+            acceptedEnv: ["QUASAR_LOCAL_SERVER_URL"],
+            acceptedConfigFields: ["localServerUrl"],
+            examples: [
+              "quasar <command> --server http://127.0.0.1:6180",
+              "export QUASAR_LOCAL_SERVER_URL=http://127.0.0.1:6180",
+              `write {"localServerUrl":"http://127.0.0.1:6180"} to ${defaultClientConfigPath()}`,
+            ],
+          }
+        : {
+            configPath: defaultClientConfigPath(),
+            acceptedEnv: ["QUASAR_INGEST_TOKEN"],
+            acceptedConfigFields: ["ingestToken"],
+            examples: [
+              "quasar ingest --ingest-token <token>",
+              "export QUASAR_INGEST_TOKEN=<token>",
+              `write {"ingestToken":"<token>"} to ${defaultClientConfigPath()}`,
+            ],
+          };
+    super(requirement === "server"
+      ? `quasar ${commandName} requires a configured local server URL`
+      : `quasar ${commandName} requires a configured ingest token`);
+    this.details = details;
   }
 }
 
@@ -98,7 +121,7 @@ const daemonInterval = () => {
   return parsed;
 };
 
-const daemonToken = () => arg("--ingest-token") ?? process.env.QUASAR_INGEST_TOKEN;
+const daemonToken = () => arg("--ingest-token") ?? configuredIngestToken();
 
 const daemonPlist = (options: { readonly binary: string; readonly serverUrl: string; readonly ingestToken: string; readonly intervalSeconds: number }) => {
   const paths = daemonPaths();
@@ -258,10 +281,39 @@ const urlFor = (base: string, path: string, params: Record<string, string | unde
   return url;
 };
 
+const httpTimeoutMs = () => positiveInt(arg("--timeout-ms") ?? process.env.QUASAR_HTTP_TIMEOUT_MS, 60_000);
+
+const isTransientFetchError = (error: unknown): boolean => {
+  const message = error instanceof Error ? error.message : String(error);
+  return /socket|closed|ECONNRESET|ETIMEDOUT|terminated/i.test(message);
+};
+
+const fetchWithRetry = async (url: URL): Promise<Response> => {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await fetch(url, { signal: AbortSignal.timeout(httpTimeoutMs()) });
+    } catch (error) {
+      lastError = error;
+      if (!isTransientFetchError(error) || attempt === 2) break;
+      await Bun.sleep(250 * (attempt + 1));
+    }
+  }
+  throw lastError;
+};
+
 const requireServer = (name: string): string | undefined => {
   const base = server();
   if (base !== undefined) return base;
-  writeJson(fail(name, new ConfigurationError(name)));
+  writeJson(fail(name, new ConfigurationError(name, "server")));
+  process.exitCode = 2;
+  return undefined;
+};
+
+const requireIngestToken = (name: string): string | undefined => {
+  const token = arg("--ingest-token") ?? configuredIngestToken();
+  if (token !== undefined) return token;
+  writeJson(fail(name, new ConfigurationError(name, "ingestToken")));
   process.exitCode = 2;
   return undefined;
 };
@@ -270,7 +322,7 @@ const fetchServer = async (name: string, path: string, params: Record<string, st
   const base = requireServer(name);
   if (base === undefined) return;
   try {
-    const response = await fetch(urlFor(base, path, params));
+    const response = await fetchWithRetry(urlFor(base, path, params));
     writeJson(await response.json());
     if (!response.ok) process.exitCode = 1;
   } catch (error) {
@@ -306,14 +358,16 @@ switch (command) {
     break;
   }
   case "ingest": {
+    const base = requireServer("ingest");
+    if (base === undefined) break;
+    const ingestToken = requireIngestToken("ingest");
+    if (ingestToken === undefined) break;
     const options = {
       provider: (arg("--provider") ?? "all") as never,
       limit: arg("--limit") === undefined ? undefined : intArg("--limit", 1),
       force: flag("--force"),
-      ingestToken: arg("--ingest-token") ?? process.env.QUASAR_INGEST_TOKEN,
+      ingestToken,
     };
-    const base = requireServer("ingest");
-    if (base === undefined) break;
     try {
       const reports = await ingestRemote(options, base);
       const failure = ingestFailureError(reports);
@@ -330,7 +384,7 @@ switch (command) {
       provider: (arg("--provider") ?? "all") as never,
       limit: arg("--limit") === undefined ? undefined : intArg("--limit", 1),
       force: flag("--force"),
-      ingestToken: arg("--ingest-token") ?? process.env.QUASAR_INGEST_TOKEN,
+      ingestToken: arg("--ingest-token") ?? configuredIngestToken(),
     };
     const program = ingest(options).pipe(
       Effect.flatMap((reports) => {
@@ -542,7 +596,7 @@ switch (command) {
         ],
         env: {
           QUASAR_LOCAL_HOME: "override ~/.config/quasar/local-server",
-          QUASAR_CONFIG: "override ~/.config/quasar/config.json for default server routing",
+          QUASAR_CONFIG: "override ~/.config/quasar/config.json for default server/token routing",
           QUASAR_LOCAL_SQLITE: "override SQLite file path",
           QUASAR_SEARCH_DATA_DIR: "override LanceDB directory",
           QUASAR_CODEX_ROOT: "override Codex history root",
@@ -553,7 +607,8 @@ switch (command) {
           QUASAR_KIMI_ROOT: "override Kimi history root",
           QUASAR_ANTIGRAVITY_ROOT: "override Antigravity history root",
           QUASAR_LOCAL_SERVER_URL: "route client commands through an already-running local server",
-          QUASAR_INGEST_TOKEN: "required for remote write ingest and daemon install/run",
+          QUASAR_INGEST_TOKEN: "required for remote write ingest and daemon install/run unless config has ingestToken",
+          QUASAR_HTTP_TIMEOUT_MS: "client HTTP timeout for local-server requests, default 60000",
         },
       }),
     );
