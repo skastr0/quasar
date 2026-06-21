@@ -8,7 +8,6 @@ import { configuredIngestToken, configuredServerUrl, defaultClientConfigPath } f
 import { ingestFailureError, ingestReportPayload } from "./ingest-report";
 import { ingestRemote } from "../../server/src/ingest";
 import { fail, ok, writeJson } from "../../server/src/json";
-import { serve } from "../../server/src/server";
 
 const arg = (name: string): string | undefined => {
   const index = process.argv.indexOf(name);
@@ -360,10 +359,6 @@ switch (command) {
     }
     break;
   }
-  case "serve": {
-    serve({ port: intArg("--port", 6180), hostname: arg("--host") ?? process.env.QUASAR_LOCAL_HOST ?? "127.0.0.1" });
-    break;
-  }
   case "stats": {
     await fetchServer("stats", "/status");
     break;
@@ -451,7 +446,6 @@ switch (command) {
           "daemon install --server https://<quasar-service-tailnet-hostname> --ingest-token <token> [--interval-seconds 60]",
           "daemon status",
           "daemon uninstall",
-          "serve [--host 127.0.0.1] [--port 6180]",
           "projects [--limit n] [--offset n]",
           "sessions [--provider name] [--project-key key] [--limit n] [--offset n]",
           "messages --session-id id [--limit n]",

@@ -13,7 +13,7 @@ describe("server ops config", () => {
     expect(compose).toContain("QUASAR_HOME: /data/quasar");
     expect(compose).toContain("QUASAR_LOCAL_SQLITE: /data/quasar/quasar.sqlite");
     expect(compose).toContain("QUASAR_SEARCH_DATA_DIR: /data/quasar/search.lance");
-    expect(dockerfile).toContain('CMD ["bun", "packages/cli/src/cli.ts", "serve"');
+    expect(dockerfile).toContain('CMD ["bun", "packages/server/src/main.ts"');
     expect(dockerfile).not.toContain("packages/server/src/cli.ts");
   });
 
