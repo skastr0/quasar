@@ -4,16 +4,16 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { LanceDb, makeLanceDbLayer, makeLanceDbRuntime } from "../src/index";
+import { LanceDb, makeLanceDbLayer, makeLanceDbRuntime } from "../src/lancedb";
 import {
   GEMINI_EMBEDDING_DIMENSIONS,
   MESSAGE_SEARCH_COLUMNS,
-} from "../src/index";
+} from "../src/lancedb";
 
 const tempDirs: string[] = [];
 
 const makeTempDir = async () => {
-  const dir = await mkdtemp(join(tmpdir(), "quasar-search-"));
+  const dir = await mkdtemp(join(tmpdir(), "quasar-lancedb-"));
   tempDirs.push(dir);
   return dir;
 };

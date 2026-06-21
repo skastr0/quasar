@@ -1,6 +1,6 @@
 import { HttpMiddleware, HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "@effect/platform";
 import { BunHttpServer, BunRuntime } from "@effect/platform-bun";
-import { LanceDb, MESSAGE_SEARCH_COLUMNS } from "@skastr0/quasar-search";
+import { LanceDb, MESSAGE_SEARCH_COLUMNS } from "./lancedb";
 import { Effect, Layer, Schema } from "effect";
 
 import { LocalServerConfig } from "./config";

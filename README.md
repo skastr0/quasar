@@ -23,8 +23,7 @@ than writing to native history.
 ## Workspace
 
 - `packages/cli`: the `quasar` CLI — provider history parsing (adapters), session mapping, ingest client, and JSON query commands.
-- `packages/server`: the local Effect server: SQLite truth, durable queue, workers, and HTTP control surface.
-- `packages/search`: LanceDB search primitives.
+- `packages/server`: the local Effect server: SQLite truth, durable queue, workers, LanceDB search (`src/lancedb.ts`), and HTTP control surface.
 
 The dashboard is not present. Only the CLI is prepared for npm publication.
 
