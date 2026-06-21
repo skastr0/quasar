@@ -16,12 +16,28 @@ const NOW = "2026-06-11T00:00:00.000Z";
 
 const line = (value: unknown) => JSON.stringify(value);
 
-const rolloutLines = (cwd: string) =>
+// Real on-disk shape: every rollout file is named
+// rollout-<ISO datetime>-<uuidv7>.jsonl and its line 1 is a session_meta
+// record whose payload.id is that same UUIDv7 (the codex native session id).
+const FIXTURE_UUID = "01900000-0000-7000-8000-000000000001";
+const rolloutFilename = (datetime: string, uuid: string) =>
+  `rollout-${datetime}-${uuid}.jsonl`;
+
+const rolloutLines = (cwd: string, id: string = FIXTURE_UUID) =>
   [
+    // Real-shaped session_meta: payload.id is the bare UUIDv7 also embedded in
+    // the filename; carries cwd/originator/cli_version as the real harness does.
     line({
       timestamp: NOW,
       type: "session_meta",
-      payload: { type: "session_meta", id: "native", cwd },
+      payload: {
+        id,
+        timestamp: NOW,
+        cwd,
+        originator: "codex-tui",
+        cli_version: "0.140.0",
+        type: "session_meta",
+      },
     }),
     // Injected wrapper arriving with role user — must map to kind preamble.
     line({
@@ -116,8 +132,18 @@ describe("codex adapter", () => {
     const archivedDir = join(root, "archived_sessions");
     mkdirSync(datedDir, { recursive: true });
     mkdirSync(archivedDir, { recursive: true });
-    writeFileSync(join(datedDir, "rollout-2026-06-11-live.jsonl"), rolloutLines("/tmp/proj"));
-    writeFileSync(join(archivedDir, "rollout-2026-05-01-archived.jsonl"), rolloutLines("/tmp/proj"));
+    // Distinct sessions carry distinct session_meta.payload.id values — the
+    // content-sourced native id, NOT the filename stem.
+    const liveUuid = "01900000-0000-7000-8000-000000000001";
+    const archivedUuid = "01900000-0000-7000-8000-000000000002";
+    writeFileSync(
+      join(datedDir, rolloutFilename("2026-06-11T03-14-02", liveUuid)),
+      rolloutLines("/tmp/proj", liveUuid),
+    );
+    writeFileSync(
+      join(archivedDir, rolloutFilename("2026-05-01T09-00-00", archivedUuid)),
+      rolloutLines("/tmp/proj", archivedUuid),
+    );
 
     const result = await codexAdapter.read({
       machine: MACHINE,
@@ -183,13 +209,15 @@ describe("codex adapter", () => {
       "<model_switch>\nThe user was previously using a different model…",
       "<app-context>\n# Codex desktop context…",
     ];
+    const wrapperUuid = "01900000-0000-7000-8000-000000000003";
+    const wrapperFile = rolloutFilename("2026-06-12T10-00-00", wrapperUuid);
     writeFileSync(
-      join(wrapperDir, "rollout-2026-06-12-wrappers.jsonl"),
+      join(wrapperDir, wrapperFile),
       [
         line({
           timestamp: NOW,
           type: "session_meta",
-          payload: { type: "session_meta", id: "wrappers", cwd: "/tmp/proj" },
+          payload: { id: wrapperUuid, timestamp: NOW, cwd: "/tmp/proj", type: "session_meta" },
         }),
         ...wrapperTexts.map((text) =>
           line({
@@ -220,7 +248,7 @@ describe("codex adapter", () => {
       roots: { codex: root },
     });
     const session = result.sessions.find((candidate) =>
-      candidate.sourcePath.endsWith("rollout-2026-06-12-wrappers.jsonl"),
+      candidate.sourcePath.endsWith(wrapperFile),
     )!;
     const messageEvents = session.events.filter((event) => event.kind === "message");
     expect(messageEvents).toHaveLength(1);
@@ -235,13 +263,15 @@ describe("codex adapter", () => {
   test("empty text stubs carry no turn content — no JSON envelope dump (measured 2026-06-11)", async () => {
     const stubDir = join(root, "sessions", "2026", "06", "14");
     mkdirSync(stubDir, { recursive: true });
+    const stubUuid = "01900000-0000-7000-8000-000000000004";
+    const stubFile = rolloutFilename("2026-06-14T11-22-33", stubUuid);
     writeFileSync(
-      join(stubDir, "rollout-2026-06-14-stubs.jsonl"),
+      join(stubDir, stubFile),
       [
         line({
           timestamp: NOW,
           type: "session_meta",
-          payload: { type: "session_meta", id: "stubs", cwd: "/tmp/proj" },
+          payload: { id: stubUuid, timestamp: NOW, cwd: "/tmp/proj", type: "session_meta" },
         }),
         // The measured corpus shape: an assistant message whose entire
         // content is one empty output_text stub. Provider machinery, not a turn.
@@ -272,7 +302,7 @@ describe("codex adapter", () => {
       roots: { codex: root },
     });
     const session = result.sessions.find((candidate) =>
-      candidate.sourcePath.endsWith("rollout-2026-06-14-stubs.jsonl"),
+      candidate.sourcePath.endsWith(stubFile),
     )!;
     const stubEvent = session.events.find((event) => event.rawReference.line === 2)!;
     expect(stubEvent.kind).toBe("message");
@@ -288,13 +318,15 @@ describe("codex adapter", () => {
   test("merges local_shell_call pairs into completed tool calls (input from `action`)", async () => {
     const shellDir = join(root, "sessions", "2026", "06", "13");
     mkdirSync(shellDir, { recursive: true });
+    const shellUuid = "01900000-0000-7000-8000-000000000005";
+    const shellFile = rolloutFilename("2026-06-13T08-15-00", shellUuid);
     writeFileSync(
-      join(shellDir, "rollout-2026-06-13-local-shell.jsonl"),
+      join(shellDir, shellFile),
       [
         line({
           timestamp: NOW,
           type: "session_meta",
-          payload: { type: "session_meta", id: "local-shell", cwd: "/tmp/proj" },
+          payload: { id: shellUuid, timestamp: NOW, cwd: "/tmp/proj", type: "session_meta" },
         }),
         line({
           timestamp: NOW,
@@ -320,7 +352,7 @@ describe("codex adapter", () => {
       roots: { codex: root },
     });
     const session = result.sessions.find((candidate) =>
-      candidate.sourcePath.endsWith("rollout-2026-06-13-local-shell.jsonl"),
+      candidate.sourcePath.endsWith(shellFile),
     )!;
 
     expect(session.toolCalls).toHaveLength(1);
@@ -363,31 +395,39 @@ describe("codex adapter", () => {
   });
 
   // ---------------------------------------------------------------------------
-  // AC#5 — idempotency proof
+  // AC#5 — idempotency proof (content-sourced id)
   //
-  // Codex native id = filename stem of the source path. Two files at
-  // DIFFERENT parent directories but carrying the SAME filename stem must
-  // resolve to byte-identical session.id values.  The test reads the adapter
-  // over two independent temp trees and asserts the resulting ids match.
+  // The codex native id is session_meta.payload.id — NOT the filename stem. To
+  // prove the id is content-sourced and path/filename-INDEPENDENT, the two
+  // files vary BOTH the parent directory AND the filename (different
+  // rollout-<timestamp>-... names), while carrying the IDENTICAL
+  // session_meta.payload.id. Their canonical session.id must be byte-identical.
+  // This FAILS if codex ever reverts to deriving the id from the filename stem,
+  // since the stems differ.
   // ---------------------------------------------------------------------------
-  test("AC#5 idempotency: same filename stem at different parent paths → byte-identical session.id", async () => {
+  test("AC#5 idempotency: identical session_meta.payload.id under different parent paths AND filenames → byte-identical session.id", async () => {
     // Tree A simulates a host path (e.g. /Users/me/Library/…)
     const hostRoot = mkdtempSync(join(tmpdir(), "quasar-codex-host-"));
     // Tree B simulates a Docker /history mount
     const dockerRoot = mkdtempSync(join(tmpdir(), "quasar-codex-docker-"));
 
     try {
-      // Both trees use the SAME filename, producing the same stem.
-      const FILENAME = "rollout-2026-06-21-idem.jsonl";
+      // The SAME content id, the SAME canonical conversation.
+      const SHARED_UUID = "01900000-0000-7000-8000-000000000006";
+      // Different parent directories AND different rollout filenames (distinct
+      // embedded timestamps): nothing path/filename-derived can match.
       const hostDir = join(hostRoot, "sessions", "2026", "06", "21");
-      const dockerDir = join(dockerRoot, "sessions", "2026", "06", "21");
+      const dockerDir = join(dockerRoot, "sessions", "2026", "06", "20");
       mkdirSync(hostDir, { recursive: true });
       mkdirSync(dockerDir, { recursive: true });
+      const hostFile = rolloutFilename("2026-06-21T07-00-00", SHARED_UUID);
+      const dockerFile = rolloutFilename("2026-06-20T19-30-15", SHARED_UUID);
 
-      // Identical content at both locations — same payload.id, same everything.
-      const content = rolloutLines("/tmp/idem-proj");
-      writeFileSync(join(hostDir, FILENAME), content);
-      writeFileSync(join(dockerDir, FILENAME), content);
+      // Same session_meta.payload.id at both locations; the filename timestamp
+      // differs but is irrelevant to identity.
+      const content = rolloutLines("/tmp/idem-proj", SHARED_UUID);
+      writeFileSync(join(hostDir, hostFile), content);
+      writeFileSync(join(dockerDir, dockerFile), content);
 
       const hostResult = await codexAdapter.read({
         machine: MACHINE,
@@ -403,13 +443,66 @@ describe("codex adapter", () => {
       expect(hostResult.sessions).toHaveLength(1);
       expect(dockerResult.sessions).toHaveLength(1);
       // The canonical session.id is the critical assertion: byte-identical
-      // regardless of which parent directory tree the adapter scanned.
+      // because it is sourced from session_meta.payload.id, not the path/stem.
       expect(hostResult.sessions[0]!.id).toBe(dockerResult.sessions[0]!.id);
-      // Sanity: the sourcePaths DO differ (they live in different trees).
+      // Sanity: BOTH the sourcePaths and the filenames DO differ.
       expect(hostResult.sessions[0]!.sourcePath).not.toBe(dockerResult.sessions[0]!.sourcePath);
+      expect(hostResult.sessions[0]!.sourcePath.endsWith(hostFile)).toBe(true);
+      expect(dockerResult.sessions[0]!.sourcePath.endsWith(dockerFile)).toBe(true);
+      expect(hostFile).not.toBe(dockerFile);
     } finally {
       rmSync(hostRoot, { recursive: true, force: true });
       rmSync(dockerRoot, { recursive: true, force: true });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Boundary rejection: a rollout file whose line 1 carries no
+  // session_meta.payload.id is a contract breach. The adapter must write ZERO
+  // rows for it, emit the named diagnostic, and continue.
+  // ---------------------------------------------------------------------------
+  test("boundary-rejects a rollout file missing session_meta.payload.id", async () => {
+    const rejectRoot = mkdtempSync(join(tmpdir(), "quasar-codex-reject-"));
+    try {
+      const dir = join(rejectRoot, "sessions", "2026", "06", "21");
+      mkdirSync(dir, { recursive: true });
+      // Line 1 is a session_meta with NO payload.id — malformed at the boundary.
+      writeFileSync(
+        join(dir, rolloutFilename("2026-06-21T07-00-00", "01900000-0000-7000-8000-000000000001")),
+        [
+          line({
+            timestamp: NOW,
+            type: "session_meta",
+            payload: { timestamp: NOW, cwd: "/tmp/proj", type: "session_meta" },
+          }),
+          line({
+            timestamp: NOW,
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "this turn must never be ingested" }],
+            },
+          }),
+        ].join("\n"),
+      );
+
+      const result = await codexAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { codex: rejectRoot },
+      });
+
+      // Zero rows written for the rejected file.
+      expect(result.sessions).toHaveLength(0);
+      // A named diagnostic identifies the boundary breach.
+      const rejection = result.diagnostics.find((diagnostic) =>
+        diagnostic.message.includes("codex.session_meta.payload.id.missing"),
+      )!;
+      expect(rejection).toBeDefined();
+      expect(rejection.status).toBe("error");
+    } finally {
+      rmSync(rejectRoot, { recursive: true, force: true });
     }
   });
 });

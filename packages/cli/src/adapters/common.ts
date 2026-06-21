@@ -771,9 +771,6 @@ export const eventIdFor = (
   stableKey: string | number,
 ) => `${sessionId}:event:${stableJsonHash([sequence, stableKey])}`;
 
-export const nativeSessionIdFromPath = (path: string) =>
-  basename(path).replace(/\.(jsonl|json|db)$/i, "");
-
 /**
  * The canonical source fingerprint string for a stat. Adapter pre-parse
  * probes and the ingest engine's statSync path MUST both route through this so

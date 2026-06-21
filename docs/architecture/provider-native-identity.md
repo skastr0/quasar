@@ -17,19 +17,26 @@ row.
 
 ## Codex
 
-**Native id source:** the stem of the session file name (the part before
-`.jsonl`), extracted via `nativeSessionIdFromPath(sourcePath)`.
+**Native id source:** the `session_meta.payload.id` field — the bare UUIDv7 the
+Codex harness assigns at session creation — read from the first JSON record of the rollout
+file. This is the `CodexSessionId`.
 
-**Where it lives:** the JSONL file itself carries a `session_meta` line with a
-`payload.id` field, but the adapter uses the filename stem, not that field.
-Codex names its rollout files after the session (e.g.,
-`rollout-2026-06-11-live.jsonl`), so the stem is the natural stable key.
+**Where it lives:** every rollout file's first JSON record is a `session_meta` record
+whose `payload.id` is the canonical session UUIDv7 (e.g.,
+`01900000-0000-7000-8000-000000000001`). The same uuid is also embedded in the
+filename (`rollout-<ISO datetime>-<uuid>.jsonl`), but the filename stem is NOT
+used: it embeds a timestamp (provenance) and is path-derived, so the
+content-sourced `payload.id` is the canonical key.
 
-**Why path-independent:** only the filename stem enters the hash — never the
-parent directory chain.  Two file trees that place a file named
-`rollout-2026-06-11-live.jsonl` under `/Users/alice/...` and under
-`/history/...` respectively produce the same `CodexSessionId` and therefore
-the same `SessionId`.
+**Boundary rejection:** a rollout file whose first JSON record carries no
+`session_meta.payload.id` is a contract breach. The adapter writes zero rows for
+that file, emits the named diagnostic `codex.session_meta.payload.id.missing`,
+and continues. It never falls back to the filename stem.
+
+**Why path-independent:** only the in-content uuid enters the hash — never the
+filename and never the parent directory chain. Two files carrying the same
+`session_meta.payload.id` under different parent paths AND different rollout
+filenames produce the same `CodexSessionId` and therefore the same `SessionId`.
 
 ---
 
@@ -69,9 +76,9 @@ is a UUID-like string assigned by the Grok harness.
 
 **Why path-independent:** only the final directory component (the uuid name)
 enters the hash — never the `projectKey` component above it and never the
-root.  A session directory named `session-1` under `/Users/alice/.grok/...`
-and the same directory name under `/history/.grok/...` produce the same
-`GrokSessionId` and therefore the same `SessionId`.
+root.  A session directory named `01900000-0000-7000-8000-000000000002` under
+`/Users/alice/.grok/...` and the same directory name under `/history/.grok/...`
+produce the same `GrokSessionId` and therefore the same `SessionId`.
 
 ---
 

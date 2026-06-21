@@ -18,7 +18,6 @@ import {
   kindFromNative,
   logicalPathFor,
   logicalRootFor,
-  nativeSessionIdFromPath,
   numberValue,
   projectSessionNativeValue,
   projectToolPayloadNativeValue,
@@ -430,6 +429,33 @@ const projectPathFromSessionMeta = (value: unknown) => {
       : undefined;
 };
 
+/**
+ * The codex native session id is the bare UUIDv7 the harness assigns at
+ * `session_meta.payload.id` (the first JSON record of every rollout file) — content-sourced,
+ * not derived from the filename stem. The stem embeds a timestamp (provenance)
+ * and is path-derived, so two re-keyings of the same conversation under
+ * different filenames would otherwise diverge. Reading the canonical uuid
+ * re-keys codex sessions to their clean id.
+ */
+const sessionIdFromSessionMeta = (value: unknown): string | undefined => {
+  const record = recordFrom(value);
+  if (record.type !== "session_meta") return undefined;
+  const payload = recordFrom(record.payload);
+  return typeof payload.id === "string" && payload.id.length > 0
+    ? payload.id
+    : undefined;
+};
+
+/**
+ * A rollout file missing `session_meta.payload.id` is a contract breach at the
+ * ingest boundary, not a fallback case: emitting a path-derived id would
+ * silently re-introduce the provenance-bearing filename stem this change
+ * removes. The named diagnostic identifies the offending file; the adapter
+ * writes zero rows for it and continues.
+ */
+export const CODEX_MISSING_SESSION_META_ID =
+  "codex.session_meta.payload.id.missing";
+
 
 const parseFileWalkInput = (root: string, limit: number | undefined, skip: number | undefined) => {
   const trimmedRoot = root.trim();
@@ -479,14 +505,32 @@ function* walkFilesWithStats(
   yield* visit(walkInput.root);
 }
 
+/** Read only the codex native id (session_meta.payload.id) from the first JSON record. */
+const readCodexNativeId = async (
+  path: string,
+  parseOptions: { readonly strictJsonLines?: boolean },
+): Promise<string | undefined> => {
+  for await (const { value } of readCodexJsonLines(path, {
+    strict: parseOptions.strictJsonLines,
+  })) {
+    const id = sessionIdFromSessionMeta(value);
+    if (id !== undefined) return id;
+    // session_meta is the first JSON record of every rollout file; if the first record is not
+    // a session_meta carrying an id, the file is malformed at the boundary.
+    return undefined;
+  }
+  return undefined;
+};
+
 async function* streamCodexSessionFromFile(
   path: string,
   sourcePath: string,
   logicalSessionsRoot: string,
+  rawNativeId: string,
   options: AdapterOptions,
   parseOptions: { readonly strictJsonLines?: boolean } = {},
 ): AsyncGenerator<NormalizedSession> {
-  const nativeSessionId = CodexSessionId(nativeSessionIdFromPath(sourcePath));
+  const nativeSessionId = CodexSessionId(rawNativeId);
   const sessionId = sessionIdFor("codex", nativeSessionId);
   const toolCallsById = new Map<string, CodexToolCallDraft>();
   const toolCallEventByToolId = new Map<string, string>();
@@ -658,14 +702,35 @@ async function* streamCodex(options: AdapterOptions) {
     };
   }
   let sessionCount = 0;
+  let rejectedCount = 0;
   for (const { path, scan } of files) {
     const sourcePath = logicalPathFor(path, scan.physicalRoot, scan.logicalScanRoot);
+    // The codex native id is the content-sourced session_meta.payload.id, so the
+    // pre-parse probe must read it from the first JSON record to derive the same canonical
+    // sessionId the full parse would; a file missing it is boundary-rejected.
+    const nativeId = await readCodexNativeId(path, {});
+    if (nativeId === undefined) {
+      rejectedCount += 1;
+      yield {
+        type: "diagnostic" as const,
+        diagnostic: {
+          adapterId: codexAdapter.id,
+          provider: "codex" as const,
+          status: "error" as const,
+          parserConfidence: "documented" as const,
+          rootPath: scan.logicalScanRoot,
+          message: `${CODEX_MISSING_SESSION_META_ID}: ${sourcePath} has no session_meta.payload.id; wrote zero rows for this session.`,
+          details: { sourcePath, physicalPath: path },
+        },
+      };
+      continue;
+    }
     // Cheap pre-parse gate: a stat (size/mtime) is the per-session change
     // signal, so an unchanged rollout file never reaches the line parse.
     if (options.shouldParseSession !== undefined) {
       const stat = statSync(path);
       const probe = {
-        sessionId: sessionIdFor("codex", CodexSessionId(nativeSessionIdFromPath(sourcePath))),
+        sessionId: sessionIdFor("codex", CodexSessionId(nativeId)),
         sourceFingerprint: sourceFingerprintFor(stat),
       };
       if ((await options.shouldParseSession(probe)) === false) continue;
@@ -675,6 +740,7 @@ async function* streamCodex(options: AdapterOptions) {
         path,
         sourcePath,
         scan.logicalScanRoot,
+        nativeId,
         options,
     )) {
       yield {
@@ -698,7 +764,10 @@ async function* streamCodex(options: AdapterOptions) {
       status: sessionCount > 0 ? ("available" as const) : ("no_data_found" as const),
       parserConfidence: "documented" as const,
       rootPath: logicalSessionsRoot,
-      message: `Discovered ${sessionCount} Codex session(s).`,
+      message:
+        rejectedCount > 0
+          ? `Discovered ${sessionCount} Codex session(s); rejected ${rejectedCount} file(s) missing session_meta.payload.id.`
+          : `Discovered ${sessionCount} Codex session(s).`,
     },
   };
 }

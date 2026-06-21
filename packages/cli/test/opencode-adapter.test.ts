@@ -15,7 +15,7 @@ const MACHINE = {
 
 const NOW = "2026-06-11T00:00:00.000Z";
 
-const SESSION_ID = "ses_fixture";
+const SESSION_ID = "ses_test0001";
 
 /**
  * Fixture mirrors the measured production shape: parts carry the session
@@ -74,7 +74,7 @@ afterAll(() => {
 // temp dirs and asserts the results agree.
 // ---------------------------------------------------------------------------
 describe("AC#5 idempotency: same session.id in DB at different file paths → byte-identical session.id", () => {
-  const IDEM_SESSION_ID = "ses_idem_proof";
+  const IDEM_SESSION_ID = "ses_test0002";
   const IDEM_SQL = `
 create table session (id text primary key, title text, directory text, time_created integer, time_updated integer);
 create table message (id text primary key, session_id text, time_created integer, data text);
