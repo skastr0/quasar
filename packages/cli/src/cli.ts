@@ -9,14 +9,14 @@ import { Effect } from "effect";
 
 import { configuredIngestToken, configuredServerUrl, defaultClientConfigPath } from "./client-config";
 import { ingestFailureError, ingestReportPayload } from "./ingest-report";
-import { ingestRemote } from "../../local-server/src/ingest";
-import { fail, ok, writeJson } from "../../local-server/src/json";
-import { SearchMaintenance } from "../../local-server/src/maintenance";
-import { AppRuntime } from "../../local-server/src/runtime";
-import { DerivedSearch } from "../../local-server/src/search";
-import { serve } from "../../local-server/src/server";
-import { DurableQueue, Embeddings, WorkerSupervisor } from "../../local-server/src/services";
-import { LocalStore } from "../../local-server/src/store";
+import { ingestRemote } from "../../server/src/ingest";
+import { fail, ok, writeJson } from "../../server/src/json";
+import { SearchMaintenance } from "../../server/src/maintenance";
+import { AppRuntime } from "../../server/src/runtime";
+import { DerivedSearch } from "../../server/src/search";
+import { serve } from "../../server/src/server";
+import { DurableQueue, Embeddings, WorkerSupervisor } from "../../server/src/services";
+import { LocalStore } from "../../server/src/store";
 
 const arg = (name: string): string | undefined => {
   const index = process.argv.indexOf(name);
@@ -61,12 +61,12 @@ class ConfigurationError extends Error {
       requirement === "server"
         ? {
             configPath: defaultClientConfigPath(),
-            acceptedEnv: ["QUASAR_LOCAL_SERVER_URL"],
-            acceptedConfigFields: ["localServerUrl"],
+            acceptedEnv: ["QUASAR_SERVER_URL"],
+            acceptedConfigFields: ["serverUrl"],
             examples: [
               "quasar <command> --server http://127.0.0.1:6180",
-              "export QUASAR_LOCAL_SERVER_URL=http://127.0.0.1:6180",
-              `write {"localServerUrl":"http://127.0.0.1:6180"} to ${defaultClientConfigPath()}`,
+              "export QUASAR_SERVER_URL=http://127.0.0.1:6180",
+              `write {"serverUrl":"http://127.0.0.1:6180"} to ${defaultClientConfigPath()}`,
             ],
           }
         : {
@@ -145,7 +145,7 @@ const daemonPlist = (options: { readonly binary: string; readonly serverUrl: str
     <string>${xml(`${dirname(options.binary)}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`)}</string>
     <key>QUASAR_DAEMON_BINARY</key>
     <string>${xml(options.binary)}</string>
-    <key>QUASAR_LOCAL_SERVER_URL</key>
+    <key>QUASAR_SERVER_URL</key>
     <string>${xml(options.serverUrl)}</string>
     <key>QUASAR_INGEST_TOKEN</key>
     <string>${xml(options.ingestToken)}</string>
@@ -168,7 +168,7 @@ const daemonPlist = (options: { readonly binary: string; readonly serverUrl: str
 const installDaemon = () => {
   if (platform() !== "darwin") throw new Error("daemon install is only supported on macOS launchd");
   const serverUrl = server();
-  if (serverUrl === undefined) throw new Error("--server or QUASAR_LOCAL_SERVER_URL is required");
+  if (serverUrl === undefined) throw new Error("--server or QUASAR_SERVER_URL is required");
   const ingestToken = daemonToken();
   if (ingestToken === undefined) throw new Error("--ingest-token or QUASAR_INGEST_TOKEN is required");
   const binary = resolve(daemonBinary());
@@ -222,7 +222,7 @@ const runDaemonTick = () => {
   const ingestToken = daemonToken();
   if (serverUrl === undefined || ingestToken === undefined) {
     cleanup();
-    throw new Error("daemon run requires QUASAR_LOCAL_SERVER_URL and QUASAR_INGEST_TOKEN");
+    throw new Error("daemon run requires QUASAR_SERVER_URL and QUASAR_INGEST_TOKEN");
   }
   const result = spawnSync(binary, ["ingest", "--provider", "all", "--summary", "--server", serverUrl, "--ingest-token", ingestToken], {
     stdio: "inherit",
@@ -576,7 +576,7 @@ switch (command) {
           "version",
         ],
         env: {
-          QUASAR_LOCAL_HOME: "override ~/.config/quasar/local-server",
+          QUASAR_LOCAL_HOME: "override ~/.config/quasar/server",
           QUASAR_CONFIG: "override ~/.config/quasar/config.json for default server/token routing",
           QUASAR_LOCAL_SQLITE: "override SQLite file path",
           QUASAR_SEARCH_DATA_DIR: "override LanceDB directory",
@@ -587,9 +587,9 @@ switch (command) {
           QUASAR_HERMES_ROOT: "override Hermes history root",
           QUASAR_KIMI_ROOT: "override Kimi history root",
           QUASAR_ANTIGRAVITY_ROOT: "override Antigravity history root",
-          QUASAR_LOCAL_SERVER_URL: "route client commands through an already-running local server",
+          QUASAR_SERVER_URL: "route client commands through an already-running local server",
           QUASAR_INGEST_TOKEN: "required for remote write ingest and daemon install/run unless config has ingestToken",
-          QUASAR_HTTP_TIMEOUT_MS: "client HTTP timeout for local-server requests, default 60000",
+          QUASAR_HTTP_TIMEOUT_MS: "client HTTP timeout for server requests, default 60000",
         },
       }),
     );

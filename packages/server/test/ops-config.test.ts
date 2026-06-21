@@ -5,27 +5,27 @@ import { describe, expect, test } from "bun:test";
 
 const repoRoot = join(import.meta.dir, "..", "..", "..");
 
-describe("local-server ops config", () => {
+describe("server ops config", () => {
   test("Docker persists Quasar machine identity in the data volume", () => {
-    const compose = readFileSync(join(repoRoot, "platform/local-server/compose.yaml"), "utf8");
-    const dockerfile = readFileSync(join(repoRoot, "platform/local-server/Dockerfile"), "utf8");
+    const compose = readFileSync(join(repoRoot, "platform/server/compose.yaml"), "utf8");
+    const dockerfile = readFileSync(join(repoRoot, "platform/server/Dockerfile"), "utf8");
 
     expect(compose).toContain("QUASAR_HOME: /data/quasar");
     expect(compose).toContain("QUASAR_LOCAL_SQLITE: /data/quasar/quasar.sqlite");
     expect(compose).toContain("QUASAR_SEARCH_DATA_DIR: /data/quasar/search.lance");
     expect(dockerfile).toContain('CMD ["bun", "packages/cli/src/cli.ts", "serve"');
-    expect(dockerfile).not.toContain("packages/local-server/src/cli.ts");
+    expect(dockerfile).not.toContain("packages/server/src/cli.ts");
   });
 
   test("operator scripts keep deploy and maintenance repeatable", () => {
     const pkg = readFileSync(join(repoRoot, "package.json"), "utf8");
-    const ops = readFileSync(join(repoRoot, "scripts/local-server-ops.mjs"), "utf8");
-    const runbook = readFileSync(join(repoRoot, "docs/operations/local-server-docker-tailscale.md"), "utf8");
+    const ops = readFileSync(join(repoRoot, "scripts/server-ops.mjs"), "utf8");
+    const runbook = readFileSync(join(repoRoot, "docs/operations/server-docker-tailscale.md"), "utf8");
 
-    expect(pkg).toContain("local-server:deploy");
-    expect(pkg).toContain("local-server:maintain");
-    expect(pkg).toContain("local-server:lance");
-    expect(pkg).toContain("local-server:backup");
+    expect(pkg).toContain("server:deploy");
+    expect(pkg).toContain("server:maintain");
+    expect(pkg).toContain("server:lance");
+    expect(pkg).toContain("server:backup");
     expect(ops).toContain("case \"maintain\"");
     expect(ops).toContain("case \"lance\"");
     expect(ops).toContain("@lancedb/lancedb");
@@ -35,31 +35,31 @@ describe("local-server ops config", () => {
     expect(runbook).toContain("quasar daemon uninstall");
     expect(runbook).toContain("so a slow first");
     expect(runbook).toContain("Avoid the HTTP maintenance endpoint for long optimize runs");
-    expect(runbook).toContain("bun run local-server:lance");
+    expect(runbook).toContain("bun run server:lance");
     expect(runbook).toContain("does **not** archive `search.lance` by default");
   });
 
   test("server-side history ingestion paths are removed", () => {
     const pkg = readFileSync(join(repoRoot, "package.json"), "utf8");
-    const ops = readFileSync(join(repoRoot, "scripts/local-server-ops.mjs"), "utf8");
-    const compose = readFileSync(join(repoRoot, "platform/local-server/compose.yaml"), "utf8");
+    const ops = readFileSync(join(repoRoot, "scripts/server-ops.mjs"), "utf8");
+    const compose = readFileSync(join(repoRoot, "platform/server/compose.yaml"), "utf8");
 
-    expect(pkg).not.toContain("local-server:ingest");
-    expect(pkg).not.toContain("local-server:sync-tick");
-    expect(pkg).not.toContain("local-server:sync-install");
-    expect(pkg).not.toContain("local-server:sync-status");
+    expect(pkg).not.toContain("server:ingest");
+    expect(pkg).not.toContain("server:sync-tick");
+    expect(pkg).not.toContain("server:sync-install");
+    expect(pkg).not.toContain("server:sync-status");
     expect(ops).not.toContain("operator-ingest");
     expect(ops).not.toContain("syncTick");
     expect(ops).not.toContain("QUASAR_SYNC_INGEST_LIMIT");
     expect(compose).not.toContain("/history/");
     expect(compose).not.toContain("QUASAR_CLAUDE_ROOT");
-    expect(existsSync(join(repoRoot, "scripts/install-local-server-sync.mjs"))).toBe(false);
+    expect(existsSync(join(repoRoot, "scripts/install-server-sync.mjs"))).toBe(false);
   });
 
-  test("runbook documents the agent-facing local-server tool contract", () => {
+  test("runbook documents the agent-facing server tool contract", () => {
     const cli = readFileSync(join(repoRoot, "packages/cli/src/cli.ts"), "utf8");
     const clientConfig = readFileSync(join(repoRoot, "packages/cli/src/client-config.ts"), "utf8");
-    const runbook = readFileSync(join(repoRoot, "docs/operations/local-server-docker-tailscale.md"), "utf8");
+    const runbook = readFileSync(join(repoRoot, "docs/operations/server-docker-tailscale.md"), "utf8");
 
     expect(cli).toContain("tool-calls [--session-id id] [--project-key key] [--provider name] [--tool-name name] [--limit n] [--offset n]");
     expect(cli).toContain("tool-call --id id");
@@ -70,7 +70,7 @@ describe("local-server ops config", () => {
     expect(cli).toContain("operator-worker-tick");
     expect(cli).toContain("operator-maintain");
     expect(cli).toContain("config.json");
-    expect(clientConfig).toContain("localServerUrl");
+    expect(clientConfig).toContain("serverUrl");
     expect(clientConfig).toContain("ingestToken");
     expect(runbook).toContain("Agent / MCP serving contract");
     expect(runbook).toContain("GET /search/<mode>");

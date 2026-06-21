@@ -1,17 +1,17 @@
-# Quasar local-server production proof — 2026-06-19
+# Quasar server production proof — 2026-06-19
 
 ## Verdict
 
-PASS: the Mac mini Docker local-server is serving SQLite truth, LanceDB lexical/fusion/semantic search, and the server-owned embedding worker drained the Synthetic/Nomic corpus queue without pending or failed jobs.
+PASS: the Mac mini Docker server is serving SQLite truth, LanceDB lexical/fusion/semantic search, and the server-owned embedding worker drained the Synthetic/Nomic corpus queue without pending or failed jobs.
 
 ## Runtime target
 
 - Server URL: `http://<mac-mini-tailscale-ip>:6180`
-- Runtime: Docker Compose service `quasar-local-server-local-server-1`
+- Runtime: Docker Compose service `quasar-server-server-1`
 - Tailscale access: direct Mac mini Tailscale IP, not MagicDNS
 - Storage home inside container: `/data/quasar`
 - SQLite truth: `/data/quasar/quasar.sqlite`
-- LanceDB: embedded in the local-server container/process; no separate LanceDB container
+- LanceDB: embedded in the server container/process; no separate LanceDB container
 - Embedding profile: `synthetic:hf:nomic-ai/nomic-embed-text-v1.5:768:search_document`
 
 ## SQLite truth
@@ -77,9 +77,9 @@ The last two jobs were legitimate user-message rows of ~1.48M characters each. T
 Final maintenance was run in-container rather than over the HTTP request path:
 
 ```bash
-docker compose --env-file platform/local-server/.env \
-  -f platform/local-server/compose.yaml \
-  exec -T local-server sh -lc \
+docker compose --env-file platform/server/.env \
+  -f platform/server/compose.yaml \
+  exec -T server sh -lc \
   "cd /app && timeout 240s bun packages/cli/src/cli.ts operator-maintain --vector true --optimize true"
 ```
 
@@ -170,14 +170,14 @@ Result: HTTP 200 with real session hits from the local corpus, including prior Q
 Code validation after worker hardening:
 
 ```bash
-bun run --cwd packages/local-server test test/embeddings.test.ts
+bun run --cwd packages/server test test/embeddings.test.ts
 bun run typecheck
 ```
 
 Results:
 
-- `packages/local-server` embedding tests: 19 pass / 0 fail
-- root typecheck: pass across core, search, local-server, and CLI
+- `packages/server` embedding tests: 19 pass / 0 fail
+- root typecheck: pass across core, search, server, and CLI
 
 ## Notes
 

@@ -1,7 +1,7 @@
 # Release Checklist
 
 Publishing is paused until the v2 product gates are green (see
-`docs/architecture/quasar-effect-local-server-plan-2026-06-18.md`). Public artifacts
+`docs/architecture/quasar-effect-server-plan-2026-06-18.md`). Public artifacts
 must describe a working system, not aspirations.
 
 Quasar uses CI-first npm publishing for the CLI package. Do not publish locally

@@ -1,11 +1,11 @@
-name: quasar-local-server
+name: quasar-server
 
 services:
-  local-server:
+  server:
     build:
       context: ../..
-      dockerfile: platform/local-server/Dockerfile
-    image: quasar-local-server:latest
+      dockerfile: platform/server/Dockerfile
+    image: quasar-server:latest
     restart: unless-stopped
     stop_grace_period: 30s
     stop_signal: SIGTERM
@@ -26,7 +26,7 @@ services:
       QUASAR_SEARCH_DATA_DIR: /data/quasar/search.lance
       QUASAR_LOCAL_HOST: 0.0.0.0
       QUASAR_LOCAL_PORT: 6180
-      QUASAR_INGEST_TOKEN: ${QUASAR_INGEST_TOKEN:?set QUASAR_INGEST_TOKEN in platform/local-server/.env for remote ingest writes}
+      QUASAR_INGEST_TOKEN: ${QUASAR_INGEST_TOKEN:?set QUASAR_INGEST_TOKEN in platform/server/.env for remote ingest writes}
       QUASAR_WORKERS_ENABLED: ${QUASAR_WORKERS_ENABLED:-false}
       QUASAR_EMBEDDING_WORKER_ENABLED: ${QUASAR_EMBEDDING_WORKER_ENABLED:-}
       QUASAR_INDEX_REPAIR_WORKER_ENABLED: ${QUASAR_INDEX_REPAIR_WORKER_ENABLED:-}

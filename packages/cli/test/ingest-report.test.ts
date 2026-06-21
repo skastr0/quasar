@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { ingestFailureError, ingestReportPayload } from "../src/ingest-report";
-import type { IngestReport } from "../../local-server/src/ingest";
+import type { IngestReport } from "../../server/src/ingest";
 
 const report = (sessionsFailed: number): IngestReport => ({
   provider: "codex",

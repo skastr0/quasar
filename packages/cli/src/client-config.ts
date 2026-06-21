@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
 export interface QuasarClientConfig {
-  readonly localServerUrl?: string;
+  readonly serverUrl?: string;
   readonly ingestToken?: string;
 }
 
@@ -16,7 +16,7 @@ const asString = (value: unknown): string | undefined =>
 const asClientConfig = (value: unknown): QuasarClientConfig => {
   if (!isRecord(value)) return {};
   return {
-    localServerUrl: asString(value.localServerUrl),
+    serverUrl: asString(value.serverUrl),
     ingestToken: asString(value.ingestToken),
   };
 };
@@ -30,12 +30,12 @@ export const loadClientConfig = (path = defaultClientConfigPath()): QuasarClient
 };
 
 export const configuredServerUrl = (env: NodeJS.ProcessEnv = process.env): string | undefined => {
-  const explicit = asString(env.QUASAR_LOCAL_SERVER_URL);
+  const explicit = asString(env.QUASAR_SERVER_URL);
   if (explicit !== undefined) return explicit;
 
   const config = loadClientConfig(defaultClientConfigPath(env));
   if (config === undefined) return undefined;
-  return config.localServerUrl;
+  return config.serverUrl;
 };
 
 export const configuredIngestToken = (env: NodeJS.ProcessEnv = process.env): string | undefined => {

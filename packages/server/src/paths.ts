@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 export const quasarLocalHome = (): string =>
-  process.env.QUASAR_LOCAL_HOME?.trim() || join(homedir(), ".config", "quasar", "local-server");
+  process.env.QUASAR_LOCAL_HOME?.trim() || join(homedir(), ".config", "quasar", "server");
 
 export const sqlitePath = (): string =>
   process.env.QUASAR_LOCAL_SQLITE?.trim() || join(quasarLocalHome(), "quasar.sqlite");

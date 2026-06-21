@@ -453,7 +453,7 @@ const routes = HttpRouter.empty.pipe(
   HttpRouter.get("/maintenance/run", maintenanceRun),
   HttpRouter.get("/maintenance/freshness", maintenanceFreshness),
   HttpRouter.get("/maintenance/repair", maintenanceRepair),
-  HttpRouter.get("/", json(ok("root", { service: "quasar-local-server" }))),
+  HttpRouter.get("/", json(ok("root", { service: "quasar-server" }))),
   HttpRouter.get("*", json({ ok: false, error: { type: "NotFound", message: "No route" } }, { status: 404 })),
 );
 

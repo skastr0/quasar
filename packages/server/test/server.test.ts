@@ -13,7 +13,7 @@ import { LocalStore, makeLocalStoreLayer } from "../src/store";
 const tempDirs: string[] = [];
 
 const tempDir = () => {
-  const dir = mkdtempSync(join(tmpdir(), "quasar-local-server-"));
+  const dir = mkdtempSync(join(tmpdir(), "quasar-server-"));
   tempDirs.push(dir);
   return dir;
 };

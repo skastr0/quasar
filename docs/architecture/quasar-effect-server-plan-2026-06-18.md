@@ -252,7 +252,7 @@ Each implementation slice should use the narrowest check that proves its claim:
 - full proof with real corpus counts and sample search results.
 
 Root validation remains `bun run typecheck && bun run test` until the package defines a
-stronger local-server-specific verification command.
+stronger server-specific verification command.
 
 ## Current migration sequence
 

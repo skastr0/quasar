@@ -4,8 +4,8 @@ import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const repoRoot = resolve(import.meta.dir, "..");
-const envFile = resolve(repoRoot, "platform/local-server/.env");
-const composeFile = resolve(repoRoot, "platform/local-server/compose.yaml");
+const envFile = resolve(repoRoot, "platform/server/.env");
+const composeFile = resolve(repoRoot, "platform/server/compose.yaml");
 const command = process.argv[2] ?? "help";
 const rest = process.argv.slice(3);
 
@@ -13,12 +13,12 @@ const compose = ["compose", "--env-file", envFile, "-f", composeFile];
 
 const usage = {
   commands: {
-    deploy: "build/recreate the Docker local-server service",
-    up: "start the Docker local-server service without force recreate",
-    down: "stop the Docker local-server service",
+    deploy: "build/recreate the Docker server service",
+    up: "start the Docker server service without force recreate",
+    down: "stop the Docker server service",
     restart: "restart the running service",
     ps: "show compose service state",
-    logs: "follow local-server logs; pass --no-follow to print once",
+    logs: "follow server logs; pass --no-follow to print once",
     health: "GET /health from the local server",
     status: "GET /status from the local server; pass --lance for LanceDB stats",
     lance: "inspect all LanceDB tables and indexes directly inside the container",
@@ -27,11 +27,11 @@ const usage = {
     backup: "write ./quasar-truth-backup.tar with SQLite truth and machine identity",
   },
   examples: [
-    "bun scripts/local-server-ops.mjs deploy",
-    "bun scripts/local-server-ops.mjs status --lance",
-    "bun scripts/local-server-ops.mjs lance",
-    "bun scripts/local-server-ops.mjs maintain --vector true --optimize true",
-    "bun scripts/local-server-ops.mjs exec -- sh -lc 'ls -lah /data/quasar'",
+    "bun scripts/server-ops.mjs deploy",
+    "bun scripts/server-ops.mjs status --lance",
+    "bun scripts/server-ops.mjs lance",
+    "bun scripts/server-ops.mjs maintain --vector true --optimize true",
+    "bun scripts/server-ops.mjs exec -- sh -lc 'ls -lah /data/quasar'",
   ],
 };
 
@@ -40,27 +40,27 @@ if (command === "help" || command === "--help" || command === "-h") {
   process.exit(0);
 }
 
-requireFile(envFile, "copy platform/local-server/.env.example to platform/local-server/.env first");
-requireFile(composeFile, "missing local-server compose file");
+requireFile(envFile, "copy platform/server/.env.example to platform/server/.env first");
+requireFile(composeFile, "missing server compose file");
 
 switch (command) {
   case "deploy":
-    docker(["up", "-d", "--build", "--force-recreate", "local-server"], { injectShellSecrets: true });
+    docker(["up", "-d", "--build", "--force-recreate", "server"], { injectShellSecrets: true });
     break;
   case "up":
-    docker(["up", "-d", "--build", "local-server"], { injectShellSecrets: true });
+    docker(["up", "-d", "--build", "server"], { injectShellSecrets: true });
     break;
   case "down":
     docker(["down"]);
     break;
   case "restart":
-    docker(["restart", "local-server"]);
+    docker(["restart", "server"]);
     break;
   case "ps":
     docker(["ps"]);
     break;
   case "logs":
-    docker(rest.includes("--no-follow") ? ["logs", "--tail=200", "local-server"] : ["logs", "-f", "--tail=200", "local-server"]);
+    docker(rest.includes("--no-follow") ? ["logs", "--tail=200", "server"] : ["logs", "-f", "--tail=200", "server"]);
     break;
   case "health":
     if (rest.includes("--external")) await getJson("/health");
@@ -110,18 +110,18 @@ function backupTruth() {
     "set -eu",
     "rm -rf /tmp/quasar-truth-backup /tmp/quasar-truth-backup.tar",
     "mkdir -p /tmp/quasar-truth-backup",
-    "cd /app/packages/local-server",
+    "cd /app/packages/server",
     "bun -e 'import { Database } from \"bun:sqlite\"; const db = new Database(process.env.QUASAR_LOCAL_SQLITE); db.exec(\"VACUUM INTO \\\"/tmp/quasar-truth-backup/quasar.sqlite\\\"\"); db.close();'",
     "cp /data/quasar/machine.json /tmp/quasar-truth-backup/machine.json",
     "tar -cf /tmp/quasar-truth-backup.tar -C /tmp/quasar-truth-backup .",
     "rm -rf /tmp/quasar-truth-backup",
   ].join("\n"));
-  docker(["cp", "local-server:/tmp/quasar-truth-backup.tar", "./quasar-truth-backup.tar"]);
+  docker(["cp", "server:/tmp/quasar-truth-backup.tar", "./quasar-truth-backup.tar"]);
   sh("rm -f /tmp/quasar-truth-backup.tar");
 }
 
 function exec(args) {
-  docker(["exec", "-T", "local-server", ...args]);
+  docker(["exec", "-T", "server", ...args]);
 }
 
 function docker(args, options = {}) {
@@ -133,7 +133,7 @@ function docker(args, options = {}) {
 }
 
 async function getJson(path) {
-  const base = process.env.QUASAR_LOCAL_SERVER_URL ?? `http://127.0.0.1:${process.env.QUASAR_LOCAL_PORT ?? "6180"}`;
+  const base = process.env.QUASAR_SERVER_URL ?? `http://127.0.0.1:${process.env.QUASAR_LOCAL_PORT ?? "6180"}`;
   const url = new URL(path, base.endsWith("/") ? base : `${base}/`);
   const response = await fetch(url);
   const body = await response.text();
@@ -147,7 +147,7 @@ async function getJson(path) {
 
 function containerGetJson(path) {
   const url = `http://127.0.0.1:${process.env.QUASAR_LOCAL_PORT ?? "6180"}${path}`;
-  const dockerArgs = [...compose, "exec", "-T", "local-server", "curl", "-fsS", url];
+  const dockerArgs = [...compose, "exec", "-T", "server", "curl", "-fsS", url];
   const result = spawnSync("docker", dockerArgs, { cwd: repoRoot, encoding: "utf8", env: process.env });
   if (result.stderr) process.stderr.write(result.stderr);
   if (result.stdout) {
