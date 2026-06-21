@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test } from "bun:test";
 
 import { ampAdapter } from "../src/adapters/amp";
 import type { AmpRunner } from "../src/adapters/amp";

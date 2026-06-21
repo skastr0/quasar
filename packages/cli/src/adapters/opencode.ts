@@ -9,7 +9,7 @@ import type {
   SessionAdapter,
   UnitFingerprint,
 } from "./types";
-import type { Artifact, SessionEdge, SessionRole, ToolCall, UsageRecord } from "../schemas";
+import type { Artifact, SessionEdge, SessionRole, ToolCall, UsageRecord } from "@skastr0/quasar-core";
 import {
   artifactIdFor,
   buildSession,

@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterAll, describe, expect, test } from "vitest";
+import { afterAll, describe, expect, test } from "bun:test";
 
 import { antigravityAdapter } from "../src/adapters/antigravity";
 
@@ -537,7 +537,7 @@ describe("T5: cumulative replay collapse — estate validation", () => {
   const estateRoot = process.env.ANTIGRAVITY_ESTATE_ROOT ?? join(homedir(), ".gemini/antigravity-cli");
   const estateBrain = join(estateRoot, "brain");
 
-  test.runIf(existsSync(estateBrain))(
+  test.if(existsSync(estateBrain))(
     "on-disk estate: every real session satisfies collapse invariant",
     async () => {
       const result = await antigravityAdapter.read({
