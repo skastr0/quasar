@@ -4,6 +4,7 @@ import { basename, dirname, join, relative } from "node:path";
 import { Option, Schema } from "effect";
 
 import { stableJsonHash, stableWideHash } from "../core/hash";
+import { IDENTITY_SCHEME_VERSION } from "../core/identity";
 import type { NativeSessionId, SessionId } from "../core/identity";
 import { gitRemoteForPath } from "../core/git-identity";
 import { resolveProjectIdentity } from "../core/project-normalization";
@@ -745,6 +746,8 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
     provider: args.provider,
     agentName: args.agentName,
     machineId: args.machine.machineId,
+    host: args.machine.hostname ?? "",
+    identitySchemeVersion: IDENTITY_SCHEME_VERSION,
     projectIdentity,
     ...(args.nativeProjectKey !== undefined
       ? { nativeProjectKey: args.nativeProjectKey }

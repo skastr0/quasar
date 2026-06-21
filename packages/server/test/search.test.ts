@@ -38,6 +38,8 @@ const mappedSession = (messages: MappedSession["messages"]): MappedSession => ({
     updatedAt: "2026-06-18T10:01:00.000Z",
     sourcePath: "/history/session-a.jsonl",
     sourceFingerprint: `fingerprint-${messages.length}`,
+    host: "host-a",
+    identitySchemeVersion: 1,
     messageCount: messages.length,
     toolCallCount: 0,
   },

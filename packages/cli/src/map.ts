@@ -92,6 +92,8 @@ export const mapSession = (
       updatedAt: session.updatedAt,
       sourcePath: session.sourcePath,
       sourceFingerprint,
+      host: session.host,
+      identitySchemeVersion: session.identitySchemeVersion,
       messageCount: messages.length,
       toolCallCount: toolCalls.length,
     },

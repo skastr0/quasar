@@ -273,6 +273,11 @@ export const NormalizedSession = Schema.Struct({
   provider: Provider,
   agentName: Schema.String,
   machineId: Schema.String,
+  /** Readable hostname/machine the session was observed on — provenance only,
+   * NOT part of the machine/path-independent identity key. */
+  host: Schema.String,
+  /** Version of the canonical identity scheme this session was stamped under. */
+  identitySchemeVersion: Schema.Number,
   projectIdentity: ProjectResolution,
   nativeProjectKey: Schema.optional(Schema.String),
   title: Schema.optional(Schema.String),

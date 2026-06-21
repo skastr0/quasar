@@ -49,6 +49,8 @@ const mappedSession = (overrides: Partial<MappedSession["session"]> = {}): Mappe
     updatedAt: overrides.updatedAt ?? "2026-06-18T10:05:00.000Z",
     sourcePath: overrides.sourcePath ?? "/hist/session-a.jsonl",
     sourceFingerprint: overrides.sourceFingerprint ?? "fingerprint-a",
+    host: overrides.host ?? "host-a",
+    identitySchemeVersion: overrides.identitySchemeVersion ?? 1,
     messageCount: overrides.messageCount ?? 2,
     toolCallCount: overrides.toolCallCount ?? 2,
   },
@@ -130,6 +132,24 @@ describe("LocalStore", () => {
     );
 
     expect(stats).toEqual({ projects: 1, sessions: 1, messages: 2, toolCalls: 2, ingestRuns: 0 });
+  });
+
+  test("round-trips host and identity scheme version provenance on read", async () => {
+    const path = sqlitePath();
+    const sessions = await withStore(
+      path,
+      (store) =>
+        Effect.gen(function* () {
+          yield* store.upsertSession(
+            mappedSession({ host: "lighthouse", identitySchemeVersion: 1 }),
+          );
+          return yield* store.listSessions({ limit: 10 });
+        }),
+    );
+
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]?.host).toBe("lighthouse");
+    expect(sessions[0]?.identitySchemeVersion).toBe(1);
   });
 
   test("lists projects for the HTTP and CLI read surfaces", async () => {

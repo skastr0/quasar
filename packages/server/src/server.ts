@@ -74,6 +74,8 @@ const isSessionRow = (value: unknown): boolean =>
   && isOptionalString(value.updatedAt)
   && isString(value.sourcePath)
   && isString(value.sourceFingerprint)
+  && isString(value.host)
+  && isNonNegativeInt(value.identitySchemeVersion)
   && isNonNegativeInt(value.messageCount)
   && isNonNegativeInt(value.toolCallCount);
 

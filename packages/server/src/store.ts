@@ -91,6 +91,8 @@ const migrate = (db: Database): void => {
       updated_at TEXT,
       source_path TEXT NOT NULL,
       source_fingerprint TEXT NOT NULL,
+      host TEXT NOT NULL DEFAULT '',
+      identity_scheme_version INTEGER NOT NULL DEFAULT 0,
       message_count INTEGER NOT NULL,
       tool_call_count INTEGER NOT NULL
     );
@@ -147,6 +149,23 @@ const migrate = (db: Database): void => {
       PRIMARY KEY (model, content_hash)
     );
   `);
+  // Idempotent column adds for an existing sessions table predating the
+  // host/identity_scheme_version provenance fields (QSR-215). This is an empty
+  // -column add (defaults supply existing rows), NOT a data migration — real
+  // corpus cleanup stays in QSR-219. Safe to re-run on the live data volume.
+  const sessionColumns = new Set(
+    (db.query("PRAGMA table_info(sessions)").all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (!sessionColumns.has("host")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN host TEXT NOT NULL DEFAULT ''");
+  }
+  if (!sessionColumns.has("identity_scheme_version")) {
+    db.exec(
+      "ALTER TABLE sessions ADD COLUMN identity_scheme_version INTEGER NOT NULL DEFAULT 0",
+    );
+  }
 };
 
 const count = (db: Database, table: string): number =>
@@ -176,9 +195,9 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
            ON CONFLICT(project_key) DO UPDATE SET display_name = excluded.display_name, raw_path = excluded.raw_path`,
         );
         const upsertSession = db.prepare(
-          `INSERT INTO sessions(session_id, project_key, provider, agent_name, title, started_at, updated_at, source_path, source_fingerprint, message_count, tool_call_count)
-           VALUES ($sessionId, $projectKey, $provider, $agentName, $title, $startedAt, $updatedAt, $sourcePath, $sourceFingerprint, $messageCount, $toolCallCount)
-           ON CONFLICT(session_id) DO UPDATE SET project_key = excluded.project_key, provider = excluded.provider, agent_name = excluded.agent_name, title = excluded.title, started_at = excluded.started_at, updated_at = excluded.updated_at, source_path = excluded.source_path, source_fingerprint = excluded.source_fingerprint, message_count = excluded.message_count, tool_call_count = excluded.tool_call_count`,
+          `INSERT INTO sessions(session_id, project_key, provider, agent_name, title, started_at, updated_at, source_path, source_fingerprint, host, identity_scheme_version, message_count, tool_call_count)
+           VALUES ($sessionId, $projectKey, $provider, $agentName, $title, $startedAt, $updatedAt, $sourcePath, $sourceFingerprint, $host, $identitySchemeVersion, $messageCount, $toolCallCount)
+           ON CONFLICT(session_id) DO UPDATE SET project_key = excluded.project_key, provider = excluded.provider, agent_name = excluded.agent_name, title = excluded.title, started_at = excluded.started_at, updated_at = excluded.updated_at, source_path = excluded.source_path, source_fingerprint = excluded.source_fingerprint, host = excluded.host, identity_scheme_version = excluded.identity_scheme_version, message_count = excluded.message_count, tool_call_count = excluded.tool_call_count`,
         );
         const insertMessage = db.prepare(
           `INSERT INTO messages(session_id, seq, role, text, ts, project_key, content_hash)
@@ -211,6 +230,8 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
             $updatedAt: mapped.session.updatedAt ?? null,
             $sourcePath: mapped.session.sourcePath,
             $sourceFingerprint: mapped.session.sourceFingerprint,
+            $host: mapped.session.host,
+            $identitySchemeVersion: mapped.session.identitySchemeVersion,
             $messageCount: mapped.session.messageCount,
             $toolCallCount: mapped.session.toolCallCount,
           });
@@ -276,7 +297,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               }
               const where = filters.length > 0 ? ` WHERE ${filters.join(" AND ")}` : "";
               return db
-                .query(`SELECT session_id AS sessionId, project_key AS projectKey, provider, agent_name AS agentName, title, started_at AS startedAt, updated_at AS updatedAt, source_path AS sourcePath, source_fingerprint AS sourceFingerprint, message_count AS messageCount, tool_call_count AS toolCallCount FROM sessions${where} ORDER BY COALESCE(updated_at, started_at, '') DESC LIMIT ? OFFSET ?`)
+                .query(`SELECT session_id AS sessionId, project_key AS projectKey, provider, agent_name AS agentName, title, started_at AS startedAt, updated_at AS updatedAt, source_path AS sourcePath, source_fingerprint AS sourceFingerprint, host, identity_scheme_version AS identitySchemeVersion, message_count AS messageCount, tool_call_count AS toolCallCount FROM sessions${where} ORDER BY COALESCE(updated_at, started_at, '') DESC LIMIT ? OFFSET ?`)
                 .all(...args, limit, offset) as SessionRow[];
             }),
           getMessage: ({ sessionId, seq, contentHash }) =>

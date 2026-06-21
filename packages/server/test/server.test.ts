@@ -36,6 +36,8 @@ const mappedSession = (overrides: { readonly fingerprint?: string; readonly firs
     updatedAt: "2026-06-18T10:01:00.000Z",
     sourcePath: "/history/session-http.jsonl",
     sourceFingerprint: overrides.fingerprint ?? "fingerprint-http",
+    host: "host-http",
+    identitySchemeVersion: 1,
     messageCount: 2,
     toolCallCount: 1,
   },
