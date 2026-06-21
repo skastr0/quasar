@@ -5,14 +5,16 @@ import { adaptersByProvider } from "../src/adapters/registry";
 import type { SessionAdapter } from "../src/adapters/types";
 import { ingestRemote } from "../src/ingest";
 
+const realClaudeAdapter = adaptersByProvider.get("claude");
 afterEach(() => {
-  adaptersByProvider.delete("unknown");
+  if (realClaudeAdapter) adaptersByProvider.set("claude", realClaudeAdapter);
+  else adaptersByProvider.delete("claude");
 });
 
 const session = (id = "session-a"): NormalizedSession => ({
   id,
   nativeSessionId: id,
-  provider: "unknown",
+  provider: "claude",
   agentName: "test-agent",
   machineId: "machine-a",
   projectIdentity: {
@@ -34,7 +36,7 @@ const session = (id = "session-a"): NormalizedSession => ({
       sequence: 0,
       timestamp: "2026-06-18T10:00:00.000Z",
       machineId: "machine-a",
-      provider: "unknown",
+      provider: "claude",
       agentName: "test-agent",
       projectIdentityKey: "project-a",
       role: "user",
@@ -49,7 +51,7 @@ const session = (id = "session-a"): NormalizedSession => ({
       sequence: 1,
       timestamp: "2026-06-18T10:01:00.000Z",
       machineId: "machine-a",
-      provider: "unknown",
+      provider: "claude",
       agentName: "test-agent",
       projectIdentityKey: "project-a",
       role: "assistant",
@@ -65,7 +67,7 @@ const session = (id = "session-a"): NormalizedSession => ({
       sessionId: id,
       eventId: `${id}:event-tool`,
       machineId: "machine-a",
-      provider: "unknown",
+      provider: "claude",
       agentName: "test-agent",
       projectIdentityKey: "project-a",
       toolName: "shell_command",
@@ -85,7 +87,7 @@ const fingerprintForSession = (item: NormalizedSession) => ({ tag: `fingerprint:
 
 const adapterFor = (sessions: readonly NormalizedSession[], options: { readonly onParse?: (sessionId: string) => void } = {}): SessionAdapter => ({
   id: "fixture-adapter",
-  provider: "unknown",
+  provider: "claude",
   displayName: "Fixture Adapter",
   stable: true,
   defaultRoot: () => undefined,
@@ -104,7 +106,7 @@ const adapterFor = (sessions: readonly NormalizedSession[], options: { readonly 
 
 describe("ingestRemote", () => {
   test("remote ingest retries transient server write failures", async () => {
-    adaptersByProvider.set("unknown", adapterFor([session("remote-retry")]));
+    adaptersByProvider.set("claude", adapterFor([session("remote-retry")]));
     let writeAttempts = 0;
     const server = Bun.serve({
       hostname: "127.0.0.1",
@@ -144,7 +146,7 @@ describe("ingestRemote", () => {
 
     try {
       const reports = await ingestRemote(
-        { provider: "unknown" as never, ingestToken: "token-a" },
+        { provider: "claude", ingestToken: "token-a" },
         `http://127.0.0.1:${server.port}`,
       );
 
@@ -160,7 +162,7 @@ describe("ingestRemote", () => {
 
   test("remote ingest probes fingerprints before parsing unchanged sessions", async () => {
     const parsed: string[] = [];
-    adaptersByProvider.set("unknown", adapterFor([session("remote-skip")], { onParse: (sessionId) => parsed.push(sessionId) }));
+    adaptersByProvider.set("claude", adapterFor([session("remote-skip")], { onParse: (sessionId) => parsed.push(sessionId) }));
     let probes = 0;
     let writes = 0;
     const server = Bun.serve({
@@ -181,7 +183,7 @@ describe("ingestRemote", () => {
 
     try {
       const reports = await ingestRemote(
-        { provider: "unknown" as never, ingestToken: "token-a" },
+        { provider: "claude", ingestToken: "token-a" },
         `http://127.0.0.1:${server.port}`,
       );
 

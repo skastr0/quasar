@@ -23,15 +23,9 @@ export const Provider = Schema.Literal(
   "claude",
   "opencode",
   "grok",
-  "amp",
-  "pi",
   "kimi",
-  "droid",
   "hermes",
   "antigravity",
-  "cursor",
-  "gemini",
-  "unknown",
 );
 export type Provider = typeof Provider.Type;
 
