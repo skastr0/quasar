@@ -60,7 +60,9 @@ import type { SessionEventKind } from "../core/schemas";
  *  - task_started /
  *    task_complete /
  *    turn_aborted        -> signal lifecycle
- *  - mcp_tool_call_end   -> signal tool_result  (FIX: was unknown pass-through)
+ *  - mcp_tool_call_end   -> signal tool_result  (dual carrier: merged by call_id
+ *                          with function_call_output; collapses the 60% duplicate,
+ *                          standalone only in the 40% sole-carrier case)
  *  - session_meta        -> signal system
  *  - compacted (top)     -> signal summary      (FIX: was unknown pass-through)
  *  - turn_context (top)  -> drop  codex.turn_context.provider_bookkeeping
@@ -83,25 +85,45 @@ import type { SessionEventKind } from "../core/schemas";
 // session_meta — the first JSON record of every rollout-*.jsonl file.
 //
 // The load-bearing fields are `type` (literal `session_meta`) and `payload.id`
-// (the bare UUIDv7 = the codex native session id). Subagent lineage lives at
-// `payload.source.subagent.thread_spawn.parent_thread_id` with the agent
-// identity at `payload.source.subagent.agent_nickname` / `agent_role`. These are
-// present ONLY on subagent rollouts; a main-session rollout carries no
-// `source.subagent`, admitted by leaving the branch optional/nullable.
+// (the bare UUIDv7 = the codex native session id). Subagent lineage AND agent
+// identity both live under `payload.source.subagent.thread_spawn`: the parent
+// native id at `thread_spawn.parent_thread_id`, the agent identity at
+// `thread_spawn.agent_nickname` (preferred) / `thread_spawn.agent_role`
+// (fallback), alongside `agent_path` / `depth`. Grounded 2026-06-21 against all
+// 517 subagent rollouts on disk: every one carries these under `thread_spawn`,
+// NOT at the subagent level. These are present ONLY on subagent rollouts; a
+// main-session rollout carries no `source.subagent`, admitted by leaving the
+// branch optional/nullable.
 // ---------------------------------------------------------------------------
 
-/** The `thread_spawn` block on a subagent rollout carrying the parent native id. */
+/**
+ * The `thread_spawn` block on a subagent rollout. Carries the parent native id
+ * AND the spawned agent's identity (nickname/role/path/depth) — the real
+ * on-disk location for all of these (measured: all 517 subagent rollouts).
+ */
 const CodexThreadSpawnSchema = Schema.Struct({
   // The parent rollout's native id (its session_meta.payload.id). Present on
   // subagent rollouts; this is the SESSION-to-SESSION lineage signal.
   parent_thread_id: Schema.optional(Schema.NullOr(Schema.String)),
-});
-
-/** The `subagent` block: agent identity plus the thread_spawn lineage pointer. */
-const CodexSubagentSchema = Schema.Struct({
   // Human-readable nickname for the spawned agent; the preferred agentName.
   agent_nickname: Schema.optional(Schema.NullOr(Schema.String)),
   // Structural role; the agentName fallback when no nickname is present.
+  agent_role: Schema.optional(Schema.NullOr(Schema.String)),
+  // Path to the spawned agent's definition; provenance, modeled for fidelity.
+  agent_path: Schema.optional(Schema.NullOr(Schema.String)),
+  // Spawn depth in the subagent tree; provenance, modeled for fidelity.
+  depth: Schema.optional(Schema.NullOr(Schema.Number)),
+});
+
+/**
+ * The `subagent` block: the thread_spawn lineage + identity pointer. The
+ * agent_nickname/agent_role kept here are a SECONDARY fallback only — the real
+ * on-disk carrier is thread_spawn (see CodexThreadSpawnSchema).
+ */
+const CodexSubagentSchema = Schema.Struct({
+  // Secondary fallback for the nickname; the canonical carrier is thread_spawn.
+  agent_nickname: Schema.optional(Schema.NullOr(Schema.String)),
+  // Secondary fallback for the role; the canonical carrier is thread_spawn.
   agent_role: Schema.optional(Schema.NullOr(Schema.String)),
   thread_spawn: Schema.optional(Schema.NullOr(CodexThreadSpawnSchema)),
 });
@@ -308,6 +330,13 @@ const CodexTurnAbortedPayloadSchema = Schema.Struct({
   duration_ms: Schema.optional(Schema.NullOr(Schema.Number)),
 });
 
+// mcp_tool_call_end is a DUAL-CARRIER result. Measured 2026-06-21: 60% of
+// mcp_tool_call_end records share their `call_id` with a
+// response_item.function_call_output that ALSO carries the result — two
+// carriers for one logical result. The adapter routes this through the
+// call_id-keyed merge (treating `result` as the output) so it COLLAPSES onto
+// the existing tool call when a function_call_output with the same call_id
+// exists, and only emits a standalone tool result in the 40% sole-carrier case.
 const CodexMcpToolCallEndPayloadSchema = Schema.Struct({
   type: Schema.Literal("mcp_tool_call_end"),
   call_id: Schema.optional(Schema.NullOr(Schema.String)),
@@ -584,7 +613,10 @@ export const CODEX_RECORD_REGISTRY: ReadonlyMap<string, CodexRecordEntry> = new 
   eventMsgEntry(
     "mcp_tool_call_end",
     asSchema(CodexMcpToolCallEndPayloadSchema),
-    // FIX: mcp_tool_call_end carries the tool result, not unknown pass-through.
+    // mcp_tool_call_end carries the tool result. It is a dual carrier: 60% share
+    // a call_id with a function_call_output that also carries the result, so the
+    // adapter merges by call_id (collapsing the duplicate) and only emits a
+    // standalone result in the 40% sole-carrier case.
     signalKind("tool_result"),
   ),
   eventMsgEntry(
