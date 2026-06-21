@@ -140,7 +140,7 @@ describe("QSR-220 opencode subagent lineage", () => {
   // with a non-null parent_id is a subagent of the parent row.
   const PARENT_ID = "ses_fab00parent00aaaa";
   const CHILD_ID = "ses_fab00child000bbbb";
-  const AGENT_NAME = "secret-tester";
+  const AGENT_NAME = "fab-subagent-role";
   const LINEAGE_SQL = `
 create table session (
   id text primary key,
@@ -163,7 +163,7 @@ insert into part values ('prt_parent', 'msg_parent', '${PARENT_ID}', 1, json_obj
 
 -- Child subagent: parent_id points at the parent ses_ id, agent names the role.
 insert into session (id, parent_id, title, directory, agent, path, time_created, time_updated)
-  values ('${CHILD_ID}', '${PARENT_ID}', 'subagent run (@secret-tester)', '/tmp/proj', '${AGENT_NAME}', '/tmp/proj', 2, 9);
+  values ('${CHILD_ID}', '${PARENT_ID}', 'subagent run (@${AGENT_NAME})', '/tmp/proj', '${AGENT_NAME}', '/tmp/proj', 2, 9);
 insert into message values ('msg_child', '${CHILD_ID}', 2, json_object('role', 'assistant', 'time', json_object('created', 2)));
 insert into part values ('prt_child', 'msg_child', '${CHILD_ID}', 2, json_object('type', 'text', 'text', 'subagent reply'));
 `;

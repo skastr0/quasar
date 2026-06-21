@@ -650,3 +650,181 @@ describe("T6 (QSR-220): malformed wire record → named diagnostic + dropped, va
     expect(session.events).toHaveLength(2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T7 (QSR-220 review FIX B): an agents/<id>/wire.jsonl present ON DISK but
+// ABSENT from state.json.agents is a provider surprise. It must NOT silently
+// vanish (boundary doctrine): a NAMED diagnostic (kimi.agent.undeclared_wire)
+// fires AND the orphan content is ingested as its own first-class session
+// attributed to main — never dropped.
+// ---------------------------------------------------------------------------
+describe("T7 (QSR-220 FIX B): undeclared on-disk wire → named diagnostic + ingested orphan", () => {
+  const root = join(testRoot, "t7");
+  const sessionsDir = join(root, "sessions");
+  const NATIVE_SESSION_ID = "session_test0007";
+  const sessionDir = join(sessionsDir, "wd_proj_orphan", NATIVE_SESSION_ID);
+  const mainDir = join(sessionDir, "agents", "main");
+  // agent-7 exists ONLY on disk — it is NOT in state.json.agents.
+  const orphanDir = join(sessionDir, "agents", "agent-7");
+
+  mkdirSync(mainDir, { recursive: true });
+  mkdirSync(orphanDir, { recursive: true });
+
+  writeJson(join(sessionDir, "state.json"), {
+    createdAt: "2026-05-06T08:00:00.000Z",
+    updatedAt: "2026-05-06T09:00:00.000Z",
+    title: "Orphan wire session",
+    isCustomTitle: true,
+    // Only main is declared — agent-7 is deliberately omitted.
+    agents: { main: { homedir: mainDir, type: "main", parentAgentId: null } },
+    custom: {},
+  });
+
+  writeJsonLines(join(root, "session_index.jsonl"), [
+    { sessionId: NATIVE_SESSION_ID, sessionDir: sessionDir, workDir: "/home/user/orphan" },
+  ]);
+
+  writeJsonLines(join(mainDir, "wire.jsonl"), [
+    {
+      type: "context.append_message",
+      message: { role: "user", content: [{ type: "text", text: "main orphan-parent message" }] },
+      origin: { kind: "user" },
+      time: 100,
+    },
+  ]);
+
+  // The undeclared agent carries real transcript content that must survive.
+  writeJsonLines(join(orphanDir, "wire.jsonl"), [
+    {
+      type: "context.append_loop_event",
+      event: { type: "content.part", part: { type: "text", text: "orphan agent-7 content" } },
+      time: 200,
+    },
+  ]);
+
+  const read = () =>
+    kimiAdapter.read({ machine: MACHINE, now: NOW, roots: { kimi: root } });
+
+  const parentSessionIdOf = (session: { sessionEdges: readonly { kind: string; fromId?: string }[] }) =>
+    session.sessionEdges.find((e) => e.kind === "subagent_of")?.fromId;
+
+  test("emits a named kimi.agent.undeclared_wire diagnostic", async () => {
+    const result = await read();
+    const undeclared = result.diagnostics.filter((d) =>
+      (d.message ?? "").includes("kimi.agent.undeclared_wire"),
+    );
+    expect(undeclared.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("the orphan content is ingested as its own session, not lost", async () => {
+    const result = await read();
+    // main + orphan agent-7 → 2 sessions.
+    expect(result.sessions).toHaveLength(2);
+    const orphan = result.sessions.find(
+      (s) => s.nativeSessionId === `${NATIVE_SESSION_ID}/agent-7`,
+    )!;
+    expect(orphan).toBeDefined();
+    const texts = orphan.events.flatMap((e) =>
+      e.contentText !== undefined ? [e.contentText] : [],
+    );
+    expect(texts.some((t) => t.includes("orphan agent-7 content"))).toBe(true);
+  });
+
+  test("the orphan is attributed to main as its parent", async () => {
+    const result = await read();
+    const main = result.sessions.find((s) => s.nativeSessionId === NATIVE_SESSION_ID)!;
+    const orphan = result.sessions.find(
+      (s) => s.nativeSessionId === `${NATIVE_SESSION_ID}/agent-7`,
+    )!;
+    expect(parentSessionIdOf(orphan)).toBe(main.id);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T8 (QSR-220 review FIX C): a sub-agent spawned by ANOTHER sub-agent must link
+// to that sub's own compound canonical id — NOT flattened onto main. The edge
+// fromId honours agent.parentAgentId.
+// ---------------------------------------------------------------------------
+describe("T8 (QSR-220 FIX C): nested parentAgentId links to the real parent sub, not main", () => {
+  const root = join(testRoot, "t8");
+  const sessionsDir = join(root, "sessions");
+  const NATIVE_SESSION_ID = "session_test0008";
+  const sessionDir = join(sessionsDir, "wd_proj_nested", NATIVE_SESSION_ID);
+  const mainDir = join(sessionDir, "agents", "main");
+  const agentADir = join(sessionDir, "agents", "agent-a");
+  const agentBDir = join(sessionDir, "agents", "agent-b");
+
+  mkdirSync(mainDir, { recursive: true });
+  mkdirSync(agentADir, { recursive: true });
+  mkdirSync(agentBDir, { recursive: true });
+
+  writeJson(join(sessionDir, "state.json"), {
+    createdAt: "2026-05-07T08:00:00.000Z",
+    updatedAt: "2026-05-07T09:00:00.000Z",
+    title: "Nested lineage session",
+    isCustomTitle: false,
+    agents: {
+      main: { homedir: mainDir, type: "main", parentAgentId: null },
+      // agent-a spawned by main.
+      "agent-a": { homedir: agentADir, type: "sub", parentAgentId: "main" },
+      // agent-b spawned by agent-a (a sub spawning a sub).
+      "agent-b": { homedir: agentBDir, type: "sub", parentAgentId: "agent-a" },
+    },
+    custom: {},
+  });
+
+  writeJsonLines(join(root, "session_index.jsonl"), [
+    { sessionId: NATIVE_SESSION_ID, sessionDir: sessionDir, workDir: "/home/user/nested" },
+  ]);
+
+  writeJsonLines(join(mainDir, "wire.jsonl"), [
+    {
+      type: "context.append_message",
+      message: { role: "user", content: [{ type: "text", text: "main message" }] },
+      origin: { kind: "user" },
+      time: 100,
+    },
+  ]);
+  writeJsonLines(join(agentADir, "wire.jsonl"), [
+    {
+      type: "context.append_loop_event",
+      event: { type: "content.part", part: { type: "text", text: "agent-a result" } },
+      time: 200,
+    },
+  ]);
+  writeJsonLines(join(agentBDir, "wire.jsonl"), [
+    {
+      type: "context.append_loop_event",
+      event: { type: "content.part", part: { type: "text", text: "agent-b result" } },
+      time: 300,
+    },
+  ]);
+
+  const read = () =>
+    kimiAdapter.read({ machine: MACHINE, now: NOW, roots: { kimi: root } });
+
+  const parentSessionIdOf = (session: { sessionEdges: readonly { kind: string; fromId?: string }[] }) =>
+    session.sessionEdges.find((e) => e.kind === "subagent_of")?.fromId;
+
+  test("agent-a (spawned by main) links to the main session", async () => {
+    const result = await read();
+    const main = result.sessions.find((s) => s.nativeSessionId === NATIVE_SESSION_ID)!;
+    const agentA = result.sessions.find(
+      (s) => s.nativeSessionId === `${NATIVE_SESSION_ID}/agent-a`,
+    )!;
+    expect(parentSessionIdOf(agentA)).toBe(main.id);
+  });
+
+  test("agent-b (spawned by agent-a) links to agent-a, NOT main", async () => {
+    const result = await read();
+    const main = result.sessions.find((s) => s.nativeSessionId === NATIVE_SESSION_ID)!;
+    const agentA = result.sessions.find(
+      (s) => s.nativeSessionId === `${NATIVE_SESSION_ID}/agent-a`,
+    )!;
+    const agentB = result.sessions.find(
+      (s) => s.nativeSessionId === `${NATIVE_SESSION_ID}/agent-b`,
+    )!;
+    expect(parentSessionIdOf(agentB)).toBe(agentA.id);
+    expect(parentSessionIdOf(agentB)).not.toBe(main.id);
+  });
+});

@@ -303,6 +303,78 @@ describe("QSR-220: subagent_of lineage edge → canonical parentSessionId", () =
 });
 
 // ---------------------------------------------------------------------------
+// QSR-220 foundation: fail-closed E2E — garbage middle row is DROPPED with a
+// named diagnostic; the two flanking valid sessions ingest without throwing.
+//
+// Locks the wiring of `decodeOrDrop` inside `streamHermes` (QSR-220 boundary):
+// only the unit tests in harness-schema.test.ts test the primitive in
+// isolation; this test proves it is correctly wired end-to-end so a malformed
+// session row in a real state.db never aborts the whole file.
+// ---------------------------------------------------------------------------
+describe("QSR-220 fail-closed E2E: garbage middle row dropped, flanking sessions ingest", () => {
+  const root = join(testRoot, "qsr220-fail-closed");
+  mkdirSync(root, { recursive: true });
+
+  const VALID_BEFORE_ID = "20200101_000001_aaa00001";
+  const GARBAGE_ID = "20200101_000002_aaa00002"; // started_at will be TEXT, violating started_at REAL NOT NULL
+  const VALID_AFTER_ID = "20200101_000003_aaa00003";
+
+  // Insert the three rows: valid, garbage (started_at as TEXT), valid.
+  // ORDER: started_at DESC so the garbage row lands between the two valid ones
+  // in the query result. We deliberately store started_at=3000 (valid before),
+  // started_at='not-a-number' (garbage middle), started_at=1000 (valid after).
+  const insertGarbageSession = (sessionId: string, title: string) =>
+    `insert into sessions (id, source, title, cwd, started_at, message_count) values ('${sessionId}', 'cli', '${title}', NULL, 'not-a-number', 1);`;
+
+  execFileSync("sqlite3", [
+    join(root, "state.db"),
+    SESSION_SCHEMA
+    + `insert into sessions (id, source, title, cwd, started_at, message_count) values ('${VALID_BEFORE_ID}', 'cli', 'Valid before', NULL, 3000, 1);`
+    + insertMessage("before-msg", VALID_BEFORE_ID)
+    + insertGarbageSession(GARBAGE_ID, "Garbage middle")
+    + `insert into sessions (id, source, title, cwd, started_at, message_count) values ('${VALID_AFTER_ID}', 'cli', 'Valid after', NULL, 1000, 1);`
+    + insertMessage("after-msg", VALID_AFTER_ID),
+  ]);
+
+  test(
+    "two valid sessions ingest, garbage middle is dropped, hermes.session.decode_failed diagnostic emitted, no throw",
+    async () => {
+      let result: Awaited<ReturnType<typeof hermesAdapter.read>>;
+      // The adapter must complete without throwing even with a garbage row.
+      expect(async () => {
+        result = await hermesAdapter.read({
+          machine: MACHINE,
+          now: NOW,
+          roots: { hermes: root },
+        });
+      }).not.toThrow();
+
+      result = await hermesAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { hermes: root },
+      });
+
+      // Two valid sessions must be present; garbage row must be dropped.
+      expect(result.sessions).toHaveLength(2);
+      const ids = result.sessions.map((s) => s.id).sort();
+      expect(ids).toContain(sessionIdFor("hermes", HermesSessionId(VALID_BEFORE_ID)));
+      expect(ids).toContain(sessionIdFor("hermes", HermesSessionId(VALID_AFTER_ID)));
+      expect(ids).not.toContain(sessionIdFor("hermes", HermesSessionId(GARBAGE_ID)));
+
+      // A diagnostic carrying the name `hermes.session.decode_failed` must be
+      // emitted. streamHermes surfaces it as:
+      //   message: `Hermes row dropped (hermes.session.decode_failed) in profile ...`
+      const decodeFailed = result.diagnostics.filter((d) =>
+        d.message.includes("hermes.session.decode_failed"),
+      );
+      expect(decodeFailed.length).toBeGreaterThanOrEqual(1);
+    },
+    15_000,
+  );
+});
+
+// ---------------------------------------------------------------------------
 // QSR-220 regression: event-threading `kind="parent"` must NEVER become a
 // parentSessionId.
 //

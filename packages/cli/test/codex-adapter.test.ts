@@ -651,7 +651,7 @@ describe("codex adapter", () => {
               type: "session_meta",
               source: {
                 subagent: {
-                  agent_role: "reviewer",
+                  agent_role: "fab-reviewer-role",
                   thread_spawn: { parent_thread_id: PARENT_UUID },
                 },
               },
@@ -677,7 +677,7 @@ describe("codex adapter", () => {
       const child = result.sessions.find((session) =>
         session.nativeSessionId === CHILD_UUID,
       )!;
-      expect(mapSession(child, "fp").session.agentName).toBe("reviewer");
+      expect(mapSession(child, "fp").session.agentName).toBe("fab-reviewer-role");
       const parentSessionId = sessionIdFor("codex", CodexSessionId(PARENT_UUID));
       expect(child.sessionEdges.find((edge) => edge.kind === "subagent_of")!.fromId).toBe(
         parentSessionId,

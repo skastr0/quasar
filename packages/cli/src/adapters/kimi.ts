@@ -110,25 +110,34 @@ const agentNameFor = (agent: KimiAgent): string =>
     : `kimi-${agent.type ?? "sub"}:${agent.id}`;
 
 /**
- * Enumerate every agent declared in state.json that has a readable wire.jsonl.
+ * Enumerate every agent that has a readable agents/<id>/wire.jsonl.
  *
- * The state.json `agents` dict is the source of truth for which agents exist
- * and their lineage (type + parentAgentId). Each agent reads its OWN
+ * The state.json `agents` dict is the primary source of truth for which agents
+ * exist and their lineage (type + parentAgentId). Each agent reads its OWN
  * agents/<id>/wire.jsonl. An agent declared without a wire file on disk is
- * skipped (no events to project); a wire dir present on disk but absent from
- * state.json is also skipped — state.json is authoritative for lineage, and a
- * wire with no declared agent has no parent to attribute.
+ * skipped (no events to project).
+ *
+ * BOUNDARY (AGENTS.md): a wire dir present ON DISK but ABSENT from
+ * state.json.agents is a provider surprise. It is never silently dropped — that
+ * would lose transcript content. Instead it emits a NAMED diagnostic
+ * (`kimi.agent.undeclared_wire`, carrying session id + agent id) AND is ingested
+ * as its own first-class orphan session: attributed to `main` so its content is
+ * recoverable rather than vanishing.
  */
 const collectAgents = (
   sessionDir: string,
+  nativeSessionId: string,
   state: Record<string, unknown>,
+  diagnostics: DecodeDiagnostic[],
 ): KimiAgent[] => {
   const agentsRecord = recordFrom(state.agents);
   const agents: KimiAgent[] = [];
+  const declared = new Set<string>();
   for (const id of Object.keys(agentsRecord).sort()) {
     const meta = recordFrom(agentsRecord[id]);
     const wirePath = join(sessionDir, "agents", id, "wire.jsonl");
     if (!existsSync(wirePath)) continue;
+    declared.add(id);
     agents.push({
       id,
       type: stringValue(meta.type),
@@ -136,6 +145,36 @@ const collectAgents = (
       wirePath,
     });
   }
+
+  // Scan the agents/ directory on disk for wire.jsonl files NOT declared in
+  // state.json.agents. Each such orphan is named + ingested, never dropped.
+  const agentsDir = join(sessionDir, "agents");
+  if (existsSync(agentsDir)) {
+    let entries: string[];
+    try {
+      entries = readdirSync(agentsDir).sort();
+    } catch {
+      entries = [];
+    }
+    for (const id of entries) {
+      if (declared.has(id)) continue;
+      const wirePath = join(agentsDir, id, "wire.jsonl");
+      if (!existsSync(wirePath)) continue;
+      diagnostics.push({
+        name: "kimi.agent.undeclared_wire",
+        message: `session=${nativeSessionId} agent=${id}: agents/${id}/wire.jsonl present on disk but absent from state.json.agents; ingested as orphan attributed to main`,
+      });
+      agents.push({
+        id,
+        // No declared lineage — treat as a sub attributed to main so content is
+        // never lost.
+        type: "sub",
+        parentAgentId: "main",
+        wirePath,
+      });
+    }
+  }
+
   return agents;
 };
 
@@ -228,24 +267,34 @@ const buildAgentSession = (
   const sessionEdges: KimiEdgeDraft[] = [];
 
   // Canonical SESSION-to-session subagent lineage. A sub-agent emits a
-  // `kind="subagent_of"` edge whose `fromId` is the MAIN session's canonical
+  // `kind="subagent_of"` edge whose `fromId` is its REAL parent's canonical
   // SessionId and whose `toId` is this sub-agent's own SessionId. This is the
   // purpose-built session-lineage edge — never `parent`, which is event
   // threading. mapSession projects `subagent_of.fromId` onto the served
   // SessionRow.parentSessionId column; the native parent id is kept in
   // rawReference. The main agent emits no such edge (its parentSessionId stays
   // undefined).
+  //
+  // Parent resolution honours agent.parentAgentId: a sub spawned by `main` (or
+  // with no declared parent) links to the main session's canonical id; a sub
+  // spawned by ANOTHER sub links to that sub's own compound canonical id, so
+  // deep lineage is preserved rather than flattening every sub onto main.
   if (!isMain) {
+    const parentAgentId = agent.parentAgentId ?? "main";
+    const fromId =
+      parentAgentId === "main"
+        ? params.mainSessionId
+        : sessionIdFor("kimi", KimiSessionId(`${params.nativeSessionId}/${parentAgentId}`));
     sessionEdges.push({
-      id: edgeIdFor(sessionId, "subagent_of", params.mainSessionId, sessionId),
+      id: edgeIdFor(sessionId, "subagent_of", fromId, sessionId),
       kind: "subagent_of",
-      fromId: params.mainSessionId,
+      fromId,
       toId: sessionId,
       rawReference: {
         sourcePath: agent.wirePath,
         nativeType: "agent",
         agentId: agent.id,
-        parentAgentId: agent.parentAgentId ?? "main",
+        parentAgentId,
       },
     });
   }
@@ -605,7 +654,7 @@ const buildKimiSessionsFromEntry = (
   const updatedAt = stringValue(state.updatedAt);
 
   const mainSessionId = sessionIdFor("kimi", KimiSessionId(entry.sessionId));
-  const agents = collectAgents(entry.sessionDir, state);
+  const agents = collectAgents(entry.sessionDir, entry.sessionId, state, diagnostics);
 
   return agents.map((agent) =>
     buildAgentSession(

@@ -158,7 +158,7 @@ describe("QSR-220 grok subagent lineage", () => {
   // Clearly-FABRICATED UUIDv7-shaped identifiers — never real on-disk ids.
   const PARENT_UUID = "01900000-0000-7000-8000-00000000aaaa";
   const CHILD_UUID = "01900000-0000-7000-8000-00000000bbbb";
-  const SUBAGENT_TYPE = "explore";
+  const SUBAGENT_TYPE = "fab-explore-role";
   const PROJECT_KEY = encodeURIComponent("/repo/lineage");
 
   const setupRoot = () => {
@@ -270,8 +270,8 @@ describe("QSR-220 grok subagent lineage", () => {
 
   test("the subagent manifest schema rejects records missing required lineage fields", () => {
     const decode = Schema.decodeUnknownEither(GrokSubagentManifest);
-    expect(decode({ parent_session_id: "p", child_session_id: "c", subagent_type: "explore" })._tag).toBe("Right");
-    expect(decode({ child_session_id: "c", subagent_type: "explore" })._tag).toBe("Left");
-    expect(decode({ parent_session_id: "", child_session_id: "c", subagent_type: "explore" })._tag).toBe("Left");
+    expect(decode({ parent_session_id: "p", child_session_id: "c", subagent_type: "fab-explore-role" })._tag).toBe("Right");
+    expect(decode({ child_session_id: "c", subagent_type: "fab-explore-role" })._tag).toBe("Left");
+    expect(decode({ parent_session_id: "", child_session_id: "c", subagent_type: "fab-explore-role" })._tag).toBe("Left");
   });
 });

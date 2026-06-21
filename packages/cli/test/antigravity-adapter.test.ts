@@ -693,7 +693,7 @@ describe("QSR-220: cross-session subagent lineage", () => {
       created_at: "2026-06-20T07:24:10Z",
       thinking: "Defining the subagents.",
       tool_calls: [
-        { name: "define_subagent", args: { name: "codebase-analyst", description: "analyze" } },
+        { name: "define_subagent", args: { name: "fab-analyst-role", description: "analyze" } },
       ],
     },
     // manage_task Action="list" POLLING NOISE → dropped.
@@ -729,8 +729,8 @@ describe("QSR-220: cross-session subagent lineage", () => {
           name: "invoke_subagent",
           args: {
             Subagents: [
-              { Prompt: "analyze repo a", Role: "Codebase Analyst", TypeName: "self" },
-              { Prompt: "audit repo b", Role: "Adversarial API Auditor", TypeName: "api_auditor" },
+              { Prompt: "analyze repo a", Role: "Fabricated Analyst Role", TypeName: "self" },
+              { Prompt: "audit repo b", Role: "Fabricated Audit Role", TypeName: "api_auditor" },
             ],
           },
         },
@@ -820,8 +820,8 @@ describe("QSR-220: cross-session subagent lineage", () => {
     const { session: childA } = await sessionByUuid(CHILD_A_UUID);
     const { session: childB } = await sessionByUuid(CHILD_B_UUID);
     // First Subagent Role → first child uuid; second → second child.
-    expect(childA!.agentName).toBe("Codebase Analyst");
-    expect(childB!.agentName).toBe("Adversarial API Auditor");
+    expect(childA!.agentName).toBe("Fabricated Analyst Role");
+    expect(childB!.agentName).toBe("Fabricated Audit Role");
   });
 
   test("subagent_of edge carries the native parent uuid in rawReference", async () => {
