@@ -67,6 +67,54 @@ afterAll(() => {
 });
 
 // ---------------------------------------------------------------------------
+// AC#5 — idempotency proof (content-id provider, sessions.id DB column)
+//
+// Hermes native id = `sessions.id` column value from the SQLite state.db.
+// Two DB files at DIFFERENT root paths containing the SAME session id must
+// resolve to byte-identical canonical session.id values.
+// ---------------------------------------------------------------------------
+describe("AC#5 idempotency: same sessions.id at different DB paths → byte-identical session.id", () => {
+  const hostRoot = join(testRoot, "idem-host");
+  const dockerRoot = join(testRoot, "idem-docker");
+  mkdirSync(hostRoot, { recursive: true });
+  mkdirSync(dockerRoot, { recursive: true });
+
+  // Both DBs carry the same session id value at different file paths.
+  const IDEM_SESSION_ID = "hermes-idem-session-001";
+  execFileSync("sqlite3", [join(hostRoot, "state.db"),
+    SESSION_SCHEMA + insertSession(IDEM_SESSION_ID, "Idempotency session host") + insertMessage(`${IDEM_SESSION_ID}-msg`, IDEM_SESSION_ID),
+  ]);
+  execFileSync("sqlite3", [join(dockerRoot, "state.db"),
+    SESSION_SCHEMA + insertSession(IDEM_SESSION_ID, "Idempotency session docker") + insertMessage(`${IDEM_SESSION_ID}-msg`, IDEM_SESSION_ID),
+  ]);
+
+  test(
+    "host and docker reads produce byte-identical session.id",
+    async () => {
+      const hostResult = await hermesAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { hermes: hostRoot },
+      });
+      const dockerResult = await hermesAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { hermes: dockerRoot },
+      });
+
+      expect(hostResult.sessions).toHaveLength(1);
+      expect(dockerResult.sessions).toHaveLength(1);
+      // Canonical session.id must be byte-identical regardless of which
+      // file path the state.db lives at.
+      expect(hostResult.sessions[0]!.id).toBe(dockerResult.sessions[0]!.id);
+      // sourcePaths differ — proving the id is path-independent.
+      expect(hostResult.sessions[0]!.sourcePath).not.toBe(dockerResult.sessions[0]!.sourcePath);
+    },
+    15_000,
+  );
+});
+
+// ---------------------------------------------------------------------------
 // T1: multi-profile layout
 // ---------------------------------------------------------------------------
 describe("T1: multi-profile layout", () => {

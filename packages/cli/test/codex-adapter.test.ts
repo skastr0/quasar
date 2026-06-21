@@ -361,4 +361,55 @@ describe("codex adapter", () => {
       .map((event) => event.kind);
     expect(kinds).toEqual(["tool_call", "tool_result", "tool_call", "tool_result"]);
   });
+
+  // ---------------------------------------------------------------------------
+  // AC#5 — idempotency proof
+  //
+  // Codex native id = filename stem of the source path. Two files at
+  // DIFFERENT parent directories but carrying the SAME filename stem must
+  // resolve to byte-identical session.id values.  The test reads the adapter
+  // over two independent temp trees and asserts the resulting ids match.
+  // ---------------------------------------------------------------------------
+  test("AC#5 idempotency: same filename stem at different parent paths → byte-identical session.id", async () => {
+    // Tree A simulates a host path (e.g. /Users/me/Library/…)
+    const hostRoot = mkdtempSync(join(tmpdir(), "quasar-codex-host-"));
+    // Tree B simulates a Docker /history mount
+    const dockerRoot = mkdtempSync(join(tmpdir(), "quasar-codex-docker-"));
+
+    try {
+      // Both trees use the SAME filename, producing the same stem.
+      const FILENAME = "rollout-2026-06-21-idem.jsonl";
+      const hostDir = join(hostRoot, "sessions", "2026", "06", "21");
+      const dockerDir = join(dockerRoot, "sessions", "2026", "06", "21");
+      mkdirSync(hostDir, { recursive: true });
+      mkdirSync(dockerDir, { recursive: true });
+
+      // Identical content at both locations — same payload.id, same everything.
+      const content = rolloutLines("/tmp/idem-proj");
+      writeFileSync(join(hostDir, FILENAME), content);
+      writeFileSync(join(dockerDir, FILENAME), content);
+
+      const hostResult = await codexAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { codex: hostRoot },
+      });
+      const dockerResult = await codexAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { codex: dockerRoot },
+      });
+
+      expect(hostResult.sessions).toHaveLength(1);
+      expect(dockerResult.sessions).toHaveLength(1);
+      // The canonical session.id is the critical assertion: byte-identical
+      // regardless of which parent directory tree the adapter scanned.
+      expect(hostResult.sessions[0]!.id).toBe(dockerResult.sessions[0]!.id);
+      // Sanity: the sourcePaths DO differ (they live in different trees).
+      expect(hostResult.sessions[0]!.sourcePath).not.toBe(dockerResult.sessions[0]!.sourcePath);
+    } finally {
+      rmSync(hostRoot, { recursive: true, force: true });
+      rmSync(dockerRoot, { recursive: true, force: true });
+    }
+  });
 });

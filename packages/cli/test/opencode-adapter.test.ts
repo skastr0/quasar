@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -63,6 +63,62 @@ execFileSync("sqlite3", [dbPath, FIXTURE_SQL]);
 
 afterAll(() => {
   rmSync(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// AC#5 — idempotency proof (content-id provider, session.id DB field)
+//
+// OpenCode native id = `session.id` column from the SQLite DB.  The same id
+// value at two DIFFERENT db file paths must resolve to byte-identical
+// canonical session.id.  The test creates two identical DB files in separate
+// temp dirs and asserts the results agree.
+// ---------------------------------------------------------------------------
+describe("AC#5 idempotency: same session.id in DB at different file paths → byte-identical session.id", () => {
+  const IDEM_SESSION_ID = "ses_idem_proof";
+  const IDEM_SQL = `
+create table session (id text primary key, title text, directory text, time_created integer, time_updated integer);
+create table message (id text primary key, session_id text, time_created integer, data text);
+create table part (id text primary key, message_id text, session_id text, time_created integer, data text);
+insert into session values ('${IDEM_SESSION_ID}', 'idempotency test', '/tmp/idem', 1, 2);
+insert into message values ('msg_idem_user', '${IDEM_SESSION_ID}', 1, json_object('role', 'user', 'time', json_object('created', 1)));
+insert into part values ('prt_idem_text', 'msg_idem_user', '${IDEM_SESSION_ID}', 1, json_object('type', 'text', 'text', 'idempotency check'));
+`;
+
+  const hostDir = mkdtempSync(join(tmpdir(), "quasar-oc-host-"));
+  const dockerDir = mkdtempSync(join(tmpdir(), "quasar-oc-docker-"));
+
+  afterAll(() => {
+    rmSync(hostDir, { recursive: true, force: true });
+    rmSync(dockerDir, { recursive: true, force: true });
+  });
+
+  execFileSync("sqlite3", [join(hostDir, "opencode.db"), IDEM_SQL]);
+  execFileSync("sqlite3", [join(dockerDir, "opencode.db"), IDEM_SQL]);
+
+  test(
+    "host and docker reads produce byte-identical session.id",
+    async () => {
+      const hostResult = await opencodeAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { opencode: hostDir },
+      });
+      const dockerResult = await opencodeAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { opencode: dockerDir },
+      });
+
+      expect(hostResult.sessions).toHaveLength(1);
+      expect(dockerResult.sessions).toHaveLength(1);
+      // Canonical session.id must be byte-identical — the id comes from the
+      // DB content, not from the file path.
+      expect(hostResult.sessions[0]!.id).toBe(dockerResult.sessions[0]!.id);
+      // The sourcePaths differ, proving the id is path-independent.
+      expect(hostResult.sessions[0]!.sourcePath).not.toBe(dockerResult.sessions[0]!.sourcePath);
+    },
+    15_000,
+  );
 });
 
 describe("opencode adapter", () => {
