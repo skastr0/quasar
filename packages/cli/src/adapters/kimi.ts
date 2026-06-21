@@ -3,10 +3,11 @@ import { join } from "node:path";
 
 import { collectAdapterStream, type AdapterStreamItem, type SessionAdapter } from "./types";
 import { KimiSessionId } from "../core/identity";
-import type { ToolCall, UsageRecord } from "../core/schemas";
+import type { SessionEdge, ToolCall, UsageRecord } from "../core/schemas";
 import {
   buildSession,
   compactText,
+  edgeIdFor,
   eventIdFor,
   homePath,
   projectToolPayloadNativeValue,
@@ -21,6 +22,8 @@ import {
   usageIdFor,
   type NativeValue,
 } from "./common";
+import { type DecodeDiagnostic, decodeOrDrop, isSignal } from "./harness-schema";
+import { KimiWireRecordSchema } from "./kimi-schema";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -62,7 +65,25 @@ type KimiUsageDraft = Omit<
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
 >;
 
+type KimiEdgeDraft = Omit<
+  SessionEdge,
+  "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
+>;
+
 type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
+
+/**
+ * One agent inside a Kimi session directory, as declared in state.json's
+ * `agents` dict. The `id` is the dict key (`main`, `agent-0`, ...); `type` is
+ * `main` for the root agent and `sub` for spawned sub-agents; `parentAgentId`
+ * names the spawning agent (`main` for subs, null/absent for the root).
+ */
+type KimiAgent = {
+  readonly id: string;
+  readonly type: string | undefined;
+  readonly parentAgentId: string | undefined;
+  readonly wirePath: string;
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -77,24 +98,45 @@ const kimiTime = (time: unknown): string | undefined => {
   return undefined;
 };
 
-/** Enumerate agent wire.jsonl paths for a session directory. */
-const collectAgentWirePaths = (sessionDir: string): { agentId: string; wirePath: string }[] => {
-  const agentsDir = join(sessionDir, "agents");
-  if (!existsSync(agentsDir)) return [];
-  const results: { agentId: string; wirePath: string }[] = [];
-  let entries: string[];
-  try {
-    entries = readdirSync(agentsDir);
-  } catch {
-    return [];
+/**
+ * The session-level agentName for a Kimi agent. The root agent reports as the
+ * harness itself (`kimi-code`); a sub-agent reports its declared type so the
+ * served SessionRow.agentName distinguishes a first-class sub-agent session
+ * from its parent. The agent id is appended so two subs are never collapsed.
+ */
+const agentNameFor = (agent: KimiAgent): string =>
+  agent.type === "main" || agent.id === "main"
+    ? "kimi-code"
+    : `kimi-${agent.type ?? "sub"}:${agent.id}`;
+
+/**
+ * Enumerate every agent declared in state.json that has a readable wire.jsonl.
+ *
+ * The state.json `agents` dict is the source of truth for which agents exist
+ * and their lineage (type + parentAgentId). Each agent reads its OWN
+ * agents/<id>/wire.jsonl. An agent declared without a wire file on disk is
+ * skipped (no events to project); a wire dir present on disk but absent from
+ * state.json is also skipped — state.json is authoritative for lineage, and a
+ * wire with no declared agent has no parent to attribute.
+ */
+const collectAgents = (
+  sessionDir: string,
+  state: Record<string, unknown>,
+): KimiAgent[] => {
+  const agentsRecord = recordFrom(state.agents);
+  const agents: KimiAgent[] = [];
+  for (const id of Object.keys(agentsRecord).sort()) {
+    const meta = recordFrom(agentsRecord[id]);
+    const wirePath = join(sessionDir, "agents", id, "wire.jsonl");
+    if (!existsSync(wirePath)) continue;
+    agents.push({
+      id,
+      type: stringValue(meta.type),
+      parentAgentId: stringValue(meta.parentAgentId),
+      wirePath,
+    });
   }
-  for (const agentId of entries) {
-    const wirePath = join(agentsDir, agentId, "wire.jsonl");
-    if (existsSync(wirePath)) {
-      results.push({ agentId, wirePath });
-    }
-  }
-  return results;
+  return agents;
 };
 
 // ---------------------------------------------------------------------------
@@ -102,76 +144,116 @@ const collectAgentWirePaths = (sessionDir: string): { agentId: string; wirePath:
 // ---------------------------------------------------------------------------
 
 type AgentLineEvent = {
-  readonly agentId: string;
-  readonly wirePath: string;
   readonly lineNumber: number;
   readonly outerTime: number;
   readonly record: Record<string, unknown>;
 };
 
-/** Parse a single agent's wire.jsonl into a list of tagged line-events. */
-const collectAgentLineEvents = (agentId: string, wirePath: string): AgentLineEvent[] => {
+/**
+ * Parse a single agent's wire.jsonl into tagged line-events, fail-closed.
+ *
+ * Every line is decoded through the shared `decodeOrDrop` boundary against
+ * `KimiWireRecordSchema`: a malformed record (not an object, non-string `type`)
+ * becomes a NAMED diagnostic (`kimi.wire.decode_failed`) in `diagnostics` and is
+ * dropped — it never throws (the rest of the wire keeps importing) and never
+ * silently coerces a half-record. Lines that fail JSON parse are already dropped
+ * by `readJsonLines` upstream; this gate rejects structurally-invalid records.
+ */
+const collectAgentLineEvents = (
+  agent: KimiAgent,
+  diagnostics: DecodeDiagnostic[],
+): AgentLineEvent[] => {
   let lines: { value: unknown; lineNumber: number }[];
   try {
-    lines = readJsonLines(wirePath);
+    lines = readJsonLines(agent.wirePath);
   } catch {
     return [];
   }
   const result: AgentLineEvent[] = [];
   for (const { value, lineNumber } of lines) {
+    const decision = decodeOrDrop(KimiWireRecordSchema, value, {
+      kind: "wire" as const,
+      diagnosticName: "kimi.wire.decode_failed",
+      diagnostics,
+    });
+    if (!isSignal(decision)) continue;
     const record = recordFrom(value);
     const outerTime =
-      typeof record.time === "number" && Number.isFinite(record.time)
-        ? record.time
+      typeof decision.value.time === "number" && Number.isFinite(decision.value.time)
+        ? decision.value.time
         : 0;
-    result.push({ agentId, wirePath, lineNumber, outerTime, record });
+    result.push({ lineNumber, outerTime, record });
   }
   return result;
 };
 
 // ---------------------------------------------------------------------------
-// Session builder
+// Per-agent session builder
 // ---------------------------------------------------------------------------
 
-const buildKimiSessionFromEntry = (
-  entry: { sessionId: string; sessionDir: string; workDir: string },
-  sessionsRoot: string,
+const buildAgentSession = (
+  params: {
+    readonly agent: KimiAgent;
+    readonly nativeSessionId: string;
+    readonly mainSessionId: ReturnType<typeof sessionIdFor>;
+    readonly sessionDir: string;
+    readonly workDir: string;
+    readonly title: string | undefined;
+    readonly createdAt: string | undefined;
+    readonly updatedAt: string | undefined;
+    readonly sessionsRoot: string;
+  },
   options: AdapterOptions,
+  diagnostics: DecodeDiagnostic[],
 ) => {
-  const nativeSessionId = KimiSessionId(entry.sessionId);
-  const sessionId = sessionIdFor("kimi", nativeSessionId);
-  const stateJsonPath = join(entry.sessionDir, "state.json");
-  const stateRaw = readJsonFile(stateJsonPath);
-  const state = recordFrom(stateRaw);
+  const { agent } = params;
+  const isMain = agent.type === "main" || agent.id === "main";
+  // (1) main → keyed by the unchanged native session id.
+  // (2) each sub-agent → keyed by the COMPOUND native id `${sessionId}/${agentId}`
+  //     so every spawned agent becomes its own first-class session.
+  const nativeId = isMain
+    ? KimiSessionId(params.nativeSessionId)
+    : KimiSessionId(`${params.nativeSessionId}/${agent.id}`);
+  const sessionId = sessionIdFor("kimi", nativeId);
 
-  // Extract title from state.json.
-  const isCustomTitle = state.isCustomTitle === true;
-  const title = isCustomTitle ? stringValue(state.title) : undefined;
-  const createdAt = stringValue(state.createdAt);
-  const updatedAt = stringValue(state.updatedAt);
-
-  // Collect all agents' wire.jsonl paths.
-  const agentWires = collectAgentWirePaths(entry.sessionDir);
-
-  // Gather all line-events across agents, then sort by (outerTime, agentId, lineNumber).
-  const allLineEvents: AgentLineEvent[] = [];
-  for (const { agentId, wirePath } of agentWires) {
-    const events = collectAgentLineEvents(agentId, wirePath);
-    for (const ev of events) allLineEvents.push(ev);
-  }
-  allLineEvents.sort((a, b) => {
+  const lineEvents = collectAgentLineEvents(agent, diagnostics);
+  lineEvents.sort((a, b) => {
     if (a.outerTime !== b.outerTime) return a.outerTime - b.outerTime;
-    if (a.agentId !== b.agentId) return a.agentId < b.agentId ? -1 : 1;
     return a.lineNumber - b.lineNumber;
   });
 
-  // Map events, maintain tool-call drafts keyed by toolCallId.
   const toolCallsById = new Map<string, KimiToolCallDraft>();
   const usageDrafts: KimiUsageDraft[] = [];
   const eventDrafts: KimiEventDraft[] = [];
+  const sessionEdges: KimiEdgeDraft[] = [];
 
-  for (let seq = 0; seq < allLineEvents.length; seq++) {
-    const { agentId, wirePath, lineNumber, outerTime, record } = allLineEvents[seq]!;
+  // Canonical SESSION-to-session subagent lineage. A sub-agent emits a
+  // `kind="subagent_of"` edge whose `fromId` is the MAIN session's canonical
+  // SessionId and whose `toId` is this sub-agent's own SessionId. This is the
+  // purpose-built session-lineage edge — never `parent`, which is event
+  // threading. mapSession projects `subagent_of.fromId` onto the served
+  // SessionRow.parentSessionId column; the native parent id is kept in
+  // rawReference. The main agent emits no such edge (its parentSessionId stays
+  // undefined).
+  if (!isMain) {
+    sessionEdges.push({
+      id: edgeIdFor(sessionId, "subagent_of", params.mainSessionId, sessionId),
+      kind: "subagent_of",
+      fromId: params.mainSessionId,
+      toId: sessionId,
+      rawReference: {
+        sourcePath: agent.wirePath,
+        nativeType: "agent",
+        agentId: agent.id,
+        parentAgentId: agent.parentAgentId ?? "main",
+      },
+    });
+  }
+
+  for (let seq = 0; seq < lineEvents.length; seq++) {
+    const { lineNumber, outerTime, record } = lineEvents[seq]!;
+    const agentId = agent.id;
+    const wirePath = agent.wirePath;
     const outerType = stringValue(record.type) ?? "unknown";
     const outerTimeIso = kimiTime(outerTime !== 0 ? outerTime : undefined);
 
@@ -187,7 +269,6 @@ const buildKimiSessionFromEntry = (
       const originKind = stringValue(originRecord.kind) ?? stringValue(record.originKind);
       const isUserOrigin = originKind === "user";
 
-      // Extract text from message.content[].text
       const contentArr = Array.isArray(message.content) ? message.content : [];
       const textParts = contentArr
         .map((c) => recordFrom(c))
@@ -206,7 +287,6 @@ const buildKimiSessionFromEntry = (
           rawReference: { sourcePath: wirePath, line: lineNumber, nativeType: outerType, agentId },
         });
       } else {
-        // Non-user origin → preamble / system context
         eventDrafts.push({
           id: eventId,
           sequence: seq,
@@ -267,7 +347,6 @@ const buildKimiSessionFromEntry = (
             },
           });
         } else {
-          // Other part types → lifecycle
           eventDrafts.push({
             id: eventId,
             sequence: seq,
@@ -353,7 +432,6 @@ const buildKimiSessionFromEntry = (
             },
           });
         } else {
-          // Unmatched tool result — create a minimal record
           const minimalId = scopedId(sessionId, "tool", eventId);
           const minimal: KimiToolCallDraft = {
             id: minimalId,
@@ -383,7 +461,6 @@ const buildKimiSessionFromEntry = (
         continue;
       }
 
-      // step.begin / step.end / other loop events → lifecycle
       eventDrafts.push({
         id: eventId,
         sequence: seq,
@@ -456,7 +533,6 @@ const buildKimiSessionFromEntry = (
           ? { cacheCreationInputTokens: inputCacheCreation }
           : {}),
       });
-      // Also emit a lifecycle event so the sequence is preserved
       eventDrafts.push({
         id: eventId,
         sequence: seq,
@@ -493,20 +569,61 @@ const buildKimiSessionFromEntry = (
 
   return buildSession({
     provider: "kimi",
-    agentName: "kimi-code",
+    agentName: agentNameFor(agent),
     machine: options.machine,
     sessionId,
-    nativeSessionId,
-    projectPath: entry.workDir.length > 0 ? entry.workDir : undefined,
-    title,
-    startedAt: createdAt,
-    updatedAt,
-    sourceRoot: sessionsRoot,
-    sourcePath: entry.sessionDir,
+    nativeSessionId: nativeId,
+    projectPath: params.workDir.length > 0 ? params.workDir : undefined,
+    title: params.title,
+    startedAt: params.createdAt,
+    updatedAt: params.updatedAt,
+    sourceRoot: params.sessionsRoot,
+    sourcePath: join(params.sessionDir, "agents", agent.id),
     events: eventDrafts,
     toolCalls: [...toolCallsById.values()],
+    sessionEdges,
     usageRecords: usageDrafts,
   });
+};
+
+// ---------------------------------------------------------------------------
+// Session-entry fan-out: one entry → one session per agent
+// ---------------------------------------------------------------------------
+
+const buildKimiSessionsFromEntry = (
+  entry: { sessionId: string; sessionDir: string; workDir: string },
+  sessionsRoot: string,
+  options: AdapterOptions,
+  diagnostics: DecodeDiagnostic[],
+) => {
+  const stateRaw = readJsonFile(join(entry.sessionDir, "state.json"));
+  const state = recordFrom(stateRaw);
+
+  const isCustomTitle = state.isCustomTitle === true;
+  const title = isCustomTitle ? stringValue(state.title) : undefined;
+  const createdAt = stringValue(state.createdAt);
+  const updatedAt = stringValue(state.updatedAt);
+
+  const mainSessionId = sessionIdFor("kimi", KimiSessionId(entry.sessionId));
+  const agents = collectAgents(entry.sessionDir, state);
+
+  return agents.map((agent) =>
+    buildAgentSession(
+      {
+        agent,
+        nativeSessionId: entry.sessionId,
+        mainSessionId,
+        sessionDir: entry.sessionDir,
+        workDir: entry.workDir,
+        title,
+        createdAt,
+        updatedAt,
+        sessionsRoot,
+      },
+      options,
+      diagnostics,
+    ),
+  );
 };
 
 // ---------------------------------------------------------------------------
@@ -546,16 +663,15 @@ async function* streamKimi(options: AdapterOptions): AsyncGenerator<AdapterStrea
     return;
   }
 
-  // The sessions directory is the sourceRoot for all sessions.
   const sessionsRoot = join(root, "sessions");
 
   const rootRecord = sourceRoot("kimi", kimiAdapter.id, sessionsRoot, options.machine, options.now);
   yield { type: "sourceRoot", sourceRoot: rootRecord };
 
-  // Parse the session index.
   const indexLines = readJsonLines(indexPath);
   let sessionCount = 0;
   let skipped = 0;
+  const decodeDiagnostics: DecodeDiagnostic[] = [];
 
   for (const { value } of indexLines) {
     const entry = recordFrom(value);
@@ -566,11 +682,12 @@ async function* streamKimi(options: AdapterOptions): AsyncGenerator<AdapterStrea
     if (sessionId === undefined || sessionDir === undefined) continue;
     if (!existsSync(sessionDir)) continue;
 
-    // Skip / limit support
     if (skipped < (options.skip ?? 0)) { skipped++; continue; }
     if (sessionCount >= (options.limit ?? Number.POSITIVE_INFINITY)) break;
 
-    // Pre-parse gate: skip sessions that have not changed since last ingest.
+    // Pre-parse gate keys off the MAIN session id. The whole agent tree shares
+    // one state.json fingerprint, so a hit skips the entire entry (main + subs)
+    // together — they always change together.
     if (options.shouldParseSession !== undefined) {
       const stateJsonPath = join(sessionDir, "state.json");
       if (existsSync(stateJsonPath)) {
@@ -583,25 +700,44 @@ async function* streamKimi(options: AdapterOptions): AsyncGenerator<AdapterStrea
       }
     }
 
-    const session = buildKimiSessionFromEntry(
+    const sessions = buildKimiSessionsFromEntry(
       { sessionId, sessionDir, workDir },
       sessionsRoot,
       options,
+      decodeDiagnostics,
     );
 
     const stateJsonPath = join(sessionDir, "state.json");
+    for (const session of sessions) {
+      yield {
+        type: "session",
+        session,
+        sourceUnit: {
+          provider: "kimi",
+          adapterId: kimiAdapter.id,
+          rootPath: sessionsRoot,
+          sourcePath: session.sourcePath,
+          physicalPath: existsSync(stateJsonPath) ? stateJsonPath : sessionDir,
+        },
+      };
+      sessionCount += 1;
+    }
+  }
+
+  // Surface every named wire-decode drop as a single attributable diagnostic.
+  for (const diagnostic of decodeDiagnostics) {
     yield {
-      type: "session",
-      session,
-      sourceUnit: {
-        provider: "kimi",
+      type: "diagnostic",
+      diagnostic: {
         adapterId: kimiAdapter.id,
+        provider: "kimi",
+        status: "unsupported",
+        parserConfidence: "observed",
         rootPath: sessionsRoot,
-        sourcePath: session.sourcePath,
-        physicalPath: existsSync(stateJsonPath) ? stateJsonPath : sessionDir,
+        message: `Kimi wire record dropped (${diagnostic.name}).`,
+        details: { error: diagnostic.message },
       },
     };
-    sessionCount += 1;
   }
 
   yield {
