@@ -12,14 +12,12 @@ import {
   edgeIdFor,
   eventIdFor,
   homePath,
-  kindFromNative,
   parseJsonString,
   projectSessionNativeValue,
   projectToolPayloadNativeValue,
   recordFrom,
   readJsonFile,
   readJsonLines,
-  roleFrom,
   scopedId,
   sessionIdFor,
   sourceFingerprintFor,
@@ -27,7 +25,43 @@ import {
   stringValue,
   type NativeValue,
 } from "./common";
-import { decodeGrokSubagentManifest } from "./grok-schema";
+import type { SessionEventKind, SessionRole } from "../core/schemas";
+import {
+  classifyGrokChat,
+  classifyGrokEvent,
+  classifyGrokHunk,
+  classifyGrokUpdate,
+  decodeGrokSubagentManifest,
+  decodeGrokSummary,
+  GROK_DECODE_FAILED,
+  GROK_UNKNOWN_TYPE,
+} from "./grok-schema";
+import { isSignal, type DecodeDiagnostic, type SignalDecision } from "./harness-schema";
+
+/**
+ * Local, DECLARATIVE role mapping (QSR-220). The adapter no longer borrows the
+ * shared `roleFrom`/`kindFromNative` string heuristics: every grok record's kind
+ * comes from the per-record-type classifier in `grok-schema.ts`, and the role is
+ * derived here from the (already-validated) record type. Nothing is inferred from
+ * fuzzy substring matching.
+ */
+const grokRole = (type: string | undefined): SessionRole => {
+  switch (type) {
+    case "user":
+      return "user";
+    case "assistant":
+      return "assistant";
+    case "reasoning":
+      return "thinking";
+    case "system":
+      return "system";
+    case "tool_result":
+    case "backend_tool_call":
+      return "tool";
+    default:
+      return "unknown";
+  }
+};
 
 const decodeProjectPath = (encoded: string) => {
   try {
@@ -195,23 +229,22 @@ const grokToolCall = (
   };
 };
 
-const grokKind = (record: Record<string, unknown>) => {
-  if (grokToolName(record) !== undefined) {
-    const status = String(recordFrom(record.state).status ?? record.status ?? "");
-    return status === "completed" ? ("tool_result" as const) : ("tool_call" as const);
-  }
-  const type =
-    typeof record.type === "string"
-      ? record.type
-      : typeof record.method === "string"
-        ? record.method
-        : undefined;
-  if (type === undefined) {
-    return stringContent(record) === undefined ? ("lifecycle" as const) : ("message" as const);
-  }
-  if (type === "assistant" || type === "user" || type === "system") return "message" as const;
-  return kindFromNative(type);
-};
+/**
+ * A classify result for one on-disk record. `dropped` carries the named reason
+ * (telemetry drop, encrypted-reasoning drop, decode failure, or unknown type) so
+ * the caller can both skip emission AND surface a diagnostic — zero records fall
+ * through to an `unknown` pass-through event.
+ */
+type ClassifyResult =
+  | { readonly emit: true; readonly kind: SessionEventKind }
+  | { readonly emit: false; readonly reason: string };
+
+const toClassifyResult = (
+  decision: SignalDecision<unknown, SessionEventKind>,
+): ClassifyResult =>
+  isSignal(decision)
+    ? { emit: true, kind: decision.kind }
+    : { emit: false, reason: decision.reason };
 
 const grokContentProjection = (record: Record<string, unknown>): NativeValue | undefined => {
   const content = grokNestedContent(record);
@@ -236,10 +269,14 @@ const grokArtifacts = (
   sessionId: SessionId,
   sessionDir: string,
   hunkPath: string,
+  diagnostics: DecodeDiagnostic[],
 ) =>
   readJsonLines(hunkPath).flatMap(({ value, lineNumber }) => {
     const record = recordFrom(value);
     if (Object.keys(record).length === 0) return [];
+    // Fail-closed classify: an unknown/garbage hunk eventType is a NAMED drop,
+    // never a silently-kept artifact.
+    if (!isSignal(classifyGrokHunk(value, diagnostics))) return [];
     const path = typeof record.filePath === "string" ? record.filePath : undefined;
     const id = artifactIdFor(sessionId, record.hunkId ?? lineNumber);
     return [
@@ -265,11 +302,6 @@ const grokArtifacts = (
       } satisfies GrokArtifactDraft,
     ];
   });
-
-const grokSummaryRecord = (summary: unknown): Record<string, unknown> =>
-  summary !== null && typeof summary === "object" && !Array.isArray(summary)
-    ? (summary as Record<string, unknown>)
-    : {};
 
 /** Extract plaintext reasoning text from an assistant record's `reasoning` field. */
 const grokReasoningText = (record: Record<string, unknown>): string | undefined => {
@@ -355,12 +387,23 @@ const buildGrokSessionFromChatPath = (
   lineageMap: GrokLineageMap,
   options: AdapterOptions,
 ) => {
+  // Per-session named decode/drop diagnostics (QSR-220). A malformed record or an
+  // unknown record type is accumulated here and surfaced as a session-level
+  // boundary diagnostic; ingest of the rest of the session continues.
+  const decodeDiagnostics: DecodeDiagnostic[] = [];
   const sessionDir = dirname(chatPath);
   const nativeSessionId = GrokSessionId(basename(sessionDir));
   const sessionId = sessionIdFor("grok", nativeSessionId);
   const projectKey = basename(dirname(sessionDir));
   const projectPath = decodeProjectPath(projectKey);
-  const summary = grokSummaryRecord(readJsonFile(join(sessionDir, "summary.json")));
+  // A missing summary.json is simple absence, not garbage: only a PRESENT but
+  // malformed summary is a named decode failure.
+  const summaryRaw = readJsonFile(join(sessionDir, "summary.json"));
+  const summary: Record<string, unknown> =
+    summaryRaw === undefined || summaryRaw === null
+      ? {}
+      : ((decodeGrokSummary(summaryRaw, decodeDiagnostics) as Record<string, unknown> | undefined) ??
+        {});
   const chatLines = readJsonLines(chatPath);
   const readOptionalLines = (path: string) => (existsSync(path) ? readJsonLines(path) : []);
   const eventLines = readOptionalLines(join(sessionDir, "events.jsonl"));
@@ -416,152 +459,147 @@ const buildGrokSessionFromChatPath = (
     return toolCall?.id;
   };
 
-  const events = [
-    ...chatLines.flatMap(({ value, lineNumber }, index) => {
-      const record =
-        typeof value === "object" && value !== null
-          ? (value as Record<string, unknown>)
-          : {};
-      const type = typeof record.type === "string" ? record.type : "message";
-      const nativeEventId =
-        typeof record.id === "string" ? record.id : undefined;
-      const eventId = eventIdFor(sessionId, index, nativeEventId ?? lineNumber);
+  const updatePath = join(sessionDir, "updates.jsonl");
+  const eventPath = join(sessionDir, "events.jsonl");
 
-      const result: GrokEventDraft[] = [];
+  const chatEvents = chatLines.flatMap(({ value, lineNumber }, index) => {
+    const record =
+      typeof value === "object" && value !== null
+        ? (value as Record<string, unknown>)
+        : {};
+    const type = typeof record.type === "string" ? record.type : undefined;
+    // DECLARATIVE classify: zero passthrough. A drop (telemetry, encrypted
+    // reasoning, decode failure, unknown type) emits NO event for this line.
+    const classified = toClassifyResult(classifyGrokChat(value, decodeDiagnostics));
+    if (!classified.emit) return [];
+    const nativeEventId = typeof record.id === "string" ? record.id : undefined;
+    const eventId = eventIdFor(sessionId, index, nativeEventId ?? lineNumber);
+    const result: GrokEventDraft[] = [];
 
-      if (type === "assistant") {
-        // Emit a reasoning event ahead of the assistant reply when plaintext reasoning exists.
-        const reasoningText = grokReasoningText(record);
-        if (reasoningText !== undefined) {
-          const reasoningEventId = `${eventId}:r`;
-          result.push({
-            id: reasoningEventId,
-            nativeEventId: nativeEventId !== undefined ? `${nativeEventId}:r` : undefined,
-            sequence: index,
-            timestamp: grokTime(record),
-            role: "thinking" as const,
-            kind: "reasoning" as const,
-            contentText: reasoningText,
-            rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: "reasoning" },
-          });
-        }
-
-        // Collect tool calls from the tool_calls array.
-        const toolCallId =
-          collectAssistantToolCalls(
-            sessionId,
-            eventId,
-            record,
-            toolCallsById,
-          ) ?? collectTool(eventId, record);
-
-        const content = grokContentProjection(record);
+    if (type === "assistant") {
+      // Emit a reasoning event ahead of the assistant reply when plaintext reasoning exists.
+      const reasoningText = grokReasoningText(record);
+      if (reasoningText !== undefined) {
+        const reasoningEventId = `${eventId}:r`;
         result.push({
-          id: eventId,
-          nativeEventId,
+          id: reasoningEventId,
+          nativeEventId: nativeEventId !== undefined ? `${nativeEventId}:r` : undefined,
           sequence: index,
           timestamp: grokTime(record),
-          role: roleFrom(type),
-          kind: toolCallId !== undefined ? ("tool_call" as const) : ("message" as const),
-          contentText: compactText(content),
-          contentSource: content,
-          ...(toolCallId !== undefined ? { toolCallId } : {}),
-          rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: type },
-        });
-      } else if (type === "tool_result") {
-        // Merge content into the matching ToolCall record.
-        const toolCallId = mergeToolResult(
-          sessionId,
-          eventId,
-          record,
-          toolCallsById,
-        ) ?? collectTool(eventId, record);
-        const content = grokContentProjection(record);
-        result.push({
-          id: eventId,
-          nativeEventId,
-          sequence: index,
-          timestamp: grokTime(record),
-          role: "unknown" as const,
-          kind: "tool_result" as const,
-          contentText: compactText(content),
-          contentSource: content,
-          ...(toolCallId !== undefined ? { toolCallId } : {}),
-          rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: type },
-        });
-      } else {
-        const toolCallId = collectTool(eventId, record);
-        const content = grokContentProjection(record);
-        result.push({
-          id: eventId,
-          nativeEventId,
-          sequence: index,
-          timestamp: grokTime(record),
-          role: roleFrom(type),
-          kind: grokKind(record),
-          contentText: compactText(content),
-          contentSource: content,
-          ...(toolCallId !== undefined ? { toolCallId } : {}),
-          rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: type },
+          role: "thinking" as const,
+          kind: "reasoning" as const,
+          contentText: reasoningText,
+          rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: "reasoning" },
         });
       }
-      return result;
-    }),
-    ...eventLines.map(({ value, lineNumber }, index) => {
-      const record =
-        typeof value === "object" && value !== null
-          ? (value as Record<string, unknown>)
-          : {};
-      const type = typeof record.type === "string" ? record.type : "event";
-      const eventPath = join(sessionDir, "events.jsonl");
-      const nativeEventId =
-        typeof record.id === "string" ? record.id : undefined;
-      const eventId = eventIdFor(sessionId, index, nativeEventId ?? `events:${lineNumber}`);
-      const toolCallId = collectTool(eventId, record);
+      const toolCallId =
+        collectAssistantToolCalls(sessionId, eventId, record, toolCallsById) ??
+        collectTool(eventId, record);
       const content = grokContentProjection(record);
-      return {
+      result.push({
+        id: eventId,
+        nativeEventId,
+        sequence: index,
+        timestamp: grokTime(record),
+        role: grokRole(type),
+        kind: toolCallId !== undefined ? ("tool_call" as const) : classified.kind,
+        contentText: compactText(content),
+        contentSource: content,
+        ...(toolCallId !== undefined ? { toolCallId } : {}),
+        rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: type },
+      });
+    } else if (type === "tool_result") {
+      const toolCallId =
+        mergeToolResult(sessionId, eventId, record, toolCallsById) ??
+        collectTool(eventId, record);
+      const content = grokContentProjection(record);
+      result.push({
+        id: eventId,
+        nativeEventId,
+        sequence: index,
+        timestamp: grokTime(record),
+        role: grokRole(type),
+        kind: classified.kind,
+        contentText: compactText(content),
+        contentSource: content,
+        ...(toolCallId !== undefined ? { toolCallId } : {}),
+        rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: type },
+      });
+    } else {
+      // user / system / backend_tool_call: kind comes from the classifier.
+      const toolCallId =
+        type === "backend_tool_call" ? collectTool(eventId, record) : undefined;
+      const content = grokContentProjection(record);
+      result.push({
+        id: eventId,
+        nativeEventId,
+        sequence: index,
+        timestamp: grokTime(record),
+        role: grokRole(type),
+        kind: classified.kind,
+        contentText: compactText(content),
+        contentSource: content,
+        ...(toolCallId !== undefined ? { toolCallId } : {}),
+        rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: type },
+      });
+    }
+    return result;
+  });
+
+  const sidecarEvents = eventLines.flatMap(({ value, lineNumber }, index) => {
+    const record =
+      typeof value === "object" && value !== null
+        ? (value as Record<string, unknown>)
+        : {};
+    const type = typeof record.type === "string" ? record.type : undefined;
+    const classified = toClassifyResult(classifyGrokEvent(value, decodeDiagnostics));
+    if (!classified.emit) return [];
+    const nativeEventId = typeof record.id === "string" ? record.id : undefined;
+    const eventId = eventIdFor(sessionId, index, nativeEventId ?? `events:${lineNumber}`);
+    const toolCallId = collectTool(eventId, record);
+    const content = grokContentProjection(record);
+    return [
+      {
         id: eventId,
         nativeEventId,
         sequence: chatLines.length + index,
         timestamp: grokTime(record),
         role: "unknown" as const,
-        kind: grokKind(record),
+        kind: classified.kind,
         contentText: compactText(content),
         contentSource: content,
         ...(toolCallId !== undefined ? { toolCallId } : {}),
-        rawReference: {
-          sourcePath: eventPath,
-          line: lineNumber,
-          nativeType: type,
-        },
-      };
-    }),
-    ...updateLines.map(({ value, lineNumber }, index) => {
-      const record = recordFrom(value);
-      const updatePath = join(sessionDir, "updates.jsonl");
-      const type =
-        typeof record.method === "string"
-          ? record.method
-          : typeof record.type === "string"
-            ? record.type
-            : "update";
-      const eventId = eventIdFor(sessionId, index, `updates:${lineNumber}`);
-      const toolCallId = collectTool(eventId, record);
-      const content = grokContentProjection(record);
-      return {
+        rawReference: { sourcePath: eventPath, line: lineNumber, nativeType: type ?? "event" },
+      } satisfies GrokEventDraft,
+    ];
+  });
+
+  const updateEvents = updateLines.flatMap(({ value, lineNumber }, index) => {
+    const record = recordFrom(value);
+    const classified = toClassifyResult(classifyGrokUpdate(value, decodeDiagnostics));
+    if (!classified.emit) return [];
+    const subtype = stringValue(recordFrom(recordFrom(record.params).update).sessionUpdate);
+    const innerUpdate = recordFrom(recordFrom(record.params).update);
+    const eventId = eventIdFor(sessionId, index, `updates:${lineNumber}`);
+    const toolCallId = collectTool(eventId, innerUpdate);
+    const content = grokContentProjection(innerUpdate);
+    return [
+      {
         id: eventId,
         sequence: chatLines.length + eventLines.length + index,
         timestamp: grokTime(record),
         role: "system" as const,
-        kind: grokKind(record),
+        kind: classified.kind,
         contentText: compactText(content),
         contentSource: content,
         ...(toolCallId !== undefined ? { toolCallId } : {}),
-        rawReference: { sourcePath: updatePath, line: lineNumber, nativeType: type },
-      };
-    }),
-  ];
-  return buildSession({
+        rawReference: { sourcePath: updatePath, line: lineNumber, nativeType: subtype ?? "update" },
+      } satisfies GrokEventDraft,
+    ];
+  });
+
+  const events = [...chatEvents, ...sidecarEvents, ...updateEvents];
+  const session = buildSession({
     provider: "grok",
     agentName,
     machine: options.machine,
@@ -577,9 +615,10 @@ const buildGrokSessionFromChatPath = (
     toolCalls: [...toolCallsById.values()],
     sessionEdges,
     artifacts: existsSync(hunkPath)
-      ? grokArtifacts(sessionId, sessionDir, hunkPath)
+      ? grokArtifacts(sessionId, sessionDir, hunkPath, decodeDiagnostics)
       : [],
   });
+  return { session, decodeDiagnostics };
 };
 
 async function* streamGrok(options: AdapterOptions): AsyncGenerator<AdapterStreamItem> {
@@ -624,7 +663,12 @@ async function* streamGrok(options: AdapterOptions): AsyncGenerator<AdapterStrea
       };
       if ((await options.shouldParseSession(probe)) === false) continue;
     }
-    const session = buildGrokSessionFromChatPath(chatPath, sessionsRoot, lineageMap, options);
+    const { session, decodeDiagnostics } = buildGrokSessionFromChatPath(
+      chatPath,
+      sessionsRoot,
+      lineageMap,
+      options,
+    );
     yield {
       type: "session",
       session,
@@ -638,6 +682,28 @@ async function* streamGrok(options: AdapterOptions): AsyncGenerator<AdapterStrea
       fingerprint,
     };
     sessionCount += 1;
+    // QSR-220 boundary doctrine: a malformed record or an unknown record type is
+    // a NAMED, attributable diagnostic — never a silent skip. Only true decode
+    // failures / unknown types surface here; declarative telemetry drops
+    // (`grok.drop.*`) are expected and accumulate into the diagnostics sink but
+    // do not raise an error. Ingest already continued (the session was emitted).
+    const hardFailures = decodeDiagnostics.filter(
+      (d) => d.name === GROK_DECODE_FAILED || d.name === GROK_UNKNOWN_TYPE,
+    );
+    if (hardFailures.length > 0) {
+      yield {
+        type: "diagnostic",
+        diagnostic: {
+          adapterId: grokAdapter.id,
+          provider: "grok",
+          status: "error",
+          parserConfidence: "observed",
+          rootPath: sessionsRoot,
+          message: `Dropped ${hardFailures.length} malformed/unknown grok record(s) in ${basename(sessionDir)} (fail-closed; ingest continued).`,
+          details: { sessionDir, diagnostics: hardFailures },
+        },
+      };
+    }
   }
   yield {
     type: "diagnostic",
