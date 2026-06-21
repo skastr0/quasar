@@ -309,17 +309,27 @@ describe("T1: single-agent session — user, assistant, reasoning, tool events",
 });
 
 // ---------------------------------------------------------------------------
-// T2: multi-agent session — events merged by outer time order
+// T2 (QSR-220): multi-agent session UN-MERGED into first-class sessions.
+//
+// A session dir with main + agent-0 + agent-1 must yield THREE first-class
+// sessions: the main agent (parentSessionId undefined) and each sub-agent
+// (parentSessionId === the main session's canonical id, agentName set). The
+// sub-agent canonical ids are derived from the COMPOUND native id
+// `${sessionId}/${agentId}`, so each sub is independently addressable. Events
+// are NOT merged across agents any more — each agent reads only its own wire.
 // ---------------------------------------------------------------------------
-describe("T2: multi-agent session — time-ordered merge", () => {
+describe("T2 (QSR-220): subagents become first-class sessions with lineage", () => {
   const root = join(testRoot, "t2");
   const sessionsDir = join(root, "sessions");
-  const sessionDir = join(sessionsDir, "wd_proj_ccdd3344", "session_test0003");
+  const NATIVE_SESSION_ID = "session_test0003";
+  const sessionDir = join(sessionsDir, "wd_proj_ccdd3344", NATIVE_SESSION_ID);
   const mainDir = join(sessionDir, "agents", "main");
   const agent0Dir = join(sessionDir, "agents", "agent-0");
+  const agent1Dir = join(sessionDir, "agents", "agent-1");
 
   mkdirSync(mainDir, { recursive: true });
   mkdirSync(agent0Dir, { recursive: true });
+  mkdirSync(agent1Dir, { recursive: true });
 
   writeJson(join(sessionDir, "state.json"), {
     createdAt: "2026-05-02T08:00:00.000Z",
@@ -329,19 +339,19 @@ describe("T2: multi-agent session — time-ordered merge", () => {
     agents: {
       main: { homedir: mainDir, type: "main", parentAgentId: null },
       "agent-0": { homedir: agent0Dir, type: "sub", parentAgentId: "main" },
+      "agent-1": { homedir: agent1Dir, type: "sub", parentAgentId: "main" },
     },
     custom: {},
   });
 
   writeJsonLines(join(root, "session_index.jsonl"), [
     {
-      sessionId: "session_test0003",
+      sessionId: NATIVE_SESSION_ID,
       sessionDir: sessionDir,
       workDir: "/home/user/projects/other",
     },
   ]);
 
-  // main agent: events at t=100 and t=300
   writeJsonLines(join(mainDir, "wire.jsonl"), [
     {
       type: "context.append_message",
@@ -356,47 +366,95 @@ describe("T2: multi-agent session — time-ordered merge", () => {
     },
   ]);
 
-  // agent-0: event at t=200 (interleaved between main's t=100 and t=300)
   writeJsonLines(join(agent0Dir, "wire.jsonl"), [
     {
       type: "context.append_loop_event",
-      event: { type: "content.part", part: { type: "text", text: "sub-agent result" } },
+      event: { type: "content.part", part: { type: "text", text: "agent-0 result" } },
       time: 200,
     },
   ]);
 
-  test("discovers 1 session with 3 content-bearing events", async () => {
-    const result = await kimiAdapter.read({
-      machine: MACHINE,
-      now: NOW,
-      roots: { kimi: root },
-    });
-    expect(result.sessions).toHaveLength(1);
-    const session = result.sessions[0]!;
-    const contentEvents = session.events.filter(
-      (e) => e.kind === "message" || e.kind === "preamble",
-    );
-    expect(contentEvents).toHaveLength(3);
+  writeJsonLines(join(agent1Dir, "wire.jsonl"), [
+    {
+      type: "context.append_loop_event",
+      event: { type: "content.part", part: { type: "text", text: "agent-1 result" } },
+      time: 250,
+    },
+  ]);
+
+  const read = () =>
+    kimiAdapter.read({ machine: MACHINE, now: NOW, roots: { kimi: root } });
+
+  // Replicate mapSession's projection: parentSessionId is the fromId of the
+  // canonical `subagent_of` edge (never any other edge kind).
+  const parentSessionIdOf = (session: { sessionEdges: readonly { kind: string; fromId?: string }[] }) =>
+    session.sessionEdges.find((e) => e.kind === "subagent_of")?.fromId;
+
+  test("yields 3 first-class sessions (main + agent-0 + agent-1)", async () => {
+    const result = await read();
+    expect(result.sessions).toHaveLength(3);
   });
 
-  test("events are ordered by outer time (t=100, t=200, t=300)", async () => {
-    const result = await kimiAdapter.read({
-      machine: MACHINE,
-      now: NOW,
-      roots: { kimi: root },
-    });
-    const session = result.sessions[0]!;
-    const msgEvents = session.events.filter((e) => e.kind === "message");
-    // Should be: t=100 (user), t=200 (sub-agent text), t=300 (main reply)
-    expect(msgEvents).toHaveLength(3);
-    // Each successive event has a higher or equal sequence number
-    for (let i = 1; i < msgEvents.length; i++) {
-      expect(msgEvents[i]!.sequence).toBeGreaterThan(msgEvents[i - 1]!.sequence);
-    }
-    // Content order matches time order
-    expect(msgEvents[0]!.contentText).toContain("main user message");
-    expect(msgEvents[1]!.contentText).toContain("sub-agent result");
-    expect(msgEvents[2]!.contentText).toContain("main assistant reply");
+  test("main session keyed by the unchanged native id, no parent lineage", async () => {
+    const result = await read();
+    const main = result.sessions.find((s) => s.nativeSessionId === NATIVE_SESSION_ID)!;
+    expect(main).toBeDefined();
+    expect(main.agentName).toBe("kimi-code");
+    expect(parentSessionIdOf(main)).toBeUndefined();
+  });
+
+  test("agent-0 and agent-1 are first-class sessions keyed by compound native id", async () => {
+    const result = await read();
+    const agent0 = result.sessions.find(
+      (s) => s.nativeSessionId === `${NATIVE_SESSION_ID}/agent-0`,
+    );
+    const agent1 = result.sessions.find(
+      (s) => s.nativeSessionId === `${NATIVE_SESSION_ID}/agent-1`,
+    );
+    expect(agent0).toBeDefined();
+    expect(agent1).toBeDefined();
+    // Each sub-agent session has its own distinct canonical id.
+    expect(agent0!.id).not.toBe(agent1!.id);
+  });
+
+  test("each sub-agent's parentSessionId === the main session's canonical id", async () => {
+    const result = await read();
+    const main = result.sessions.find((s) => s.nativeSessionId === NATIVE_SESSION_ID)!;
+    const agent0 = result.sessions.find(
+      (s) => s.nativeSessionId === `${NATIVE_SESSION_ID}/agent-0`,
+    )!;
+    const agent1 = result.sessions.find(
+      (s) => s.nativeSessionId === `${NATIVE_SESSION_ID}/agent-1`,
+    )!;
+    expect(parentSessionIdOf(agent0)).toBe(main.id);
+    expect(parentSessionIdOf(agent1)).toBe(main.id);
+  });
+
+  test("each sub-agent has agentName set and distinct from main", async () => {
+    const result = await read();
+    const agent0 = result.sessions.find(
+      (s) => s.nativeSessionId === `${NATIVE_SESSION_ID}/agent-0`,
+    )!;
+    const agent1 = result.sessions.find(
+      (s) => s.nativeSessionId === `${NATIVE_SESSION_ID}/agent-1`,
+    )!;
+    expect(agent0.agentName.length).toBeGreaterThan(0);
+    expect(agent1.agentName.length).toBeGreaterThan(0);
+    expect(agent0.agentName).not.toBe("kimi-code");
+    expect(agent0.agentName).not.toBe(agent1.agentName);
+  });
+
+  test("each agent reads only its own wire (no cross-agent event bleed)", async () => {
+    const result = await read();
+    const agent0 = result.sessions.find(
+      (s) => s.nativeSessionId === `${NATIVE_SESSION_ID}/agent-0`,
+    )!;
+    const texts = agent0.events.flatMap((e) =>
+      e.contentText !== undefined ? [e.contentText] : [],
+    );
+    expect(texts.some((t) => t.includes("agent-0 result"))).toBe(true);
+    expect(texts.some((t) => t.includes("main user message"))).toBe(false);
+    expect(texts.some((t) => t.includes("agent-1 result"))).toBe(false);
   });
 });
 
@@ -512,5 +570,83 @@ describe("T5: shouldParseSession gate", () => {
       shouldParseSession: () => true,
     });
     expect(result.sessions).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T6 (QSR-220): wire records are decoded fail-closed.
+//
+// A structurally-invalid wire record (valid JSON, wrong shape: no string
+// `type`) must become a NAMED diagnostic (kimi.wire.decode_failed) and be
+// dropped — it must NOT throw (the rest of the wire keeps importing) and must
+// NOT silently coerce into a half-event.
+// ---------------------------------------------------------------------------
+describe("T6 (QSR-220): malformed wire record → named diagnostic + dropped, valid records survive", () => {
+  const root = join(testRoot, "t6");
+  const sessionsDir = join(root, "sessions");
+  const sessionDir = join(sessionsDir, "wd_proj_decode", "session_test0006");
+  const agentDir = join(sessionDir, "agents", "main");
+
+  mkdirSync(agentDir, { recursive: true });
+
+  writeJson(join(sessionDir, "state.json"), {
+    createdAt: "2026-05-05T08:00:00.000Z",
+    updatedAt: "2026-05-05T08:00:00.000Z",
+    title: "Decode Session",
+    isCustomTitle: true,
+    agents: { main: { homedir: agentDir, type: "main", parentAgentId: null } },
+    custom: {},
+  });
+
+  writeJsonLines(join(root, "session_index.jsonl"), [
+    { sessionId: "session_test0006", sessionDir: sessionDir, workDir: "/home/user/decode" },
+  ]);
+
+  // Line 1: valid. Line 2: valid JSON but missing the load-bearing string `type`
+  // (fails the boundary schema). Line 3: `type` present but not a string. Line 4:
+  // valid again — must survive the drops on lines 2 and 3.
+  writeJsonLines(join(agentDir, "wire.jsonl"), [
+    {
+      type: "context.append_message",
+      message: { role: "user", content: [{ type: "text", text: "before the garbage" }] },
+      origin: { kind: "user" },
+      time: 1000,
+    },
+    { notAType: "garbage", time: 2000 },
+    { type: 42, time: 3000 },
+    {
+      type: "context.append_loop_event",
+      event: { type: "content.part", part: { type: "text", text: "after the garbage" } },
+      time: 4000,
+    },
+  ]);
+
+  const read = () =>
+    kimiAdapter.read({ machine: MACHINE, now: NOW, roots: { kimi: root } });
+
+  test("emits a named kimi.wire.decode_failed diagnostic", async () => {
+    const result = await read();
+    const decodeDiag = result.diagnostics.filter((d) =>
+      (d.message ?? "").includes("kimi.wire.decode_failed"),
+    );
+    expect(decodeDiag.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("valid records survive the dropped garbage", async () => {
+    const result = await read();
+    expect(result.sessions).toHaveLength(1);
+    const session = result.sessions[0]!;
+    const texts = session.events.flatMap((e) =>
+      e.contentText !== undefined ? [e.contentText] : [],
+    );
+    expect(texts.some((t) => t.includes("before the garbage"))).toBe(true);
+    expect(texts.some((t) => t.includes("after the garbage"))).toBe(true);
+  });
+
+  test("the malformed records do not become events", async () => {
+    const result = await read();
+    const session = result.sessions[0]!;
+    // 2 valid wire lines → 2 events; the 2 garbage lines are dropped.
+    expect(session.events).toHaveLength(2);
   });
 });
