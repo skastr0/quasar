@@ -55,6 +55,26 @@ const isSubagentFile = (path: string) =>
   dirname(path).includes(`${join("subagents", "workflows")}`) ||
   /^agent-/.test(basename(path));
 
+/**
+ * Recover the parent MAIN session uuid from a subagent/workflow-agent path:
+ * `{project}/{parentMainSessionUuid}/subagents/[workflows/wf_<run>/]agent-…`.
+ * The parent uuid is the path segment immediately before the `subagents`
+ * directory. Used only as a fallback when the in-record `sessionId` is absent.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const subagentParentUuidFromPath = (path: string): string | undefined => {
+  const segments = path.split(/[\\/]/);
+  const index = segments.lastIndexOf("subagents");
+  if (index <= 0) return undefined;
+  const parent = segments[index - 1];
+  // Only accept a real session-uuid directory as the parent — never a project
+  // key (which is the dir name when a subagent file is laid out without the
+  // intervening `{parentUuid}` directory). The in-record `sessionId` is the
+  // primary source; this path fallback is uuid-shaped to avoid false parents.
+  return parent !== undefined && UUID_RE.test(parent) ? parent : undefined;
+};
+
 const firstStringField = (
   records: readonly Record<string, unknown>[],
   field: string,
@@ -359,9 +379,68 @@ const buildClaudeSessionFromFile = (
       : projectPathFromClaudeKey(projectKey);
   const nativeSessionId = claudeNativeSessionId(sourcePath, records);
   const sessionId = sessionIdFor("claude", nativeSessionId);
+  // SESSION lineage: a subagent/workflow-agent file is a FIRST-CLASS child
+  // session whose parent is the MAIN session that spawned it. The parent main
+  // session uuid is recoverable two ways — the in-record `sessionId` (which on a
+  // subagent record is the PARENT's uuid, not the child's `agentId`) and the
+  // `{parent-uuid}/subagents/...` path directory — preferring the in-record
+  // value, falling back to the path. We emit a `subagent_of` SessionEdge (the
+  // canonical pattern hermes/codex/antigravity use) so mapSession projects it
+  // onto SessionRow.parentSessionId. This was MISSING — claude was the only one
+  // of 7 harnesses emitting no subagent_of edge.
+  const subagentEdges: ClaudeEdgeDraft[] = [];
+  if (isSubagentFile(sourcePath)) {
+    const parentMainSessionUuid =
+      firstStringField(records, "sessionId") ?? subagentParentUuidFromPath(sourcePath);
+    if (parentMainSessionUuid !== undefined && parentMainSessionUuid !== nativeSessionId) {
+      const parentSessionId = sessionIdFor("claude", ClaudeSessionId(parentMainSessionUuid));
+      subagentEdges.push({
+        id: edgeIdFor(sessionId, "subagent_of", parentSessionId, sessionId),
+        kind: "subagent_of",
+        fromId: parentSessionId,
+        toId: sessionId,
+        rawReference: {
+          sourcePath,
+          nativeType: "subagent_parent_session",
+          nativeValue: parentMainSessionUuid,
+        },
+      });
+    }
+  }
   const toolCallsById = new Map<string, ClaudeToolCallDraft>();
   const usageRecords: ClaudeUsageDraft[] = [];
   const nativeUuidToEventId = new Map<string, string>();
+  // EVERY record's uuid -> parentUuid, across kept AND dropped records. The
+  // event lineage map (nativeUuidToEventId) holds only KEPT events, so a kept
+  // turn whose parentUuid points at a DROPPED record (e.g. an assistant turn
+  // whose parent is a dropped api_error/turn_duration system record) would lose
+  // its parent-event link. This full chain lets us walk up past dropped records
+  // to the NEAREST KEPT ancestor, preserving the thread (32 turns degraded in a
+  // real file before this fix).
+  const nativeUuidToParentUuid = new Map<string, string>();
+  for (const record of records) {
+    const uuid = typeof record.uuid === "string" ? record.uuid : undefined;
+    const parent = typeof record.parentUuid === "string" ? record.parentUuid : undefined;
+    if (uuid !== undefined && parent !== undefined) {
+      nativeUuidToParentUuid.set(uuid, parent);
+    }
+  }
+  /**
+   * Resolve a parentUuid to the event id of the nearest KEPT ancestor, walking
+   * up the full uuid->parentUuid chain across dropped records. Returns undefined
+   * if no ancestor was kept (the lineage genuinely terminates in dropped rows).
+   */
+  const resolveKeptAncestorEventId = (parentUuid: string): string | undefined => {
+    const seen = new Set<string>();
+    let current: string | undefined = parentUuid;
+    while (current !== undefined && !seen.has(current)) {
+      const kept = nativeUuidToEventId.get(current);
+      if (kept !== undefined) return kept;
+      seen.add(current);
+      current = nativeUuidToParentUuid.get(current);
+    }
+    return undefined;
+  };
   const parentEdges: ClaudeEdgeDraft[] = [];
   // Every record's classifier verdict — signal(kind) or drop(reason) —
   // accumulates a NAMED diagnostic on any malformed/unmodeled record. The
@@ -395,7 +474,7 @@ const buildClaudeSessionFromFile = (
     if (nativeEventId !== undefined) nativeUuidToEventId.set(nativeEventId, eventId);
     const parentUuid = typeof record.parentUuid === "string" ? record.parentUuid : undefined;
     if (parentUuid !== undefined) {
-      const parentEventId = nativeUuidToEventId.get(parentUuid);
+      const parentEventId = resolveKeptAncestorEventId(parentUuid);
       parentEdges.push({
         id: edgeIdFor(sessionId, "parent", parentUuid, nativeEventId ?? eventId),
         kind: "parent",
@@ -426,7 +505,7 @@ const buildClaudeSessionFromFile = (
       id: eventId,
       nativeEventId,
       parentEventId:
-        parentUuid === undefined ? undefined : nativeUuidToEventId.get(parentUuid) ?? parentUuid,
+        parentUuid === undefined ? undefined : resolveKeptAncestorEventId(parentUuid) ?? parentUuid,
       sequence,
       timestamp,
       role: claudeRoleFor(kind, typeof message?.role === "string" ? message.role : undefined),
@@ -450,7 +529,7 @@ const buildClaudeSessionFromFile = (
     projectPath,
     events,
     toolCalls: [...toolCallsById.values()],
-    sessionEdges: parentEdges,
+    sessionEdges: [...subagentEdges, ...parentEdges],
     usageRecords,
   });
   return { session, diagnostics };
