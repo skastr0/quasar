@@ -67,8 +67,6 @@ describe("server ops config", () => {
     expect(cli).toContain("daemon install --server https://<quasar-service-tailnet-hostname> --ingest-token <token> [--interval-seconds 60]");
     expect(cli).toContain("com.quasar.remote-ingest");
     expect(cli).toContain("already_running");
-    expect(cli).toContain("operator-worker-tick");
-    expect(cli).toContain("operator-maintain");
     expect(cli).toContain("config.json");
     expect(clientConfig).toContain("serverUrl");
     expect(clientConfig).toContain("ingestToken");

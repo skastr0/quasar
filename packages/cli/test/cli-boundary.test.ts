@@ -107,12 +107,4 @@ describe("CLI client/operator boundary", () => {
     expect(result.json.error?.details?.acceptedEnv).toEqual(["QUASAR_INGEST_TOKEN"]);
     expect(result.json.error?.details?.acceptedConfigFields).toEqual(["ingestToken"]);
   }, 15_000);
-
-  test("operator commands remain explicit and do not require a server URL", async () => {
-    const result = await runCli(["operator-workers"]);
-
-    expect(result.exitCode).toBe(0);
-    expect(result.json.ok).toBe(true);
-    expect(result.json.command).toBe("operator-workers");
-  }, 15_000);
 });

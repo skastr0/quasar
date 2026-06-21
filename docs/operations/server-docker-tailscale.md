@@ -361,11 +361,7 @@ bun run server:maintain
 3. `bun run server:status` — queue pending/leased/failed counts?
 4. `bun run server:lance` — all LanceDB tables, indexes, and unindexed rows?
 5. `bun scripts/server-ops.mjs exec -- sh -lc 'du -sh /data/quasar/*'` — disk growth sane?
-6. If jobs are leased forever after a crash, run:
-
-   ```bash
-   bun scripts/server-ops.mjs exec -- sh -lc 'cd /app && bun packages/cli/src/cli.ts operator-recover-leases'
-   ```
+6. If jobs are leased forever after a crash, restart the server (`bun run server:restart`); stale worker leases are recovered automatically by the maintenance and embedding workers.
 
 7. If search misses fresh sessions, re-run ingest from the source machine's CLI
    (`quasar ingest --provider all`), then rebuild derived search state:
