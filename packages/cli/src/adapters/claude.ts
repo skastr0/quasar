@@ -11,7 +11,6 @@ import {
   edgeIdFor,
   eventIdFor,
   homePath,
-  kindFromNative,
   logicalPathFor,
   logicalRootFor,
   numberValue,
@@ -20,7 +19,6 @@ import {
   projectToolPayloadNativeValue,
   readJsonLines,
   recordFrom,
-  roleFrom,
   scopedId,
   sessionIdFor,
   sourceFingerprintFor,
@@ -28,6 +26,9 @@ import {
   type NativeValue,
   usageIdFor,
 } from "./common";
+import { type DecodeDiagnostic, isSignal } from "./harness-schema";
+import { classifyClaudeRecord, type ClaudeKind } from "./claude-schema";
+import type { SessionRole } from "../core/schemas";
 
 const projectPathFromClaudeKey = (key: string) =>
   key.startsWith("-") ? key.replace(/^-/, "/").replaceAll("-", "/") : key;
@@ -272,12 +273,33 @@ const upsertClaudeToolCalls = (
   return eventToolCallId;
 };
 
-const claudeKindFrom = (type: string, blocks: readonly unknown[]) => {
-  if (blocks.some((block) => recordFrom(block).type === "tool_result")) return "tool_result" as const;
-  if (blocks.some((block) => recordFrom(block).type === "tool_use")) return "tool_call" as const;
-  if (type === "file-history-snapshot") return "snapshot" as const;
-  if (type === "permission-mode") return "system" as const;
-  return kindFromNative(type);
+/**
+ * Declarative kind -> role projection for a SIGNAL record. Replaces the shared
+ * `roleFrom` heuristic locally: the classifier already decided the canonical
+ * event kind, so the role follows from the message role (when present) or the
+ * kind. No "guess from a free-form type string" path remains.
+ */
+const claudeRoleFor = (
+  kind: ClaudeKind,
+  messageRole: string | undefined,
+): SessionRole => {
+  if (messageRole === "user") return "user";
+  if (messageRole === "assistant") return "assistant";
+  switch (kind) {
+    case "tool_result":
+      return "tool";
+    case "tool_call":
+      return "assistant";
+    case "reasoning":
+      return "thinking";
+    case "summary":
+    case "snapshot":
+    case "system":
+    case "lifecycle":
+      return "system";
+    default:
+      return "unknown";
+  }
 };
 
 const claudeUsageRecord = (
@@ -341,19 +363,35 @@ const buildClaudeSessionFromFile = (
   const usageRecords: ClaudeUsageDraft[] = [];
   const nativeUuidToEventId = new Map<string, string>();
   const parentEdges: ClaudeEdgeDraft[] = [];
-  const events = lines.map(({ value, lineNumber }, index) => {
+  // Every record's classifier verdict — signal(kind) or drop(reason) —
+  // accumulates a NAMED diagnostic on any malformed/unmodeled record. The
+  // boundary doctrine: a contract breach is a named diagnostic + a dropped
+  // record, never a throw and never a silent "unknown" pass-through.
+  const diagnostics: DecodeDiagnostic[] = [];
+  // Sequencing is over KEPT (signal) events only, so dropped bookkeeping does
+  // not leave gaps or claim event ids in the lineage map.
+  let sequence = 0;
+  const events = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const { value, lineNumber } = lines[index]!;
     const record =
       typeof value === "object" && value !== null
         ? (value as Record<string, unknown>)
         : {};
     const type = typeof record.type === "string" ? record.type : "unknown";
+    const decision = classifyClaudeRecord(record, diagnostics);
+    // DROP: malformed, unmodeled, or declared harness bookkeeping/telemetry.
+    // It contributes its named diagnostic (already pushed) but no event, no
+    // tool-call, no usage, and no lineage entry.
+    if (!isSignal(decision)) continue;
+    const kind = decision.kind;
     const message =
       record.message !== null && typeof record.message === "object"
         ? (record.message as Record<string, unknown>)
         : undefined;
     const content = claudeContentProjection(message, record);
     const nativeEventId = typeof record.uuid === "string" ? record.uuid : undefined;
-    const eventId = eventIdFor(sessionId, index, nativeEventId ?? lineNumber);
+    const eventId = eventIdFor(sessionId, sequence, nativeEventId ?? lineNumber);
     if (nativeEventId !== undefined) nativeUuidToEventId.set(nativeEventId, eventId);
     const parentUuid = typeof record.parentUuid === "string" ? record.parentUuid : undefined;
     if (parentUuid !== undefined) {
@@ -379,29 +417,28 @@ const buildClaudeSessionFromFile = (
     const usageRecord = claudeUsageRecord(
       sessionId,
       eventId,
-      index,
+      sequence,
       timestamp,
       message,
     );
     if (usageRecord !== undefined) usageRecords.push(usageRecord);
-    return {
+    events.push({
       id: eventId,
       nativeEventId,
       parentEventId:
         parentUuid === undefined ? undefined : nativeUuidToEventId.get(parentUuid) ?? parentUuid,
-      sequence: index,
+      sequence,
       timestamp,
-      role: roleFrom(
-        typeof message?.role === "string" ? message.role : type,
-      ),
-      kind: claudeKindFrom(type, blocks),
+      role: claudeRoleFor(kind, typeof message?.role === "string" ? message.role : undefined),
+      kind,
       contentText: compactText(content),
       contentSource: content,
       ...(toolCallId !== undefined ? { toolCallId } : {}),
       rawReference: { sourcePath, line: lineNumber, nativeType: type },
-    };
-  });
-  return buildSession({
+    });
+    sequence += 1;
+  }
+  const session = buildSession({
     provider: "claude",
     agentName: "claude-code",
     machine: options.machine,
@@ -416,6 +453,7 @@ const buildClaudeSessionFromFile = (
     sessionEdges: parentEdges,
     usageRecords,
   });
+  return { session, diagnostics };
 };
 
 async function* streamClaude(options: AdapterOptions) {
@@ -453,7 +491,7 @@ async function* streamClaude(options: AdapterOptions) {
     // sessions — they are excluded from ingest entirely.
     if (isClaudeJournalFile(path)) continue;
     const sourcePath = logicalPathFor(path, projectsRoot, logicalProjectsRoot);
-    const session = buildClaudeSessionFromFile(
+    const { session, diagnostics } = buildClaudeSessionFromFile(
       path,
       sourcePath,
       logicalProjectsRoot,
@@ -482,6 +520,22 @@ async function* streamClaude(options: AdapterOptions) {
         physicalPath: path,
       },
     };
+    // Surface every NAMED decode diagnostic from a malformed/unmodeled record
+    // in this file. Each is attributable (diagnostic name + parse failure) so a
+    // provider contract breach is visible at the boundary, never silent.
+    for (const diagnostic of diagnostics) {
+      yield {
+        type: "diagnostic" as const,
+        diagnostic: {
+          adapterId: claudeAdapter.id,
+          provider: "claude" as const,
+          status: "error" as const,
+          parserConfidence: "observed" as const,
+          rootPath: logicalProjectsRoot,
+          message: `${diagnostic.name} for ${sourcePath}: ${diagnostic.message}`,
+        },
+      };
+    }
   }
   yield {
     type: "diagnostic" as const,
