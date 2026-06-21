@@ -160,7 +160,7 @@ export const rolesFromInvokeToolCall = (args: unknown): SubagentRole[] => {
 
 /**
  * Resolve the display agentName for a child subagent: prefer the human-facing
- * `Role` ("Adversarial API Auditor"); fall back to `TypeName` when Role is
+ * `Role` ("Fabricated Audit Role"); fall back to `TypeName` when Role is
  * absent; `TypeName` is sometimes the unhelpful sentinel "self", so it is only
  * used when no Role exists. Returns undefined when neither is present.
  */
