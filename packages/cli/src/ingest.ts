@@ -319,7 +319,7 @@ export const ingestRemote = async (
 ): Promise<readonly IngestReport[]> => {
   const providers =
     options.provider === "all"
-      ? stableAdapters.map((adapter) => adapter.provider).filter((provider) => provider !== "amp")
+      ? stableAdapters.map((adapter) => adapter.provider)
       : [options.provider];
   const reports: IngestReport[] = [];
   for (const provider of providers) {
