@@ -11,6 +11,8 @@ import type { NormalizedSession, SessionEventKind, SessionRole, ToolCall, UsageR
 import {
   CODEX_SESSION_META_DECODE_FAILED,
   CodexSessionMetaSchema,
+  classifyCodexRecord,
+  type CodexClassification,
   type CodexSessionMeta,
 } from "./codex-schema";
 import { type DecodeDiagnostic, decodeOrDrop, isSignal } from "./harness-schema";
@@ -21,14 +23,12 @@ import {
   edgeIdFor,
   eventIdFor,
   homePath,
-  kindFromNative,
   logicalPathFor,
   logicalRootFor,
   numberValue,
   projectSessionNativeValue,
   projectToolPayloadNativeValue,
   recordFrom,
-  roleFrom,
   scopedId,
   sessionIdFor,
   sourceFingerprintFor,
@@ -148,71 +148,76 @@ const isInjectedWrapperMessage = (payload: CodexRecord): boolean => {
   );
 };
 
-const codexKindFrom = (
-  recordType: string,
-  payloadType: string | undefined,
-  payload: CodexRecord,
-): SessionEventKind => {
-  switch (payloadType) {
-    case "message":
-      return isInjectedWrapperMessage(payload) ? "preamble" : "message";
-    case "user_message":
-      return "message";
-    case "agent_message":
-      return payload.phase === "commentary" ? "preamble" : "message";
-    case "function_call":
-    case "local_shell_call":
-    case "custom_tool_call":
-      return "tool_call";
-    case "function_call_output":
-    case "local_shell_call_output":
-    case "custom_tool_call_output":
-      return "tool_result";
-    case "reasoning":
-      return "reasoning";
-    case "token_count":
-      return "usage";
-    case "task_started":
-    case "task_complete":
-    case "turn_aborted":
-      return "lifecycle";
-    case "compacted":
-      return "summary";
+/**
+ * Map a raw codex role string to the canonical `SessionRole`. Local to this
+ * adapter (QSR-220): the codex adapter owns its own role parsing rather than
+ * importing a shared heuristic, so the role mapping is declarative here.
+ */
+const codexRoleLiteralFrom = (value: string | undefined): SessionRole => {
+  switch (value) {
+    case "user":
+    case "assistant":
+    case "developer":
+    case "system":
+    case "tool":
+    case "thinking":
+      return value;
     default:
-      return kindFromNative(payloadType ?? recordType);
+      return "unknown";
   }
 };
 
-const codexRoleFrom = (
-  recordType: string,
+/**
+ * The declarative SIGNAL kind, refined for the two codex sub-cases that depend
+ * on projected content rather than the schema shape:
+ *  - response_item.message whose first content block opens with an injected
+ *    wrapper tag is `preamble` (harness machinery, not a human turn).
+ *  - event_msg.agent_message with `phase: "commentary"` is `preamble`.
+ * Both map to `message` in the registry; the refinement happens here because it
+ * reads the payload content, not the record's type discriminator.
+ */
+const refineCodexSignalKind = (
   payloadType: string | undefined,
   payload: CodexRecord,
+  signalKind: SessionEventKind,
+): SessionEventKind => {
+  if (signalKind !== "message") return signalKind;
+  if (payloadType === "message" && isInjectedWrapperMessage(payload)) return "preamble";
+  if (payloadType === "agent_message" && payload.phase === "commentary") return "preamble";
+  return "message";
+};
+
+/**
+ * The declarative per-record role. An explicit payload `role` (user / assistant
+ * / developer / …) always wins; otherwise the role follows the harness-mapped
+ * `kind` (the signal kind from `classifyCodexRecord`), so role and kind stay
+ * consistent without re-deriving from the native type string.
+ */
+const codexRoleFrom = (
+  payload: CodexRecord,
+  kind: SessionEventKind,
+  payloadType: string | undefined,
 ): SessionRole => {
-  const explicitRole = roleFrom(
+  const explicitRole = codexRoleLiteralFrom(
     typeof payload.role === "string" ? payload.role : undefined,
   );
   if (explicitRole !== "unknown") return explicitRole;
-  switch (payloadType) {
-    case "function_call":
-    case "local_shell_call":
-    case "custom_tool_call":
-    case "agent_message":
+  if (payloadType === "user_message") return "user";
+  if (payloadType === "agent_message") return "assistant";
+  switch (kind) {
+    case "tool_call":
       return "assistant";
-    case "function_call_output":
-    case "local_shell_call_output":
-    case "custom_tool_call_output":
+    case "tool_result":
       return "tool";
     case "reasoning":
       return "thinking";
-    case "user_message":
-      return "user";
-    case "token_count":
-    case "task_started":
-    case "task_complete":
-    case "turn_aborted":
+    case "usage":
+    case "lifecycle":
+    case "system":
+    case "summary":
       return "system";
     default:
-      return roleFrom(recordType);
+      return "unknown";
   }
 };
 
@@ -619,16 +624,16 @@ async function* streamCodexSessionFromFile(
     strict: parseOptions.strictJsonLines,
   })) {
     projectPath ??= projectPathFromSessionMeta(value);
-    // Fail-closed decode of the session_meta record (the first JSON record).
-    // A garbage session_meta becomes the NAMED diagnostic
-    // `codex.session_meta.decode_failed` + a dropped decode — never a throw,
-    // never silent coercion. Subagent lineage + agentName are projected ONLY
-    // from a successfully decoded session_meta.
+    // Fail-closed decode of the session_meta record (the first JSON record) for
+    // subagent lineage + agentName ONLY. The named diagnostic for a garbage
+    // session_meta is emitted by the unified classifier below (single source),
+    // so this block routes its decode failure into a throwaway sink to avoid a
+    // duplicate. Lineage is projected ONLY from a successfully decoded record.
     if (recordFrom(value).type === "session_meta") {
       const decision = decodeOrDrop(CodexSessionMetaSchema, value, {
         kind: "session_meta" as const,
         diagnosticName: CODEX_SESSION_META_DECODE_FAILED,
-        diagnostics: decodeDiagnostics,
+        diagnostics: [],
       });
       if (isSignal(decision)) {
         const lineage = codexSubagentLineage(decision.value);
@@ -662,10 +667,17 @@ async function* streamCodexSessionFromFile(
     const nativeType = typeof record.type === "string" ? record.type : "unknown";
     const payloadValue = record.payload;
     const payloadRecord = payloadRecordFrom(payloadValue);
-    const content = projectSessionNativeValue(payloadValue);
     const payloadType = payloadTypeFrom(payloadRecord);
-    const role = codexRoleFrom(nativeType, payloadType, payloadRecord);
-    const kind = codexKindFrom(nativeType, payloadType, payloadRecord);
+    // QSR-220: route EVERY record through the declarative fail-closed classifier.
+    // It returns a SIGNAL (kept, with a mapped SessionEventKind) or a DROP
+    // (discarded, with a NAMED reason). A schema failure or unmodeled type is a
+    // named decode diagnostic + a DROP — never a throw, never an `unknown`
+    // pass-through event. A DROP emits NO event/tool-call/usage row.
+    const classification: CodexClassification = classifyCodexRecord(value, decodeDiagnostics);
+    if (!isSignal(classification)) continue;
+    const content = projectSessionNativeValue(payloadValue);
+    const kind = refineCodexSignalKind(payloadType, payloadRecord, classification.kind);
+    const role = codexRoleFrom(payloadRecord, classification.kind, payloadType);
     const payloadCallId = callIdFromPayload(payloadRecord);
     const nativeEventId =
       typeof payloadRecord.id === "string"
@@ -847,7 +859,7 @@ async function* streamCodex(options: AdapterOptions) {
           status: "unsupported" as const,
           parserConfidence: "documented" as const,
           rootPath: scan.logicalScanRoot,
-          message: `Codex session_meta dropped (${diagnostic.name}) for ${sourcePath}.`,
+          message: `Codex record dropped (${diagnostic.name}) for ${sourcePath}.`,
           details: { error: diagnostic.message, sourcePath, physicalPath: path },
         },
       };
