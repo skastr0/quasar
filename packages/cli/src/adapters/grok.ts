@@ -2,7 +2,7 @@ import { existsSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
 import { collectAdapterStream, type AdapterStreamItem, type SessionAdapter } from "./types";
-import type { Artifact, SessionEvent, ToolCall } from "@skastr0/quasar-core";
+import type { Artifact, SessionEvent, ToolCall } from "../core/schemas";
 import {
   artifactIdFor,
   buildSession,
@@ -45,7 +45,7 @@ type GrokArtifactDraft = Omit<
 type GrokEventDraft = Omit<
   SessionEvent,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey" | "contentBlocks"
-> & { readonly contentBlocks?: readonly import("@skastr0/quasar-core").ContentBlock[]; readonly contentSource?: NativeValue };
+> & { readonly contentBlocks?: readonly import("../core/schemas").ContentBlock[]; readonly contentSource?: NativeValue };
 type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
 
 const grokSessionFingerprint = (sessionDir: string) => {

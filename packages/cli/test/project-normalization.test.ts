@@ -3,7 +3,7 @@ import { describe, expect, test } from "vitest";
 import {
   normalizeGitRemote,
   resolveProjectIdentity,
-} from "../src/project-normalization";
+} from "../src/core/project-normalization";
 
 describe("project normalization", () => {
   test("normalizes ssh and https git remotes to the same identity", () => {

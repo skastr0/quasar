@@ -12,7 +12,6 @@
   "dependencies": {
     "@effect/platform": "^0.96.1",
     "@effect/platform-bun": "^0.90.0",
-    "@skastr0/quasar-core": "workspace:*",
     "@skastr0/quasar-search": "workspace:*",
     "effect": "^3.21.2"
   },

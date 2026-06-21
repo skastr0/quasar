@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { stableCanonicalJsonHash } from "../src/hash";
+import { stableCanonicalJsonHash } from "../src/core/hash";
 
 describe("stable canonical JSON hash", () => {
   test("ignores object key order but preserves array order", () => {

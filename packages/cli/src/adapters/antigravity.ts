@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { collectAdapterStream, type AdapterStreamItem, type SessionAdapter } from "./types";
-import type { NormalizedSession, ToolCall } from "@skastr0/quasar-core";
+import type { NormalizedSession, ToolCall } from "../core/schemas";
 import {
   buildSession,
   compactText,
