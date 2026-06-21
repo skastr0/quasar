@@ -3,6 +3,8 @@ import { join } from "node:path";
 
 import { describe, expect, test } from "bun:test";
 
+import { Provider } from "../src/provider";
+
 const srcRoot = join(import.meta.dir, "..", "src");
 
 const tsFiles = (root: string): readonly string[] =>
@@ -21,5 +23,40 @@ describe("server package boundary", () => {
 
   test("does no provider history-root discovery", () => {
     expect(offenders((src) => /QUASAR_(CODEX|CLAUDE|OPENCODE|GROK|HERMES|KIMI|ANTIGRAVITY)_ROOT/.test(src))).toEqual([]);
+  });
+
+  test("exposes no provider-history command (server owns serve/worker/maintenance/search/status only)", () => {
+    // The server never scans, discovers, or parses provider histories; ingest is
+    // CLI-side only. Guard against an ingest/scan/discover command sneaking into
+    // the server's only entrypoint surface.
+    const mainSrc = readFileSync(join(srcRoot, "main.ts"), "utf8");
+    expect(/\bscan\b|\bdiscover\b|provider.?histor/i.test(mainSrc)).toBe(false);
+  });
+});
+
+describe("ingest boundary contract is locked", () => {
+  test("provider enum is exactly the seven supported providers", () => {
+    expect([...Provider.literals]).toEqual([
+      "codex",
+      "claude",
+      "opencode",
+      "grok",
+      "kimi",
+      "hermes",
+      "antigravity",
+    ]);
+  });
+
+  test("the message-role allowlist is exactly user/assistant/reasoning at the HTTP boundary", () => {
+    // The HTTP ingest validator's role allowlist is the locked boundary; if a new
+    // role is added it must be made explicit here AND in server.ts isMessageRow.
+    const serverSrc = readFileSync(join(srcRoot, "server.ts"), "utf8");
+    const match = serverSrc.match(/const roles = new Set<string>\(\[([^\]]*)\]\);/);
+    expect(match).not.toBeNull();
+    const literals = (match?.[1] ?? "")
+      .split(",")
+      .map((part) => part.trim().replace(/^["']|["']$/g, ""))
+      .filter((part) => part !== "");
+    expect(literals).toEqual(["user", "assistant", "reasoning"]);
   });
 });
