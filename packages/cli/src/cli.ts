@@ -9,7 +9,7 @@ import { Effect } from "effect";
 
 import { configuredIngestToken, configuredServerUrl, defaultClientConfigPath } from "./client-config";
 import { ingestFailureError, ingestReportPayload } from "./ingest-report";
-import { ingest, ingestRemote } from "../../local-server/src/ingest";
+import { ingestRemote } from "../../local-server/src/ingest";
 import { fail, ok, writeJson } from "../../local-server/src/json";
 import { SearchMaintenance } from "../../local-server/src/maintenance";
 import { AppRuntime } from "../../local-server/src/runtime";
@@ -379,24 +379,6 @@ switch (command) {
     }
     break;
   }
-  case "operator-ingest": {
-    const options = {
-      provider: (arg("--provider") ?? "all") as never,
-      limit: arg("--limit") === undefined ? undefined : intArg("--limit", 1),
-      force: flag("--force"),
-      ingestToken: arg("--ingest-token") ?? configuredIngestToken(),
-    };
-    const program = ingest(options).pipe(
-      Effect.flatMap((reports) => {
-        const failure = ingestFailureError(reports);
-        return failure === undefined
-          ? Effect.succeed(ingestReportPayload(reports, flag("--summary")))
-          : Effect.fail(failure);
-      }),
-    );
-    await run("operator-ingest", program);
-    break;
-  }
   case "serve": {
     serve({ port: intArg("--port", 6180), hostname: arg("--host") ?? process.env.QUASAR_LOCAL_HOST ?? "127.0.0.1" });
     break;
@@ -568,7 +550,6 @@ switch (command) {
       ok("help", {
         commands: [
           "ingest --provider all|claude|codex|opencode|hermes|grok --server https://<quasar-service-tailnet-hostname> [--limit n] [--force] [--summary]",
-          "operator-ingest --provider all|claude|codex|opencode|hermes|grok [--limit n] [--force] [--summary]",
           "daemon install --server https://<quasar-service-tailnet-hostname> --ingest-token <token> [--interval-seconds 60]",
           "daemon status",
           "daemon uninstall",

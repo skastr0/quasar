@@ -20,7 +20,6 @@ Set at least:
 - `QUASAR_PUBLISH_HOST=0.0.0.0` unless Docker can bind the Tailscale IP directly.
 - `QUASAR_LOCAL_PORT=6180`.
 - `QUASAR_INGEST_TOKEN=<long random token>`. Remote write ingest is disabled unless this is configured, and client machines must send the same token.
-- `QUASAR_*_ROOT` paths for each local history source.
 - `QUASAR_EMBEDDING_PROVIDER=synthetic` and Synthetic/Nomic profile values for bulk text embeddings.
 - `SYNTHETIC_API_KEY` in the environment or the invoking shell. `scripts/local-server-ops.mjs deploy` will also read it from the Mac mini interactive zsh environment when it is not already exported.
 
@@ -37,9 +36,6 @@ bun run local-server:logs        # follow logs
 bun run local-server:health      # lightweight health check
 bun run local-server:status      # SQLite/queue/cache status
 bun run local-server:lance       # direct LanceDB table/index inventory
-bun run local-server:ingest      # run full provider ingest inside the container
-bun run local-server:sync-tick   # cheap incremental tick for cron/launchd
-bun run local-server:sync-status # launchd schedule status
 bun run local-server:maintain    # LanceDB indexes/optimize inside container
 bun run local-server:backup      # write ./quasar-truth-backup.tar
 ```
@@ -49,7 +45,6 @@ Raw helper form:
 ```bash
 bun scripts/local-server-ops.mjs status --lance
 bun scripts/local-server-ops.mjs lance
-bun scripts/local-server-ops.mjs ingest --provider claude --limit 50
 bun scripts/local-server-ops.mjs exec -- sh -lc 'du -sh /data/quasar/*'
 ```
 
@@ -191,27 +186,18 @@ Notes for wrappers:
 - If a wrapper cannot reach `QUASAR_LOCAL_SERVER_URL`, fail closed with a connection
   error instead of falling back to stale data.
 
-## Incremental sync story
+## Keeping the server fresh
 
-Keep this simple:
+The server does not ingest provider histories. New sessions reach it only through
+CLI clients that read local history folders and POST mapped sessions over HTTP — see
+[Ingesting from another Tailscale machine](#ingesting-from-another-tailscale-machine).
 
-1. Docker keeps the server and enabled background workers alive.
-2. A host scheduler periodically runs one cheap sync tick:
-
-   ```bash
-   cd /Users/guilhermecastro/Projects/quasar
-   bun run local-server:sync-tick
-   ```
-
-3. The sync tick runs inside the container against the mounted read-only history roots:
-   - default: `operator-ingest --provider all --summary`
-   - emergency/operator override: set `QUASAR_SYNC_INGEST_LIMIT=<n>` to cap a tick while diagnosing a bad source
-
-4. Freshness repair, LanceDB optimize, and index maintenance are explicit operations, not part of the minute tick. Run `bun run local-server:maintain` after large ingests or when `local-server:status` shows queued repair/index work that is not draining.
-
-5. Embedding is not a cron shell loop. The server-owned embedding worker leases queued `embed-message` jobs, batches provider calls, uses the cache, and backs off on retryable provider limits.
-
-The scheduled tick is intentionally uncapped by default and relies on adapter `shouldParseSession` probes to skip unchanged sources before expensive parse work. It emits summary JSON so per-minute logs stay small, disables one-shot workers in the CLI process, and leaves embedding/index draining/backoff to the long-running Docker service.
+Freshness repair, LanceDB optimize, and index maintenance remain explicit server
+operations, not part of any minute tick. Run `bun run local-server:maintain` after
+large ingests or when `local-server:status` shows queued repair/index work that is
+not draining. Embedding is not a cron shell loop: the server-owned embedding worker
+leases queued `embed-message` jobs, batches provider calls, uses the cache, and backs
+off on retryable provider limits.
 
 ## Ingesting from another Tailscale machine
 
@@ -254,7 +240,6 @@ missing.
 
 Recommended schedule:
 
-- every 60 seconds: `bun run local-server:sync-tick`
 - daily or after large ingests: `bun run local-server:maintain`
 - before risky changes: `bun run local-server:backup`
 
@@ -288,14 +273,8 @@ Uninstall:
 quasar daemon uninstall
 ```
 
-The Mac mini repo-local `bun run local-server:sync-install` helper is only for
-the server host's own mounted corpus. Do not use it for remote client machines.
-
-Equivalent cron entry if launchd is not desired; replace the repo and Bun paths for the host:
-
-```cron
-* * * * * cd /path/to/quasar && /path/to/bun run local-server:sync-tick >> logs/local-server-sync.log 2>&1
-```
+The same released-CLI daemon is how the Mac mini host ingests its own corpus: it
+runs as a client that reads local histories and POSTs them to the server over HTTP.
 
 ## Worker policy
 
@@ -360,7 +339,7 @@ This writes `./quasar-truth-backup.tar` with:
 - `quasar.sqlite`, produced by SQLite `VACUUM INTO` so the snapshot is coherent while the server is running,
 - `machine.json`, so provider session IDs remain stable after restore.
 
-It intentionally does **not** archive `search.lance` by default. LanceDB is derived from SQLite message/search state and is rebuilt with `sync-tick`, server workers, and `maintain`; backing up it by default turns a truth backup into a slow multi-GB derived-index copy.
+It intentionally does **not** archive `search.lance` by default. LanceDB is derived from SQLite message/search state and is rebuilt with server workers and `maintain`; backing up it by default turns a truth backup into a slow multi-GB derived-index copy.
 
 Restore is intentionally manual because it replaces the truth store:
 
@@ -372,7 +351,6 @@ bun scripts/local-server-ops.mjs exec -- sh -lc 'rm -rf /data/quasar'
 docker compose --env-file platform/local-server/.env -f platform/local-server/compose.yaml cp ./quasar-truth-backup.tar local-server:/tmp/quasar-truth-backup.tar
 bun scripts/local-server-ops.mjs exec -- sh -lc 'mkdir -p /data/quasar && tar -xf /tmp/quasar-truth-backup.tar -C /data/quasar'
 bun run local-server:restart
-bun run local-server:sync-tick
 bun run local-server:maintain
 ```
 
@@ -389,10 +367,10 @@ bun run local-server:maintain
    bun scripts/local-server-ops.mjs exec -- sh -lc 'cd /app && bun packages/cli/src/cli.ts operator-recover-leases'
    ```
 
-7. If search misses fresh sessions, run:
+7. If search misses fresh sessions, re-run ingest from the source machine's CLI
+   (`quasar ingest --provider all`), then rebuild derived search state:
 
    ```bash
-   bun run local-server:sync-tick
    bun run local-server:maintain
    ```
 
