@@ -5,6 +5,7 @@ import {
   type SignalDecision,
   decodeOrDrop,
   drop,
+  signal,
 } from "./harness-schema";
 
 /**
@@ -144,10 +145,44 @@ export const ClaudeSystemCompactBoundarySchema = Schema.Struct({
   content: Schema.String,
 });
 
+/**
+ * The `connection` field of an api_error is EITHER null OR a transport-error
+ * struct (`{code,message,isSSLError}`). On real disk both shapes occur; the old
+ * `string|null` model made every real api_error fail decode.
+ */
+const ClaudeApiErrorConnectionSchema = Schema.NullOr(
+  Schema.Struct({
+    code: Schema.optional(Schema.NullOr(Schema.String)),
+    message: Schema.optional(Schema.NullOr(Schema.String)),
+    isSSLError: Schema.optional(Schema.Boolean),
+  }),
+);
+
+/**
+ * On real disk `error` is ALWAYS an object — never a bare string|null — shaped
+ * `{message, status?, formatted, connection, isNetworkDown, rateLimits}`.
+ * `status` is present only for HTTP errors; `connection` is null unless it is a
+ * transport failure; `rateLimits` is null unless throttled (modeled loosely as
+ * it is opaque telemetry the adapter does not read). Modeling it as a string
+ * previously made every real api_error fail decode and false-drop as
+ * `claude.system.decode_failed`.
+ */
+const ClaudeApiErrorDetailSchema = Schema.Struct({
+  message: Schema.String,
+  status: Schema.optional(Schema.Number),
+  formatted: Schema.optional(Schema.NullOr(Schema.String)),
+  connection: Schema.optional(ClaudeApiErrorConnectionSchema),
+  isNetworkDown: Schema.optional(Schema.Boolean),
+  rateLimits: Schema.optional(Schema.NullOr(Schema.Unknown)),
+});
+
 export const ClaudeSystemApiErrorSchema = Schema.Struct({
   ...SystemBase,
   subtype: Schema.Literal("api_error"),
-  error: Schema.optional(Schema.NullOr(Schema.String)),
+  error: ClaudeApiErrorDetailSchema,
+  retryInMs: Schema.optional(Schema.Number),
+  retryAttempt: Schema.optional(Schema.Number),
+  maxRetries: Schema.optional(Schema.Number),
 });
 
 export const ClaudeSystemScheduledTaskFireSchema = Schema.Struct({
@@ -230,7 +265,7 @@ export type ClaudeAttachmentSubtype =
  */
 const ATTACHMENT_VERDICT: Record<
   ClaudeAttachmentSubtype,
-  { readonly kind: "message" } | { readonly reason: string }
+  { readonly kind: "message" | "reasoning" } | { readonly reason: string }
 > = {
   // Real user/assistant-facing content → signal as a message.
   queued_command: { kind: "message" },
@@ -242,12 +277,18 @@ const ATTACHMENT_VERDICT: Record<
   skill_listing: { kind: "message" },
   invoked_skills: { kind: "message" },
   hook_success: { kind: "message" },
+  // A satisfied goal_status carries a UNIQUE assistant-authored `.reason`
+  // synthesis (a multi-paragraph justification of why the goal condition was
+  // met) preserved in NO other kept record. It is assistant reasoning, not a
+  // ping → signal as `reasoning`. (An unmet goal_status carries no synthesis,
+  // but the same kind is harmless: its content projection is the condition prose
+  // and the adapter keeps whatever prose exists.)
+  goal_status: { kind: "reasoning" },
   // Pure harness bookkeeping → drop with a named reason.
   deferred_tools_delta: { reason: "harness bookkeeping: tool-availability delta" },
   task_reminder: { reason: "harness bookkeeping: todo/task reminder injection" },
   command_permissions: { reason: "harness bookkeeping: allowed-tools permission set" },
   agent_listing_delta: { reason: "harness bookkeeping: agent-availability delta" },
-  goal_status: { reason: "harness bookkeeping: sentinel goal status ping" },
   date_change: { reason: "harness bookkeeping: wall-clock date rollover" },
   ultra_effort_enter: { reason: "harness bookkeeping: effort-mode enter marker" },
   ultra_effort_exit: { reason: "harness bookkeeping: effort-mode exit marker" },
@@ -400,7 +441,10 @@ const SYSTEM_VERDICT: Record<
   compact_boundary: { kind: "summary" },
   turn_duration: { reason: "harness telemetry: per-turn duration metric" },
   stop_hook_summary: { reason: "harness telemetry: stop-hook execution summary" },
-  api_error: { reason: "harness telemetry: provider api error/retry record" },
+  // api_error now decodes (its `error` is an object, not a string) and carries
+  // no turn content — only transport-error/retry telemetry → CLEAN named drop,
+  // NOT a false `claude.system.decode_failed`.
+  api_error: { reason: "harness telemetry: provider api error/retry record (no turn content)" },
 };
 
 /** Validate a bookkeeping record then drop it with a named reason. */
@@ -417,6 +461,36 @@ const bookkeepingDrop = <A, I>(
   });
   if (decision._tag === "drop") return decision;
   return drop(reason);
+};
+
+export const CLAUDE_QUEUE_OPERATION_DECODE_FAILED = "claude.queue_operation.decode_failed";
+
+/**
+ * queue-operation is POLYMORPHIC by `operation`:
+ *   - `enqueue` carries a UNIQUE queued-prompt `content` (the prose the user
+ *     queued while a turn was in flight) preserved in NO kept record → signal
+ *     as a `message`.
+ *   - `dequeue` is an empty pop marker (no content) → drop with a named reason.
+ * Modeling both as a blanket bookkeeping-drop was a FALSE DROP losing the
+ * queued-prompt prose.
+ */
+const classifyQueueOperation = (
+  record: unknown,
+  diagnostics?: DecodeDiagnostic[],
+): SignalDecision<unknown, ClaudeKind> => {
+  const decision = decodeOrDrop(ClaudeQueueOperationSchema, record, {
+    kind: "message" as const,
+    diagnosticName: CLAUDE_QUEUE_OPERATION_DECODE_FAILED,
+    diagnostics,
+  });
+  if (decision._tag === "drop") return decision;
+  const value = decision.value as { operation?: string | null; content?: string | null };
+  const operation = typeof value.operation === "string" ? value.operation : undefined;
+  const hasContent = typeof value.content === "string" && value.content.trim().length > 0;
+  if (operation === "enqueue" && hasContent) {
+    return signal("message", value);
+  }
+  return drop(`session ui state: prompt queue ${operation ?? "operation"} (no content)`);
 };
 
 const classifySystem = (
@@ -461,8 +535,9 @@ const classifyAttachment = (
   }
   const key = subtype as ClaudeAttachmentSubtype;
   const verdict = ATTACHMENT_VERDICT[key];
+  const kind: ClaudeKind = "kind" in verdict ? verdict.kind : ("message" as const);
   const decision = decodeOrDrop(attachmentSchema(subtype), record, {
-    kind: "message" as const,
+    kind,
     diagnosticName: CLAUDE_ATTACHMENT_DECODE_FAILED,
     diagnostics,
   });
@@ -531,7 +606,7 @@ export const classifyClaudeRecord = (
     case "permission-mode":
       return bookkeepingDrop(ClaudePermissionModeSchema, record, "session ui state: permission mode", diagnostics);
     case "queue-operation":
-      return bookkeepingDrop(ClaudeQueueOperationSchema, record, "session ui state: prompt queue operation", diagnostics);
+      return classifyQueueOperation(record, diagnostics);
     case "agent-setting":
       return bookkeepingDrop(ClaudeAgentSettingSchema, record, "session ui state: agent setting", diagnostics);
     case "agent-name":

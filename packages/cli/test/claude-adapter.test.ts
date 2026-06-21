@@ -350,10 +350,61 @@ describe("QSR-220 system subtype dispatch", () => {
     expect(d._tag === "drop" && d.reason).toContain("stop-hook");
   });
 
-  test("api_error -> drop(telemetry)", () => {
-    const rec = fromSchema(ClaudeSystemApiErrorSchema, sys("api_error", { level: "error", error: "synthetic error" }));
-    const d = classifyClaudeRecord(rec);
-    expect(d._tag === "drop" && d.reason).toContain("api error");
+  // QSR-220 FIX (finding 3): on real disk `error` is ALWAYS an object
+  // {message,status,formatted,connection,isNetworkDown,rateLimits} — never a
+  // string|null. The old schema modeled it as string and EVERY real api_error
+  // false-dropped as `claude.system.decode_failed`. With the corrected schema
+  // the record DECODES, then drops with a CLEAN named telemetry reason (it
+  // carries no turn content) — not a decode failure.
+  test("api_error (real object shape) -> decodes, drop(telemetry) NOT decode_failed", () => {
+    const diags: DecodeDiagnostic[] = [];
+    const rec = fromSchema(
+      ClaudeSystemApiErrorSchema,
+      sys("api_error", {
+        level: "error",
+        error: {
+          message: "503 synthetic upstream error",
+          status: 503,
+          formatted: "503 synthetic upstream error",
+          connection: null,
+          isNetworkDown: false,
+          rateLimits: null,
+        },
+        retryInMs: 500,
+        retryAttempt: 1,
+        maxRetries: 10,
+      }),
+    );
+    const d = classifyClaudeRecord(rec, diags);
+    expect(d._tag).toBe("drop");
+    if (d._tag === "drop") {
+      expect(d.reason).toContain("api error");
+      expect(d.reason).not.toContain("decode_failed");
+    }
+    // A real api_error must NOT raise the false decode_failed diagnostic.
+    expect(diags.some((x) => x.name === "claude.system.decode_failed")).toBe(false);
+  });
+
+  // The transport-failure variant: `connection` is a {code,message,isSSLError}
+  // object (not null). It must also decode under the corrected schema.
+  test("api_error with connection object (ECONNRESET) -> decodes + drop(telemetry)", () => {
+    const diags: DecodeDiagnostic[] = [];
+    const rec = fromSchema(
+      ClaudeSystemApiErrorSchema,
+      sys("api_error", {
+        level: "error",
+        error: {
+          message: "Connection error.",
+          formatted: "Unable to connect to API (synthetic ECONNRESET)",
+          connection: { code: "ECONNRESET", message: "synthetic socket close", isSSLError: false },
+          isNetworkDown: false,
+          rateLimits: null,
+        },
+      }),
+    );
+    const d = classifyClaudeRecord(rec, diags);
+    expect(d._tag).toBe("drop");
+    expect(diags.some((x) => x.name === "claude.system.decode_failed")).toBe(false);
   });
 
   test("unmodeled system subtype -> drop + named diagnostic (no throw)", () => {
@@ -399,7 +450,6 @@ describe("QSR-220 attachment subtype dispatch", () => {
     "task_reminder",
     "command_permissions",
     "agent_listing_delta",
-    "goal_status",
     "date_change",
     "ultra_effort_enter",
     "ultra_effort_exit",
@@ -417,6 +467,34 @@ describe("QSR-220 attachment subtype dispatch", () => {
       if (d._tag === "drop") expect(d.reason).toContain("bookkeeping");
     });
   }
+
+  // QSR-220 FIX (finding 2): a satisfied goal_status carries a UNIQUE
+  // assistant-authored `.reason` synthesis (a justification of why the goal
+  // condition was met) preserved in NO other kept record. It was a FALSE DROP;
+  // it is now signaled as `reasoning`.
+  test("goal_status (met, with assistant .reason synthesis) -> signal(reasoning)", () => {
+    const d = classifyClaudeRecord(
+      att({
+        type: "goal_status",
+        met: true,
+        condition: "synthetic goal condition prose",
+        reason: "synthetic assistant synthesis: the condition is satisfied because …",
+        iterations: 1,
+        durationMs: 1234,
+        tokens: 5678,
+      }),
+    );
+    expect(d._tag).toBe("signal");
+    if (d._tag === "signal") expect(d.kind).toBe("reasoning");
+  });
+
+  test("goal_status (unmet sentinel) -> still signal(reasoning)", () => {
+    const d = classifyClaudeRecord(
+      att({ type: "goal_status", met: false, sentinel: true, condition: "synthetic pending condition" }),
+    );
+    expect(d._tag).toBe("signal");
+    if (d._tag === "signal") expect(d.kind).toBe("reasoning");
+  });
 
   test("unmodeled attachment subtype -> drop + named diagnostic (no throw)", () => {
     const diags: DecodeDiagnostic[] = [];
@@ -451,7 +529,6 @@ describe("QSR-220 top-level type dispatch", () => {
     [ClaudeLastPromptSchema, { type: "last-prompt", sessionId: FAB.sessionId, lastPrompt: "x", leafUuid: FAB.uuid }],
     [ClaudeModeSchema, { type: "mode", sessionId: FAB.sessionId, mode: "default" }],
     [ClaudePermissionModeSchema, { type: "permission-mode", sessionId: FAB.sessionId, permissionMode: "default" }],
-    [ClaudeQueueOperationSchema, { type: "queue-operation", sessionId: FAB.sessionId, operation: "enqueue", content: "x", timestamp: FAB.ts }],
     [ClaudeAgentSettingSchema, { type: "agent-setting", sessionId: FAB.sessionId, agentSetting: {} }],
     [ClaudeAgentNameSchema, { type: "agent-name", sessionId: FAB.sessionId, agentName: "synthetic-agent" }],
   ];
@@ -464,6 +541,47 @@ describe("QSR-220 top-level type dispatch", () => {
       if (d._tag === "drop") expect(d.reason).toContain("session ui state");
     });
   }
+
+  // QSR-220 FIX (finding 1): queue-operation is POLYMORPHIC by `operation`. An
+  // `enqueue` carries a UNIQUE queued-prompt `content` (the prose the user typed
+  // while a turn was in flight) preserved in NO kept record — it was a FALSE
+  // DROP and is now signaled as a message. A `dequeue` is an empty pop marker
+  // (no content) and stays a named drop.
+  test("queue-operation enqueue (with content) -> signal(message)", () => {
+    const rec = fromSchema(ClaudeQueueOperationSchema, {
+      type: "queue-operation",
+      sessionId: FAB.sessionId,
+      operation: "enqueue",
+      content: "synthetic queued prompt while the turn was in flight",
+      timestamp: FAB.ts,
+    });
+    const d = classifyClaudeRecord(rec);
+    expect(d._tag).toBe("signal");
+    if (d._tag === "signal") expect(d.kind).toBe("message");
+  });
+
+  test("queue-operation dequeue (empty) -> drop(session ui state)", () => {
+    const rec = fromSchema(ClaudeQueueOperationSchema, {
+      type: "queue-operation",
+      sessionId: FAB.sessionId,
+      operation: "dequeue",
+      timestamp: FAB.ts,
+    });
+    const d = classifyClaudeRecord(rec);
+    expect(d._tag).toBe("drop");
+    if (d._tag === "drop") expect(d.reason).toContain("session ui state");
+  });
+
+  test("queue-operation enqueue WITHOUT content -> drop (no prose to preserve)", () => {
+    const rec = fromSchema(ClaudeQueueOperationSchema, {
+      type: "queue-operation",
+      sessionId: FAB.sessionId,
+      operation: "enqueue",
+      timestamp: FAB.ts,
+    });
+    const d = classifyClaudeRecord(rec);
+    expect(d._tag).toBe("drop");
+  });
 
   test("unmodeled top-level type -> drop + named diagnostic (no throw)", () => {
     const diags: DecodeDiagnostic[] = [];
@@ -573,5 +691,101 @@ describe("QSR-220 end-to-end through the adapter", () => {
     const assistantEvent = session.events.find((e) => e.nativeEventId === "a2")!;
     expect(userEvent).toBeDefined();
     expect(assistantEvent.parentEventId).toBe(userEvent.id);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// QSR-220 FIX (finding 4): a kept turn whose parentUuid points DIRECTLY at a
+// DROPPED record must still resolve to the nearest kept ancestor — the uuid map
+// previously registered only KEPT events, so the link was lost (32 turns
+// degraded in a real file). Here the assistant's parent is the dropped
+// telemetry record, whose own parent is the kept user turn.
+// ---------------------------------------------------------------------------
+describe("QSR-220 lineage: parent points at a DROPPED record -> nearest kept ancestor", () => {
+  const root = mkdtempSync(join(tmpdir(), "quasar-claude-lineage-"));
+  afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+  const SID = "deadbeef-0000-4000-8000-0000000000aa";
+  const projectDir = join(root, "projects", "-Users-fixtureuser-fixtureapp");
+  mkdirSync(projectDir, { recursive: true });
+
+  const records = [
+    // kept user turn
+    { type: "user", sessionId: SID, uuid: "uA", message: { role: "user", content: [{ type: "text", text: "syn root" }] } },
+    // DROPPED telemetry whose parent is the kept user turn
+    { type: "system", sessionId: SID, uuid: "sDrop", parentUuid: "uA", subtype: "turn_duration", durationMs: 9 },
+    // kept assistant turn whose parent is the DROPPED record sDrop
+    { type: "assistant", sessionId: SID, uuid: "aB", parentUuid: "sDrop", message: { role: "assistant", content: [{ type: "text", text: "syn reply" }] } },
+  ];
+  writeFileSync(join(projectDir, `${SID}.jsonl`), records.map((r) => JSON.stringify(r)).join("\n"));
+
+  test("assistant whose parent is a dropped record links to the kept user turn", async () => {
+    const result = await claudeAdapter.read({ machine: MACHINE, now: NOW, roots: { claude: root } });
+    const session = result.sessions[0]!;
+    expect(session.events).toHaveLength(2);
+    const userEvent = session.events.find((e) => e.nativeEventId === "uA")!;
+    const assistantEvent = session.events.find((e) => e.nativeEventId === "aB")!;
+    // Must resolve THROUGH the dropped sDrop to the kept user event — never the
+    // raw dropped uuid and never undefined.
+    expect(assistantEvent.parentEventId).toBe(userEvent.id);
+    expect(assistantEvent.parentEventId).not.toBe("sDrop");
+    // The parent SessionEdge must carry fromEventId (resolved), not a raw fromId.
+    const edge = session.sessionEdges.find(
+      (e) => e.kind === "parent" && e.toEventId === assistantEvent.id,
+    )!;
+    expect(edge.fromEventId).toBe(userEvent.id);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// QSR-220 FIX (finding 5): a subagent/workflow-agent file is a first-class child
+// session whose parent is the main session that spawned it. claude was the only
+// harness emitting NO `subagent_of` edge. The parent main session uuid is the
+// in-record `sessionId` (which on a subagent record is the PARENT's uuid, not
+// the child's `agentId`), also recoverable from the `{parentUuid}/subagents/…`
+// path. mapSession projects `subagent_of` onto SessionRow.parentSessionId.
+// ---------------------------------------------------------------------------
+describe("QSR-220 subagent_of session lineage", () => {
+  const root = mkdtempSync(join(tmpdir(), "quasar-claude-subof-"));
+  afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+  // Parent main session uuid (also the subagent records' in-record sessionId).
+  const PARENT_UUID = "deadbeef-0000-4000-8000-0000000000b1";
+  // Child native id = the in-record agentId (NOT a uuid, NOT the filename stem).
+  const CHILD_AGENT_ID = "feedface000000c2";
+
+  const projectDir = join(root, "projects", "-Users-fixtureuser-fixtureapp");
+  // Subagent file lives under {project}/{parentUuid}/subagents/agent-<id>.jsonl
+  const subagentDir = join(projectDir, PARENT_UUID, "subagents");
+  mkdirSync(subagentDir, { recursive: true });
+
+  const subRecords = [
+    { type: "user", sessionId: PARENT_UUID, agentId: CHILD_AGENT_ID, uuid: "su1", parentUuid: null, isSidechain: true, message: { role: "user", content: "synthetic sub task" } },
+    { type: "assistant", sessionId: PARENT_UUID, agentId: CHILD_AGENT_ID, uuid: "su2", parentUuid: "su1", message: { role: "assistant", content: [{ type: "text", text: "synthetic sub result" }] } },
+  ];
+  writeFileSync(join(subagentDir, `agent-${CHILD_AGENT_ID}.jsonl`), subRecords.map((r) => JSON.stringify(r)).join("\n"));
+
+  test("subagent session emits a subagent_of edge to the parent main session", async () => {
+    const result = await claudeAdapter.read({ machine: MACHINE, now: NOW, roots: { claude: root } });
+    expect(result.sessions).toHaveLength(1);
+    const session = result.sessions[0]!;
+    const edge = session.sessionEdges.find((e) => e.kind === "subagent_of")!;
+    expect(edge).toBeDefined();
+    // toId is THIS child session; fromId is the parent main session id.
+    expect(edge.toId).toBe(session.id);
+    expect(edge.fromId).toBeDefined();
+    expect(edge.fromId).not.toBe(session.id);
+    // The parent id is byte-identical to what an independent main-session read
+    // of PARENT_UUID would produce — the canonical join key, not a raw uuid.
+    const parentMain = mkdtempSync(join(tmpdir(), "quasar-claude-subof-parent-"));
+    const parentDir = join(parentMain, "projects", "-Users-fixtureuser-fixtureapp");
+    mkdirSync(parentDir, { recursive: true });
+    writeFileSync(
+      join(parentDir, `${PARENT_UUID}.jsonl`),
+      [JSON.stringify({ type: "user", sessionId: PARENT_UUID, uuid: "p1", message: { role: "user", content: "syn" } })].join("\n"),
+    );
+    const parentResult = await claudeAdapter.read({ machine: MACHINE, now: NOW, roots: { claude: parentMain } });
+    expect(edge.fromId).toBe(parentResult.sessions[0]!.id);
+    rmSync(parentMain, { recursive: true, force: true });
   });
 });
