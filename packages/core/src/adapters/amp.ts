@@ -430,10 +430,10 @@ async function* streamAmp(options: AdapterOptions): AsyncGenerator<AdapterStream
     const sessionId = `amp:${stableWideHash(canonicalThreadURL(thread.id))}`;
     if (
       options.shouldParseSession !== undefined &&
-      options.shouldParseSession({
+      (await options.shouldParseSession({
         sessionId,
         sourceFingerprint: JSON.stringify(fingerprint),
-      }) === false
+      })) === false
     ) {
       continue;
     }

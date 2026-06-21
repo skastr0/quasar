@@ -683,7 +683,7 @@ async function* streamCodex(options: AdapterOptions) {
         sessionId: sessionIdFor("codex", options.machine.machineId, nativeSessionIdFromPath(sourcePath), sourcePath),
         sourceFingerprint: sourceFingerprintFor(stat),
       };
-      if (options.shouldParseSession(probe) === false) continue;
+      if ((await options.shouldParseSession(probe)) === false) continue;
     }
     sessionCount += 1;
     for await (const session of streamCodexSessionFromFile(

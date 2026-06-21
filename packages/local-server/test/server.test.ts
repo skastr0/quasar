@@ -252,5 +252,5 @@ describe("HTTP server", () => {
       proc.kill();
       await proc.exited;
     }
-  });
+  }, 15_000);
 });

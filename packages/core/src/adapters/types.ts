@@ -30,7 +30,7 @@ export interface AdapterDiscoverOptions {
    * build/yield for that session. Absent (the default) preserves today's
    * behavior: every discovered session is parsed and yielded.
    */
-  readonly shouldParseSession?: (probe: SessionParseProbe) => boolean;
+  readonly shouldParseSession?: (probe: SessionParseProbe) => boolean | Promise<boolean>;
 }
 
 export interface AdapterReadResult {

@@ -611,7 +611,7 @@ async function* streamKimi(options: AdapterOptions): AsyncGenerator<AdapterStrea
           sessionId: sessionIdFor("kimi", options.machine.machineId, sessionId, sessionDir),
           sourceFingerprint: sourceFingerprintFor(stat),
         };
-        if (options.shouldParseSession(probe) === false) continue;
+        if ((await options.shouldParseSession(probe)) === false) continue;
       }
     }
 

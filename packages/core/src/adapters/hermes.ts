@@ -552,12 +552,12 @@ const hermesSessionFingerprint = (rows: readonly HermesMessageRow[]): UnitFinger
  * probe's sourceFingerprint equals what the engine derives from
  * `item.fingerprint` (JSON.stringify of the same unit fingerprint).
  */
-const skipHermesSession = (
+const skipHermesSession = async (
   options: AdapterOptions,
   sessionEntry: HermesSessionRow,
   messageRows: readonly HermesMessageRow[],
   sourcePath: string,
-): boolean => {
+): Promise<boolean> => {
   if (options.shouldParseSession === undefined) return false;
   const probe = {
     sessionId: sessionIdFor(
@@ -568,7 +568,7 @@ const skipHermesSession = (
     ),
     sourceFingerprint: JSON.stringify(hermesSessionFingerprint(messageRows)),
   };
-  return options.shouldParseSession(probe) === false;
+  return (await options.shouldParseSession(probe)) === false;
 };
 
 async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStreamItem> {
@@ -618,7 +618,7 @@ async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStr
       if (db === undefined) {
         for (const sessionEntry of readSessionRowsCli(tempDb.path, options.limit, options.skip)) {
           const messageRows = readMessageRowsCli(tempDb.path, String(sessionEntry.id ?? ""));
-          if (skipHermesSession(options, sessionEntry, messageRows, logicalDbPath)) continue;
+          if (await skipHermesSession(options, sessionEntry, messageRows, logicalDbPath)) continue;
           const session = buildHermesSessionFromRows(
             logicalDbPath,
             logicalRoot ?? root,
@@ -644,7 +644,7 @@ async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStr
       } else {
         for (const sessionEntry of readSessionRows(db, options.limit, options.skip)) {
           const messageRows = readMessageRows(db, String(sessionEntry.id ?? ""));
-          if (skipHermesSession(options, sessionEntry, messageRows, logicalDbPath)) continue;
+          if (await skipHermesSession(options, sessionEntry, messageRows, logicalDbPath)) continue;
           const session = buildHermesSessionFromRows(
             logicalDbPath,
             logicalRoot ?? root,

@@ -771,11 +771,11 @@ const opencodeSessionFingerprint = (row: OpenCodeSessionRow): UnitFingerprint | 
  * fingerprint); when no per-session fingerprint exists the engine falls back
  * to a file stat the probe cannot match, so the gate is not consulted.
  */
-const skipOpenCodeSession = (
+const skipOpenCodeSession = async (
   options: AdapterOptions,
   sessionEntry: OpenCodeSessionRow,
   sourcePath: string,
-): boolean => {
+): Promise<boolean> => {
   if (options.shouldParseSession === undefined) return false;
   const fingerprint = opencodeSessionFingerprint(sessionEntry);
   if (fingerprint === undefined) return false;
@@ -783,7 +783,7 @@ const skipOpenCodeSession = (
     sessionId: sessionIdFor("opencode", options.machine.machineId, sessionEntry.id, sourcePath),
     sourceFingerprint: JSON.stringify(fingerprint),
   };
-  return options.shouldParseSession(probe) === false;
+  return (await options.shouldParseSession(probe)) === false;
 };
 
 async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterStreamItem> {
@@ -814,7 +814,7 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
       };
       let sessionCount = 0;
       for (const sessionEntry of rows) {
-        if (skipOpenCodeSession(options, sessionEntry, logicalDbPath ?? dbPath)) continue;
+        if (await skipOpenCodeSession(options, sessionEntry, logicalDbPath ?? dbPath)) continue;
         const session = buildOpenCodeSessionCli(
           tempDb.path,
           logicalDbPath ?? dbPath,
@@ -860,7 +860,7 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
     };
     let sessionCount = 0;
     for (const sessionEntry of readSessionRows(db, options.limit, options.skip)) {
-      if (skipOpenCodeSession(options, sessionEntry, logicalDbPath ?? dbPath)) continue;
+      if (await skipOpenCodeSession(options, sessionEntry, logicalDbPath ?? dbPath)) continue;
       const session = buildOpenCodeSession(
         db,
         logicalDbPath ?? dbPath,

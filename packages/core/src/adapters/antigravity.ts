@@ -491,7 +491,7 @@ async function* streamAntigravity(options: AdapterOptions): AsyncGenerator<Adapt
         sessionId: sessionIdFor("antigravity", options.machine.machineId, uuid, join(brainRoot, uuid)),
         sourceFingerprint: sourceFingerprintFor(stat),
       };
-      if (options.shouldParseSession(probe) === false) continue;
+      if ((await options.shouldParseSession(probe)) === false) continue;
     }
 
     const session = buildAntigravitySession(

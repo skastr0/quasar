@@ -136,8 +136,8 @@ curl -fsS https://<quasar-service-tailnet-hostname>/health
 
 tmp="$(mktemp -d)"
 printf '%s\n' '{"schemaVersion":3,"projectKey":"quasar","localServerUrl":"https://<quasar-service-tailnet-hostname>"}' > "$tmp/config.json"
-QUASAR_CONFIG="$tmp/config.json" npx -y @skastr0/quasar-cli@0.1.7 stats
-QUASAR_CONFIG="$tmp/config.json" npx -y @skastr0/quasar-cli@0.1.7 search \
+QUASAR_CONFIG="$tmp/config.json" npx -y @skastr0/quasar-cli@0.1.11 stats
+QUASAR_CONFIG="$tmp/config.json" npx -y @skastr0/quasar-cli@0.1.11 search \
   --query "effect server" \
   --mode fusion \
   --limit 3
@@ -159,9 +159,13 @@ Equivalent client config:
 {
   "schemaVersion": 3,
   "projectKey": "quasar",
-  "localServerUrl": "https://<quasar-service-tailnet-hostname>"
+  "localServerUrl": "https://<quasar-service-tailnet-hostname>",
+  "ingestToken": "<same-token-as-mac-mini-platform-local-server-env>"
 }
 ```
+
+Omit `ingestToken` for read/search-only agent wrappers. Include it only for
+operator write ingest and daemon installs.
 
 The `quasar` CLI mirrors the HTTP API and is safe to wrap as MCP tools. The
 serving surface is read/search only:
@@ -242,9 +246,11 @@ quasar stats
 ```
 
 You may pass `--server https://<quasar-service-tailnet-hostname>` and
-`--ingest-token <token>` instead of exporting `QUASAR_LOCAL_SERVER_URL` and
-`QUASAR_INGEST_TOKEN`. The read/search API remains reachable without this
-token; `POST /ingest/session` fails closed without it.
+`--ingest-token <token>`, or set `localServerUrl` and `ingestToken` in
+`~/.config/quasar/config.json`, instead of exporting `QUASAR_LOCAL_SERVER_URL`
+and `QUASAR_INGEST_TOKEN`. The read/search API remains reachable without this
+token; remote write ingest fails closed before provider scanning when it is
+missing.
 
 Recommended schedule:
 

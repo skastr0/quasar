@@ -95,6 +95,19 @@ describe("CLI client/operator boundary", () => {
     expect(result.json.error?.type).toBe("ConfigurationError");
   }, 15_000);
 
+  test("remote ingest fails before scanning when no ingest token is configured", async () => {
+    const result = await runCli(["ingest", "--provider", "all", "--summary"], {
+      QUASAR_LOCAL_SERVER_URL: "http://127.0.0.1:1",
+    });
+
+    expect(result.exitCode).toBe(2);
+    expect(result.json.ok).toBe(false);
+    expect(result.json.command).toBe("ingest");
+    expect(result.json.error?.type).toBe("ConfigurationError");
+    expect(result.json.error?.details?.acceptedEnv).toEqual(["QUASAR_INGEST_TOKEN"]);
+    expect(result.json.error?.details?.acceptedConfigFields).toEqual(["ingestToken"]);
+  }, 15_000);
+
   test("operator commands remain explicit and do not require a server URL", async () => {
     const result = await runCli(["operator-workers"]);
 
