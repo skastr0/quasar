@@ -1,5 +1,5 @@
 import { google, type GoogleEmbeddingModelOptions } from "@ai-sdk/google";
-import { LanceDb } from "@skastr0/quasar-search";
+import { LanceDb } from "./lancedb";
 import { embedMany } from "ai";
 import { Database } from "bun:sqlite";
 import { Effect, Layer, Schema } from "effect";

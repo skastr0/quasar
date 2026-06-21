@@ -96,7 +96,7 @@ function sh(script) {
 
 function lanceTables() {
   sh([
-    "cd /app/packages/search",
+    "cd /app/packages/server",
     "bun -e 'import * as lancedb from \"@lancedb/lancedb\"; const db = await lancedb.connect(process.env.QUASAR_SEARCH_DATA_DIR); const tables = []; for (const name of await db.tableNames()) { const table = await db.openTable(name); tables.push({ name, rows: await table.countRows(), indices: (await table.listIndices()).map((index) => ({ name: index.name, type: index.indexType, columns: index.columns, indexedRows: index.numIndexedRows, unindexedRows: index.numUnindexedRows })) }); } console.log(JSON.stringify({ ok: true, command: \"lance\", data: { tables } }, null, 2));'",
   ].join(" && "));
 }

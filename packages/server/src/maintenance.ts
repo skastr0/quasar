@@ -1,4 +1,4 @@
-import { DEFAULT_SEARCH_TABLE, LanceDb } from "@skastr0/quasar-search";
+import { DEFAULT_SEARCH_TABLE, LanceDb } from "./lancedb";
 import { Context, Effect, Layer } from "effect";
 
 import { embeddingProfileFromEnv, embeddingProfileSearchTable } from "./embeddingProfiles";

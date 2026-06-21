@@ -6,13 +6,14 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "test": "bun test",
+    "test": "LANCE_INCLUDE_VECTOR_CENTROIDS=false bun test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@effect/platform": "^0.96.1",
     "@effect/platform-bun": "^0.90.0",
-    "@skastr0/quasar-search": "workspace:*",
+    "@lancedb/lancedb": "^0.30.0",
+    "apache-arrow": "18.1.0",
     "effect": "^3.21.2"
   },
   "devDependencies": {

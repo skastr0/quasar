@@ -1,4 +1,4 @@
-import { LanceDb, makeLanceDbLayer } from "@skastr0/quasar-search";
+import { LanceDb, makeLanceDbLayer } from "./lancedb";
 import { Layer, ManagedRuntime } from "effect";
 
 import { LocalServerConfigLive } from "./config";

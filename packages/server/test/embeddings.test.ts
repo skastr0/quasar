@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { LanceDb, makeLanceDbLayer } from "@skastr0/quasar-search";
+import { LanceDb, makeLanceDbLayer } from "../src/lancedb";
 import { afterEach, describe, expect, test } from "bun:test";
 import { Effect, Layer } from "effect";
 import { createHash } from "node:crypto";

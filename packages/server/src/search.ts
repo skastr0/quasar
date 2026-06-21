@@ -5,7 +5,7 @@ import {
   type MessageSearchRow,
   type SearchHit,
   type TableStatsReport,
-} from "@skastr0/quasar-search";
+} from "./lancedb";
 import { Context, Effect, Layer } from "effect";
 
 import { embeddingProfileFromEnv, embeddingProfileSearchTable } from "./embeddingProfiles";
