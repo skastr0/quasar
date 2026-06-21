@@ -6,8 +6,21 @@ import { basename, join } from "node:path";
 import { Schema } from "effect";
 
 import { HermesSessionId, type SessionId } from "../core/identity";
-import type { Artifact, SessionEdge, SessionEventKind, ToolCall, UsageRecord } from "../core/schemas";
+import type { Artifact, SessionEdge, SessionRole, ToolCall, UsageRecord } from "../core/schemas";
 import { type DecodeDiagnostic, decodeOrDrop, isSignal } from "./harness-schema";
+import {
+  HermesCodexMessageItemsArraySchema,
+  HermesCodexReasoningItemsArraySchema,
+  HermesMessageRowSchema,
+  HermesReasoningDetailsArraySchema,
+  HermesSessionRowSchema,
+  HermesToolCallsArraySchema,
+  type HermesMessageRow,
+  type HermesSessionRow,
+  type HermesToolCall,
+  classifyMessage,
+  classifyToolCall,
+} from "./hermes-schema";
 import {
   buildSession,
   compactText,
@@ -20,8 +33,6 @@ import {
   parseJsonString,
   projectSessionNativeValue,
   projectToolPayloadNativeValue,
-  recordFrom,
-  roleFrom,
   scopedId,
   sessionIdFor,
   sourceRoot,
@@ -40,74 +51,15 @@ type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
 type HermesDatabase = NonNullable<Awaited<ReturnType<typeof maybeDatabase>>>;
 
 // ---------------------------------------------------------------------------
-// On-disk row schemas (QSR-220 fail-closed boundary)
-//
-// Grounded against the real ~/.hermes/state.db `.schema`:
-//   sessions: id TEXT PK NOT NULL, started_at REAL NOT NULL; everything else
-//             this adapter reads is nullable TEXT/REAL/INTEGER.
-//   messages: id INTEGER PK, session_id TEXT NOT NULL, role TEXT NOT NULL,
-//             timestamp REAL NOT NULL; everything else read is nullable.
-//
-// These schemas declare expectations for every field this adapter reads (the
-// boundary doctrine: every schema field declares what it admits). Rows are
-// decoded through `decodeOrDrop`, so a malformed/garbage row becomes a NAMED
-// diagnostic + a dropped record — never a throw that aborts the whole file,
-// never a silently coerced half-row. SQLite hands back numbers for INTEGER /
-// REAL and strings for TEXT; nullable columns arrive as `null`. The decode is
-// lenient about excess columns (Effect ignores excess properties by default)
-// but strict about the load-bearing identity/ordering fields.
+// On-disk record schemas + declarative classification live in hermes-schema.ts
+// (QSR-220 FULL DATA FIDELITY). This adapter imports them read-only and routes
+// EVERY provider record — session rows, message rows, and the JSON sub-records
+// inside the tool_calls / codex_* / reasoning_details TEXT columns — through
+// `decodeOrDrop`, then dispatches each via the declarative `classifyMessage` /
+// `classifyToolCall` (signal mapped-kind / drop named-reason). There is no
+// "unknown" pass-through and no shared kind/role heuristic in this file.
 // ---------------------------------------------------------------------------
 
-/** A SQLite TEXT column that may be absent or NULL. */
-const NullableText = Schema.optional(Schema.NullOr(Schema.String));
-/** A SQLite numeric (INTEGER/REAL) column that may be absent or NULL. */
-const NullableNumeric = Schema.optional(Schema.NullOr(Schema.Number));
-/** A nullable column whose stored type we do not constrain (free-form TEXT/JSON). */
-const NullableLoose = Schema.optional(Schema.NullOr(Schema.Unknown));
-
-const HermesSessionRowSchema = Schema.Struct({
-  // sessions.id is TEXT PRIMARY KEY NOT NULL — the load-bearing native id.
-  id: Schema.String,
-  // started_at is REAL NOT NULL — the ordering key.
-  started_at: Schema.Number,
-  model: NullableText,
-  parent_session_id: NullableText,
-  ended_at: NullableNumeric,
-  input_tokens: NullableNumeric,
-  output_tokens: NullableNumeric,
-  cache_read_tokens: NullableNumeric,
-  cache_write_tokens: NullableNumeric,
-  reasoning_tokens: NullableNumeric,
-  billing_provider: NullableText,
-  estimated_cost_usd: NullableNumeric,
-  actual_cost_usd: NullableNumeric,
-  title: NullableText,
-  cwd: NullableText,
-});
-
-const HermesMessageRowSchema = Schema.Struct({
-  // messages.id is INTEGER PRIMARY KEY AUTOINCREMENT — arrives as a number.
-  id: Schema.Number,
-  // session_id TEXT NOT NULL, role TEXT NOT NULL, timestamp REAL NOT NULL.
-  session_id: Schema.String,
-  role: Schema.String,
-  timestamp: Schema.Number,
-  content: NullableText,
-  tool_call_id: NullableText,
-  tool_calls: NullableLoose,
-  tool_name: NullableText,
-  token_count: NullableNumeric,
-  finish_reason: NullableText,
-  reasoning: NullableText,
-  reasoning_content: NullableText,
-  reasoning_details: NullableLoose,
-  codex_reasoning_items: NullableLoose,
-  codex_message_items: NullableLoose,
-  platform_message_id: NullableText,
-});
-
-type HermesSessionRow = typeof HermesSessionRowSchema.Type;
-type HermesMessageRow = typeof HermesMessageRowSchema.Type;
 type HermesToolCallDraft = Omit<
   ToolCall,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
@@ -197,6 +149,7 @@ export const hermesSessionWindowLimit = (limit: number | undefined) =>
 const sessionWindowSkip = (skip: number | undefined) => Math.max(0, Math.floor(skip ?? 0));
 const HERMES_SESSION_COLUMNS = [
   "id",
+  "source",
   "model",
   "parent_session_id",
   "started_at",
@@ -211,6 +164,9 @@ const HERMES_SESSION_COLUMNS = [
   "actual_cost_usd",
   "title",
   "cwd",
+  "handoff_state",
+  "handoff_platform",
+  "handoff_error",
 ].join(", ");
 // Columns are read in full — never byte caps. Provider garbage surfaces as
 // named diagnostics at the ingest layer.
@@ -311,43 +267,79 @@ const isoFromEpoch = (value: unknown) => {
   return new Date(numeric > 10_000_000_000 ? numeric : numeric * 1000).toISOString();
 };
 
-const parsedJsonField = (value: unknown): NativeValue | undefined => {
+/**
+ * Decode a JSON-as-TEXT column through a modeled Schema fail-closed. The column
+ * value is first JSON.parsed (the column stores a JSON string), then validated.
+ * A malformed payload is NOT projected as raw NativeValue — it is dropped with
+ * a named diagnostic so a garbage column never coerces silently. Returns the
+ * decoded value (typed) or undefined when absent/empty/invalid.
+ */
+const decodeJsonColumn = <A, I>(
+  schema: Schema.Schema<A, I>,
+  value: unknown,
+  diagnosticName: string,
+  diagnostics: DecodeDiagnostic[],
+): A | undefined => {
   const parsed = parseJsonString(value);
   if (parsed === undefined || parsed === null || parsed === "") return undefined;
-  return parsed as NativeValue;
+  const decision = decodeOrDrop(schema, parsed, {
+    kind: "json" as const,
+    diagnosticName,
+    diagnostics,
+  });
+  return isSignal(decision) ? decision.value : undefined;
 };
 
-const projectedReasoningFields = (message: HermesMessageRow) => ({
-  reasoningDetails: parsedJsonField(message.reasoning_details),
-  codexReasoningItems: parsedJsonField(message.codex_reasoning_items),
-  codexMessageItems: parsedJsonField(message.codex_message_items),
+/**
+ * Decode all reasoning/codex JSON sub-record columns of a message through their
+ * modeled schemas. Each is a NAMED record type; a malformed column is a named
+ * drop, never silent passthrough.
+ */
+const projectedReasoningFields = (message: HermesMessageRow, diagnostics: DecodeDiagnostic[]) => ({
+  reasoningDetails: decodeJsonColumn(
+    HermesReasoningDetailsArraySchema,
+    message.reasoning_details,
+    "hermes.reasoning_details.decode_failed",
+    diagnostics,
+  ),
+  codexReasoningItems: decodeJsonColumn(
+    HermesCodexReasoningItemsArraySchema,
+    message.codex_reasoning_items,
+    "hermes.codex_reasoning_items.decode_failed",
+    diagnostics,
+  ),
+  codexMessageItems: decodeJsonColumn(
+    HermesCodexMessageItemsArraySchema,
+    message.codex_message_items,
+    "hermes.codex_message_items.decode_failed",
+    diagnostics,
+  ),
 });
 
-const toolCallRecords = (value: unknown) => {
+/**
+ * Decode the tool_calls TEXT column into the modeled tool-call array. The column
+ * stores either a JSON array or (legacy) a single object; both are normalized to
+ * an array before validation. A malformed payload is a named drop.
+ */
+const decodedToolCalls = (value: unknown, diagnostics: DecodeDiagnostic[]): HermesToolCall[] => {
   const parsed = parseJsonString(value);
-  if (Array.isArray(parsed)) return parsed.map(recordFrom).filter((record) => Object.keys(record).length > 0);
-  const record = recordFrom(parsed);
-  return Object.keys(record).length === 0 ? [] : [record];
+  if (parsed === undefined || parsed === null || parsed === "") return [];
+  const asArray = Array.isArray(parsed) ? parsed : [parsed];
+  const decision = decodeOrDrop(HermesToolCallsArraySchema, asArray, {
+    kind: "tool_calls" as const,
+    diagnosticName: "hermes.tool_calls.decode_failed",
+    diagnostics,
+  });
+  return isSignal(decision) ? [...decision.value] : [];
 };
 
-const toolNameFromCall = (call: Record<string, unknown>) => {
-  const functionRecord = recordFrom(call.function);
-  return (
-    stringValue(functionRecord.name) ??
-    stringValue(call.name) ??
-    stringValue(call.tool_name) ??
-    stringValue(call.toolName) ??
-    "hermes_tool"
-  );
-};
-
-const toolInputFromCall = (call: Record<string, unknown>) => {
-  const functionRecord = recordFrom(call.function);
+const toolInputFromCall = (call: HermesToolCall) => {
+  const fn = call.function ?? undefined;
   return projectToolPayloadNativeValue(
-    parseJsonString(functionRecord.arguments) ??
+    parseJsonString(fn?.arguments) ??
     parseJsonString(call.arguments) ??
-    functionRecord.input ??
-    functionRecord.parameters ??
+    fn?.input ??
+    fn?.parameters ??
     call.args ??
     call.input ??
     call.params ??
@@ -355,7 +347,7 @@ const toolInputFromCall = (call: Record<string, unknown>) => {
   );
 };
 
-const nativeToolIdFromCall = (call: Record<string, unknown>, fallback: unknown) =>
+const nativeToolIdFromCall = (call: HermesToolCall, fallback: unknown) =>
   stringValue(call.id) ??
   stringValue(call.call_id) ??
   stringValue(call.tool_call_id) ??
@@ -368,27 +360,12 @@ const statusFromFinishReason = (finishReason: unknown) => {
   return value.includes("tool") ? "started" : value;
 };
 
-const messageKind = (
-  message: HermesMessageRow,
-  calls: readonly Record<string, unknown>[],
-): SessionEventKind => {
-  if (message.tool_call_id !== undefined || stringValue(message.role) === "tool") return "tool_result";
-  if (calls.length > 0) return "tool_call";
-  if (
-    stringValue(message.reasoning) !== undefined ||
-    stringValue(message.reasoning_content) !== undefined ||
-    message.reasoning_details !== undefined
-  ) {
-    return stringValue(message.content) === undefined ? "reasoning" : "message";
-  }
-  return "message";
-};
+type DecodedReasoning = ReturnType<typeof projectedReasoningFields>;
 
-const messageContent = (message: HermesMessageRow): NativeValue => {
-  const reasoning = projectedReasoningFields(message);
-  const reasoningDetails = projectSessionNativeValue(reasoning.reasoningDetails);
-  const codexReasoningItems = projectSessionNativeValue(reasoning.codexReasoningItems);
-  const codexMessageItems = projectSessionNativeValue(reasoning.codexMessageItems);
+const messageContent = (message: HermesMessageRow, reasoning: DecodedReasoning): NativeValue => {
+  const reasoningDetails = projectSessionNativeValue(reasoning.reasoningDetails as NativeValue);
+  const codexReasoningItems = projectSessionNativeValue(reasoning.codexReasoningItems as NativeValue);
+  const codexMessageItems = projectSessionNativeValue(reasoning.codexMessageItems as NativeValue);
   return {
     content: stringValue(message.content),
     reasoning: stringValue(message.reasoning),
@@ -405,22 +382,22 @@ const messageBlocks = (
   sessionId: SessionId,
   eventId: string,
   message: HermesMessageRow,
+  reasoning: DecodedReasoning,
 ) => {
-  const reasoning = projectedReasoningFields(message);
   const blockInputs: NativeValue[] = [];
   const content = stringValue(message.content);
   if (content !== undefined) blockInputs.push({ type: "text", text: content });
   const thinking = stringValue(message.reasoning_content) ?? stringValue(message.reasoning);
   if (thinking !== undefined) blockInputs.push({ type: "thinking", thinking });
-  const reasoningDetails = projectSessionNativeValue(reasoning.reasoningDetails);
+  const reasoningDetails = projectSessionNativeValue(reasoning.reasoningDetails as NativeValue);
   if (reasoningDetails !== undefined) {
     blockInputs.push({ type: "json", value: reasoningDetails, label: "reasoning_details" });
   }
-  const codexReasoningItems = projectSessionNativeValue(reasoning.codexReasoningItems);
+  const codexReasoningItems = projectSessionNativeValue(reasoning.codexReasoningItems as NativeValue);
   if (codexReasoningItems !== undefined) {
     blockInputs.push({ type: "json", value: codexReasoningItems, label: "codex_reasoning_items" });
   }
-  const codexMessageItems = projectSessionNativeValue(reasoning.codexMessageItems);
+  const codexMessageItems = projectSessionNativeValue(reasoning.codexMessageItems as NativeValue);
   if (codexMessageItems !== undefined) {
     blockInputs.push({ type: "json", value: codexMessageItems, label: "codex_message_items" });
   }
@@ -494,6 +471,7 @@ const buildHermesSessionFromRows = (
   session: HermesSessionRow,
   messages: readonly HermesMessageRow[],
   profileName: string,
+  diagnostics: DecodeDiagnostic[],
 ) => {
   const nativeSessionId = HermesSessionId(String(session.id ?? ""));
   const sessionId = sessionIdFor("hermes", nativeSessionId);
@@ -531,18 +509,40 @@ const buildHermesSessionFromRows = (
     });
   }
 
-  const events = messages.map((message, index) => {
-    const nativeEventId = String(message.id ?? index);
+  // Each message row is classified DECLARATIVELY (signal kind+role / drop named
+  // reason). A dropped message (e.g. the empty `session_meta` lifecycle marker)
+  // produces NO event — there is no "unknown" fall-through. The native-event
+  // sequence index advances only for kept (signal) events so the sequence stays
+  // dense and deterministic.
+  let sequence = 0;
+  const events = messages.flatMap((message) => {
+    const nativeEventId = String(message.id ?? sequence);
+    const calls = decodedToolCalls(message.tool_calls, diagnostics);
+    const decision = classifyMessage(message, calls);
+    if (!isSignal(decision)) {
+      // Named drop (session_meta marker, empty/unmapped) — recorded as a
+      // diagnostic so the boundary stays attributable; emits no event.
+      diagnostics.push({ name: "hermes.message.dropped", message: decision.reason });
+      return [];
+    }
+    const index = sequence;
+    sequence += 1;
     const eventId = eventIdFor(sessionId, index, nativeEventId);
-    const calls = toolCallRecords(message.tool_calls);
     let eventToolCallId: string | undefined;
+
+    // tool_call kind: assemble each modeled+classified tool call.
     for (const [callIndex, call] of calls.entries()) {
+      const callDecision = classifyToolCall(call);
+      if (!isSignal(callDecision)) {
+        diagnostics.push({ name: "hermes.toolcall.dropped", message: callDecision.reason });
+        continue;
+      }
       const nativeToolId = nativeToolIdFromCall(call, `${nativeEventId}:${callIndex}`);
       const input = toolInputFromCall(call);
       const toolCall: HermesToolCallDraft = {
         id: scopedId(sessionId, "tool", nativeToolId),
         eventId,
-        toolName: toolNameFromCall(call),
+        toolName: callDecision.value.name,
         status: statusFromFinishReason(message.finish_reason),
         ...(input !== undefined ? { input } : {}),
         startedAt: isoFromEpoch(message.timestamp),
@@ -552,6 +552,8 @@ const buildHermesSessionFromRows = (
       eventToolCallId ??= toolCall.id;
     }
 
+    // tool_result kind: a row carrying a tool_call_id back-reference completes
+    // the matching call (or synthesizes one when the call row was unseen).
     const resultNativeToolId = stringValue(message.tool_call_id);
     if (resultNativeToolId !== undefined) {
       const existing = toolCallsByNativeId.get(resultNativeToolId);
@@ -584,20 +586,25 @@ const buildHermesSessionFromRows = (
 
     const usage = messageUsage(sessionId, eventId, message, index, session);
     if (usage !== undefined) usageRecords.push(usage);
-    const content = messageContent(message);
-    return {
-      id: eventId,
-      nativeEventId,
-      sequence: index,
-      timestamp: isoFromEpoch(message.timestamp),
-      role: roleFrom(stringValue(message.role)),
-      kind: messageKind(message, calls),
-      contentText: compactText(content),
-      contentSource: content,
-      contentBlocks: messageBlocks(sessionId, eventId, message),
-      ...(eventToolCallId !== undefined ? { toolCallId: eventToolCallId } : {}),
-      rawReference: { sourcePath: dbPath, table: "messages", rowId: nativeEventId, nativeType: "message" },
-    };
+    const reasoning = projectedReasoningFields(message, diagnostics);
+    const content = messageContent(message, reasoning);
+    return [
+      {
+        id: eventId,
+        nativeEventId,
+        sequence: index,
+        timestamp: isoFromEpoch(message.timestamp),
+        // Declarative role from the classifier — NOT the shared `roleFrom`
+        // heuristic (which mislabels `session_meta` as "unknown").
+        role: decision.value.role satisfies SessionRole,
+        kind: decision.kind,
+        contentText: compactText(content),
+        contentSource: content,
+        contentBlocks: messageBlocks(sessionId, eventId, message, reasoning),
+        ...(eventToolCallId !== undefined ? { toolCallId: eventToolCallId } : {}),
+        rawReference: { sourcePath: dbPath, table: "messages", rowId: nativeEventId, nativeType: "message" },
+      },
+    ];
   });
 
   return buildSession({
@@ -740,6 +747,7 @@ async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStr
           sessionEntry,
           messageRows,
           profileName,
+          decodeDiagnostics,
         );
         yield {
           type: "session",

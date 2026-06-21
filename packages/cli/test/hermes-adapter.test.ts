@@ -4,11 +4,50 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterAll, describe, expect, test } from "bun:test";
+import { Schema } from "effect";
 
 import { sessionIdFor } from "../src/adapters/common";
 import { hermesAdapter } from "../src/adapters/hermes";
+import {
+  HermesCodexMessageItemsArraySchema,
+  HermesCodexReasoningItemsArraySchema,
+  HermesMessageRowSchema,
+  HermesReasoningDetailsArraySchema,
+  HermesSessionRowSchema,
+  HermesToolCallSchema,
+  HermesToolCallsArraySchema,
+  type HermesMessageRow,
+  type HermesToolCall,
+  classifyMessage,
+  classifyToolCall,
+} from "../src/adapters/hermes-schema";
+import { decodeOrDrop, isSignal } from "../src/adapters/harness-schema";
 import { HermesSessionId } from "../src/core/identity";
 import { mapSession } from "../src/map";
+
+// ---------------------------------------------------------------------------
+// QSR-220 FULL DATA FIDELITY — fixtures are built FROM the Effect schemas via
+// typed decoders (Schema.decodeSync), NOT hand-typed loose JSON, so a schema
+// change breaks these fixtures at construction. All identifiers below are
+// clearly FABRICATED (year 2099, hex sentinels like deadbeef/cafebabe) and have
+// been grepped against the real ~/.hermes estate to resolve to ZERO on-disk
+// rows. No real session content is copied here.
+// ---------------------------------------------------------------------------
+
+const FAB_SESSION_ID = "20990101_000000_deadbeef";
+
+/** Build a fully-typed message row through the schema (excess→omitted on disk). */
+const messageRow = (overrides: Partial<HermesMessageRow>): HermesMessageRow =>
+  Schema.decodeSync(HermesMessageRowSchema)({
+    id: 9001,
+    session_id: FAB_SESSION_ID,
+    role: "user",
+    timestamp: 4_000_000_000,
+    ...overrides,
+  });
+
+const toolCall = (raw: Record<string, unknown>): HermesToolCall =>
+  Schema.decodeSync(HermesToolCallSchema)(raw);
 
 const MACHINE = {
   machineId: "machine:test",
@@ -467,5 +506,260 @@ describe("QSR-220 regression: event-level kind=parent edge must not corrupt pare
 
     const mapped = mapSession(session as unknown as Parameters<typeof mapSession>[0], "fp");
     expect(mapped.session.parentSessionId).toBe(parentSessionId);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// QSR-220 FULL DATA FIDELITY: declarative per-record-type signal/drop dispatch.
+//
+// One test per modeled record type asserts its EXACT signal(kind+role) or
+// drop(named reason) outcome. There is NO "unknown" pass-through: every record
+// type resolves to either a mapped kind or a NAMED drop.
+// ---------------------------------------------------------------------------
+describe("QSR-220 fidelity: message classification (signal kind / drop reason)", () => {
+  test("record type: user message → signal kind=message role=user", () => {
+    const row = messageRow({ role: "user", content: "synthetic user turn" });
+    const d = classifyMessage(row, []);
+    expect(isSignal(d)).toBe(true);
+    if (isSignal(d)) {
+      expect(d.kind).toBe("message");
+      expect(d.value.role).toBe("user");
+    }
+  });
+
+  test("record type: assistant text message → signal kind=message role=assistant", () => {
+    const row = messageRow({ role: "assistant", content: "synthetic assistant reply" });
+    const d = classifyMessage(row, []);
+    expect(isSignal(d)).toBe(true);
+    if (isSignal(d)) {
+      expect(d.kind).toBe("message");
+      expect(d.value.role).toBe("assistant");
+    }
+  });
+
+  test("record type: assistant with tool_calls → signal kind=tool_call role=assistant", () => {
+    const row = messageRow({ role: "assistant", finish_reason: "tool_calls" });
+    const calls = [toolCall({ id: "call_FABRICATEDZZZ0000", function: { name: "synthetic_tool_zzz", arguments: "{}" } })];
+    const d = classifyMessage(row, calls);
+    expect(isSignal(d)).toBe(true);
+    if (isSignal(d)) {
+      expect(d.kind).toBe("tool_call");
+      expect(d.value.role).toBe("assistant");
+    }
+  });
+
+  test("record type: assistant reasoning-only (no content) → signal kind=reasoning role=assistant", () => {
+    const row = messageRow({ role: "assistant", reasoning_content: "synthetic chain of thought", content: null });
+    const d = classifyMessage(row, []);
+    expect(isSignal(d)).toBe(true);
+    if (isSignal(d)) {
+      expect(d.kind).toBe("reasoning");
+      expect(d.value.role).toBe("assistant");
+    }
+  });
+
+  test("record type: assistant reasoning WITH content → signal kind=message (reasoning is an extra block)", () => {
+    const row = messageRow({ role: "assistant", reasoning_content: "synthetic thought", content: "final answer" });
+    const d = classifyMessage(row, []);
+    expect(isSignal(d)).toBe(true);
+    if (isSignal(d)) expect(d.kind).toBe("message");
+  });
+
+  test("record type: tool role → signal kind=tool_result role=tool", () => {
+    const row = messageRow({ role: "tool", tool_call_id: "call_FABRICATEDZZZ0000", content: "synthetic tool output" });
+    const d = classifyMessage(row, []);
+    expect(isSignal(d)).toBe(true);
+    if (isSignal(d)) {
+      expect(d.kind).toBe("tool_result");
+      expect(d.value.role).toBe("tool");
+    }
+  });
+
+  test("record type: any row carrying tool_call_id → signal kind=tool_result", () => {
+    const row = messageRow({ role: "assistant", tool_call_id: "call_FABRICATEDZZZ0000" });
+    const d = classifyMessage(row, []);
+    expect(isSignal(d)).toBe(true);
+    if (isSignal(d)) expect(d.kind).toBe("tool_result");
+  });
+
+  test("record type: session_meta marker → DROP hermes.message.session_meta_marker (no unknown passthrough)", () => {
+    const row = messageRow({ role: "session_meta", content: null });
+    const d = classifyMessage(row, []);
+    expect(isSignal(d)).toBe(false);
+    if (!isSignal(d)) expect(d.reason).toBe("hermes.message.session_meta_marker");
+  });
+
+  test("record type: empty assistant (no content/tool_calls/reasoning) → DROP hermes.message.empty_assistant", () => {
+    const row = messageRow({ role: "assistant", content: null });
+    const d = classifyMessage(row, []);
+    expect(isSignal(d)).toBe(false);
+    if (!isSignal(d)) expect(d.reason).toBe("hermes.message.empty_assistant");
+  });
+
+  test("record type: empty user → DROP hermes.message.empty_user", () => {
+    const row = messageRow({ role: "user", content: null });
+    const d = classifyMessage(row, []);
+    expect(isSignal(d)).toBe(false);
+    if (!isSignal(d)) expect(d.reason).toBe("hermes.message.empty_user");
+  });
+
+  test("record type: unmapped role → DROP hermes.message.unmapped_role:<role> (never unknown)", () => {
+    const row = messageRow({ role: "definitely_not_a_real_role", content: "x" });
+    const d = classifyMessage(row, []);
+    expect(isSignal(d)).toBe(false);
+    if (!isSignal(d)) expect(d.reason).toBe("hermes.message.unmapped_role:definitely_not_a_real_role");
+  });
+});
+
+describe("QSR-220 fidelity: tool_call entry classification", () => {
+  test("record type: named tool call → signal kind=tool_call with resolved name", () => {
+    const call = toolCall({ id: "call_FABRICATEDZZZ0000", function: { name: "synthetic_tool_zzz", arguments: "{}" } });
+    const d = classifyToolCall(call);
+    expect(isSignal(d)).toBe(true);
+    if (isSignal(d)) {
+      expect(d.kind).toBe("tool_call");
+      expect(d.value.name).toBe("synthetic_tool_zzz");
+    }
+  });
+
+  test("record type: top-level-named tool call (anthropic-shaped) → signal", () => {
+    const call = toolCall({ id: "call_FABRICATEDZZZ0000", name: "synthetic_tool_zzz", input: { a: 1 } });
+    const d = classifyToolCall(call);
+    expect(isSignal(d)).toBe(true);
+    if (isSignal(d)) expect(d.value.name).toBe("synthetic_tool_zzz");
+  });
+
+  test("record type: unnamed tool call → DROP hermes.toolcall.unnamed (no invented name)", () => {
+    const call = toolCall({ id: "call_FABRICATEDZZZ0000", type: "function" });
+    const d = classifyToolCall(call);
+    expect(isSignal(d)).toBe(false);
+    if (!isSignal(d)) expect(d.reason).toBe("hermes.toolcall.unnamed");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// QSR-220 fidelity: malformed-record decode (named diagnostic + drop, no throw)
+// per major record type. Each routes through decodeOrDrop and must yield a
+// named diagnostic, NOT a throw and NOT a silently coerced half-record.
+// ---------------------------------------------------------------------------
+describe("QSR-220 fidelity: malformed records → named diagnostic + drop (no throw)", () => {
+  test("malformed session row (started_at as text) → drop hermes.session.decode_failed", () => {
+    const diags: { name: string; message: string }[] = [];
+    const d = decodeOrDrop(
+      HermesSessionRowSchema,
+      { id: FAB_SESSION_ID, source: "cli", started_at: "not-a-number" },
+      { kind: "session", diagnosticName: "hermes.session.decode_failed", diagnostics: diags },
+    );
+    expect(isSignal(d)).toBe(false);
+    expect(diags.map((x) => x.name)).toContain("hermes.session.decode_failed");
+  });
+
+  test("malformed session row (missing required source) → drop", () => {
+    const diags: { name: string; message: string }[] = [];
+    const d = decodeOrDrop(
+      HermesSessionRowSchema,
+      { id: FAB_SESSION_ID, started_at: 4_000_000_000 },
+      { kind: "session", diagnosticName: "hermes.session.decode_failed", diagnostics: diags },
+    );
+    expect(isSignal(d)).toBe(false);
+    expect(diags.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("malformed message row (role as number) → drop hermes.message.decode_failed", () => {
+    const diags: { name: string; message: string }[] = [];
+    const d = decodeOrDrop(
+      HermesMessageRowSchema,
+      { id: 9001, session_id: FAB_SESSION_ID, role: 42, timestamp: 4_000_000_000 },
+      { kind: "message", diagnosticName: "hermes.message.decode_failed", diagnostics: diags },
+    );
+    expect(isSignal(d)).toBe(false);
+    expect(diags.map((x) => x.name)).toContain("hermes.message.decode_failed");
+  });
+
+  test("malformed tool_calls array (entry is a string) → drop hermes.tool_calls.decode_failed", () => {
+    const diags: { name: string; message: string }[] = [];
+    const d = decodeOrDrop(
+      HermesToolCallsArraySchema,
+      ["this is not a tool call object"],
+      { kind: "tool_calls", diagnosticName: "hermes.tool_calls.decode_failed", diagnostics: diags },
+    );
+    expect(isSignal(d)).toBe(false);
+    expect(diags.map((x) => x.name)).toContain("hermes.tool_calls.decode_failed");
+  });
+
+  test("malformed codex_reasoning_items (summary as string) → drop", () => {
+    const diags: { name: string; message: string }[] = [];
+    const d = decodeOrDrop(
+      HermesCodexReasoningItemsArraySchema,
+      [{ type: "reasoning", id: "rs_fab", summary: "should-be-array" }],
+      { kind: "json", diagnosticName: "hermes.codex_reasoning_items.decode_failed", diagnostics: diags },
+    );
+    expect(isSignal(d)).toBe(false);
+    expect(diags.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("malformed codex_message_items (content as string) → drop", () => {
+    const diags: { name: string; message: string }[] = [];
+    const d = decodeOrDrop(
+      HermesCodexMessageItemsArraySchema,
+      [{ type: "message", role: "assistant", content: "should-be-array" }],
+      { kind: "json", diagnosticName: "hermes.codex_message_items.decode_failed", diagnostics: diags },
+    );
+    expect(isSignal(d)).toBe(false);
+    expect(diags.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("well-formed codex_message_items decodes (positive control)", () => {
+    const d = decodeOrDrop(
+      HermesCodexMessageItemsArraySchema,
+      [{ type: "message", role: "assistant", status: "completed", id: "msg_fab", phase: "final_answer", content: [{ type: "output_text", text: "HERMES_FAB_OK" }] }],
+      { kind: "json", diagnosticName: "hermes.codex_message_items.decode_failed" },
+    );
+    expect(isSignal(d)).toBe(true);
+  });
+
+  test("well-formed reasoning_details decodes (positive control for unpopulated column)", () => {
+    const d = decodeOrDrop(
+      HermesReasoningDetailsArraySchema,
+      [{ type: "reasoning.text", text: "synthetic detail" }],
+      { kind: "json", diagnosticName: "hermes.reasoning_details.decode_failed" },
+    );
+    expect(isSignal(d)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// QSR-220 fidelity E2E: a session_meta marker row in a real state.db is DROPPED
+// (becomes no event) while the surrounding user/assistant turns ingest. Proves
+// the declarative dispatch is wired end-to-end, not just unit-tested.
+// ---------------------------------------------------------------------------
+describe("QSR-220 fidelity E2E: session_meta row dropped, conversational turns kept", () => {
+  const root = join(testRoot, "qsr220-session-meta");
+  mkdirSync(root, { recursive: true });
+
+  const SID = "20990101_120000_cafebabe";
+  // user turn, session_meta marker (empty), assistant turn — only 2 survive.
+  const insertMeta = (sessionId: string) =>
+    `insert into messages (session_id, role, content, timestamp) values ('${sessionId}', 'session_meta', NULL, 1001);`;
+  const insertAssistant = (sessionId: string) =>
+    `insert into messages (session_id, role, content, timestamp) values ('${sessionId}', 'assistant', 'synthetic assistant reply', 1002);`;
+
+  execFileSync("sqlite3", [join(root, "state.db"),
+    SESSION_SCHEMA
+    + insertSession(SID, "Session-meta fixture")
+    + insertMessage("user-msg", SID)
+    + insertMeta(SID)
+    + insertAssistant(SID),
+  ]);
+
+  test("the session_meta row produces no event; the two real turns do", async () => {
+    const result = await hermesAdapter.read({ machine: MACHINE, now: NOW, roots: { hermes: root } });
+    const session = result.sessions.find((s) => s.id === sessionIdFor("hermes", HermesSessionId(SID)));
+    expect(session).toBeDefined();
+    // 3 rows in, session_meta dropped → 2 events out, none with role "unknown".
+    expect(session!.events).toHaveLength(2);
+    expect(session!.events.some((e) => e.role === "unknown")).toBe(false);
+    const roles = session!.events.map((e) => e.role).sort();
+    expect(roles).toEqual(["assistant", "user"]);
   });
 });
