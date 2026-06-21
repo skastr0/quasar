@@ -3,12 +3,13 @@ import { basename, dirname, join } from "node:path";
 
 import { collectAdapterStream, type AdapterStreamItem, type SessionAdapter } from "./types";
 import { GrokSessionId, type SessionId } from "../core/identity";
-import type { Artifact, SessionEvent, ToolCall } from "../core/schemas";
+import type { Artifact, SessionEdge, SessionEvent, ToolCall } from "../core/schemas";
 import {
   artifactIdFor,
   buildSession,
   collectFiles,
   compactText,
+  edgeIdFor,
   eventIdFor,
   homePath,
   kindFromNative,
@@ -26,6 +27,7 @@ import {
   stringValue,
   type NativeValue,
 } from "./common";
+import { decodeGrokSubagentManifest } from "./grok-schema";
 
 const decodeProjectPath = (encoded: string) => {
   try {
@@ -43,6 +45,46 @@ type GrokArtifactDraft = Omit<
   Artifact,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
 >;
+type GrokEdgeDraft = Omit<
+  SessionEdge,
+  "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
+>;
+
+/**
+ * Lineage recovered for a grok CHILD session from its parent's subagent
+ * manifest: the parent's native UUIDv7 and the subagent role. Keyed by the
+ * child's native UUIDv7.
+ */
+type GrokLineage = { readonly parentNativeId: string; readonly subagentType: string };
+type GrokLineageMap = ReadonlyMap<string, { lineage: GrokLineage; manifestPath: string }>;
+
+/**
+ * Walk every `<parent-uuid>/subagents/<child-uuid>/meta.json` under the sessions
+ * root and build a child-native-id -> lineage map. Each manifest is decoded
+ * fail-closed (`grok.record.decode_failed`): a malformed manifest is dropped
+ * with a named diagnostic and contributes no edge, never aborting discovery. The
+ * scan is deliberately UN-paged (no limit/skip): the lineage map must be
+ * complete even when the session stream itself is paged, so any child page can
+ * resolve its parent.
+ */
+const buildGrokLineageMap = (sessionsRoot: string): GrokLineageMap => {
+  const manifestPaths = collectFiles(sessionsRoot, (path) =>
+    /[/\\]subagents[/\\][^/\\]+[/\\]meta\.json$/.test(path),
+  );
+  const map = new Map<string, { lineage: GrokLineage; manifestPath: string }>();
+  for (const manifestPath of manifestPaths) {
+    const manifest = decodeGrokSubagentManifest(readJsonFile(manifestPath));
+    if (manifest === undefined) continue;
+    map.set(manifest.child_session_id, {
+      lineage: {
+        parentNativeId: manifest.parent_session_id,
+        subagentType: manifest.subagent_type,
+      },
+      manifestPath,
+    });
+  }
+  return map;
+};
 type GrokEventDraft = Omit<
   SessionEvent,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey" | "contentBlocks"
@@ -310,6 +352,7 @@ const mergeToolResult = (
 const buildGrokSessionFromChatPath = (
   chatPath: string,
   sessionsRoot: string,
+  lineageMap: GrokLineageMap,
   options: AdapterOptions,
 ) => {
   const sessionDir = dirname(chatPath);
@@ -327,8 +370,37 @@ const buildGrokSessionFromChatPath = (
 
   // Derive session metadata from summary.json.
   const generatedTitle = stringValue(summary.generated_title);
+  // Session-to-session subagent lineage (QSR-220): grok records the parent only
+  // in the parent's `subagents/<child>/meta.json` manifest. If THIS session is a
+  // known child, the subagent role names the agent (e.g. "explore") and we emit
+  // the canonical `subagent_of` edge below; otherwise it is a top-level session.
+  const lineage = lineageMap.get(basename(sessionDir))?.lineage;
   const agentName =
-    stringValue(summary.agent_name) ?? stringValue(summary.current_model_id) ?? "grok-build";
+    lineage?.subagentType
+    ?? stringValue(summary.agent_name)
+    ?? stringValue(summary.current_model_id)
+    ?? "grok-build";
+  const sessionEdges: GrokEdgeDraft[] = [];
+  if (lineage !== undefined) {
+    // Canonical lineage signal: a `subagent_of` SessionEdge whose `fromId` is the
+    // PARENT's machine-independent Quasar SessionId (so it joins to
+    // `sessions.session_id`) and whose `toId` is this child. `map.ts` projects
+    // ONLY `subagent_of` onto `SessionRow.parentSessionId`. The native parent id
+    // is preserved in `rawReference`; we never emit `parent` (event threading).
+    const parentSessionId = sessionIdFor("grok", GrokSessionId(lineage.parentNativeId));
+    sessionEdges.push({
+      id: edgeIdFor(sessionId, "subagent_of", parentSessionId, sessionId),
+      kind: "subagent_of",
+      fromId: parentSessionId,
+      toId: sessionId,
+      rawReference: {
+        sourcePath: lineageMap.get(basename(sessionDir))?.manifestPath ?? sessionDir,
+        nativeType: "subagent_manifest",
+        nativeValue: lineage.parentNativeId,
+        subagentType: lineage.subagentType,
+      },
+    });
+  }
   const gitRemote = (() => {
     const remotes = summary.git_remotes;
     if (Array.isArray(remotes) && typeof remotes[0] === "string") return remotes[0] as string;
@@ -503,6 +575,7 @@ const buildGrokSessionFromChatPath = (
     gitRemote,
     events,
     toolCalls: [...toolCallsById.values()],
+    sessionEdges,
     artifacts: existsSync(hunkPath)
       ? grokArtifacts(sessionId, sessionDir, hunkPath)
       : [],
@@ -526,6 +599,9 @@ async function* streamGrok(options: AdapterOptions): AsyncGenerator<AdapterStrea
     return;
   }
   const sessionsRoot = join(root, "sessions");
+  // Build the complete child -> parent lineage map once, UN-paged, so any paged
+  // child session can still resolve its parent's canonical id.
+  const lineageMap = buildGrokLineageMap(sessionsRoot);
   const files = collectFiles(
     sessionsRoot,
     (path) => path.endsWith("chat_history.jsonl"),
@@ -548,7 +624,7 @@ async function* streamGrok(options: AdapterOptions): AsyncGenerator<AdapterStrea
       };
       if ((await options.shouldParseSession(probe)) === false) continue;
     }
-    const session = buildGrokSessionFromChatPath(chatPath, sessionsRoot, options);
+    const session = buildGrokSessionFromChatPath(chatPath, sessionsRoot, lineageMap, options);
     yield {
       type: "session",
       session,

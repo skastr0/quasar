@@ -5,6 +5,11 @@ import { join } from "node:path";
 import { afterAll, describe, expect, test } from "bun:test";
 
 import { grokAdapter } from "../src/adapters/grok";
+import { GrokSessionId } from "../src/core/identity";
+import { sessionIdFor } from "../src/adapters/common";
+import { mapSession } from "../src/map";
+import { GrokSubagentManifest } from "../src/adapters/grok-schema";
+import { Schema } from "effect";
 
 const MACHINE = {
   machineId: "machine:test",
@@ -136,5 +141,137 @@ describe("grok adapter", () => {
     expect(second.sessions).toHaveLength(0);
     expect(secondProbes).toHaveLength(1);
     expect(secondProbes[0]).not.toBe(firstProbes[0]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// QSR-220 — first-class subagent lineage
+//
+// Grok writes a subagent CHILD as its OWN top-level session directory (own
+// UUIDv7 + own chat_history.jsonl) and records the parent relationship ONLY in
+// the parent's `<parent>/subagents/<child>/meta.json` manifest. The adapter must
+// discover those manifests and, for each child session, emit a canonical
+// `subagent_of` SessionEdge whose `fromId` is the PARENT's machine-independent
+// Quasar SessionId, plus set the child's agentName from `subagent_type`.
+// ---------------------------------------------------------------------------
+describe("QSR-220 grok subagent lineage", () => {
+  // Clearly-FABRICATED UUIDv7-shaped identifiers — never real on-disk ids.
+  const PARENT_UUID = "01900000-0000-7000-8000-00000000aaaa";
+  const CHILD_UUID = "01900000-0000-7000-8000-00000000bbbb";
+  const SUBAGENT_TYPE = "explore";
+  const PROJECT_KEY = encodeURIComponent("/repo/lineage");
+
+  const setupRoot = () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-grok-lineage-"));
+    const sessionsRoot = join(root, "sessions", PROJECT_KEY);
+    // Parent session dir: own chat_history + a subagent manifest pointing at the child.
+    const parentDir = join(sessionsRoot, PARENT_UUID);
+    mkdirSync(parentDir, { recursive: true });
+    writeJsonLines(join(parentDir, "chat_history.jsonl"), [
+      { type: "user", content: "synthetic parent prompt" },
+      { type: "assistant", content: "synthetic parent reply" },
+    ]);
+    const manifestDir = join(parentDir, "subagents", CHILD_UUID);
+    mkdirSync(manifestDir, { recursive: true });
+    writeFileSync(
+      join(manifestDir, "meta.json"),
+      JSON.stringify({
+        subagent_id: CHILD_UUID,
+        parent_session_id: PARENT_UUID,
+        child_session_id: CHILD_UUID,
+        subagent_type: SUBAGENT_TYPE,
+        description: "synthetic subagent",
+        prompt: "synthetic fabricated prompt — not real content",
+        status: "completed",
+      }),
+      "utf8",
+    );
+    // Child session dir: flat, top-level, own chat_history (ingested independently).
+    const childDir = join(sessionsRoot, CHILD_UUID);
+    mkdirSync(childDir, { recursive: true });
+    writeJsonLines(join(childDir, "chat_history.jsonl"), [
+      { type: "user", content: "synthetic child prompt" },
+      { type: "assistant", content: "synthetic child reply" },
+    ]);
+    return root;
+  };
+
+  test("child session carries subagent_of edge → parent canonical SessionId, agentName = subagent_type", async () => {
+    const root = setupRoot();
+    try {
+      const result = await grokAdapter.read({ machine: MACHINE, now: NOW, roots: { grok: root } });
+      // Both the parent and child sessions are ingested flat.
+      expect(result.sessions).toHaveLength(2);
+
+      const parentSessionId = sessionIdFor("grok", GrokSessionId(PARENT_UUID));
+      const childSessionId = sessionIdFor("grok", GrokSessionId(CHILD_UUID));
+
+      const child = result.sessions.find((s) => s.id === childSessionId);
+      const parent = result.sessions.find((s) => s.id === parentSessionId);
+      expect(child).toBeDefined();
+      expect(parent).toBeDefined();
+
+      // The child carries the canonical subagent_of edge → parent SessionId.
+      const edge = child!.sessionEdges.find((e) => e.kind === "subagent_of");
+      expect(edge).toBeDefined();
+      expect(edge!.fromId).toBe(parentSessionId);
+      expect(edge!.toId).toBe(childSessionId);
+
+      // agentName is sourced from the manifest subagent_type.
+      expect(child!.agentName).toBe(SUBAGENT_TYPE);
+
+      // End-to-end: map.ts projects subagent_of onto SessionRow.parentSessionId.
+      const mappedChild = mapSession(child!, "fp-child");
+      expect(mappedChild.session.parentSessionId).toBe(parentSessionId);
+
+      // The parent is a top-level session: no subagent_of edge, default agentName.
+      expect(parent!.sessionEdges.find((e) => e.kind === "subagent_of")).toBeUndefined();
+      const mappedParent = mapSession(parent!, "fp-parent");
+      expect(mappedParent.session.parentSessionId).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a malformed subagent manifest is dropped fail-closed (no edge), ingest continues", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-grok-lineage-bad-"));
+    try {
+      const sessionsRoot = join(root, "sessions", PROJECT_KEY);
+      const parentDir = join(sessionsRoot, PARENT_UUID);
+      mkdirSync(parentDir, { recursive: true });
+      writeJsonLines(join(parentDir, "chat_history.jsonl"), [
+        { type: "user", content: "synthetic parent prompt" },
+      ]);
+      // Manifest missing required parent_session_id + subagent_type → garbage.
+      const manifestDir = join(parentDir, "subagents", CHILD_UUID);
+      mkdirSync(manifestDir, { recursive: true });
+      writeFileSync(
+        join(manifestDir, "meta.json"),
+        JSON.stringify({ subagent_id: CHILD_UUID, child_session_id: CHILD_UUID }),
+        "utf8",
+      );
+      const childDir = join(sessionsRoot, CHILD_UUID);
+      mkdirSync(childDir, { recursive: true });
+      writeJsonLines(join(childDir, "chat_history.jsonl"), [
+        { type: "user", content: "synthetic child prompt" },
+      ]);
+
+      const result = await grokAdapter.read({ machine: MACHINE, now: NOW, roots: { grok: root } });
+      // Both sessions still ingest; the bad manifest just yields no lineage edge.
+      expect(result.sessions).toHaveLength(2);
+      const childSessionId = sessionIdFor("grok", GrokSessionId(CHILD_UUID));
+      const child = result.sessions.find((s) => s.id === childSessionId);
+      expect(child).toBeDefined();
+      expect(child!.sessionEdges.find((e) => e.kind === "subagent_of")).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the subagent manifest schema rejects records missing required lineage fields", () => {
+    const decode = Schema.decodeUnknownEither(GrokSubagentManifest);
+    expect(decode({ parent_session_id: "p", child_session_id: "c", subagent_type: "explore" })._tag).toBe("Right");
+    expect(decode({ child_session_id: "c", subagent_type: "explore" })._tag).toBe("Left");
+    expect(decode({ parent_session_id: "", child_session_id: "c", subagent_type: "explore" })._tag).toBe("Left");
   });
 });
