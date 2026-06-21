@@ -147,7 +147,7 @@ const postMappedSessionOnce = async (
   return body.data.outcome;
 };
 
-const postMappedSession = async (
+export const postMappedSession = async (
   base: string,
   mapped: MappedSession,
   options: { readonly force?: boolean; readonly ingestToken?: string },
@@ -163,7 +163,7 @@ const postMappedSession = async (
   throw new Error("remote ingest retry loop exited unexpectedly");
 };
 
-const postFingerprintProbe = async (
+export const postFingerprintProbe = async (
   base: string,
   probe: SessionParseProbe,
   options: { readonly ingestToken?: string },

@@ -200,10 +200,37 @@ describe("HTTP server", () => {
         headers: { "content-type": "application/json", "x-quasar-ingest-token": token },
         body: JSON.stringify({ session: { ...mappedSession(), messages: [] } }),
       });
+      const unknownProviderSession = mappedSession();
+      const unknownProviderResponse = await fetch(`http://127.0.0.1:${port}/ingest/session`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-quasar-ingest-token": token },
+        body: JSON.stringify({
+          session: {
+            ...unknownProviderSession,
+            session: { ...unknownProviderSession.session, provider: "gemini-cli" },
+          },
+        }),
+      });
+      const unknownRoleSession = mappedSession();
+      const unknownRoleResponse = await fetch(`http://127.0.0.1:${port}/ingest/session`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-quasar-ingest-token": token },
+        body: JSON.stringify({
+          session: {
+            ...unknownRoleSession,
+            messages: [{ ...unknownRoleSession.messages[0], role: "system" }, unknownRoleSession.messages[1]],
+          },
+        }),
+      });
+      // The boundary rejection must have written zero rows: nothing persisted.
+      const sessionsAfter = await fetch(`http://127.0.0.1:${port}/sessions`).then((r) => r.json());
 
       expect(missingToken.status).toBe(401);
       expect(malformed.status).toBe(400);
       expect(wrongShape.status).toBe(400);
+      expect(unknownProviderResponse.status).toBe(400);
+      expect(unknownRoleResponse.status).toBe(400);
+      expect(sessionsAfter.data.rows).toEqual([]);
     } finally {
       proc.kill();
       await proc.exited;
