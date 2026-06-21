@@ -76,6 +76,16 @@ export const mapSession = (
   }));
 
   const toolCalls = toolCallsForSession(session, projectKey);
+  // Canonical parent lineage: ONLY a `kind="subagent_of"` SessionEdge encodes
+  // SESSION-to-session subagent lineage, carrying the parent's canonical
+  // SessionId on `fromId`. We project it onto the persisted-and-served
+  // SessionRow.parentSessionId column — the edge mechanism never reaches SQLite.
+  // The `kind="parent"` edge is EVENT-to-event message threading (claude,
+  // opencode) whose `fromId` may be a raw message uuid — projecting it here
+  // would write a message uuid into the served session column (corruption), so
+  // it is deliberately excluded.
+  const parentEdge = session.sessionEdges.find((edge) => edge.kind === "subagent_of");
+  const parentSessionId = parentEdge?.fromId;
   return {
     project: {
       projectKey,
@@ -94,6 +104,7 @@ export const mapSession = (
       sourceFingerprint,
       host: session.host,
       identitySchemeVersion: session.identitySchemeVersion,
+      ...(parentSessionId !== undefined ? { parentSessionId } : {}),
       messageCount: messages.length,
       toolCallCount: toolCalls.length,
     },

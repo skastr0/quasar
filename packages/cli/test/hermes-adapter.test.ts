@@ -5,7 +5,10 @@ import { join } from "node:path";
 
 import { afterAll, describe, expect, test } from "bun:test";
 
+import { sessionIdFor } from "../src/adapters/common";
 import { hermesAdapter } from "../src/adapters/hermes";
+import { HermesSessionId } from "../src/core/identity";
+import { mapSession } from "../src/map";
 
 const MACHINE = {
   machineId: "machine:test",
@@ -238,5 +241,159 @@ describe("T3: empty root", () => {
     expect(result.sessions).toHaveLength(0);
     const noData = result.diagnostics.filter((d) => d.status === "no_data_found");
     expect(noData.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// QSR-220: subagent parent lineage
+//
+// A hermes session with a non-null parent_session_id is a subagent. The adapter
+// must emit a `kind="subagent_of"` SessionEdge (the purpose-built SESSION-level
+// lineage kind, NOT the event-threading `kind="parent"`) whose `fromId` is the
+// CANONICAL parent SessionId (so it joins to sessions.session_id), and
+// mapSession must project ONLY that edge onto the persisted-and-served
+// SessionRow.parentSessionId.
+// ---------------------------------------------------------------------------
+describe("QSR-220: subagent_of lineage edge → canonical parentSessionId", () => {
+  const root = join(testRoot, "qsr220-lineage");
+  mkdirSync(root, { recursive: true });
+
+  const PARENT_ID = "20200101_000000_eeeeeeee";
+  const CHILD_ID = "20200101_000000_ffffffff";
+  const insertChild = (sessionId: string, parentId: string) =>
+    `insert into sessions (id, source, title, cwd, parent_session_id, started_at, message_count) values ('${sessionId}', 'cli', 'Child subagent', NULL, '${parentId}', 1000, 1);`;
+
+  execFileSync("sqlite3", [join(root, "state.db"),
+    SESSION_SCHEMA
+    + insertSession(PARENT_ID, "Parent session")
+    + insertMessage("parent-msg", PARENT_ID)
+    + insertChild(CHILD_ID, PARENT_ID)
+    + insertMessage("child-msg", CHILD_ID),
+  ]);
+
+  test("emits a subagent_of edge with the canonical parent SessionId and maps it onto parentSessionId", async () => {
+    const result = await hermesAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { hermes: root },
+    });
+
+    const expectedParentSessionId = sessionIdFor("hermes", HermesSessionId(PARENT_ID));
+    const expectedChildSessionId = sessionIdFor("hermes", HermesSessionId(CHILD_ID));
+
+    const child = result.sessions.find((s) => s.id === expectedChildSessionId);
+    expect(child).toBeDefined();
+    // Lineage is `subagent_of`, never `parent`.
+    expect(child!.sessionEdges.some((e) => e.kind === "parent")).toBe(false);
+    const lineageEdge = child!.sessionEdges.find((e) => e.kind === "subagent_of");
+    expect(lineageEdge).toBeDefined();
+    expect(lineageEdge!.fromId).toBe(expectedParentSessionId);
+    expect(lineageEdge!.toId).toBe(expectedChildSessionId);
+
+    // mapSession projects the edge onto the persisted SessionRow column.
+    const mapped = mapSession(child!, "fp");
+    expect(mapped.session.parentSessionId).toBe(expectedParentSessionId);
+
+    // A root session has no lineage edge and no parentSessionId.
+    const parent = result.sessions.find((s) => s.id === expectedParentSessionId);
+    expect(parent).toBeDefined();
+    expect(parent!.sessionEdges.some((e) => e.kind === "subagent_of")).toBe(false);
+    expect(mapSession(parent!, "fp").session.parentSessionId).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// QSR-220 regression: event-threading `kind="parent"` must NEVER become a
+// parentSessionId.
+//
+// claude (claude.ts) and opencode (opencode.ts) emit `kind="parent"` for
+// EVENT-to-event message threading, and on forward references place a RAW
+// message uuid on `edge.fromId`. If mapSession projected any `kind="parent"`
+// edge into parentSessionId it would write a message uuid into the served
+// session column — silent corruption. mapSession must read ONLY `subagent_of`.
+// ---------------------------------------------------------------------------
+describe("QSR-220 regression: event-level kind=parent edge must not corrupt parentSessionId", () => {
+  test("a session whose only parent edge is a raw message-uuid forward reference maps to parentSessionId === undefined", () => {
+    const sessionId = sessionIdFor("hermes", HermesSessionId("20200101_000000_99999999"));
+    // The claude/opencode forward-reference shape: kind="parent", fromId is a
+    // raw message uuid (NOT a canonical SessionId), toEventId set.
+    const session = {
+      id: sessionId,
+      provider: "hermes" as const,
+      agentName: "hermes",
+      title: "Event-threaded session",
+      startedAt: NOW,
+      updatedAt: NOW,
+      sourcePath: "/tmp/state.db",
+      host: { machineId: MACHINE.machineId, hostname: MACHINE.hostname, platform: MACHINE.platform },
+      identitySchemeVersion: 1,
+      projectIdentity: {
+        projectIdentityKey: "project:profile:hermes",
+        displayName: "hermes",
+        rawPath: undefined,
+      },
+      events: [],
+      toolCalls: [],
+      usageRecords: [],
+      artifacts: [],
+      sessionEdges: [
+        {
+          id: "edge:parent:forward",
+          sessionId,
+          machineId: MACHINE.machineId,
+          provider: "hermes" as const,
+          agentName: "hermes",
+          projectIdentityKey: "project:profile:hermes",
+          kind: "parent" as const,
+          fromId: "a1b2c3d4-0000-0000-0000-000000000000", // raw MESSAGE uuid
+          toEventId: "event:0",
+        },
+      ],
+    };
+
+    // The event-threading edge must be ignored — parentSessionId stays unset.
+    const mapped = mapSession(session as unknown as Parameters<typeof mapSession>[0], "fp");
+    expect(mapped.session.parentSessionId).toBeUndefined();
+  });
+
+  test("a session with a subagent_of edge maps to the canonical parent SessionId", () => {
+    const sessionId = sessionIdFor("hermes", HermesSessionId("20200101_000000_88888888"));
+    const parentSessionId = sessionIdFor("hermes", HermesSessionId("20200101_000000_77777777"));
+    const session = {
+      id: sessionId,
+      provider: "hermes" as const,
+      agentName: "hermes",
+      title: "Subagent session",
+      startedAt: NOW,
+      updatedAt: NOW,
+      sourcePath: "/tmp/state.db",
+      host: { machineId: MACHINE.machineId, hostname: MACHINE.hostname, platform: MACHINE.platform },
+      identitySchemeVersion: 1,
+      projectIdentity: {
+        projectIdentityKey: "project:profile:hermes",
+        displayName: "hermes",
+        rawPath: undefined,
+      },
+      events: [],
+      toolCalls: [],
+      usageRecords: [],
+      artifacts: [],
+      sessionEdges: [
+        {
+          id: "edge:subagent_of:lineage",
+          sessionId,
+          machineId: MACHINE.machineId,
+          provider: "hermes" as const,
+          agentName: "hermes",
+          projectIdentityKey: "project:profile:hermes",
+          kind: "subagent_of" as const,
+          fromId: parentSessionId,
+          toId: sessionId,
+        },
+      ],
+    };
+
+    const mapped = mapSession(session as unknown as Parameters<typeof mapSession>[0], "fp");
+    expect(mapped.session.parentSessionId).toBe(parentSessionId);
   });
 });

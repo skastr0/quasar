@@ -51,6 +51,9 @@ const mappedSession = (overrides: Partial<MappedSession["session"]> = {}): Mappe
     sourceFingerprint: overrides.sourceFingerprint ?? "fingerprint-a",
     host: overrides.host ?? "host-a",
     identitySchemeVersion: overrides.identitySchemeVersion ?? 1,
+    ...(overrides.parentSessionId !== undefined
+      ? { parentSessionId: overrides.parentSessionId }
+      : {}),
     messageCount: overrides.messageCount ?? 2,
     toolCallCount: overrides.toolCallCount ?? 2,
   },
@@ -150,6 +153,32 @@ describe("LocalStore", () => {
     expect(sessions).toHaveLength(1);
     expect(sessions[0]?.host).toBe("lighthouse");
     expect(sessions[0]?.identitySchemeVersion).toBe(1);
+  });
+
+  test("QSR-220: child session round-trips parentSessionId through store + read", async () => {
+    const path = sqlitePath();
+    const sessions = await withStore(
+      path,
+      (store) =>
+        Effect.gen(function* () {
+          yield* store.upsertSession(
+            mappedSession({ sessionId: "parent-session" }),
+          );
+          yield* store.upsertSession(
+            mappedSession({
+              sessionId: "child-session",
+              parentSessionId: "parent-session",
+            }),
+          );
+          return yield* store.listSessions({ limit: 10 });
+        }),
+    );
+
+    const child = sessions.find((row) => row.sessionId === "child-session");
+    const parent = sessions.find((row) => row.sessionId === "parent-session");
+    expect(child?.parentSessionId).toBe("parent-session");
+    // Root sessions report no parent (NULL column reads back as null/undefined).
+    expect(parent?.parentSessionId ?? undefined).toBeUndefined();
   });
 
   test("lists projects for the HTTP and CLI read surfaces", async () => {

@@ -3,8 +3,11 @@ import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync, statSync } 
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
+import { Schema } from "effect";
+
 import { HermesSessionId, type SessionId } from "../core/identity";
 import type { Artifact, SessionEdge, SessionEventKind, ToolCall, UsageRecord } from "../core/schemas";
+import { type DecodeDiagnostic, decodeOrDrop, isSignal } from "./harness-schema";
 import {
   buildSession,
   compactText,
@@ -35,18 +38,76 @@ import {
 
 type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
 type HermesDatabase = NonNullable<Awaited<ReturnType<typeof maybeDatabase>>>;
-type HermesRow = Record<string, unknown>;
-type HermesSessionRow = HermesRow & { id?: unknown; source?: unknown; started_at?: unknown };
-type HermesMessageRow = HermesRow & {
-  id?: unknown;
-  session_id?: unknown;
-  role?: unknown;
-  content?: unknown;
-  tool_call_id?: unknown;
-  tool_calls?: unknown;
-  tool_name?: unknown;
-  timestamp?: unknown;
-};
+
+// ---------------------------------------------------------------------------
+// On-disk row schemas (QSR-220 fail-closed boundary)
+//
+// Grounded against the real ~/.hermes/state.db `.schema`:
+//   sessions: id TEXT PK NOT NULL, started_at REAL NOT NULL; everything else
+//             this adapter reads is nullable TEXT/REAL/INTEGER.
+//   messages: id INTEGER PK, session_id TEXT NOT NULL, role TEXT NOT NULL,
+//             timestamp REAL NOT NULL; everything else read is nullable.
+//
+// These schemas declare expectations for every field this adapter reads (the
+// boundary doctrine: every schema field declares what it admits). Rows are
+// decoded through `decodeOrDrop`, so a malformed/garbage row becomes a NAMED
+// diagnostic + a dropped record — never a throw that aborts the whole file,
+// never a silently coerced half-row. SQLite hands back numbers for INTEGER /
+// REAL and strings for TEXT; nullable columns arrive as `null`. The decode is
+// lenient about excess columns (Effect ignores excess properties by default)
+// but strict about the load-bearing identity/ordering fields.
+// ---------------------------------------------------------------------------
+
+/** A SQLite TEXT column that may be absent or NULL. */
+const NullableText = Schema.optional(Schema.NullOr(Schema.String));
+/** A SQLite numeric (INTEGER/REAL) column that may be absent or NULL. */
+const NullableNumeric = Schema.optional(Schema.NullOr(Schema.Number));
+/** A nullable column whose stored type we do not constrain (free-form TEXT/JSON). */
+const NullableLoose = Schema.optional(Schema.NullOr(Schema.Unknown));
+
+const HermesSessionRowSchema = Schema.Struct({
+  // sessions.id is TEXT PRIMARY KEY NOT NULL — the load-bearing native id.
+  id: Schema.String,
+  // started_at is REAL NOT NULL — the ordering key.
+  started_at: Schema.Number,
+  model: NullableText,
+  parent_session_id: NullableText,
+  ended_at: NullableNumeric,
+  input_tokens: NullableNumeric,
+  output_tokens: NullableNumeric,
+  cache_read_tokens: NullableNumeric,
+  cache_write_tokens: NullableNumeric,
+  reasoning_tokens: NullableNumeric,
+  billing_provider: NullableText,
+  estimated_cost_usd: NullableNumeric,
+  actual_cost_usd: NullableNumeric,
+  title: NullableText,
+  cwd: NullableText,
+});
+
+const HermesMessageRowSchema = Schema.Struct({
+  // messages.id is INTEGER PRIMARY KEY AUTOINCREMENT — arrives as a number.
+  id: Schema.Number,
+  // session_id TEXT NOT NULL, role TEXT NOT NULL, timestamp REAL NOT NULL.
+  session_id: Schema.String,
+  role: Schema.String,
+  timestamp: Schema.Number,
+  content: NullableText,
+  tool_call_id: NullableText,
+  tool_calls: NullableLoose,
+  tool_name: NullableText,
+  token_count: NullableNumeric,
+  finish_reason: NullableText,
+  reasoning: NullableText,
+  reasoning_content: NullableText,
+  reasoning_details: NullableLoose,
+  codex_reasoning_items: NullableLoose,
+  codex_message_items: NullableLoose,
+  platform_message_id: NullableText,
+});
+
+type HermesSessionRow = typeof HermesSessionRowSchema.Type;
+type HermesMessageRow = typeof HermesMessageRowSchema.Type;
 type HermesToolCallDraft = Omit<
   ToolCall,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
@@ -172,6 +233,10 @@ const HERMES_MESSAGE_COLUMNS = [
   "platform_message_id",
 ].join(", ");
 
+// Raw reads return UNVALIDATED rows. Decoding happens at the boundary via
+// `decodeOrDrop` so a garbage row is named + dropped, never silently coerced.
+type HermesRawRow = Record<string, unknown>;
+
 const readSessionRows = (
   db: HermesDatabase,
   limit: number | undefined,
@@ -179,19 +244,19 @@ const readSessionRows = (
 ) =>
   db
     .query(`select ${HERMES_SESSION_COLUMNS} from sessions order by started_at desc, id desc limit ? offset ?`)
-    .all(hermesSessionWindowLimit(limit), sessionWindowSkip(skip)) as HermesSessionRow[];
+    .all(hermesSessionWindowLimit(limit), sessionWindowSkip(skip)) as HermesRawRow[];
 
 const readMessageRows = (db: HermesDatabase, sessionId: string) =>
   db
     .query(`select ${HERMES_MESSAGE_COLUMNS} from messages where session_id = ? order by timestamp, id`)
-    .all(sessionId) as HermesMessageRow[];
+    .all(sessionId) as HermesRawRow[];
 
 const readSessionRowsCli = (
   dbPath: string,
   limit: number | undefined,
   skip: number | undefined,
 ) =>
-  sqliteJson<HermesSessionRow>(
+  sqliteJson<HermesRawRow>(
     dbPath,
     `select ${HERMES_SESSION_COLUMNS} from sessions order by started_at desc, id desc limit ${hermesSessionWindowLimit(limit)} offset ${sessionWindowSkip(skip)}`,
   );
@@ -203,10 +268,42 @@ export const readHermesSessionRowsForWindow = (
 ) => readSessionRowsCli(dbPath, limit, skip);
 
 const readMessageRowsCli = (dbPath: string, sessionId: string) =>
-  sqliteJson<HermesMessageRow>(
+  sqliteJson<HermesRawRow>(
     dbPath,
     `select ${HERMES_MESSAGE_COLUMNS} from messages where session_id = ${sql(sessionId)} order by timestamp, id`,
   );
+
+/**
+ * Decode the raw session-window rows fail-closed: valid rows pass through
+ * (behavior identical to before), malformed rows become a named diagnostic in
+ * `diagnostics` and are dropped from the window.
+ */
+const decodeSessionRows = (
+  rows: readonly HermesRawRow[],
+  diagnostics: DecodeDiagnostic[],
+): HermesSessionRow[] =>
+  rows.flatMap((row) => {
+    const decision = decodeOrDrop(HermesSessionRowSchema, row, {
+      kind: "session" as const,
+      diagnosticName: "hermes.session.decode_failed",
+      diagnostics,
+    });
+    return isSignal(decision) ? [decision.value] : [];
+  });
+
+/** Decode the raw message rows for a session fail-closed; drops are named. */
+const decodeMessageRows = (
+  rows: readonly HermesRawRow[],
+  diagnostics: DecodeDiagnostic[],
+): HermesMessageRow[] =>
+  rows.flatMap((row) => {
+    const decision = decodeOrDrop(HermesMessageRowSchema, row, {
+      kind: "message" as const,
+      diagnosticName: "hermes.message.decode_failed",
+      diagnostics,
+    });
+    return isSignal(decision) ? [decision.value] : [];
+  });
 
 const isoFromEpoch = (value: unknown) => {
   const numeric = numberValue(value);
@@ -407,14 +504,30 @@ const buildHermesSessionFromRows = (
   const artifacts: HermesArtifactDraft[] = [];
   const sessionLevelUsage = sessionUsage(sessionId, session);
   if (sessionLevelUsage !== undefined) usageRecords.push(sessionLevelUsage);
-  const parentSessionId = stringValue(session.parent_session_id);
-  if (parentSessionId !== undefined) {
+  // Session-to-session subagent lineage: hermes stores the parent's NATIVE id.
+  // This is SESSION lineage, NOT event-to-event message threading, so it uses
+  // the purpose-built `subagent_of` edge kind — never `parent`, which other
+  // adapters (claude, opencode) use for event threading and on whose `fromId`
+  // they place a raw message uuid. The canonical edge carries the parent's
+  // machine-independent Quasar SessionId on `fromId` (and the child's on
+  // `toId`) so it joins to `sessions.session_id` once persisted; the native
+  // value is preserved in `rawReference`. mapSession projects `subagent_of`
+  // onto the canonical `SessionRow.parentSessionId` column.
+  const parentNativeSessionId = stringValue(session.parent_session_id);
+  if (parentNativeSessionId !== undefined) {
+    const parentSessionId = sessionIdFor("hermes", HermesSessionId(parentNativeSessionId));
     sessionEdges.push({
-      id: edgeIdFor(sessionId, "parent", parentSessionId, nativeSessionId),
-      kind: "parent",
+      id: edgeIdFor(sessionId, "subagent_of", parentSessionId, sessionId),
+      kind: "subagent_of",
       fromId: parentSessionId,
-      toId: nativeSessionId,
-      rawReference: { sourcePath: dbPath, table: "sessions", rowId: nativeSessionId, nativeType: "parent_session_id" },
+      toId: sessionId,
+      rawReference: {
+        sourcePath: dbPath,
+        table: "sessions",
+        rowId: nativeSessionId,
+        nativeType: "parent_session_id",
+        nativeValue: parentNativeSessionId,
+      },
     });
   }
 
@@ -606,61 +719,57 @@ async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStr
     const tempDb = copyDatabaseForRead(dbPath);
     const db = await maybeDatabase(tempDb.path);
     let profileSessionCount = 0;
+    // Named decode diagnostics for malformed rows in THIS profile's db. Drops
+    // are accumulated here and surfaced as a single attributable diagnostic so a
+    // garbage row never aborts the file and never coerces silently.
+    const decodeDiagnostics: DecodeDiagnostic[] = [];
+    // Raw, unvalidated readers — identical window, just two transports.
+    const rawSessionRows = db === undefined
+      ? readSessionRowsCli(tempDb.path, options.limit, options.skip)
+      : readSessionRows(db, options.limit, options.skip);
+    const rawMessageRows = (sessionId: string): HermesRawRow[] =>
+      db === undefined ? readMessageRowsCli(tempDb.path, sessionId) : readMessageRows(db, sessionId);
     try {
-      if (db === undefined) {
-        for (const sessionEntry of readSessionRowsCli(tempDb.path, options.limit, options.skip)) {
-          const messageRows = readMessageRowsCli(tempDb.path, String(sessionEntry.id ?? ""));
-          if (await skipHermesSession(options, sessionEntry, messageRows, logicalDbPath)) continue;
-          const session = buildHermesSessionFromRows(
-            logicalDbPath,
-            logicalRoot ?? root,
-            options,
-            sessionEntry,
-            messageRows,
-            profileName,
-          );
-          yield {
-            type: "session",
-            session,
-            sourceUnit: {
-              provider: "hermes" as const,
-              adapterId: hermesAdapter.id,
-              rootPath: logicalRoot ?? root,
-              sourcePath: session.sourcePath,
-              physicalPath: dbPath,
-            },
-            fingerprint: hermesSessionFingerprint(messageRows),
-          };
-          profileSessionCount += 1;
-        }
-      } else {
-        for (const sessionEntry of readSessionRows(db, options.limit, options.skip)) {
-          const messageRows = readMessageRows(db, String(sessionEntry.id ?? ""));
-          if (await skipHermesSession(options, sessionEntry, messageRows, logicalDbPath)) continue;
-          const session = buildHermesSessionFromRows(
-            logicalDbPath,
-            logicalRoot ?? root,
-            options,
-            sessionEntry,
-            messageRows,
-            profileName,
-          );
-          yield {
-            type: "session",
-            session,
-            sourceUnit: {
-              provider: "hermes" as const,
-              adapterId: hermesAdapter.id,
-              rootPath: logicalRoot ?? root,
-              sourcePath: session.sourcePath,
-              physicalPath: dbPath,
-            },
-            fingerprint: hermesSessionFingerprint(messageRows),
-          };
-          profileSessionCount += 1;
-        }
+      for (const sessionEntry of decodeSessionRows(rawSessionRows, decodeDiagnostics)) {
+        const messageRows = decodeMessageRows(rawMessageRows(sessionEntry.id), decodeDiagnostics);
+        if (await skipHermesSession(options, sessionEntry, messageRows, logicalDbPath)) continue;
+        const session = buildHermesSessionFromRows(
+          logicalDbPath,
+          logicalRoot ?? root,
+          options,
+          sessionEntry,
+          messageRows,
+          profileName,
+        );
+        yield {
+          type: "session",
+          session,
+          sourceUnit: {
+            provider: "hermes" as const,
+            adapterId: hermesAdapter.id,
+            rootPath: logicalRoot ?? root,
+            sourcePath: session.sourcePath,
+            physicalPath: dbPath,
+          },
+          fingerprint: hermesSessionFingerprint(messageRows),
+        };
+        profileSessionCount += 1;
       }
       totalSessionCount += profileSessionCount;
+      for (const diagnostic of decodeDiagnostics) {
+        yield {
+          type: "diagnostic",
+          diagnostic: {
+            adapterId: hermesAdapter.id,
+            provider: "hermes" as const,
+            status: "unsupported" as const,
+            parserConfidence: "documented" as const,
+            rootPath: logicalDbPath,
+            message: `Hermes row dropped (${diagnostic.name}) in profile '${profileName}'.`,
+            details: { error: diagnostic.message },
+          },
+        };
+      }
     } catch (error) {
       yield {
         type: "diagnostic",
