@@ -4,6 +4,7 @@ import { basename, dirname, join, relative } from "node:path";
 import { Option, Schema } from "effect";
 
 import { stableJsonHash, stableWideHash } from "../core/hash";
+import type { NativeSessionId, SessionId } from "../core/identity";
 import { gitRemoteForPath } from "../core/git-identity";
 import { resolveProjectIdentity } from "../core/project-normalization";
 import { redactSensitive } from "../core/redaction";
@@ -82,17 +83,15 @@ type BuildSessionArgs = {
   readonly provider: Provider;
   readonly agentName: string;
   readonly machine: MachineIdentity;
+  /**
+   * The canonical, machine- and path-INDEPENDENT session id. The adapter
+   * constructs it via `sessionIdFor` from its own branded native id and threads
+   * the SAME value into every child-id helper, so the whole tree keys off one
+   * machine-independent identity.
+   */
+  readonly sessionId: SessionId;
   readonly nativeSessionId: string;
   readonly nativeProjectKey?: string;
-  /**
-   * Shared-remote override for the canonical session id. Local-file providers
-   * omit this so the id stays derived from (provider, machineId, nativeSessionId,
-   * sourcePath) — machineId is load-bearing there. A shared-remote provider
-   * (one whose transcript lives on a server and is identical from every machine)
-   * supplies an id derived from the remote identity ALONE, so every machine
-   * converges on one session id and the server upsert dedups cross-machine.
-   */
-  readonly canonicalId?: string;
   readonly title?: string;
   readonly startedAt?: string;
   readonly updatedAt?: string;
@@ -321,25 +320,19 @@ export const parseJsonString = (value: unknown): unknown => {
 };
 
 export const scopedId = (
-  provider: Provider,
-  machineId: string,
-  sourcePath: string,
+  sessionId: SessionId,
   kind: string,
   ...parts: readonly unknown[]
-) => `${provider}:${kind}:${machineId}:${stableJsonHash([sourcePath, ...parts])}`;
+) => `${sessionId}:${kind}:${stableJsonHash([...parts])}`;
 
 export const contentBlockIdFor = (
-  provider: Provider,
-  machineId: string,
-  sourcePath: string,
+  sessionId: SessionId,
   eventId: string,
   sequence: number,
-) => `${provider}:block:${machineId}:${stableJsonHash([sourcePath, eventId, sequence])}`;
+) => `${sessionId}:block:${stableJsonHash([eventId, sequence])}`;
 
 export const textBlock = (
-  provider: Provider,
-  machineId: string,
-  sourcePath: string,
+  sessionId: SessionId,
   eventId: string,
   sequence: number,
   text: string | undefined,
@@ -348,7 +341,7 @@ export const textBlock = (
     ? []
     : [
         {
-          id: contentBlockIdFor(provider, machineId, sourcePath, eventId, sequence),
+          id: contentBlockIdFor(sessionId, eventId, sequence),
           sequence,
           kind: "text",
           text,
@@ -356,23 +349,19 @@ export const textBlock = (
       ];
 
 export const jsonBlock = (
-  provider: Provider,
-  machineId: string,
-  sourcePath: string,
+  sessionId: SessionId,
   eventId: string,
   sequence: number,
   value: unknown,
 ): ContentBlock => ({
-  id: contentBlockIdFor(provider, machineId, sourcePath, eventId, sequence),
+  id: contentBlockIdFor(sessionId, eventId, sequence),
   sequence,
   kind: "json",
   value,
 });
 
 export const contentBlocksFromNative = (
-  provider: Provider,
-  machineId: string,
-  sourcePath: string,
+  sessionId: SessionId,
   eventId: string,
   value: unknown,
 ): ContentBlock[] => {
@@ -380,7 +369,7 @@ export const contentBlocksFromNative = (
   const pushBlock = (block: Omit<ContentBlock, "id" | "sequence">) => {
     const sequence = blocks.length;
     blocks.push({
-      id: contentBlockIdFor(provider, machineId, sourcePath, eventId, sequence),
+      id: contentBlockIdFor(sessionId, eventId, sequence),
       sequence,
       ...block,
     });
@@ -543,39 +532,29 @@ export const contentBlocksFromNative = (
   }
   if (blocks.length > 0) return blocks;
   const text = compactText(value as NativeValue | undefined);
-  return textBlock(provider, machineId, sourcePath, eventId, 0, text);
+  return textBlock(sessionId, eventId, 0, text);
 };
 
 export const edgeIdFor = (
-  provider: Provider,
-  machineId: string,
-  sourcePath: string,
+  sessionId: SessionId,
   kind: string,
   from: unknown,
   to: unknown,
-) => `${provider}:edge:${machineId}:${stableJsonHash([sourcePath, kind, from, to])}`;
+) => `${sessionId}:edge:${stableJsonHash([kind, from, to])}`;
 
 export const usageIdFor = (
-  provider: Provider,
-  machineId: string,
-  sourcePath: string,
-  sessionId: string,
+  sessionId: SessionId,
   eventId: string | undefined,
   sequence: number,
-) => `${provider}:usage:${machineId}:${stableJsonHash([sourcePath, sessionId, eventId, sequence])}`;
+) => `${sessionId}:usage:${stableJsonHash([eventId, sequence])}`;
 
 export const artifactIdFor = (
-  provider: Provider,
-  machineId: string,
-  sourcePath: string,
-  sessionId: string,
+  sessionId: SessionId,
   stableKey: unknown,
-) => `${provider}:artifact:${machineId}:${stableJsonHash([sourcePath, sessionId, stableKey])}`;
+) => `${sessionId}:artifact:${stableJsonHash([stableKey])}`;
 
 const defaultEdgesForEvents = (
-  provider: Provider,
-  machineId: string,
-  sourcePath: string,
+  sessionId: SessionId,
   events: readonly Pick<SessionEvent, "id" | "kind" | "toolCallId">[],
 ): Omit<
   SessionEdge,
@@ -597,7 +576,7 @@ const defaultEdgesForEvents = (
     const callEventId = toolCallEventByToolId.get(event.toolCallId);
     if (callEventId === undefined) continue;
     edges.push({
-      id: edgeIdFor(provider, machineId, sourcePath, "tool_result_for", callEventId, event.id),
+      id: edgeIdFor(sessionId, "tool_result_for", callEventId, event.id),
       kind: "tool_result_for",
       fromEventId: callEventId,
       toEventId: event.id,
@@ -683,9 +662,7 @@ export const logicalPathFor = (
 ) => (physicalRoot === logicalRoot ? physicalPath : join(logicalRoot, relative(physicalRoot, physicalPath)));
 
 const contentBlocksForEvent = (
-  provider: Provider,
-  machineId: string,
-  sourcePath: string,
+  sessionId: SessionId,
   eventId: string,
   contentText: string | undefined,
   contentBlocks: readonly ContentBlock[] | undefined,
@@ -694,13 +671,7 @@ const contentBlocksForEvent = (
   if (contentBlocks !== undefined) return [...contentBlocks];
   if (contentSource === undefined) return [];
   if (typeof contentSource === "string" && compactText(contentSource) === contentText) return [];
-  return contentBlocksFromNative(
-    provider,
-    machineId,
-    sourcePath,
-    eventId,
-    contentSource,
-  );
+  return contentBlocksFromNative(sessionId, eventId, contentSource);
 };
 
 export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
@@ -716,14 +687,7 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
     packageName: args.packageName,
     explicitProjectKey: args.explicitProjectKey,
   });
-  const id =
-    args.canonicalId ??
-    sessionIdFor(
-      args.provider,
-      args.machine.machineId,
-      args.nativeSessionId,
-      args.sourcePath,
-    );
+  const id = args.sessionId;
   const events = args.events.map(({ contentBlocks, contentSource, ...event }) => ({
     ...event,
     sessionId: id,
@@ -732,9 +696,7 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
     agentName: args.agentName,
     projectIdentityKey: projectIdentity.projectIdentityKey,
     contentBlocks: contentBlocksForEvent(
-      args.provider,
-      args.machine.machineId,
-      args.sourcePath,
+      id,
       event.id,
       event.contentText,
       contentBlocks,
@@ -750,7 +712,7 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
     projectIdentityKey: projectIdentity.projectIdentityKey,
   }));
   const sessionEdges = dedupeById([
-    ...defaultEdgesForEvents(args.provider, args.machine.machineId, args.sourcePath, events),
+    ...defaultEdgesForEvents(id, events),
     ...(args.sessionEdges ?? []),
   ]).map((edge) => ({
       ...edge,
@@ -801,12 +763,10 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
 };
 
 export const eventIdFor = (
-  provider: Provider,
-  machineId: string,
-  sourcePath: string,
+  sessionId: SessionId,
   sequence: number,
   stableKey: string | number,
-) => `${provider}:event:${machineId}:${stableJsonHash([sourcePath, sequence, stableKey])}`;
+) => `${sessionId}:event:${stableJsonHash([sequence, stableKey])}`;
 
 export const nativeSessionIdFromPath = (path: string) =>
   basename(path).replace(/\.(jsonl|json|db)$/i, "");
@@ -821,16 +781,16 @@ export const sourceFingerprintFor = (stat: { size: number; mtimeMs: number }): s
   JSON.stringify({ size: stat.size, mtimeMs: stat.mtimeMs });
 
 /**
- * The session id a built session will carry, derived from the same
- * (nativeSessionId, sourcePath) inputs `buildSession` uses. Adapter pre-parse
- * probes compute it cheaply so the parse gate keys on the final session id.
+ * The canonical Quasar session id. Machine- and path-INDEPENDENT: derived from
+ * (provider, nativeSessionId) ALONE so the same session ingested from a host
+ * and from a container converges on one id and the upsert dedups it. This is
+ * the SOLE constructor of `SessionId`; it accepts only a branded
+ * `NativeSessionId`, so a bare string does not type-check.
  */
 export const sessionIdFor = (
   provider: Provider,
-  machineId: string,
-  nativeSessionId: string,
-  sourcePath: string,
-) => `${provider}:${machineId}:${stableWideHash(`${nativeSessionId}:${sourcePath}`)}`;
+  nativeSessionId: NativeSessionId,
+): SessionId => `${provider}:${stableWideHash(nativeSessionId)}` as SessionId;
 
 export const parentDirectoryName = (path: string) => basename(dirname(path));
 

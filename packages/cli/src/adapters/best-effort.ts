@@ -1,4 +1,5 @@
-import type { Provider, SessionEventKind, SessionRole, ToolCall, UsageRecord } from "../core/schemas";
+import type { SessionId } from "../core/identity";
+import type { SessionEventKind, SessionRole, ToolCall, UsageRecord } from "../core/schemas";
 import {
   kindFromNative,
   numberValue,
@@ -90,10 +91,7 @@ export const toolNameFromRecord = (value: unknown) => {
 };
 
 export const bestEffortToolCall = (
-  provider: Provider,
-  machineId: string,
-  sourcePath: string,
-  nativeSessionId: string,
+  sessionId: SessionId,
   eventId: string,
   value: unknown,
   fallbackKey: unknown,
@@ -122,7 +120,7 @@ export const bestEffortToolCall = (
     state.output ?? record.output ?? record.result ?? record.response,
   );
   return {
-    id: scopedId(provider, machineId, sourcePath, "tool", nativeSessionId, nativeToolId),
+    id: scopedId(sessionId, "tool", nativeToolId),
     eventId,
     toolName,
     status,
@@ -134,10 +132,7 @@ export const bestEffortToolCall = (
 };
 
 export const usageFromRecord = (
-  provider: Provider,
-  machineId: string,
-  sourcePath: string,
-  nativeSessionId: string,
+  sessionId: SessionId,
   eventId: string,
   sequence: number,
   value: unknown,
@@ -181,7 +176,7 @@ export const usageFromRecord = (
   const cost = numberValue(usage.cost) ?? (usageIsWholeRecord ? numberValue(record.cost) : undefined);
   if (totalTokens === undefined && cost === undefined) return undefined;
   return {
-    id: usageIdFor(provider, machineId, sourcePath, nativeSessionId, eventId, sequence),
+    id: usageIdFor(sessionId, eventId, sequence),
     eventId,
     timestamp: timestampFromRecord(record),
     model:

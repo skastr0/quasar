@@ -9,6 +9,7 @@ import type {
   SessionAdapter,
   UnitFingerprint,
 } from "./types";
+import { OpenCodeSessionId, type SessionId } from "../core/identity";
 import type { Artifact, SessionEdge, SessionRole, ToolCall, UsageRecord } from "../core/schemas";
 import {
   artifactIdFor,
@@ -454,9 +455,7 @@ const toolStatusFromPart = (part: Record<string, unknown>) => {
 
 const collectToolCalls = (
   parts: NativeValue[],
-  machineId: string,
-  sourcePath: string,
-  nativeSessionId: string,
+  sessionId: SessionId,
   messageId: string,
   eventId: string,
 ) =>
@@ -480,7 +479,7 @@ const collectToolCalls = (
     const output = projectToolPayloadNativeValue(state.output ?? record.output);
     return [
       {
-        id: scopedId("opencode", machineId, sourcePath, "tool", nativeSessionId, messageId, partId),
+        id: scopedId(sessionId, "tool", messageId, partId),
         eventId,
         toolName,
         status: toolStatusFromPart(record),
@@ -499,10 +498,7 @@ const dateFromNestedTime = (value: unknown, key: string) => {
 };
 
 const usageFromMessage = (
-  machineId: string,
-  dbPath: string,
-  nativeSessionId: string,
-  messageId: string,
+  sessionId: SessionId,
   eventId: string,
   index: number,
   data: Record<string, NativeValue | undefined>,
@@ -518,7 +514,7 @@ const usageFromMessage = (
   const totalTokens =
     numberValue(tokens.total) ?? sumNumbers([inputTokens, outputTokens, reasoningTokens]);
   return {
-    id: usageIdFor("opencode", machineId, dbPath, nativeSessionId, eventId, index),
+    id: usageIdFor(sessionId, eventId, index),
     eventId,
     timestamp: dateFromNestedTime(data.time, "created"),
     model: typeof data.modelID === "string" ? data.modelID : undefined,
@@ -541,9 +537,8 @@ const sumNumbers = (values: readonly (number | undefined)[]) => {
 };
 
 const collectArtifacts = (
-  machineId: string,
+  sessionId: SessionId,
   dbPath: string,
-  nativeSessionId: string,
   eventId: string,
   parts: NativeValue[],
 ): OpenCodeArtifactDraft[] =>
@@ -555,7 +550,7 @@ const collectArtifacts = (
     if (path === undefined) return [];
     return [
       {
-        id: artifactIdFor("opencode", machineId, dbPath, nativeSessionId, [eventId, index, path, type]),
+        id: artifactIdFor(sessionId, [eventId, index, path, type]),
         eventId,
         kind: type || "diff",
         ...(path !== undefined ? { path } : {}),
@@ -570,8 +565,7 @@ const eventFromMessage = (
   message: OpenCodeMessageRow,
   index: number,
   parts: NativeValue[],
-  machineId: string,
-  nativeSessionId: string,
+  sessionId: SessionId,
 ) => {
   const data = parseMessageData(message);
   const content = messageContentProjection(data, parts);
@@ -583,13 +577,13 @@ const eventFromMessage = (
     contentRecord.content !== undefined || contentRecord.parts !== undefined;
   const role: SessionRole =
     data.role === "assistant" || data.role === "user" ? data.role : "unknown";
-  const eventId = eventIdFor("opencode", machineId, dbPath, index, message.id);
+  const eventId = eventIdFor(sessionId, index, message.id);
   return {
     eventId,
     parentId: typeof data.parentID === "string" ? data.parentID : undefined,
-    toolCalls: collectToolCalls(parts, machineId, dbPath, nativeSessionId, message.id, eventId),
-    usageRecord: usageFromMessage(machineId, dbPath, nativeSessionId, message.id, eventId, index, data),
-    artifacts: collectArtifacts(machineId, dbPath, nativeSessionId, eventId, parts),
+    toolCalls: collectToolCalls(parts, sessionId, message.id, eventId),
+    usageRecord: usageFromMessage(sessionId, eventId, index, data),
+    artifacts: collectArtifacts(sessionId, dbPath, eventId, parts),
     event: {
       id: eventId,
       nativeEventId: message.id,
@@ -643,6 +637,8 @@ const buildOpenCodeSessionFromRows = (
   const usageRecords: OpenCodeUsageDraft[] = [];
   const sessionEdges: OpenCodeEdgeDraft[] = [];
   const artifacts: OpenCodeArtifactDraft[] = [];
+  const nativeSessionId = OpenCodeSessionId(sessionRow.id);
+  const sessionId = sessionIdFor("opencode", nativeSessionId);
   const messageIdToEventId = new Map<string, string>();
   const events = messages.map((message, index) => {
     const result = eventFromMessage(
@@ -650,14 +646,13 @@ const buildOpenCodeSessionFromRows = (
       message,
       index,
       partsByMessage.get(message.id) ?? [],
-      options.machine.machineId,
-      sessionRow.id,
+      sessionId,
     );
     messageIdToEventId.set(message.id, result.eventId);
     if (result.parentId !== undefined) {
       const parentEventId = messageIdToEventId.get(result.parentId);
       sessionEdges.push({
-        id: edgeIdFor("opencode", options.machine.machineId, dbPath, "parent", result.parentId, message.id),
+        id: edgeIdFor(sessionId, "parent", result.parentId, message.id),
         kind: "parent",
         ...(parentEventId !== undefined ? { fromEventId: parentEventId } : { fromId: result.parentId }),
         toEventId: result.eventId,
@@ -673,7 +668,8 @@ const buildOpenCodeSessionFromRows = (
     provider: "opencode",
     agentName: "opencode",
     machine: options.machine,
-    nativeSessionId: sessionRow.id,
+    sessionId,
+    nativeSessionId,
     nativeProjectKey: sessionRow.directory,
     title: sessionRow.title,
     sourceRoot: root,
@@ -780,7 +776,7 @@ const skipOpenCodeSession = async (
   const fingerprint = opencodeSessionFingerprint(sessionEntry);
   if (fingerprint === undefined) return false;
   const probe = {
-    sessionId: sessionIdFor("opencode", options.machine.machineId, sessionEntry.id, sourcePath),
+    sessionId: sessionIdFor("opencode", OpenCodeSessionId(sessionEntry.id)),
     sourceFingerprint: JSON.stringify(fingerprint),
   };
   return (await options.shouldParseSession(probe)) === false;

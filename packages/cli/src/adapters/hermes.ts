@@ -3,6 +3,7 @@ import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync, statSync } 
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
+import { HermesSessionId, type SessionId } from "../core/identity";
 import type { Artifact, SessionEdge, SessionEventKind, ToolCall, UsageRecord } from "../core/schemas";
 import {
   buildSession,
@@ -304,8 +305,7 @@ const messageContent = (message: HermesMessageRow): NativeValue => {
 };
 
 const messageBlocks = (
-  machineId: string,
-  dbPath: string,
+  sessionId: SessionId,
   eventId: string,
   message: HermesMessageRow,
 ) => {
@@ -327,13 +327,11 @@ const messageBlocks = (
   if (codexMessageItems !== undefined) {
     blockInputs.push({ type: "json", value: codexMessageItems, label: "codex_message_items" });
   }
-  return contentBlocksFromNative("hermes", machineId, dbPath, eventId, blockInputs);
+  return contentBlocksFromNative(sessionId, eventId, blockInputs);
 };
 
 const messageUsage = (
-  dbPath: string,
-  machineId: string,
-  nativeSessionId: string,
+  sessionId: SessionId,
   eventId: string,
   message: HermesMessageRow,
   index: number,
@@ -342,7 +340,7 @@ const messageUsage = (
   const totalTokens = numberValue(message.token_count);
   if (totalTokens === undefined) return undefined;
   return {
-    id: usageIdFor("hermes", machineId, dbPath, nativeSessionId, eventId, index),
+    id: usageIdFor(sessionId, eventId, index),
     eventId,
     timestamp: isoFromEpoch(message.timestamp),
     model: stringValue(session.model),
@@ -352,11 +350,9 @@ const messageUsage = (
 };
 
 const sessionUsage = (
-  dbPath: string,
-  machineId: string,
+  sessionId: SessionId,
   session: HermesSessionRow,
 ): HermesUsageDraft | undefined => {
-  const nativeSessionId = String(session.id ?? "");
   const inputTokens = numberValue(session.input_tokens);
   const outputTokens = numberValue(session.output_tokens);
   const cacheReadInputTokens = numberValue(session.cache_read_tokens);
@@ -372,7 +368,7 @@ const sessionUsage = (
   const cost = numberValue(session.actual_cost_usd) ?? numberValue(session.estimated_cost_usd);
   if (totalTokens === undefined && cost === undefined) return undefined;
   return {
-    id: usageIdFor("hermes", machineId, dbPath, nativeSessionId, undefined, -1),
+    id: usageIdFor(sessionId, undefined, -1),
     timestamp: isoFromEpoch(session.ended_at) ?? isoFromEpoch(session.started_at),
     model: stringValue(session.model),
     modelProvider: stringValue(session.billing_provider),
@@ -402,19 +398,19 @@ const buildHermesSessionFromRows = (
   messages: readonly HermesMessageRow[],
   profileName: string,
 ) => {
-  const nativeSessionId = String(session.id ?? "");
-  const machineId = options.machine.machineId;
+  const nativeSessionId = HermesSessionId(String(session.id ?? ""));
+  const sessionId = sessionIdFor("hermes", nativeSessionId);
   const toolCallsByNativeId = new Map<string, HermesToolCallDraft>();
   const toolEventByNativeId = new Map<string, string>();
   const usageRecords: HermesUsageDraft[] = [];
   const sessionEdges: HermesEdgeDraft[] = [];
   const artifacts: HermesArtifactDraft[] = [];
-  const sessionLevelUsage = sessionUsage(dbPath, machineId, session);
+  const sessionLevelUsage = sessionUsage(sessionId, session);
   if (sessionLevelUsage !== undefined) usageRecords.push(sessionLevelUsage);
   const parentSessionId = stringValue(session.parent_session_id);
   if (parentSessionId !== undefined) {
     sessionEdges.push({
-      id: edgeIdFor("hermes", machineId, dbPath, "parent", parentSessionId, nativeSessionId),
+      id: edgeIdFor(sessionId, "parent", parentSessionId, nativeSessionId),
       kind: "parent",
       fromId: parentSessionId,
       toId: nativeSessionId,
@@ -424,14 +420,14 @@ const buildHermesSessionFromRows = (
 
   const events = messages.map((message, index) => {
     const nativeEventId = String(message.id ?? index);
-    const eventId = eventIdFor("hermes", machineId, dbPath, index, nativeEventId);
+    const eventId = eventIdFor(sessionId, index, nativeEventId);
     const calls = toolCallRecords(message.tool_calls);
     let eventToolCallId: string | undefined;
     for (const [callIndex, call] of calls.entries()) {
       const nativeToolId = nativeToolIdFromCall(call, `${nativeEventId}:${callIndex}`);
       const input = toolInputFromCall(call);
       const toolCall: HermesToolCallDraft = {
-        id: scopedId("hermes", machineId, dbPath, "tool", nativeSessionId, nativeToolId),
+        id: scopedId(sessionId, "tool", nativeToolId),
         eventId,
         toolName: toolNameFromCall(call),
         status: statusFromFinishReason(message.finish_reason),
@@ -449,7 +445,7 @@ const buildHermesSessionFromRows = (
       const resultToolCall =
         existing ??
         ({
-          id: scopedId("hermes", machineId, dbPath, "tool", nativeSessionId, resultNativeToolId),
+          id: scopedId(sessionId, "tool", resultNativeToolId),
           eventId,
           toolName: stringValue(message.tool_name) ?? "hermes_tool",
         } satisfies HermesToolCallDraft);
@@ -465,7 +461,7 @@ const buildHermesSessionFromRows = (
       const callEventId = toolEventByNativeId.get(resultNativeToolId);
       if (callEventId !== undefined) {
         sessionEdges.push({
-          id: edgeIdFor("hermes", machineId, dbPath, "tool_result_for", callEventId, eventId),
+          id: edgeIdFor(sessionId, "tool_result_for", callEventId, eventId),
           kind: "tool_result_for",
           fromEventId: callEventId,
           toEventId: eventId,
@@ -473,7 +469,7 @@ const buildHermesSessionFromRows = (
       }
     }
 
-    const usage = messageUsage(dbPath, machineId, nativeSessionId, eventId, message, index, session);
+    const usage = messageUsage(sessionId, eventId, message, index, session);
     if (usage !== undefined) usageRecords.push(usage);
     const content = messageContent(message);
     return {
@@ -485,7 +481,7 @@ const buildHermesSessionFromRows = (
       kind: messageKind(message, calls),
       contentText: compactText(content),
       contentSource: content,
-      contentBlocks: messageBlocks(machineId, dbPath, eventId, message),
+      contentBlocks: messageBlocks(sessionId, eventId, message),
       ...(eventToolCallId !== undefined ? { toolCallId: eventToolCallId } : {}),
       rawReference: { sourcePath: dbPath, table: "messages", rowId: nativeEventId, nativeType: "message" },
     };
@@ -495,6 +491,7 @@ const buildHermesSessionFromRows = (
     provider: "hermes",
     agentName: "hermes",
     machine: options.machine,
+    sessionId,
     nativeSessionId,
     nativeProjectKey: stringValue(session.cwd),
     title: stringValue(session.title),
@@ -560,12 +557,7 @@ const skipHermesSession = async (
 ): Promise<boolean> => {
   if (options.shouldParseSession === undefined) return false;
   const probe = {
-    sessionId: sessionIdFor(
-      "hermes",
-      options.machine.machineId,
-      String(sessionEntry.id ?? ""),
-      sourcePath,
-    ),
+    sessionId: sessionIdFor("hermes", HermesSessionId(String(sessionEntry.id ?? ""))),
     sourceFingerprint: JSON.stringify(hermesSessionFingerprint(messageRows)),
   };
   return (await options.shouldParseSession(probe)) === false;

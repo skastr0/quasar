@@ -6,8 +6,8 @@ import {
   collectAdapterStream,
   type SessionAdapter,
 } from "./types";
+import { CodexSessionId, type SessionId } from "../core/identity";
 import type { NormalizedSession, SessionEventKind, SessionRole, ToolCall, UsageRecord } from "../core/schemas";
-import { stableWideHash } from "../core/hash";
 import {
   buildSession,
   collectFiles,
@@ -24,6 +24,7 @@ import {
   projectToolPayloadNativeValue,
   recordFrom,
   roleFrom,
+  scopedId,
   sessionIdFor,
   sourceFingerprintFor,
   sourceRoot,
@@ -215,12 +216,8 @@ const callIdFromPayload = (payload: CodexRecord) =>
     ? payload.call_id
     : undefined;
 
-const toolCallIdFor = (
-  machineId: string,
-  nativeSessionId: string,
-  sourcePath: string,
-  callId: string,
-) => `codex:tool:${machineId}:${stableWideHash(`${nativeSessionId}:${sourcePath}`)}:${callId}`;
+const toolCallIdFor = (sessionId: SessionId, callId: string) =>
+  scopedId(sessionId, "tool", callId);
 
 const parseToolInput = (value: unknown): unknown => {
   if (typeof value !== "string") return projectToolPayloadNativeValue(value);
@@ -233,9 +230,7 @@ const parseToolInput = (value: unknown): unknown => {
 
 const upsertCodexToolCall = (
   toolCallsById: Map<string, CodexToolCallDraft>,
-  machineId: string,
-  nativeSessionId: string,
-  sourcePath: string,
+  sessionId: SessionId,
   eventId: string,
   timestamp: string | undefined,
   payload: CodexRecord,
@@ -243,7 +238,7 @@ const upsertCodexToolCall = (
   const payloadType = payloadTypeFrom(payload);
   const callId = callIdFromPayload(payload);
   if (callId === undefined) return undefined;
-  const id = toolCallIdFor(machineId, nativeSessionId, sourcePath, callId);
+  const id = toolCallIdFor(sessionId, callId);
   // custom_tool_call (apply_patch and friends) shares the function_call shape
   // but carries its payload in `input` (raw text) instead of `arguments` (JSON).
   // local_shell_call carries its payload in `action` (exec command record) and
@@ -302,9 +297,7 @@ const upsertCodexToolCall = (
 };
 
 const codexUsageRecord = (
-  machineId: string,
-  sourcePath: string,
-  sessionId: string,
+  sessionId: SessionId,
   eventId: string,
   sequence: number,
   timestamp: string | undefined,
@@ -347,7 +340,7 @@ const codexUsageRecord = (
       cacheReadInputTokens,
     ]);
   return {
-    id: usageIdFor("codex", machineId, sourcePath, sessionId, eventId, sequence),
+    id: usageIdFor(sessionId, eventId, sequence),
     eventId,
     ...(timestamp !== undefined ? { timestamp } : {}),
     model:
@@ -493,7 +486,8 @@ async function* streamCodexSessionFromFile(
   options: AdapterOptions,
   parseOptions: { readonly strictJsonLines?: boolean } = {},
 ): AsyncGenerator<NormalizedSession> {
-  const nativeSessionId = nativeSessionIdFromPath(sourcePath);
+  const nativeSessionId = CodexSessionId(nativeSessionIdFromPath(sourcePath));
+  const sessionId = sessionIdFor("codex", nativeSessionId);
   const toolCallsById = new Map<string, CodexToolCallDraft>();
   const toolCallEventByToolId = new Map<string, string>();
   let projectPath: string | undefined;
@@ -505,6 +499,7 @@ async function* streamCodexSessionFromFile(
       provider: "codex",
       agentName: "codex",
       machine: options.machine,
+      sessionId,
       nativeSessionId,
       nativeProjectKey: projectPath,
       sourceRoot: logicalSessionsRoot,
@@ -554,19 +549,11 @@ async function* streamCodexSessionFromFile(
       typeof payloadRecord.id === "string"
         ? payloadRecord.id
         : payloadCallId ?? (typeof record.id === "string" ? record.id : undefined);
-    const eventId = eventIdFor(
-      "codex",
-      options.machine.machineId,
-      sourcePath,
-      recordIndex,
-      nativeEventId ?? lineNumber,
-    );
+    const eventId = eventIdFor(sessionId, recordIndex, nativeEventId ?? lineNumber);
     const timestamp = typeof record.timestamp === "string" ? record.timestamp : undefined;
     const toolCallId = upsertCodexToolCall(
       toolCallsById,
-      options.machine.machineId,
-      nativeSessionId,
-      sourcePath,
+      sessionId,
       eventId,
       timestamp,
       payloadRecord,
@@ -578,7 +565,7 @@ async function* streamCodexSessionFromFile(
         const callEventId = toolCallEventByToolId.get(toolCallId);
         if (callEventId !== undefined) {
           slice.sessionEdges.push({
-            id: edgeIdFor("codex", options.machine.machineId, sourcePath, "tool_result_for", callEventId, eventId),
+            id: edgeIdFor(sessionId, "tool_result_for", callEventId, eventId),
             kind: "tool_result_for",
             fromEventId: callEventId,
             toEventId: eventId,
@@ -587,9 +574,7 @@ async function* streamCodexSessionFromFile(
       }
     }
     const usageRecord = codexUsageRecord(
-      options.machine.machineId,
-      sourcePath,
-      nativeSessionId,
+      sessionId,
       eventId,
       recordIndex,
       timestamp,
@@ -680,7 +665,7 @@ async function* streamCodex(options: AdapterOptions) {
     if (options.shouldParseSession !== undefined) {
       const stat = statSync(path);
       const probe = {
-        sessionId: sessionIdFor("codex", options.machine.machineId, nativeSessionIdFromPath(sourcePath), sourcePath),
+        sessionId: sessionIdFor("codex", CodexSessionId(nativeSessionIdFromPath(sourcePath))),
         sourceFingerprint: sourceFingerprintFor(stat),
       };
       if ((await options.shouldParseSession(probe)) === false) continue;

@@ -2,6 +2,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { collectAdapterStream, type AdapterStreamItem, type SessionAdapter } from "./types";
+import { KimiSessionId } from "../core/identity";
 import type { ToolCall, UsageRecord } from "../core/schemas";
 import {
   buildSession,
@@ -137,6 +138,8 @@ const buildKimiSessionFromEntry = (
   sessionsRoot: string,
   options: AdapterOptions,
 ) => {
+  const nativeSessionId = KimiSessionId(entry.sessionId);
+  const sessionId = sessionIdFor("kimi", nativeSessionId);
   const stateJsonPath = join(entry.sessionDir, "state.json");
   const stateRaw = readJsonFile(stateJsonPath);
   const state = recordFrom(stateRaw);
@@ -172,13 +175,7 @@ const buildKimiSessionFromEntry = (
     const outerType = stringValue(record.type) ?? "unknown";
     const outerTimeIso = kimiTime(outerTime !== 0 ? outerTime : undefined);
 
-    const eventId = eventIdFor(
-      "kimi",
-      options.machine.machineId,
-      wirePath,
-      seq,
-      `${agentId}:${lineNumber}`,
-    );
+    const eventId = eventIdFor(sessionId, seq, `${agentId}:${lineNumber}`);
 
     // -----------------------------------------------------------------------
     // context.append_message — user or system preamble only
@@ -293,14 +290,7 @@ const buildKimiSessionFromEntry = (
         const toolName = stringValue(event.name) ?? "kimi_tool";
         const input = projectToolPayloadNativeValue(event.args);
         const draft: KimiToolCallDraft = {
-          id: scopedId(
-            "kimi",
-            options.machine.machineId,
-            wirePath,
-            "tool",
-            entry.sessionId,
-            toolCallId ?? eventId,
-          ),
+          id: scopedId(sessionId, "tool", toolCallId ?? eventId),
           eventId,
           toolName,
           status: "started",
@@ -337,16 +327,7 @@ const buildKimiSessionFromEntry = (
         if (toolCallId !== undefined) {
           const existing = toolCallsById.get(toolCallId);
           const merged: KimiToolCallDraft = {
-            id:
-              existing?.id ??
-              scopedId(
-                "kimi",
-                options.machine.machineId,
-                wirePath,
-                "tool",
-                entry.sessionId,
-                toolCallId,
-              ),
+            id: existing?.id ?? scopedId(sessionId, "tool", toolCallId),
             eventId: existing?.eventId ?? eventId,
             toolName: existing?.toolName ?? "kimi_tool",
             status: "completed",
@@ -373,14 +354,7 @@ const buildKimiSessionFromEntry = (
           });
         } else {
           // Unmatched tool result — create a minimal record
-          const minimalId = scopedId(
-            "kimi",
-            options.machine.machineId,
-            wirePath,
-            "tool",
-            entry.sessionId,
-            eventId,
-          );
+          const minimalId = scopedId(sessionId, "tool", eventId);
           const minimal: KimiToolCallDraft = {
             id: minimalId,
             eventId,
@@ -470,14 +444,7 @@ const buildKimiSessionFromEntry = (
           ? (usage.inputCacheCreation as number)
           : undefined;
 
-      const usageId = usageIdFor(
-        "kimi",
-        options.machine.machineId,
-        wirePath,
-        entry.sessionId,
-        undefined,
-        usageDrafts.length,
-      );
+      const usageId = usageIdFor(sessionId, undefined, usageDrafts.length);
       usageDrafts.push({
         id: usageId,
         timestamp: outerTimeIso,
@@ -528,7 +495,8 @@ const buildKimiSessionFromEntry = (
     provider: "kimi",
     agentName: "kimi-code",
     machine: options.machine,
-    nativeSessionId: entry.sessionId,
+    sessionId,
+    nativeSessionId,
     projectPath: entry.workDir.length > 0 ? entry.workDir : undefined,
     title,
     startedAt: createdAt,
@@ -608,7 +576,7 @@ async function* streamKimi(options: AdapterOptions): AsyncGenerator<AdapterStrea
       if (existsSync(stateJsonPath)) {
         const stat = statSync(stateJsonPath);
         const probe = {
-          sessionId: sessionIdFor("kimi", options.machine.machineId, sessionId, sessionDir),
+          sessionId: sessionIdFor("kimi", KimiSessionId(sessionId)),
           sourceFingerprint: sourceFingerprintFor(stat),
         };
         if ((await options.shouldParseSession(probe)) === false) continue;
