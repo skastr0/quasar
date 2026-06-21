@@ -81,17 +81,13 @@ switch (command) {
     break;
   }
   case "maintain":
-    cli(["operator-maintain", ...(rest.length === 0 ? ["--vector", "true", "--optimize", "true"] : rest)]);
+    containerGetJson("/maintenance/run?vector=true&optimize=true");
     break;
   case "backup":
     backupTruth();
     break;
   default:
     fail(`unknown command: ${command}`);
-}
-
-function cli(args) {
-  sh(["cd /app", ["bun", "packages/cli/src/cli.ts", ...args.map(shellQuote)].join(" ")].join(" && "));
 }
 
 function sh(script) {
@@ -177,11 +173,6 @@ function readInteractiveShellEnv(key) {
 
 function requireFile(path, message) {
   if (!existsSync(path)) fail(`${message}: ${path}`);
-}
-
-function shellQuote(value) {
-  if (/^[A-Za-z0-9_./:=@+-]+$/.test(value)) return value;
-  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function printJson(value) {

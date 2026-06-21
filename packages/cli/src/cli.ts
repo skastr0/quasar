@@ -4,19 +4,11 @@ import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync 
 import { homedir, platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
-import { LanceDb } from "@skastr0/quasar-search";
-import { Effect } from "effect";
-
 import { configuredIngestToken, configuredServerUrl, defaultClientConfigPath } from "./client-config";
 import { ingestFailureError, ingestReportPayload } from "./ingest-report";
 import { ingestRemote } from "../../server/src/ingest";
 import { fail, ok, writeJson } from "../../server/src/json";
-import { SearchMaintenance } from "../../server/src/maintenance";
-import { AppRuntime } from "../../server/src/runtime";
-import { DerivedSearch } from "../../server/src/search";
 import { serve } from "../../server/src/server";
-import { DurableQueue, Embeddings, WorkerSupervisor } from "../../server/src/services";
-import { LocalStore } from "../../server/src/store";
 
 const arg = (name: string): string | undefined => {
   const index = process.argv.indexOf(name);
@@ -331,17 +323,6 @@ const fetchServer = async (name: string, path: string, params: Record<string, st
   }
 };
 
-const run = async (name: string, program: Effect.Effect<unknown, unknown, LocalStore | LanceDb | DurableQueue | DerivedSearch | SearchMaintenance | WorkerSupervisor | Embeddings>) => {
-  try {
-    writeJson(ok(name, await AppRuntime.runPromise(program)));
-  } catch (error) {
-    writeJson(fail(name, error));
-    process.exitCode = 1;
-  } finally {
-    await AppRuntime.dispose();
-  }
-};
-
 switch (command) {
   case "daemon": {
     const subcommand = process.argv[3] ?? "status";
@@ -439,99 +420,16 @@ switch (command) {
     await fetchServer("maintain", "/maintenance/run", { vector: arg("--vector"), optimize: arg("--optimize") });
     break;
   }
-  case "operator-maintain": {
-    await run(
-      "operator-maintain",
-      Effect.gen(function* () {
-        const maintenance = yield* SearchMaintenance;
-        return yield* maintenance.maintain({
-          includeVector: arg("--vector") !== "false",
-          optimize: arg("--optimize") !== "false",
-        });
-      }),
-    );
-    break;
-  }
   case "freshness": {
     await fetchServer("freshness", "/maintenance/freshness", { limit: arg("--limit") });
-    break;
-  }
-  case "operator-freshness": {
-    await run(
-      "operator-freshness",
-      Effect.gen(function* () {
-        const maintenance = yield* SearchMaintenance;
-        return yield* maintenance.reconcileFreshness({ limit: intArg("--limit", 500) });
-      }),
-    );
     break;
   }
   case "repair-index": {
     await fetchServer("repair-index", "/maintenance/repair", { limit: arg("--limit"), leaseMs: arg("--lease-ms") });
     break;
   }
-  case "operator-repair-index": {
-    await run(
-      "operator-repair-index",
-      Effect.gen(function* () {
-        const maintenance = yield* SearchMaintenance;
-        return yield* maintenance.repairOnce({
-          workerId: "cli-maintenance",
-          limit: intArg("--limit", 100),
-          leaseMs: intArg("--lease-ms", 60_000),
-        });
-      }),
-    );
-    break;
-  }
   case "workers": {
     await fetchServer("workers", "/status");
-    break;
-  }
-  case "operator-workers": {
-    await run(
-      "operator-workers",
-      Effect.gen(function* () {
-        const workers = yield* WorkerSupervisor;
-        return yield* workers.status;
-      }),
-    );
-    break;
-  }
-  case "operator-worker-tick": {
-    await run(
-      "operator-worker-tick",
-      Effect.gen(function* () {
-        const workers = yield* WorkerSupervisor;
-        return yield* workers.tickOnce;
-      }),
-    );
-    break;
-  }
-  case "operator-embed-batch": {
-    await run(
-      "operator-embed-batch",
-      Effect.gen(function* () {
-        const embeddings = yield* Embeddings;
-        return yield* embeddings.processBatch({
-          workerId: arg("--worker-id") ?? "cli-embedding-worker",
-          limit: intArg("--limit", 32),
-          leaseMs: intArg("--lease-ms", 60_000),
-        });
-      }),
-    );
-    break;
-  }
-  case "operator-recover-leases": {
-    await run(
-      "operator-recover-leases",
-      Effect.gen(function* () {
-        const queue = yield* DurableQueue;
-        const recovered = yield* queue.recoverStaleLeases(arg("--now"));
-        const stats = yield* queue.statsByKind;
-        return { recovered, byKind: stats };
-      }),
-    );
     break;
   }
   case "search": {
@@ -564,13 +462,6 @@ switch (command) {
           "freshness [--limit n] [--server url]",
           "repair-index [--limit n] [--lease-ms n] [--server url]",
           "workers [--server url]",
-          "operator-maintain [--vector true|false] [--optimize true|false]",
-          "operator-freshness [--limit n]",
-          "operator-repair-index [--limit n] [--lease-ms n]",
-          "operator-workers",
-          "operator-worker-tick",
-          "operator-embed-batch [--limit n] [--lease-ms n] [--worker-id id]",
-          "operator-recover-leases [--now iso]",
           "search --query text [--mode lexical|semantic|fusion] [--project-key key] [--role user|assistant] [--limit n] [--server url]",
           "stats",
           "version",
