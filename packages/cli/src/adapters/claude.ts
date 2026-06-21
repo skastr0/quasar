@@ -1,7 +1,8 @@
+import { basename, dirname, join } from "node:path";
 import { existsSync, statSync } from "node:fs";
-import { join } from "node:path";
 
 import { collectAdapterStream, type SessionAdapter } from "./types";
+import { ClaudeSessionId, type SessionId } from "../core/identity";
 import type { SessionEdge, ToolCall, UsageRecord } from "../core/schemas";
 import {
   buildSession,
@@ -13,7 +14,6 @@ import {
   kindFromNative,
   logicalPathFor,
   logicalRootFor,
-  nativeSessionIdFromPath,
   numberValue,
   parentDirectoryName,
   projectSessionNativeValue,
@@ -31,6 +31,58 @@ import {
 
 const projectPathFromClaudeKey = (key: string) =>
   key.startsWith("-") ? key.replace(/^-/, "/").replaceAll("-", "/") : key;
+
+/**
+ * Claude transcripts form a TREE and the native session id is POLYMORPHIC by
+ * how a file is populated:
+ *   - main session file `{project}/{uuid}.jsonl` → the in-record `sessionId`
+ *     (its own uuid).
+ *   - subagent file `{parent}/subagents/agent-<agentId>.jsonl` and
+ *     workflow-agent file
+ *     `{parent}/subagents/workflows/wf_<run>/agent-<agentId>.jsonl` → the
+ *     in-record `agentId` (NOT the parent sessionId, NOT the filename which
+ *     carries an `agent-` prefix).
+ *   - `journal.jsonl` files carry only `started`/`result` rows (run manifests,
+ *     no conversation) → EXCLUDED entirely; they are not sessions.
+ * Subagent and workflow-agent files are FIRST-CLASS sessions and are always
+ * ingested even though they legitimately have no human user turn.
+ */
+const isClaudeJournalFile = (path: string) => basename(path) === "journal.jsonl";
+
+const isSubagentFile = (path: string) =>
+  parentDirectoryName(path) === "subagents" ||
+  dirname(path).includes(`${join("subagents", "workflows")}`) ||
+  /^agent-/.test(basename(path));
+
+const firstStringField = (
+  records: readonly Record<string, unknown>[],
+  field: string,
+): string | undefined => {
+  for (const record of records) {
+    const value = record[field];
+    if (typeof value === "string" && value.trim().length > 0) return value;
+  }
+  return undefined;
+};
+
+/**
+ * Derives the polymorphic native id from a file's parsed records. Subagent and
+ * workflow-agent files key on the in-record `agentId`; main session files key
+ * on the in-record `sessionId`. Falls back to the filename stem only when the
+ * expected in-record id is absent (defensive — real data carries it).
+ */
+const claudeNativeSessionId = (
+  path: string,
+  records: readonly Record<string, unknown>[],
+): ClaudeSessionId => {
+  const filenameStem = basename(path).replace(/\.(jsonl|json)$/i, "");
+  if (isSubagentFile(path)) {
+    const agentId =
+      firstStringField(records, "agentId") ?? filenameStem.replace(/^agent-/, "");
+    return ClaudeSessionId(agentId);
+  }
+  return ClaudeSessionId(firstStringField(records, "sessionId") ?? filenameStem);
+};
 
 type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
 type ClaudeToolCallDraft = Omit<
@@ -168,13 +220,12 @@ const claudeContentProjection = (
   return projectSessionNativeValue(record.content);
 };
 
-const toolCallIdFor = (machineId: string, sourcePath: string, nativeToolId: string) =>
-  scopedId("claude", machineId, sourcePath, "tool", nativeToolId);
+const toolCallIdFor = (sessionId: SessionId, nativeToolId: string) =>
+  scopedId(sessionId, "tool", nativeToolId);
 
 const upsertClaudeToolCalls = (
   toolCallsById: Map<string, ClaudeToolCallDraft>,
-  machineId: string,
-  sourcePath: string,
+  sessionId: SessionId,
   eventId: string,
   timestamp: string | undefined,
   blocks: readonly unknown[],
@@ -184,7 +235,7 @@ const upsertClaudeToolCalls = (
     const block = recordFrom(blockValue);
     const type = typeof block.type === "string" ? block.type : undefined;
     if (type === "tool_use" && typeof block.id === "string") {
-      const id = toolCallIdFor(machineId, sourcePath, block.id);
+      const id = toolCallIdFor(sessionId, block.id);
       const existing = toolCallsById.get(id);
       const input = projectToolPayloadNativeValue(block.input);
       toolCallsById.set(id, {
@@ -202,7 +253,7 @@ const upsertClaudeToolCalls = (
       continue;
     }
     if (type === "tool_result" && typeof block.tool_use_id === "string") {
-      const id = toolCallIdFor(machineId, sourcePath, block.tool_use_id);
+      const id = toolCallIdFor(sessionId, block.tool_use_id);
       const existing = toolCallsById.get(id);
       const output = projectToolPayloadNativeValue(block.content);
       toolCallsById.set(id, {
@@ -230,9 +281,7 @@ const claudeKindFrom = (type: string, blocks: readonly unknown[]) => {
 };
 
 const claudeUsageRecord = (
-  machineId: string,
-  sourcePath: string,
-  nativeSessionId: string,
+  sessionId: SessionId,
   eventId: string,
   sequence: number,
   timestamp: string | undefined,
@@ -250,7 +299,7 @@ const claudeUsageRecord = (
   const cacheReadInputTokens =
     numberValue(usage.cache_read_input_tokens) ?? numberValue(usage.cacheReadInputTokens);
   return {
-    id: usageIdFor("claude", machineId, sourcePath, nativeSessionId, eventId, sequence),
+    id: usageIdFor(sessionId, eventId, sequence),
     eventId,
     ...(timestamp !== undefined ? { timestamp } : {}),
     model: typeof message?.model === "string" ? message.model : undefined,
@@ -277,12 +326,17 @@ const buildClaudeSessionFromFile = (
   options: AdapterOptions,
 ) => {
   const lines = readJsonLines(path);
+  const records = lines.map(({ value }) =>
+    typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {},
+  );
   const projectKey = parentDirectoryName(sourcePath);
   const firstRecord = lines[0]?.value as Record<string, unknown> | undefined;
   const projectPath =
     typeof firstRecord?.cwd === "string"
       ? firstRecord.cwd
       : projectPathFromClaudeKey(projectKey);
+  const nativeSessionId = claudeNativeSessionId(sourcePath, records);
+  const sessionId = sessionIdFor("claude", nativeSessionId);
   const toolCallsById = new Map<string, ClaudeToolCallDraft>();
   const usageRecords: ClaudeUsageDraft[] = [];
   const nativeUuidToEventId = new Map<string, string>();
@@ -299,13 +353,13 @@ const buildClaudeSessionFromFile = (
         : undefined;
     const content = claudeContentProjection(message, record);
     const nativeEventId = typeof record.uuid === "string" ? record.uuid : undefined;
-    const eventId = eventIdFor("claude", options.machine.machineId, sourcePath, index, nativeEventId ?? lineNumber);
+    const eventId = eventIdFor(sessionId, index, nativeEventId ?? lineNumber);
     if (nativeEventId !== undefined) nativeUuidToEventId.set(nativeEventId, eventId);
     const parentUuid = typeof record.parentUuid === "string" ? record.parentUuid : undefined;
     if (parentUuid !== undefined) {
       const parentEventId = nativeUuidToEventId.get(parentUuid);
       parentEdges.push({
-        id: edgeIdFor("claude", options.machine.machineId, sourcePath, "parent", parentUuid, nativeEventId ?? eventId),
+        id: edgeIdFor(sessionId, "parent", parentUuid, nativeEventId ?? eventId),
         kind: "parent",
         ...(parentEventId !== undefined ? { fromEventId: parentEventId } : { fromId: parentUuid }),
         toEventId: eventId,
@@ -317,16 +371,13 @@ const buildClaudeSessionFromFile = (
     const blocks = contentArray(message);
     const toolCallId = upsertClaudeToolCalls(
       toolCallsById,
-      options.machine.machineId,
-      sourcePath,
+      sessionId,
       eventId,
       timestamp,
       blocks,
     );
     const usageRecord = claudeUsageRecord(
-      options.machine.machineId,
-      sourcePath,
-      nativeSessionIdFromPath(sourcePath),
+      sessionId,
       eventId,
       index,
       timestamp,
@@ -354,7 +405,8 @@ const buildClaudeSessionFromFile = (
     provider: "claude",
     agentName: "claude-code",
     machine: options.machine,
-    nativeSessionId: nativeSessionIdFromPath(sourcePath),
+    sessionId,
+    nativeSessionId,
     nativeProjectKey: projectKey,
     sourceRoot: logicalProjectsRoot,
     sourcePath,
@@ -397,23 +449,27 @@ async function* streamClaude(options: AdapterOptions) {
   };
   let sessionCount = 0;
   for (const path of files) {
+    // journal.jsonl files are run manifests (only started/result rows), not
+    // sessions — they are excluded from ingest entirely.
+    if (isClaudeJournalFile(path)) continue;
     const sourcePath = logicalPathFor(path, projectsRoot, logicalProjectsRoot);
-    // Cheap pre-parse gate: a stat (size/mtime) is the per-session change
-    // signal, so an unchanged session never reaches the line parse.
-    if (options.shouldParseSession !== undefined) {
-      const stat = statSync(path);
-      const probe = {
-        sessionId: sessionIdFor("claude", options.machine.machineId, nativeSessionIdFromPath(sourcePath), sourcePath),
-        sourceFingerprint: sourceFingerprintFor(stat),
-      };
-      if ((await options.shouldParseSession(probe)) === false) continue;
-    }
     const session = buildClaudeSessionFromFile(
       path,
       sourcePath,
       logicalProjectsRoot,
       options,
     );
+    // Change-detection gate keyed on the canonical session id (now derived
+    // from the file's polymorphic native id) plus the source fingerprint, so an
+    // unchanged session is skipped without re-emitting.
+    if (options.shouldParseSession !== undefined) {
+      const stat = statSync(path);
+      const probe = {
+        sessionId: session.id,
+        sourceFingerprint: sourceFingerprintFor(stat),
+      };
+      if ((await options.shouldParseSession(probe)) === false) continue;
+    }
     sessionCount += 1;
     yield {
       type: "session" as const,

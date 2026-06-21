@@ -1,6 +1,9 @@
 import { describe, expect, it } from "bun:test";
 
-import { contentBlocksFromNative } from "../src/adapters/common";
+import { ClaudeSessionId } from "../src/core/identity";
+import { contentBlocksFromNative, sessionIdFor } from "../src/adapters/common";
+
+const sessionId = sessionIdFor("claude", ClaudeSessionId("test-session"));
 
 const blockNativeType = (block: { metadata?: unknown }) =>
   typeof block.metadata === "object" && block.metadata !== null
@@ -12,7 +15,7 @@ describe("contentBlocksFromNative tool-payload containment", () => {
     // The exact Claude shape that leaked in the QSR-055 fidelity proof: a
     // user-role event whose content is a tool_result with an ARRAY of text
     // children. Those children are tool payload, not conversation.
-    const blocks = contentBlocksFromNative("claude", "machine", "/src", "evt", [
+    const blocks = contentBlocksFromNative(sessionId, "evt", [
       {
         type: "tool_result",
         tool_use_id: "toolu_123",
@@ -30,7 +33,7 @@ describe("contentBlocksFromNative tool-payload containment", () => {
   });
 
   it("marks deeply nested and bare-string tool_result children", () => {
-    const blocks = contentBlocksFromNative("claude", "machine", "/src", "evt", [
+    const blocks = contentBlocksFromNative(sessionId, "evt", [
       {
         type: "tool_result",
         content: ["bare string payload", { content: [{ type: "text", text: "nested" }] }],
@@ -44,7 +47,7 @@ describe("contentBlocksFromNative tool-payload containment", () => {
   });
 
   it("leaves conversational text blocks with their own nativeType", () => {
-    const blocks = contentBlocksFromNative("claude", "machine", "/src", "evt", [
+    const blocks = contentBlocksFromNative(sessionId, "evt", [
       { type: "text", text: "a real human sentence" },
     ]);
 
@@ -53,7 +56,7 @@ describe("contentBlocksFromNative tool-payload containment", () => {
   });
 
   it("keeps tool_use input marked while sibling text stays conversational", () => {
-    const blocks = contentBlocksFromNative("claude", "machine", "/src", "evt", [
+    const blocks = contentBlocksFromNative(sessionId, "evt", [
       { type: "text", text: "let me run that" },
       { type: "tool_use", id: "toolu_9", name: "Bash", input: { command: "ls" } },
     ]);

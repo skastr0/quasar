@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { collectAdapterStream, type AdapterStreamItem, type SessionAdapter } from "./types";
+import { AntigravitySessionId } from "../core/identity";
 import type { NormalizedSession, ToolCall } from "../core/schemas";
 import {
   buildSession,
@@ -257,6 +258,8 @@ const buildAntigravitySession = (
   options: AdapterOptions,
 ) => {
   const sourcePath = join(brainRoot, uuid);
+  const nativeSessionId = AntigravitySessionId(uuid);
+  const sessionId = sessionIdFor("antigravity", nativeSessionId);
   const lines = readJsonLines(transcriptPath);
   const toolCallsById = new Map<string, AntigravityToolCallDraft>();
   const eventDrafts: AntigravityEventDraft[] = [];
@@ -297,9 +300,7 @@ const buildAntigravitySession = (
     const { role, kind } = classification;
 
     const eventId = eventIdFor(
-      "antigravity",
-      options.machine.machineId,
-      transcriptPath,
+      sessionId,
       seq,
       stepIndex !== undefined ? String(stepIndex) : lineNumber,
     );
@@ -341,11 +342,8 @@ const buildAntigravitySession = (
       if (toolName === undefined) continue;
       const input = projectToolPayloadNativeValue(tc.args);
       const nativeToolId = scopedId(
-        "antigravity",
-        options.machine.machineId,
-        transcriptPath,
+        sessionId,
         "tool",
-        uuid,
         String(stepIndex ?? seq),
         toolName,
       );
@@ -407,7 +405,8 @@ const buildAntigravitySession = (
     provider: "antigravity",
     agentName: "antigravity-cli",
     machine: options.machine,
-    nativeSessionId: uuid,
+    sessionId,
+    nativeSessionId,
     sourceRoot: brainRoot,
     sourcePath,
     ...(projectPath !== undefined ? { projectPath } : {}),
@@ -488,7 +487,7 @@ async function* streamAntigravity(options: AdapterOptions): AsyncGenerator<Adapt
     if (options.shouldParseSession !== undefined) {
       const stat = statSync(transcriptPath);
       const probe = {
-        sessionId: sessionIdFor("antigravity", options.machine.machineId, uuid, join(brainRoot, uuid)),
+        sessionId: sessionIdFor("antigravity", AntigravitySessionId(uuid)),
         sourceFingerprint: sourceFingerprintFor(stat),
       };
       if ((await options.shouldParseSession(probe)) === false) continue;
