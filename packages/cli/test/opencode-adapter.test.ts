@@ -6,6 +6,9 @@ import { join } from "node:path";
 import { afterAll, describe, expect, test } from "bun:test";
 
 import { opencodeAdapter } from "../src/adapters/opencode";
+import { OpenCodeSessionId } from "../src/core/identity";
+import { sessionIdFor } from "../src/adapters/common";
+import { mapSession } from "../src/map";
 
 const MACHINE = {
   machineId: "machine:test",
@@ -116,6 +119,101 @@ insert into part values ('prt_idem_text', 'msg_idem_user', '${IDEM_SESSION_ID}',
       expect(hostResult.sessions[0]!.id).toBe(dockerResult.sessions[0]!.id);
       // The sourcePaths differ, proving the id is path-independent.
       expect(hostResult.sessions[0]!.sourcePath).not.toBe(dockerResult.sessions[0]!.sourcePath);
+    },
+    15_000,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// QSR-220 — first-class subagents: session-to-session lineage.
+//
+// OpenCode subagents are rows in the same `session` table carrying their own
+// `ses_` id, a non-null `parent_id` (the parent's `ses_` id), and a named
+// `agent` column. The adapter must emit a canonical `subagent_of` SessionEdge
+// whose `fromId` is the parent's canonical Quasar SessionId and project it onto
+// `parentSessionId`, plus stamp `agentName` from the `agent` column. The
+// fixture mirrors the real on-disk shape (a parent root row + a child subagent
+// row); identifiers are fabricated.
+// ---------------------------------------------------------------------------
+describe("QSR-220 opencode subagent lineage", () => {
+  // Real on-disk shape: `session` carries `parent_id` + `agent`. A child row
+  // with a non-null parent_id is a subagent of the parent row.
+  const PARENT_ID = "ses_fab00parent00aaaa";
+  const CHILD_ID = "ses_fab00child000bbbb";
+  const AGENT_NAME = "secret-tester";
+  const LINEAGE_SQL = `
+create table session (
+  id text primary key,
+  parent_id text,
+  title text not null,
+  directory text not null,
+  agent text,
+  path text,
+  time_created integer not null,
+  time_updated integer not null
+);
+create table message (id text primary key, session_id text, time_created integer, data text);
+create table part (id text primary key, message_id text, session_id text, time_created integer, data text);
+
+-- Parent (root) session: parent_id NULL, no agent.
+insert into session (id, parent_id, title, directory, agent, path, time_created, time_updated)
+  values ('${PARENT_ID}', null, 'parent orchestration', '/tmp/proj', null, '/tmp/proj', 1, 10);
+insert into message values ('msg_parent', '${PARENT_ID}', 1, json_object('role', 'user', 'time', json_object('created', 1)));
+insert into part values ('prt_parent', 'msg_parent', '${PARENT_ID}', 1, json_object('type', 'text', 'text', 'spawn a subagent'));
+
+-- Child subagent: parent_id points at the parent ses_ id, agent names the role.
+insert into session (id, parent_id, title, directory, agent, path, time_created, time_updated)
+  values ('${CHILD_ID}', '${PARENT_ID}', 'subagent run (@secret-tester)', '/tmp/proj', '${AGENT_NAME}', '/tmp/proj', 2, 9);
+insert into message values ('msg_child', '${CHILD_ID}', 2, json_object('role', 'assistant', 'time', json_object('created', 2)));
+insert into part values ('prt_child', 'msg_child', '${CHILD_ID}', 2, json_object('type', 'text', 'text', 'subagent reply'));
+`;
+
+  const lineageRoot = mkdtempSync(join(tmpdir(), "quasar-oc-lineage-"));
+  execFileSync("sqlite3", [join(lineageRoot, "opencode.db"), LINEAGE_SQL]);
+
+  afterAll(() => {
+    rmSync(lineageRoot, { recursive: true, force: true });
+  });
+
+  test(
+    "child's parentSessionId resolves to the parent's canonical SessionId and agentName is set",
+    async () => {
+      const result = await opencodeAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { opencode: lineageRoot },
+      });
+
+      expect(result.sessions).toHaveLength(2);
+      const parent = result.sessions.find((s) =>
+        s.id === sessionIdFor("opencode", OpenCodeSessionId(PARENT_ID)),
+      )!;
+      const child = result.sessions.find((s) =>
+        s.id === sessionIdFor("opencode", OpenCodeSessionId(CHILD_ID)),
+      )!;
+      expect(parent).toBeDefined();
+      expect(child).toBeDefined();
+
+      // Canonical lineage: the child emits a single `subagent_of` edge whose
+      // fromId is the parent's canonical SessionId (toId is the child).
+      const subagentEdges = child.sessionEdges.filter((edge) => edge.kind === "subagent_of");
+      expect(subagentEdges).toHaveLength(1);
+      expect(subagentEdges[0]!.fromId).toBe(parent.id);
+      expect(subagentEdges[0]!.toId).toBe(child.id);
+      // No event-threading `parent` edge masquerades as session lineage.
+      // The native parent id is preserved in rawReference.
+      expect((subagentEdges[0]!.rawReference as Record<string, unknown>).nativeValue).toBe(PARENT_ID);
+
+      // The agent column becomes agentName; the root session stays "opencode".
+      expect(child.agentName).toBe(AGENT_NAME);
+      expect(parent.agentName).toBe("opencode");
+
+      // mapSession projects subagent_of onto the served parentSessionId column.
+      const mappedChild = mapSession(child, "fp");
+      expect(mappedChild.session.parentSessionId).toBe(parent.id);
+      // The root session has no parent lineage projected.
+      const mappedParent = mapSession(parent, "fp");
+      expect(mappedParent.session.parentSessionId).toBeUndefined();
     },
     15_000,
   );

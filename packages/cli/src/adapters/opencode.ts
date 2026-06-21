@@ -25,9 +25,18 @@ import {
   scopedId,
   sessionIdFor,
   sourceRoot,
+  stringValue,
   type NativeValue,
   usageIdFor,
 } from "./common";
+import { type DecodeDiagnostic } from "./harness-schema";
+import {
+  decodeMessageRows,
+  decodeSessionRows,
+  type OpenCodeMessageRow,
+  type OpenCodeRawRow,
+  type OpenCodeSessionRow,
+} from "./opencode-schema";
 
 const maybeDatabase = async (path: string) => {
   try {
@@ -40,21 +49,6 @@ const maybeDatabase = async (path: string) => {
 
 type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
 type OpenCodeDatabase = NonNullable<Awaited<ReturnType<typeof maybeDatabase>>>;
-type OpenCodeSessionRow = {
-  id: string;
-  title: string;
-  directory: string;
-  path: string | null;
-  time_created: number;
-  time_updated: number;
-};
-type OpenCodeMessageRow = {
-  id: string;
-  time_created: number;
-  data: string;
-  /** Pre-prune byte length of the raw `message.data` blob. */
-  raw_bytes?: number;
-};
 type OpenCodePartRow = {
   id: string;
   message_id: string;
@@ -231,23 +225,34 @@ export const opencodeSessionWindowLimit = (limit: number | undefined) =>
   limit === undefined ? -1 : Math.max(1, Math.floor(limit));
 const sessionWindowSkip = (skip: number | undefined) => Math.max(0, Math.floor(skip ?? 0));
 
+// Session lineage columns (QSR-220). `parent_id` carries the subagent's own
+// parent ses_ id; `agent` carries the named subagent role. Both are absent on
+// older DB files (opencode-local.db predates `agent`), so they are projected
+// conditionally — a missing column becomes a NULL literal rather than a SQL
+// error, and the schema admits the column as nullable.
+const sessionLineageProjection = (
+  hasParentId: boolean,
+  hasAgent: boolean,
+) =>
+  `${hasParentId ? "parent_id" : "null"} as parent_id, ${hasAgent ? "agent" : "null"} as agent`;
+
 const readSessionRows = (
   db: OpenCodeDatabase,
   limit: number | undefined,
   skip: number | undefined,
-) =>
+): OpenCodeRawRow[] =>
   db
     .query(
-      `select id, title, directory, ${sessionPathProjection(db)} as path, time_created, time_updated from session order by time_updated desc, id desc limit ? offset ?`,
+      `select id, title, directory, ${sessionPathProjection(db)} as path, ${sessionLineageProjection(hasSqliteSessionColumn(db, "parent_id"), hasSqliteSessionColumn(db, "agent"))}, time_created, time_updated from session order by time_updated desc, id desc limit ? offset ?`,
     )
-    .all(opencodeSessionWindowLimit(limit), sessionWindowSkip(skip)) as OpenCodeSessionRow[];
+    .all(opencodeSessionWindowLimit(limit), sessionWindowSkip(skip)) as OpenCodeRawRow[];
 
-const readMessages = (db: OpenCodeDatabase, sessionId: string) =>
+const readMessages = (db: OpenCodeDatabase, sessionId: string): OpenCodeRawRow[] =>
   db
     .query(
       `select id, time_created, ${OPENCODE_RAW_BYTES_SQL} as raw_bytes, ${OPENCODE_PRUNED_MESSAGE_DATA_SQL} as data from message where session_id = ? order by time_created, id`,
     )
-    .all(sessionId) as OpenCodeMessageRow[];
+    .all(sessionId) as OpenCodeRawRow[];
 
 const readPartsByMessage = (db: OpenCodeDatabase, sessionId: string) => {
   const rows = db
@@ -268,10 +273,10 @@ const readSessionRowsCli = (
   dbPath: string,
   limit: number | undefined,
   skip: number | undefined,
-) =>
-  sqliteJson<OpenCodeSessionRow>(
+): OpenCodeRawRow[] =>
+  sqliteJson<OpenCodeRawRow>(
     dbPath,
-    `select id, title, directory, ${sessionPathProjectionCli(dbPath)} as path, time_created, time_updated from session order by time_updated desc, id desc limit ${opencodeSessionWindowLimit(limit)} offset ${sessionWindowSkip(skip)}`,
+    `select id, title, directory, ${sessionPathProjectionCli(dbPath)} as path, ${sessionLineageProjection(hasSqliteSessionColumnCli(dbPath, "parent_id"), hasSqliteSessionColumnCli(dbPath, "agent"))}, time_created, time_updated from session order by time_updated desc, id desc limit ${opencodeSessionWindowLimit(limit)} offset ${sessionWindowSkip(skip)}`,
   );
 
 export const readOpenCodeSessionRowsForWindow = (
@@ -280,8 +285,8 @@ export const readOpenCodeSessionRowsForWindow = (
   skip?: number,
 ) => readSessionRowsCli(dbPath, limit, skip);
 
-const readMessagesCli = (dbPath: string, sessionId: string) =>
-  sqliteJson<OpenCodeMessageRow>(
+const readMessagesCli = (dbPath: string, sessionId: string): OpenCodeRawRow[] =>
+  sqliteJson<OpenCodeRawRow>(
     dbPath,
     `select id, time_created, ${OPENCODE_RAW_BYTES_SQL} as raw_bytes, ${OPENCODE_PRUNED_MESSAGE_DATA_SQL} as data from message where session_id = ${sql(sessionId)} order by time_created, id`,
   );
@@ -311,12 +316,14 @@ const sqliteJson = <A>(dbPath: string, query: string): A[] => {
 
 const sql = (value: string) => `'${value.replaceAll("'", "''")}'`;
 
-const hasSqliteSessionColumn = (db: OpenCodeDatabase, column: "path") =>
+type OpenCodeSessionColumn = "path" | "parent_id" | "agent";
+
+const hasSqliteSessionColumn = (db: OpenCodeDatabase, column: OpenCodeSessionColumn) =>
   (db.query("pragma table_info(session)").all() as SQLiteColumnRow[]).some(
     (row) => row.name === column,
   );
 
-const hasSqliteSessionColumnCli = (dbPath: string, column: "path") =>
+const hasSqliteSessionColumnCli = (dbPath: string, column: OpenCodeSessionColumn) =>
   sqliteJson<SQLiteColumnRow>(dbPath, "pragma table_info(session)").some(
     (row) => row.name === column,
   );
@@ -613,6 +620,7 @@ const buildOpenCodeSession = (
   root: string,
   options: AdapterOptions,
   sessionRow: OpenCodeSessionRow,
+  diagnostics: DecodeDiagnostic[],
 ) => {
   const partsByMessage = readPartsByMessage(db, sessionRow.id);
   return buildOpenCodeSessionFromRows(
@@ -620,7 +628,7 @@ const buildOpenCodeSession = (
     root,
     options,
     sessionRow,
-    readMessages(db, sessionRow.id),
+    decodeMessageRows(readMessages(db, sessionRow.id), diagnostics),
     partsByMessage,
   );
 };
@@ -639,6 +647,35 @@ const buildOpenCodeSessionFromRows = (
   const artifacts: OpenCodeArtifactDraft[] = [];
   const nativeSessionId = OpenCodeSessionId(sessionRow.id);
   const sessionId = sessionIdFor("opencode", nativeSessionId);
+  // Session-to-session subagent lineage (QSR-220): a non-null `session.parent_id`
+  // is the subagent's own parent ses_ id. This is SESSION lineage, NOT the
+  // event-to-event `message.parentID` threading below (which uses kind="parent"
+  // and may carry a raw message uuid on fromId). The canonical edge is
+  // `subagent_of`, carrying the PARENT's machine-independent Quasar SessionId on
+  // `fromId` (and the child's on `toId`) so it joins to `sessions.session_id`
+  // once persisted; mapSession projects `subagent_of` onto the served
+  // SessionRow.parentSessionId column. The native parent id is preserved in
+  // `rawReference`. `parent` (event threading) is deliberately never used here.
+  const parentNativeSessionId = stringValue(sessionRow.parent_id);
+  if (parentNativeSessionId !== undefined) {
+    const parentSessionId = sessionIdFor("opencode", OpenCodeSessionId(parentNativeSessionId));
+    sessionEdges.push({
+      id: edgeIdFor(sessionId, "subagent_of", parentSessionId, sessionId),
+      kind: "subagent_of",
+      fromId: parentSessionId,
+      toId: sessionId,
+      rawReference: {
+        sourcePath: dbPath,
+        table: "session",
+        rowId: nativeSessionId,
+        nativeType: "parent_id",
+        nativeValue: parentNativeSessionId,
+      },
+    });
+  }
+  // The named subagent role from the `agent` column. Root sessions (and older
+  // DBs without the column) carry no agent: fall back to the provider name.
+  const agentName = stringValue(sessionRow.agent) ?? "opencode";
   const messageIdToEventId = new Map<string, string>();
   const events = messages.map((message, index) => {
     const result = eventFromMessage(
@@ -666,7 +703,7 @@ const buildOpenCodeSessionFromRows = (
   });
   return buildSession({
     provider: "opencode",
-    agentName: "opencode",
+    agentName,
     machine: options.machine,
     sessionId,
     nativeSessionId,
@@ -689,13 +726,14 @@ const buildOpenCodeSessionCli = (
   root: string,
   options: AdapterOptions,
   sessionRow: OpenCodeSessionRow,
+  diagnostics: DecodeDiagnostic[],
 ) =>
   buildOpenCodeSessionFromRows(
     sourceDbPath,
     root,
     options,
     sessionRow,
-    readMessagesCli(queryDbPath, sessionRow.id),
+    decodeMessageRows(readMessagesCli(queryDbPath, sessionRow.id), diagnostics),
     readPartsByMessageCli(queryDbPath, sessionRow.id),
   );
 
@@ -782,6 +820,24 @@ const skipOpenCodeSession = async (
   return (await options.shouldParseSession(probe)) === false;
 };
 
+/** Surface accumulated fail-closed decode drops as named diagnostics. */
+const decodeDropDiagnostics = (
+  diagnostics: readonly DecodeDiagnostic[],
+  rootPath: string,
+): AdapterStreamItem[] =>
+  diagnostics.map((diagnostic) => ({
+    type: "diagnostic" as const,
+    diagnostic: {
+      adapterId: opencodeAdapter.id,
+      provider: "opencode" as const,
+      status: "unsupported" as const,
+      parserConfidence: "observed" as const,
+      rootPath,
+      message: `OpenCode row dropped (${diagnostic.name}).`,
+      details: { error: diagnostic.message },
+    },
+  }));
+
 async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterStreamItem> {
   const root = options.roots?.opencode ?? opencodeAdapter.defaultRoot();
   const dbPath = opencodeDbPath(root);
@@ -797,13 +853,17 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
   const db = await maybeDatabase(tempDb.path);
   if (db === undefined) {
     try {
-      const rows = readSessionRowsCli(tempDb.path, options.limit, options.skip);
-      if (rows.length === 0) {
+      const rawRows = readSessionRowsCli(tempDb.path, options.limit, options.skip);
+      if (rawRows.length === 0) {
         for (const diagnostic of unsupportedRuntimeResult(dbPath).diagnostics) {
           yield { type: "diagnostic", diagnostic };
         }
         return;
       }
+      // Fail-closed decode: a malformed session row becomes a named diagnostic
+      // and is dropped from the window — it never aborts the file.
+      const decodeDiagnostics: DecodeDiagnostic[] = [];
+      const rows = decodeSessionRows(rawRows, decodeDiagnostics);
       yield {
         type: "sourceRoot",
         sourceRoot: sourceRoot("opencode", opencodeAdapter.id, logicalRoot ?? root, options.machine, options.now),
@@ -817,6 +877,7 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
           logicalRoot ?? root,
           options,
           sessionEntry,
+          decodeDiagnostics,
         );
         const fingerprint = opencodeSessionFingerprint(sessionEntry);
         yield {
@@ -832,6 +893,9 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
           ...(fingerprint !== undefined ? { fingerprint } : {}),
         };
         sessionCount += 1;
+      }
+      for (const item of decodeDropDiagnostics(decodeDiagnostics, logicalDbPath ?? dbPath)) {
+        yield item;
       }
       yield {
         type: "diagnostic",
@@ -855,7 +919,14 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
       sourceRoot: sourceRoot("opencode", opencodeAdapter.id, logicalRoot ?? root, options.machine, options.now),
     };
     let sessionCount = 0;
-    for (const sessionEntry of readSessionRows(db, options.limit, options.skip)) {
+    // Fail-closed decode: a malformed session row becomes a named diagnostic
+    // and is dropped from the window — it never aborts the file.
+    const decodeDiagnostics: DecodeDiagnostic[] = [];
+    const sessionRows = decodeSessionRows(
+      readSessionRows(db, options.limit, options.skip),
+      decodeDiagnostics,
+    );
+    for (const sessionEntry of sessionRows) {
       if (await skipOpenCodeSession(options, sessionEntry, logicalDbPath ?? dbPath)) continue;
       const session = buildOpenCodeSession(
         db,
@@ -863,6 +934,7 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
         logicalRoot ?? root,
         options,
         sessionEntry,
+        decodeDiagnostics,
       );
       const fingerprint = opencodeSessionFingerprint(sessionEntry);
       yield {
@@ -878,6 +950,9 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
         ...(fingerprint !== undefined ? { fingerprint } : {}),
       };
       sessionCount += 1;
+    }
+    for (const item of decodeDropDiagnostics(decodeDiagnostics, logicalDbPath ?? dbPath)) {
+      yield item;
     }
     yield {
       type: "diagnostic",
