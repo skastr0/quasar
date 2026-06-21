@@ -9,6 +9,12 @@ import {
 import { CodexSessionId, type SessionId } from "../core/identity";
 import type { NormalizedSession, SessionEventKind, SessionRole, ToolCall, UsageRecord } from "../core/schemas";
 import {
+  CODEX_SESSION_META_DECODE_FAILED,
+  CodexSessionMetaSchema,
+  type CodexSessionMeta,
+} from "./codex-schema";
+import { type DecodeDiagnostic, decodeOrDrop, isSignal } from "./harness-schema";
+import {
   buildSession,
   collectFiles,
   compactText,
@@ -456,6 +462,38 @@ const sessionIdFromSessionMeta = (value: unknown): string | undefined => {
 export const CODEX_MISSING_SESSION_META_ID =
   "codex.session_meta.payload.id.missing";
 
+/**
+ * Codex subagents are separate rollout-*.jsonl files, each with its own UUIDv7.
+ * A subagent rollout records its spawning parent at
+ * `session_meta.payload.source.subagent.thread_spawn.parent_thread_id` (the
+ * parent's native id) and its agent identity at `agent_nickname` (preferred) /
+ * `agent_role` (fallback). A main-session rollout carries no `source.subagent`,
+ * so this returns `undefined` and the session maps with no parent.
+ */
+type CodexSubagentLineage = {
+  /** The parent rollout's native id (its session_meta.payload.id). */
+  readonly parentNativeId: string;
+  /** Human label for the spawned agent, or undefined when none was recorded. */
+  readonly agentName: string | undefined;
+};
+
+const trimmedNonEmpty = (value: string | null | undefined): string | undefined => {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? undefined : trimmed;
+};
+
+const codexSubagentLineage = (meta: CodexSessionMeta): CodexSubagentLineage | undefined => {
+  const subagent = meta.payload.source?.subagent ?? undefined;
+  if (subagent === undefined || subagent === null) return undefined;
+  const parentNativeId = trimmedNonEmpty(subagent.thread_spawn?.parent_thread_id ?? undefined);
+  if (parentNativeId === undefined) return undefined;
+  return {
+    parentNativeId,
+    agentName: trimmedNonEmpty(subagent.agent_nickname) ?? trimmedNonEmpty(subagent.agent_role),
+  };
+};
+
 
 const parseFileWalkInput = (root: string, limit: number | undefined, skip: number | undefined) => {
   const trimmedRoot = root.trim();
@@ -528,6 +566,7 @@ async function* streamCodexSessionFromFile(
   logicalSessionsRoot: string,
   rawNativeId: string,
   options: AdapterOptions,
+  decodeDiagnostics: DecodeDiagnostic[],
   parseOptions: { readonly strictJsonLines?: boolean } = {},
 ): AsyncGenerator<NormalizedSession> {
   const nativeSessionId = CodexSessionId(rawNativeId);
@@ -535,13 +574,16 @@ async function* streamCodexSessionFromFile(
   const toolCallsById = new Map<string, CodexToolCallDraft>();
   const toolCallEventByToolId = new Map<string, string>();
   let projectPath: string | undefined;
+  // Subagent lineage + agent identity, sourced fail-closed from the decoded
+  // session_meta. Defaults: no parent, agentName "codex" (a main session).
+  let agentName = "codex";
   let slice = emptyCodexSlice();
 
   const buildCompleteSession = () => {
     if (slice.events.length === 0) return undefined;
     const session = buildSession({
       provider: "codex",
-      agentName: "codex",
+      agentName,
       machine: options.machine,
       sessionId,
       nativeSessionId,
@@ -577,6 +619,42 @@ async function* streamCodexSessionFromFile(
     strict: parseOptions.strictJsonLines,
   })) {
     projectPath ??= projectPathFromSessionMeta(value);
+    // Fail-closed decode of the session_meta record (the first JSON record).
+    // A garbage session_meta becomes the NAMED diagnostic
+    // `codex.session_meta.decode_failed` + a dropped decode — never a throw,
+    // never silent coercion. Subagent lineage + agentName are projected ONLY
+    // from a successfully decoded session_meta.
+    if (recordFrom(value).type === "session_meta") {
+      const decision = decodeOrDrop(CodexSessionMetaSchema, value, {
+        kind: "session_meta" as const,
+        diagnosticName: CODEX_SESSION_META_DECODE_FAILED,
+        diagnostics: decodeDiagnostics,
+      });
+      if (isSignal(decision)) {
+        const lineage = codexSubagentLineage(decision.value);
+        if (lineage !== undefined) {
+          if (lineage.agentName !== undefined) agentName = lineage.agentName;
+          // Session-to-session subagent lineage. The canonical signal is a
+          // `subagent_of` edge whose `fromId` is the parent's machine-independent
+          // Quasar SessionId and `toId` is this child's; mapSession projects it
+          // onto SessionRow.parentSessionId. The parent's native id is preserved
+          // in `rawReference`. NEVER `kind: "parent"` (event threading).
+          const parentSessionId = sessionIdFor("codex", CodexSessionId(lineage.parentNativeId));
+          slice.sessionEdges.push({
+            id: edgeIdFor(sessionId, "subagent_of", parentSessionId, sessionId),
+            kind: "subagent_of",
+            fromId: parentSessionId,
+            toId: sessionId,
+            rawReference: {
+              sourcePath,
+              line: lineNumber,
+              nativeType: "session_meta.payload.source.subagent.thread_spawn.parent_thread_id",
+              nativeValue: lineage.parentNativeId,
+            },
+          });
+        }
+      }
+    }
     const record =
       typeof value === "object" && value !== null
         ? (value as Record<string, unknown>)
@@ -736,12 +814,17 @@ async function* streamCodex(options: AdapterOptions) {
       if ((await options.shouldParseSession(probe)) === false) continue;
     }
     sessionCount += 1;
+    // Named decode diagnostics for a malformed session_meta in THIS file. A
+    // drop is accumulated here and surfaced as an attributable diagnostic; it
+    // never aborts the file and never coerces silently.
+    const decodeDiagnostics: DecodeDiagnostic[] = [];
     for await (const session of streamCodexSessionFromFile(
         path,
         sourcePath,
         scan.logicalScanRoot,
         nativeId,
         options,
+        decodeDiagnostics,
     )) {
       yield {
         type: "session" as const,
@@ -752,6 +835,20 @@ async function* streamCodex(options: AdapterOptions) {
           rootPath: scan.logicalScanRoot,
           sourcePath,
           physicalPath: path,
+        },
+      };
+    }
+    for (const diagnostic of decodeDiagnostics) {
+      yield {
+        type: "diagnostic" as const,
+        diagnostic: {
+          adapterId: codexAdapter.id,
+          provider: "codex" as const,
+          status: "unsupported" as const,
+          parserConfidence: "documented" as const,
+          rootPath: scan.logicalScanRoot,
+          message: `Codex session_meta dropped (${diagnostic.name}) for ${sourcePath}.`,
+          details: { error: diagnostic.message, sourcePath, physicalPath: path },
         },
       };
     }
