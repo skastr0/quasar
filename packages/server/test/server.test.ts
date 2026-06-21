@@ -117,7 +117,7 @@ describe("HTTP server", () => {
     const lance = join(dir, "search.lance");
     const port = 20_000 + Math.floor(Math.random() * 20_000);
     const token = "test-ingest-token";
-    const proc = Bun.spawn(["bun", "run", "../cli/src/cli.ts", "serve", "--host", "127.0.0.1", "--port", String(port)], {
+    const proc = Bun.spawn(["bun", "run", "src/main.ts", "--host", "127.0.0.1", "--port", String(port)], {
       cwd: join(import.meta.dir, ".."),
       env: {
         ...process.env,
@@ -169,7 +169,7 @@ describe("HTTP server", () => {
     const lance = join(dir, "search.lance");
     const port = 20_000 + Math.floor(Math.random() * 20_000);
     const token = "test-ingest-token";
-    const proc = Bun.spawn(["bun", "run", "../cli/src/cli.ts", "serve", "--host", "127.0.0.1", "--port", String(port)], {
+    const proc = Bun.spawn(["bun", "run", "src/main.ts", "--host", "127.0.0.1", "--port", String(port)], {
       cwd: join(import.meta.dir, ".."),
       env: {
         ...process.env,
@@ -215,7 +215,7 @@ describe("HTTP server", () => {
     await seedAndIndex(sqlite, lance);
 
     const port = 20_000 + Math.floor(Math.random() * 20_000);
-    const proc = Bun.spawn(["bun", "run", "../cli/src/cli.ts", "serve", "--host", "127.0.0.1", "--port", String(port)], {
+    const proc = Bun.spawn(["bun", "run", "src/main.ts", "--host", "127.0.0.1", "--port", String(port)], {
       cwd: join(import.meta.dir, ".."),
       env: {
         ...process.env,

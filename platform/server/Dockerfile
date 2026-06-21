@@ -29,4 +29,4 @@ EXPOSE 6180
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=6 \
   CMD curl -fsS http://127.0.0.1:${QUASAR_LOCAL_PORT}/health >/dev/null || exit 1
 
-CMD ["bun", "packages/cli/src/cli.ts", "serve", "--host", "0.0.0.0", "--port", "6180"]
+CMD ["bun", "packages/server/src/main.ts", "--host", "0.0.0.0", "--port", "6180"]
