@@ -5,14 +5,14 @@ import { tmpdir } from "node:os";
 
 import { collectAdapterStream, type AdapterStreamItem, type SessionAdapter } from "./types";
 import { AntigravitySessionId } from "../core/identity";
-import type { NormalizedSession, ToolCall } from "../core/schemas";
+import type { NormalizedSession, SessionEdge, ToolCall } from "../core/schemas";
 import {
   buildSession,
   compactText,
+  edgeIdFor,
   eventIdFor,
   homePath,
   projectToolPayloadNativeValue,
-  recordFrom,
   readJsonLines,
   scopedId,
   sessionIdFor,
@@ -20,6 +20,15 @@ import {
   sourceRoot,
   type NativeValue,
 } from "./common";
+import { type DecodeDiagnostic, decodeOrDrop, isSignal } from "./harness-schema";
+import {
+  AntigravityRecordSchema,
+  agentNameFromRole,
+  childUuidsFromInvokeContent,
+  classifyToolCall,
+  rolesFromInvokeToolCall,
+  type SubagentRole,
+} from "./antigravity-schema";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -29,6 +38,24 @@ type AntigravityToolCallDraft = Omit<
   ToolCall,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
 >;
+
+type AntigravityEdgeDraft = Omit<
+  SessionEdge,
+  "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
+>;
+
+/**
+ * Resolved cross-session lineage for one child brain dir: the canonical PARENT
+ * uuid that spawned it, plus the subagent Role/TypeName so the child session's
+ * agentName can reflect what kind of subagent it was.
+ */
+interface AntigravityChildLineage {
+  readonly parentUuid: string;
+  readonly role?: SubagentRole;
+}
+
+/** The whole brain root's child-uuid → parent lineage map (built once per read). */
+type AntigravityLineageMap = ReadonlyMap<string, AntigravityChildLineage>;
 
 type AntigravityEventDraft = {
   readonly id: string;
@@ -138,6 +165,11 @@ const classifyRecord = (input: {
 
   if (TOOL_EXECUTION_TYPES.has(type)) return { role: "assistant", kind: "tool_call" };
   if (type === "CHECKPOINT" || type === "SYSTEM_MESSAGE") return { role: "system", kind: "system" };
+  // INVOKE_SUBAGENT is the spawn record (content = the child brain uuid blurb).
+  // It is a first-class subagent lifecycle event, NOT "unknown": it is the
+  // structural marker that this parent forked a child session. Its content is
+  // consumed for cross-session lineage (buildLineageMap), not for search.
+  if (type === "INVOKE_SUBAGENT") return { role: "system", kind: "lifecycle" };
   return { role: "unknown", kind: "unknown" };
 };
 
@@ -247,6 +279,84 @@ const readWorkdirFromConversationDb = (uuid: string, conversationsDir: string): 
 };
 
 // ---------------------------------------------------------------------------
+// Cross-session lineage map
+//
+// Antigravity subagents are spawned via invoke_subagent and get their OWN brain
+// dir + uuid + transcript_full.jsonl (ingested flat). The parent link lives ONLY
+// in the PARENT's content: an INVOKE_SUBAGENT record whose content blurb carries
+// the child brain uuid(s), preceded by the invoke_subagent tool call whose
+// Subagents[] carry the Role/TypeName in matching order. So lineage is built by
+// scanning EVERY brain dir's transcript for INVOKE_SUBAGENT records, collecting
+// childUuid → { parentUuid, role } across the whole root, then consulting that
+// map when ingesting each child.
+// ---------------------------------------------------------------------------
+
+/**
+ * Scan a single parent transcript for INVOKE_SUBAGENT records and record each
+ * child it spawned. The most-recently-seen `invoke_subagent` tool call supplies
+ * the ordered Role/TypeName list that pairs (by index) to the child uuids in the
+ * following INVOKE_SUBAGENT content blurb. Records are decoded fail-closed; a
+ * malformed line is dropped (lineage is best-effort and never throws).
+ */
+const collectLineageFromTranscript = (
+  parentUuid: string,
+  transcriptPath: string,
+  into: Map<string, AntigravityChildLineage>,
+) => {
+  let pendingRoles: SubagentRole[] = [];
+  for (const { value } of readJsonLines(transcriptPath)) {
+    const decision = decodeOrDrop(AntigravityRecordSchema, value, {
+      kind: "record" as const,
+      diagnosticName: "antigravity.record.decode_failed",
+    });
+    if (!isSignal(decision)) continue;
+    const record = decision.value;
+
+    for (const rawToolCall of record.tool_calls ?? []) {
+      const toolDecision = classifyToolCall(rawToolCall);
+      if (isSignal(toolDecision) && toolDecision.kind === "invoke_subagent") {
+        pendingRoles = rolesFromInvokeToolCall(toolDecision.value.args);
+      }
+    }
+
+    if (record.type === "INVOKE_SUBAGENT") {
+      const childUuids = childUuidsFromInvokeContent(record.content);
+      childUuids.forEach((childUuid, index) => {
+        if (childUuid === parentUuid) return; // never self-link
+        // First writer wins: a child is spawned once; ignore later duplicates.
+        if (into.has(childUuid)) return;
+        const role = pendingRoles[index];
+        into.set(childUuid, { parentUuid, ...(role !== undefined ? { role } : {}) });
+      });
+      pendingRoles = [];
+    }
+  }
+};
+
+/**
+ * Build the child→parent lineage map across the entire brain root. Only dirs
+ * with a transcript are scanned (the same filter the ingest scan applies).
+ */
+const buildLineageMap = (
+  brainRoot: string,
+  uuids: readonly string[],
+  transcriptPathFor: (uuid: string) => string,
+): AntigravityLineageMap => {
+  const map = new Map<string, AntigravityChildLineage>();
+  for (const uuid of uuids) {
+    const transcriptPath = transcriptPathFor(uuid);
+    if (!existsSync(transcriptPath)) continue;
+    try {
+      collectLineageFromTranscript(uuid, transcriptPath, map);
+    } catch {
+      // Lineage is best-effort: a single unreadable transcript never aborts the
+      // whole map. The session still ingests; it just lacks a parent link.
+    }
+  }
+  return map;
+};
+
+// ---------------------------------------------------------------------------
 // Session builder
 // ---------------------------------------------------------------------------
 
@@ -256,6 +366,8 @@ const buildAntigravitySession = (
   brainRoot: string,
   conversationsDir: string,
   options: AdapterOptions,
+  lineage: AntigravityLineageMap,
+  diagnostics: DecodeDiagnostic[],
 ) => {
   const sourcePath = join(brainRoot, uuid);
   const nativeSessionId = AntigravitySessionId(uuid);
@@ -268,16 +380,19 @@ const buildAntigravitySession = (
   // PLANNER_RESPONSE that initiated them. We link by step_index when possible.
   const stepIndexToEventId = new Map<number, string>();
 
-  // First pass: normalize every line into a record so turn segmentation can
-  // identify the terminal PLANNER_RESPONSE of each turn before classification.
-  const parsed = lines.map(({ value, lineNumber }) => {
-    const record =
-      typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
-    return {
-      record,
-      lineNumber,
-      type: typeof record.type === "string" ? record.type : "unknown",
-    };
+  // First pass: decode every line FAIL-CLOSED through the record schema so a
+  // malformed line becomes a NAMED diagnostic (antigravity.record.decode_failed)
+  // + a dropped record, never a thrown exception that aborts the transcript and
+  // never a silently coerced half-record. Decoded records carry a typed `type`
+  // discriminator that the turn segmentation + classification below key on.
+  const parsed = lines.flatMap(({ value, lineNumber }) => {
+    const decision = decodeOrDrop(AntigravityRecordSchema, value, {
+      kind: "record" as const,
+      diagnosticName: "antigravity.record.decode_failed",
+      diagnostics,
+    });
+    if (!isSignal(decision)) return [];
+    return [{ record: decision.value, lineNumber, type: decision.value.type }];
   });
   const terminalIndices = terminalPlannerResponseIndices(parsed);
 
@@ -288,7 +403,7 @@ const buildAntigravitySession = (
     const stepIndex = typeof record.step_index === "number" ? record.step_index : undefined;
 
     // CONVERSATION_HISTORY records have null content — skip entirely.
-    const rawToolCalls = Array.isArray(record.tool_calls) ? record.tool_calls : [];
+    const rawToolCalls = record.tool_calls ?? [];
     const hasThinking = typeof record.thinking === "string" && record.thinking.length > 0;
     const classification = classifyRecord({
       type,
@@ -334,13 +449,19 @@ const buildAntigravitySession = (
     // when it rides a turn-terminal assistant message (rare).
     const reasoningRaw = thinkingRaw;
 
-    // Tool calls on PLANNER_RESPONSE records
+    // Tool calls on PLANNER_RESPONSE records. Each is classified EXPLICITLY via
+    // classifyToolCall (a SignalDecision): define_subagent / invoke_subagent /
+    // subagent_admin are kept under named kinds; manage_task and manage_subagents
+    // Action="list" polling NOISE is DROPPED (named reason) — it floods real
+    // transcripts and is never useful tool-call provenance. The drop is silent at
+    // the row level (the noise is expected, not provider garbage), so it does not
+    // raise a decode diagnostic — only schema-level decode failures do.
     let firstToolCallId: string | undefined;
-    for (const tcValue of rawToolCalls) {
-      const tc = recordFrom(tcValue);
-      const toolName = typeof tc.name === "string" ? tc.name : undefined;
-      if (toolName === undefined) continue;
-      const input = projectToolPayloadNativeValue(tc.args);
+    for (const rawToolCall of rawToolCalls) {
+      const toolDecision = classifyToolCall(rawToolCall);
+      if (!isSignal(toolDecision)) continue; // dropped polling noise / unnamed
+      const { name: toolName, args } = toolDecision.value;
+      const input = projectToolPayloadNativeValue(args);
       const nativeToolId = scopedId(
         sessionId,
         "tool",
@@ -401,9 +522,37 @@ const buildAntigravitySession = (
   // Lazy workdir fetch: only done once per session, only if DB exists.
   const projectPath = readWorkdirFromConversationDb(uuid, conversationsDir);
 
+  // Cross-session subagent lineage. If THIS session is a known child (it appears
+  // in some parent's INVOKE_SUBAGENT content), emit the canonical `subagent_of`
+  // edge: fromId = the PARENT's machine-independent Quasar SessionId, toId =
+  // this child's SessionId, with the native parent uuid preserved in
+  // rawReference. mapSession projects `subagent_of` (and ONLY subagent_of) onto
+  // SessionRow.parentSessionId — never `parent`, which is event threading. The
+  // child's agentName reflects the subagent Role/TypeName from the invoke call,
+  // so subagent sessions are labelled by what they are, not the generic CLI name.
+  const childLineage = lineage.get(uuid.toLowerCase());
+  const sessionEdges: AntigravityEdgeDraft[] = [];
+  let agentName = "antigravity-cli";
+  if (childLineage !== undefined) {
+    const parentNativeSessionId = AntigravitySessionId(childLineage.parentUuid);
+    const parentSessionId = sessionIdFor("antigravity", parentNativeSessionId);
+    sessionEdges.push({
+      id: edgeIdFor(sessionId, "subagent_of", parentSessionId, sessionId),
+      kind: "subagent_of",
+      fromId: parentSessionId,
+      toId: sessionId,
+      rawReference: {
+        sourcePath: join(brainRoot, childLineage.parentUuid),
+        nativeType: "INVOKE_SUBAGENT",
+        rowId: childLineage.parentUuid,
+      },
+    });
+    agentName = agentNameFromRole(childLineage.role) ?? agentName;
+  }
+
   return buildSession({
     provider: "antigravity",
-    agentName: "antigravity-cli",
+    agentName,
     machine: options.machine,
     sessionId,
     nativeSessionId,
@@ -412,6 +561,7 @@ const buildAntigravitySession = (
     ...(projectPath !== undefined ? { projectPath } : {}),
     events: eventDrafts,
     toolCalls: [...toolCallsById.values()],
+    sessionEdges,
   });
 };
 
@@ -471,12 +621,21 @@ async function* streamAntigravity(options: AdapterOptions): AsyncGenerator<Adapt
     entries = [];
   }
 
+  const transcriptPathFor = (uuid: string) =>
+    join(brainRoot, uuid, ".system_generated", "logs", "transcript_full.jsonl");
+
+  // Build the cross-session child→parent lineage map BEFORE the (windowed)
+  // ingest loop: a child can be ingested while its parent falls outside the
+  // skip/limit window or fails the shouldParseSession gate, so the map must be
+  // computed over the WHOLE brain root, not just the sessions being emitted.
+  const lineage = buildLineageMap(brainRoot, entries, transcriptPathFor);
+
   let sessionCount = 0;
   let skipped = 0;
 
   for (const uuid of entries) {
     // Real-session filter: only include sessions with a brain transcript.
-    const transcriptPath = join(brainRoot, uuid, ".system_generated", "logs", "transcript_full.jsonl");
+    const transcriptPath = transcriptPathFor(uuid);
     if (!existsSync(transcriptPath)) continue;
 
     // Skip / limit support
@@ -493,13 +652,33 @@ async function* streamAntigravity(options: AdapterOptions): AsyncGenerator<Adapt
       if ((await options.shouldParseSession(probe)) === false) continue;
     }
 
+    // Named decode diagnostics for malformed transcript lines in THIS session.
+    // Drops are accumulated here and surfaced as attributable diagnostics so a
+    // garbage line never aborts the transcript and never coerces silently.
+    const decodeDiagnostics: DecodeDiagnostic[] = [];
     const session = buildAntigravitySession(
       uuid,
       transcriptPath,
       brainRoot,
       conversationsDir,
       options,
+      lineage,
+      decodeDiagnostics,
     );
+    for (const diagnostic of decodeDiagnostics) {
+      yield {
+        type: "diagnostic",
+        diagnostic: {
+          adapterId: antigravityAdapter.id,
+          provider: "antigravity",
+          status: "unsupported",
+          parserConfidence: "observed",
+          rootPath: brainRoot,
+          message: `Antigravity transcript line dropped (${diagnostic.name}).`,
+          details: { nativeSessionId: uuid, error: diagnostic.message },
+        },
+      };
+    }
     const messageCounts = countMessages(session);
     if (messageCounts.userMessages === 0) {
       yield {
