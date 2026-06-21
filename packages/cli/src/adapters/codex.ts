@@ -253,6 +253,10 @@ const upsertCodexToolCall = (
   // but carries its payload in `input` (raw text) instead of `arguments` (JSON).
   // local_shell_call carries its payload in `action` (exec command record) and
   // has no `name`.
+  // NOTE: local_shell_call / local_shell_call_output are documented in the codex
+  // schema but UNOBSERVED on this machine (0 occurrences in the measured corpus
+  // 2026-06-21); real shell invocations arrive as function_call name=exec_command.
+  // They are modeled fail-closed regardless so the path is ready if they appear.
   if (
     payloadType === "function_call" ||
     payloadType === "local_shell_call" ||
@@ -284,13 +288,21 @@ const upsertCodexToolCall = (
     });
     return id;
   }
+  // mcp_tool_call_end is a dual carrier (60% share a call_id with a
+  // function_call_output that also carries the result). It is routed through the
+  // SAME call_id-keyed merge as the *_output records so the duplicate collapses
+  // onto the existing tool call; only the 40% sole-carrier case emits standalone.
+  // Its output lives in `result`, not `output`.
   if (
     payloadType === "function_call_output" ||
     payloadType === "local_shell_call_output" ||
-    payloadType === "custom_tool_call_output"
+    payloadType === "custom_tool_call_output" ||
+    payloadType === "mcp_tool_call_end"
   ) {
     const existing = toolCallsById.get(id);
-    const output = projectToolPayloadNativeValue(payload.output);
+    const output = projectToolPayloadNativeValue(
+      payloadType === "mcp_tool_call_end" ? payload.result : payload.output,
+    );
     toolCallsById.set(id, {
       id,
       eventId: existing?.eventId ?? eventId,
@@ -469,11 +481,15 @@ export const CODEX_MISSING_SESSION_META_ID =
 
 /**
  * Codex subagents are separate rollout-*.jsonl files, each with its own UUIDv7.
- * A subagent rollout records its spawning parent at
- * `session_meta.payload.source.subagent.thread_spawn.parent_thread_id` (the
- * parent's native id) and its agent identity at `agent_nickname` (preferred) /
- * `agent_role` (fallback). A main-session rollout carries no `source.subagent`,
- * so this returns `undefined` and the session maps with no parent.
+ * A subagent rollout records its spawning parent AND its agent identity under
+ * `session_meta.payload.source.subagent.thread_spawn`: the parent's native id at
+ * `thread_spawn.parent_thread_id`, the agent identity at
+ * `thread_spawn.agent_nickname` (preferred) / `thread_spawn.agent_role`
+ * (fallback). Measured 2026-06-21 across all 517 subagent rollouts: the identity
+ * lives under `thread_spawn`, NOT at the subagent level — the subagent-level
+ * read is kept only as a secondary fallback. A main-session rollout carries no
+ * `source.subagent`, so this returns `undefined` and the session maps with no
+ * parent.
  */
 type CodexSubagentLineage = {
   /** The parent rollout's native id (its session_meta.payload.id). */
@@ -491,11 +507,18 @@ const trimmedNonEmpty = (value: string | null | undefined): string | undefined =
 const codexSubagentLineage = (meta: CodexSessionMeta): CodexSubagentLineage | undefined => {
   const subagent = meta.payload.source?.subagent ?? undefined;
   if (subagent === undefined || subagent === null) return undefined;
-  const parentNativeId = trimmedNonEmpty(subagent.thread_spawn?.parent_thread_id ?? undefined);
+  const threadSpawn = subagent.thread_spawn ?? undefined;
+  const parentNativeId = trimmedNonEmpty(threadSpawn?.parent_thread_id ?? undefined);
   if (parentNativeId === undefined) return undefined;
+  // Agent identity lives under thread_spawn on real disk (all 517 subagent
+  // rollouts); the subagent-level read is a secondary fallback only.
   return {
     parentNativeId,
-    agentName: trimmedNonEmpty(subagent.agent_nickname) ?? trimmedNonEmpty(subagent.agent_role),
+    agentName:
+      trimmedNonEmpty(threadSpawn?.agent_nickname) ??
+      trimmedNonEmpty(threadSpawn?.agent_role) ??
+      trimmedNonEmpty(subagent.agent_nickname) ??
+      trimmedNonEmpty(subagent.agent_role),
   };
 };
 

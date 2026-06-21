@@ -52,8 +52,8 @@ const rolloutLines = (cwd: string, id: string = FIXTURE_UUID) =>
         id,
         timestamp: NOW,
         cwd,
-        originator: "codex-tui",
-        cli_version: "0.140.0",
+        originator: "qsr-fab-tui",
+        cli_version: "0.0.0-qsr-fab",
         type: "session_meta",
       },
     }),
@@ -528,11 +528,14 @@ describe("codex adapter", () => {
   // QSR-220 — first-class subagents.
   //
   // Codex subagents are separate rollout-*.jsonl files, each with its own
-  // UUIDv7. A subagent rollout records its spawning parent at
-  // session_meta.payload.source.subagent.thread_spawn.parent_thread_id and its
-  // identity at agent_nickname (fallback agent_role). The adapter emits a
-  // canonical `subagent_of` edge whose fromId is the parent's canonical
-  // SessionId; mapSession projects it onto SessionRow.parentSessionId.
+  // UUIDv7. A subagent rollout records its spawning parent AND its identity
+  // under session_meta.payload.source.subagent.thread_spawn: the parent at
+  // thread_spawn.parent_thread_id, the identity at thread_spawn.agent_nickname
+  // (fallback thread_spawn.agent_role). Measured 2026-06-21 across all 517
+  // subagent rollouts — the identity lives under thread_spawn, not at the
+  // subagent level. The adapter emits a canonical `subagent_of` edge whose
+  // fromId is the parent's canonical SessionId; mapSession projects it onto
+  // SessionRow.parentSessionId.
   //
   // Real-shape fixture: a parent rollout + a subagent rollout whose
   // parent_thread_id points at the parent. All ids are fabricated.
@@ -556,8 +559,8 @@ describe("codex adapter", () => {
               id: PARENT_UUID,
               timestamp: NOW,
               cwd: FIXTURE_CWD,
-              originator: "codex-tui",
-              cli_version: "0.140.0",
+              originator: "qsr-fab-tui",
+              cli_version: "0.0.0-qsr-fab",
               type: "session_meta",
             },
           }),
@@ -585,14 +588,20 @@ describe("codex adapter", () => {
               id: CHILD_UUID,
               timestamp: NOW,
               cwd: FIXTURE_CWD,
-              originator: "codex-tui",
-              cli_version: "0.140.0",
+              originator: "qsr-fab-tui",
+              cli_version: "0.0.0-qsr-fab",
               type: "session_meta",
+              // Real on-disk shape (all 517 subagent rollouts): identity lives
+              // under thread_spawn, NOT at the subagent level.
               source: {
                 subagent: {
-                  agent_nickname: "qsr-fab-agent-name",
-                  agent_role: "qsr-fab-role",
-                  thread_spawn: { parent_thread_id: PARENT_UUID },
+                  thread_spawn: {
+                    parent_thread_id: PARENT_UUID,
+                    agent_nickname: "qsr-fab-agent-name",
+                    agent_role: "qsr-fab-role",
+                    agent_path: "/qsr/fab/agents/qsr-fab-agent.md",
+                    depth: 1,
+                  },
                 },
               },
             },
@@ -664,10 +673,14 @@ describe("codex adapter", () => {
               timestamp: NOW,
               cwd: FIXTURE_CWD,
               type: "session_meta",
+              // Real on-disk shape: identity (here role-only) lives under
+              // thread_spawn, exercising the agent_role fallback on the real path.
               source: {
                 subagent: {
-                  agent_role: "qsr-fab-role-only",
-                  thread_spawn: { parent_thread_id: PARENT_UUID },
+                  thread_spawn: {
+                    parent_thread_id: PARENT_UUID,
+                    agent_role: "qsr-fab-role-only",
+                  },
                 },
               },
             },
