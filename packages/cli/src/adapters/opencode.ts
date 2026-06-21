@@ -29,11 +29,15 @@ import {
   type NativeValue,
   usageIdFor,
 } from "./common";
-import { type DecodeDiagnostic } from "./harness-schema";
+import { type DecodeDiagnostic, isSignal, type SignalDecision } from "./harness-schema";
 import {
+  classifyOpenCodeMessage,
+  classifyOpenCodePart,
   decodeMessageRows,
   decodeSessionRows,
   type OpenCodeMessageRow,
+  type OpenCodePart,
+  type OpenCodePartKind,
   type OpenCodeRawRow,
   type OpenCodeSessionRow,
 } from "./opencode-schema";
@@ -57,6 +61,39 @@ type OpenCodePartRow = {
 };
 type SQLiteColumnRow = { name: string };
 type SQLiteCountRow = { count: number };
+
+/**
+ * A part row after declarative per-record-type dispatch (QSR-220). The raw
+ * parsed payload is retained for field projection, but EVERY downstream
+ * decision (does it project as turn content? is it a tool call? an artifact?)
+ * reads `decision` — the schema-driven signal/drop verdict — never an ad-hoc
+ * string/shape heuristic. `decision` is a drop (with a named reason) for
+ * machinery parts and for malformed/unrecognised-type parts.
+ */
+type ClassifiedPart = {
+  readonly raw: NativeValue;
+  readonly decision: SignalDecision<OpenCodePart, OpenCodePartKind>;
+};
+
+/** The signal arm: a kept part with its mapped kind + decoded value. */
+type SignalPart = ClassifiedPart & {
+  readonly decision: { readonly _tag: "signal"; readonly kind: OpenCodePartKind; readonly value: OpenCodePart };
+};
+
+const isSignalPart = (part: ClassifiedPart): part is SignalPart => isSignal(part.decision);
+
+const partKind = (part: ClassifiedPart): OpenCodePartKind | undefined =>
+  isSignal(part.decision) ? part.decision.kind : undefined;
+
+/**
+ * Classify one parsed part payload through the schema-driven dispatch, routing
+ * malformed/unrecognised parts to a NAMED diagnostic + drop (never a throw,
+ * never a silent unknown pass-through).
+ */
+const classifyPart = (raw: NativeValue, diagnostics: DecodeDiagnostic[]): ClassifiedPart => ({
+  raw,
+  decision: classifyOpenCodePart(raw, diagnostics),
+});
 
 // Machinery-key pruning only — never byte caps. Provider garbage surfaces as
 // named diagnostics at the ingest layer.
@@ -154,22 +191,17 @@ const OPENCODE_PRUNED_PART_DATA_SQL = [
   "else data end",
 ].join(" ");
 
-const toolNameFromPart = (part: unknown) => {
-  if (part === null || typeof part !== "object") return undefined;
-  const record = part as Record<string, unknown>;
-  const type = typeof record.type === "string" ? record.type.toLowerCase() : "";
-  if (!type.includes("tool") && record.tool === undefined && record.toolName === undefined) {
-    return undefined;
-  }
-  if (typeof record.toolName === "string") return record.toolName;
-  if (typeof record.tool === "string") return record.tool;
-  if (typeof record.name === "string") return record.name;
-  const nested = record.function ?? record.call ?? record.metadata;
-  if (nested !== null && typeof nested === "object") {
-    const nestedRecord = nested as Record<string, unknown>;
-    if (typeof nestedRecord.name === "string") return nestedRecord.name;
-  }
-  return "opencode-tool";
+/**
+ * The tool name of a part — derived from the schema-validated `tool` field of a
+ * part the classifier already mapped to a tool kind. This is no longer a
+ * shape/string heuristic: a part is "a tool" iff `classifyOpenCodePart` mapped
+ * it to `tool_call`/`tool_result`, and the name is the decoded `tool` field.
+ */
+const toolNameFromSignalPart = (part: SignalPart): string | undefined => {
+  const kind = part.decision.kind;
+  if (kind !== "tool_call" && kind !== "tool_result") return undefined;
+  const value = part.decision.value;
+  return value.type === "tool" ? value.tool : undefined;
 };
 
 type OpenCodeToolCallDraft = Omit<
@@ -254,16 +286,27 @@ const readMessages = (db: OpenCodeDatabase, sessionId: string): OpenCodeRawRow[]
     )
     .all(sessionId) as OpenCodeRawRow[];
 
-const readPartsByMessage = (db: OpenCodeDatabase, sessionId: string) => {
+const readPartsByMessage = (
+  db: OpenCodeDatabase,
+  sessionId: string,
+  diagnostics: DecodeDiagnostic[],
+) => {
   const rows = db
     .query(
       `select id, message_id, time_created, ${OPENCODE_PRUNED_PART_DATA_SQL} as data from part where session_id = ? order by time_created, id`,
     )
     .all(sessionId) as OpenCodePartRow[];
-  const partsByMessage = new Map<string, NativeValue[]>();
+  return groupClassifiedParts(rows, diagnostics);
+};
+
+const groupClassifiedParts = (
+  rows: readonly OpenCodePartRow[],
+  diagnostics: DecodeDiagnostic[],
+) => {
+  const partsByMessage = new Map<string, ClassifiedPart[]>();
   for (const part of rows) {
     const list = partsByMessage.get(part.message_id) ?? [];
-    list.push(parsePartData(part.data));
+    list.push(classifyPart(parsePartData(part.data), diagnostics));
     partsByMessage.set(part.message_id, list);
   }
   return partsByMessage;
@@ -291,18 +334,16 @@ const readMessagesCli = (dbPath: string, sessionId: string): OpenCodeRawRow[] =>
     `select id, time_created, ${OPENCODE_RAW_BYTES_SQL} as raw_bytes, ${OPENCODE_PRUNED_MESSAGE_DATA_SQL} as data from message where session_id = ${sql(sessionId)} order by time_created, id`,
   );
 
-const readPartsByMessageCli = (dbPath: string, sessionId: string) => {
+const readPartsByMessageCli = (
+  dbPath: string,
+  sessionId: string,
+  diagnostics: DecodeDiagnostic[],
+) => {
   const rows = sqliteJson<OpenCodePartRow>(
     dbPath,
     `select id, message_id, time_created, ${OPENCODE_PRUNED_PART_DATA_SQL} as data from part where session_id = ${sql(sessionId)} order by time_created, id`,
   );
-  const partsByMessage = new Map<string, NativeValue[]>();
-  for (const part of rows) {
-    const list = partsByMessage.get(part.message_id) ?? [];
-    list.push(parsePartData(part.data));
-    partsByMessage.set(part.message_id, list);
-  }
-  return partsByMessage;
+  return groupClassifiedParts(rows, diagnostics);
 };
 
 const sqliteJson = <A>(dbPath: string, query: string): A[] => {
@@ -372,62 +413,47 @@ const summaryMetadata = (value: unknown): NativeValue | undefined => {
 };
 
 /**
- * Part types that are agent machinery, not session turns: lifecycle markers,
- * compaction records, and file attachments. They never project into message
- * content (the search surface); diff/patch parts are likewise machinery and
- * already surface separately as artifacts.
+ * Project a CLASSIFIED part into turn content. Driven entirely by the schema
+ * dispatch verdict — no string/shape re-sniffing:
+ *   - drop (machinery: step-start/-finish/compaction/file; patch artifacts; or
+ *     a malformed/unrecognised part) -> never projects as turn content.
+ *   - signal "reasoning" -> plaintext thinking, projected under `thinking`.
+ *   - signal "message" (text part) -> visible text, projected under `text`.
+ *   - signal "tool_call"/"tool_result" -> a tool envelope carrying the decoded
+ *     `tool` name + callID; the shared block builder tags it tool machinery.
+ * Blank text is absent text: the measured corpus holds thousands of
+ * encrypted-reasoning stubs ({"type":"reasoning","text":""}) whose plaintext is
+ * empty (the real reasoning lives encrypted in metadata) — those never project.
  */
-const MACHINERY_PART_TYPES = new Set(["step-start", "step-finish", "compaction", "file"]);
-
-const partContentProjection = (part: NativeValue): NativeValue | undefined => {
-  const record = recordFrom(part);
-  if (Object.keys(record).length === 0) return typeof part === "string" ? part : undefined;
-  const type = typeof record.type === "string" ? record.type : undefined;
-  const lowerType = type?.toLowerCase() ?? "";
-  if (lowerType.includes("diff") || lowerType.includes("patch")) return undefined;
-  if (MACHINERY_PART_TYPES.has(lowerType)) return undefined;
+const partContentProjection = (part: ClassifiedPart): NativeValue | undefined => {
+  if (!isSignalPart(part)) return undefined;
+  const kind = part.decision.kind;
+  if (kind === "artifact") return undefined; // patch surfaces only as an artifact
+  const value = part.decision.value;
   const rawText =
-    typeof record.text === "string"
-      ? record.text
-      : typeof record.content === "string"
-        ? record.content
-        : typeof record.message === "string"
-          ? record.message
-          : undefined;
-  // Blank text is absent text: the measured corpus holds thousands of
-  // encrypted-reasoning stubs ({"type":"reasoning","text":""}) whose plaintext
-  // is empty — the actual reasoning lives encrypted in metadata.
+    (value.type === "text" || value.type === "reasoning") ? value.text : undefined;
   const text = rawText !== undefined && rawText.trim().length > 0 ? rawText : undefined;
-  const toolName = toolNameFromPart(record);
-  // A part with neither session text nor a tool identity is machinery, not a
-  // turn: it never projects, so a JSON dump of its bare envelope (e.g.
-  // {"type":"reasoning"}) can never reach the search surface.
+  const toolName = toolNameFromSignalPart(part);
+  // A part with neither session text nor a tool identity never projects, so a
+  // JSON dump of a bare envelope (e.g. an empty-text reasoning stub) can never
+  // reach the search surface.
   if (text === undefined && toolName === undefined) return undefined;
-  const path =
-    typeof record.path === "string"
-      ? record.path
-      : typeof record.file === "string"
-        ? record.file
-        : typeof record.filePath === "string"
-          ? record.filePath
-          : undefined;
-  // Reasoning parts are plaintext thinking: project under the `thinking` key
-  // so the shared block builder emits `kind: "thinking"` blocks, which the
-  // ingest layer promotes to `role: "reasoning"` rows.
-  const textKey = lowerType === "reasoning" ? "thinking" : "text";
+  const callID = value.type === "tool" ? value.callID ?? undefined : undefined;
+  // Reasoning parts are plaintext thinking: project under the `thinking` key so
+  // the shared block builder emits `kind: "thinking"` blocks, which the ingest
+  // layer promotes to `role: "reasoning"` rows.
+  const textKey = kind === "reasoning" ? "thinking" : "text";
   return {
-    ...(type !== undefined ? { type } : {}),
+    type: value.type,
     ...(text !== undefined ? { [textKey]: text } : {}),
-    ...(path !== undefined ? { path } : {}),
     ...(toolName !== undefined ? { toolName } : {}),
-    ...(typeof record.callID === "string" ? { callID: record.callID } : {}),
-    ...(typeof record.id === "string" ? { id: record.id } : {}),
+    ...(callID !== undefined ? { callID } : {}),
   };
 };
 
 const messageContentProjection = (
   data: Record<string, NativeValue | undefined>,
-  parts: NativeValue[],
+  parts: ClassifiedPart[],
 ): NativeValue => {
   const role = typeof data.role === "string" ? data.role : undefined;
   const content =
@@ -451,45 +477,30 @@ const messageContentProjection = (
   };
 };
 
-const toolStatusFromPart = (part: Record<string, unknown>) => {
-  const state = recordFrom(part.state);
-  return typeof state.status === "string"
-    ? state.status
-    : typeof part.status === "string"
-      ? part.status
-      : undefined;
-};
-
 const collectToolCalls = (
-  parts: NativeValue[],
+  parts: ClassifiedPart[],
   sessionId: SessionId,
   messageId: string,
   eventId: string,
 ) =>
   parts.flatMap((part, partIndex) => {
-    const toolName = toolNameFromPart(part);
+    if (!isSignalPart(part)) return [];
+    const toolName = toolNameFromSignalPart(part);
     if (toolName === undefined) return [];
-    const record = recordFrom(part);
-    const state = recordFrom(record.state);
-    const partId =
-      typeof record.callID === "string"
-        ? record.callID
-        : typeof record.id === "string"
-          ? record.id
-          : partIndex;
-    const startedAt =
-      typeof record.time_created === "string"
-        ? record.time_created
-        : dateFromNestedTime(state.time, "start");
-    const completedAt = dateFromNestedTime(state.time, "end");
-    const input = projectToolPayloadNativeValue(state.input ?? record.input);
-    const output = projectToolPayloadNativeValue(state.output ?? record.output);
+    const value = part.decision.value;
+    if (value.type !== "tool") return [];
+    const state = value.state ?? undefined;
+    const partId = value.callID ?? partIndex;
+    const startedAt = dateFromNestedTime(state?.time, "start");
+    const completedAt = dateFromNestedTime(state?.time, "end");
+    const input = projectToolPayloadNativeValue(state?.input);
+    const output = projectToolPayloadNativeValue(state?.output);
     return [
       {
         id: scopedId(sessionId, "tool", messageId, partId),
         eventId,
         toolName,
-        status: toolStatusFromPart(record),
+        status: state?.status ?? undefined,
         ...(input !== undefined ? { input } : {}),
         ...(output !== undefined ? { output } : {}),
         ...(startedAt !== undefined ? { startedAt } : {}),
@@ -547,20 +558,21 @@ const collectArtifacts = (
   sessionId: SessionId,
   dbPath: string,
   eventId: string,
-  parts: NativeValue[],
+  parts: ClassifiedPart[],
 ): OpenCodeArtifactDraft[] =>
   parts.flatMap((part, index) => {
-    const record = recordFrom(part);
-    const type = typeof record.type === "string" ? record.type.toLowerCase() : "";
-    if (!type.includes("diff") && !type.includes("patch")) return [];
-    const path = typeof record.path === "string" ? record.path : undefined;
-    if (path === undefined) return [];
+    // A part is an artifact iff the schema dispatch mapped it to `artifact`
+    // (i.e. a `patch` part). No string-sniffing for "diff"/"patch".
+    if (!isSignalPart(part) || part.decision.kind !== "artifact") return [];
+    const value = part.decision.value;
+    if (value.type !== "patch") return [];
+    const hash = value.hash ?? undefined;
     return [
       {
-        id: artifactIdFor(sessionId, [eventId, index, path, type]),
+        id: artifactIdFor(sessionId, [eventId, index, hash ?? "patch", value.type]),
         eventId,
-        kind: type || "diff",
-        ...(path !== undefined ? { path } : {}),
+        kind: value.type,
+        ...(hash !== undefined ? { contentHash: hash } : {}),
         sourcePath: dbPath,
         sourceRef: { table: "part", eventId, index },
       },
@@ -571,10 +583,19 @@ const eventFromMessage = (
   dbPath: string,
   message: OpenCodeMessageRow,
   index: number,
-  parts: NativeValue[],
+  parts: ClassifiedPart[],
   sessionId: SessionId,
+  diagnostics: DecodeDiagnostic[],
 ) => {
   const data = parseMessageData(message);
+  // Declarative role dispatch: the message payload is classified through the
+  // role-discriminated schema. A payload whose role is neither user nor
+  // assistant becomes a NAMED drop diagnostic and resolves to role "unknown"
+  // WITHOUT any content (its parts already drop too) — never a coerced turn.
+  const messageDecision = classifyOpenCodeMessage(data, diagnostics);
+  const role: SessionRole = isSignal(messageDecision)
+    ? messageDecision.value.role
+    : "unknown";
   const content = messageContentProjection(data, parts);
   // Machinery-only turns (step markers, compaction, patches) project to a
   // bare role envelope; without content or parts there is no session text,
@@ -582,8 +603,11 @@ const eventFromMessage = (
   const contentRecord = recordFrom(content);
   const hasTurnContent =
     contentRecord.content !== undefined || contentRecord.parts !== undefined;
-  const role: SessionRole =
-    data.role === "assistant" || data.role === "user" ? data.role : "unknown";
+  // A turn is a tool_call iff a part was classified as a tool invocation.
+  const isToolTurn = parts.some((part) => {
+    const kind = partKind(part);
+    return kind === "tool_call" || kind === "tool_result";
+  });
   const eventId = eventIdFor(sessionId, index, message.id);
   return {
     eventId,
@@ -597,7 +621,7 @@ const eventFromMessage = (
       sequence: index,
       timestamp: new Date(message.time_created).toISOString(),
       role,
-      kind: parts.some((part) => toolNameFromPart(part) !== undefined) ? ("tool_call" as const) : ("message" as const),
+      kind: isToolTurn ? ("tool_call" as const) : ("message" as const),
       ...(hasTurnContent
         ? { contentText: compactText(content as NativeValue), contentSource: content }
         : {}),
@@ -622,7 +646,7 @@ const buildOpenCodeSession = (
   sessionRow: OpenCodeSessionRow,
   diagnostics: DecodeDiagnostic[],
 ) => {
-  const partsByMessage = readPartsByMessage(db, sessionRow.id);
+  const partsByMessage = readPartsByMessage(db, sessionRow.id, diagnostics);
   return buildOpenCodeSessionFromRows(
     dbPath,
     root,
@@ -630,6 +654,7 @@ const buildOpenCodeSession = (
     sessionRow,
     decodeMessageRows(readMessages(db, sessionRow.id), diagnostics),
     partsByMessage,
+    diagnostics,
   );
 };
 
@@ -639,7 +664,8 @@ const buildOpenCodeSessionFromRows = (
   options: AdapterOptions,
   sessionRow: OpenCodeSessionRow,
   messages: OpenCodeMessageRow[],
-  partsByMessage: Map<string, NativeValue[]>,
+  partsByMessage: Map<string, ClassifiedPart[]>,
+  diagnostics: DecodeDiagnostic[],
 ) => {
   const toolCalls: Omit<ToolCall, "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey">[] = [];
   const usageRecords: OpenCodeUsageDraft[] = [];
@@ -684,6 +710,7 @@ const buildOpenCodeSessionFromRows = (
       index,
       partsByMessage.get(message.id) ?? [],
       sessionId,
+      diagnostics,
     );
     messageIdToEventId.set(message.id, result.eventId);
     if (result.parentId !== undefined) {
@@ -734,7 +761,8 @@ const buildOpenCodeSessionCli = (
     options,
     sessionRow,
     decodeMessageRows(readMessagesCli(queryDbPath, sessionRow.id), diagnostics),
-    readPartsByMessageCli(queryDbPath, sessionRow.id),
+    readPartsByMessageCli(queryDbPath, sessionRow.id, diagnostics),
+    diagnostics,
   );
 
 const copyDatabaseForRead = (dbPath: string) => {

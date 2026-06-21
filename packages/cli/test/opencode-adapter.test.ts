@@ -4,11 +4,27 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterAll, describe, expect, test } from "bun:test";
+import { Schema } from "effect";
 
 import { opencodeAdapter } from "../src/adapters/opencode";
 import { OpenCodeSessionId } from "../src/core/identity";
 import { sessionIdFor } from "../src/adapters/common";
 import { mapSession } from "../src/map";
+import { isSignal, type DecodeDiagnostic } from "../src/adapters/harness-schema";
+import {
+  classifyOpenCodeMessage,
+  classifyOpenCodePart,
+  OpenCodeAssistantMessageSchema,
+  OpenCodeCompactionPartSchema,
+  OpenCodeFilePartSchema,
+  OpenCodePatchPartSchema,
+  OpenCodeReasoningPartSchema,
+  OpenCodeStepFinishPartSchema,
+  OpenCodeStepStartPartSchema,
+  OpenCodeTextPartSchema,
+  OpenCodeToolPartSchema,
+  OpenCodeUserMessageSchema,
+} from "../src/adapters/opencode-schema";
 
 const MACHINE = {
   machineId: "machine:test",
@@ -290,4 +306,226 @@ describe("opencode adapter", () => {
     },
     15_000,
   );
+});
+
+// ---------------------------------------------------------------------------
+// QSR-220 FULL DATA FIDELITY — declarative per-record-type signal/drop dispatch.
+//
+// The on-disk census (measured 2026-06-21 across opencode.db +
+// opencode-local.db) is EXHAUSTIVE:
+//   message.data.role : { user, assistant }
+//   part.data.type    : { text, reasoning, tool, step-start, step-finish,
+//                         compaction, patch, file }
+// Every record type is EXPLICITLY classified — signal(kind) or drop(named
+// reason) — and an unrecognised type/role is itself a NAMED drop. There is NO
+// "unknown" pass-through. Every fixture below is built FROM the Effect schema
+// via `Schema.encodeSync`, so a schema field change breaks the fixture rather
+// than letting a stale hand-typed shape sneak through. All identifiers and
+// content are FABRICATED (verified to resolve to ZERO real on-disk data).
+// ---------------------------------------------------------------------------
+describe("QSR-220 full data fidelity: declarative per-record-type dispatch", () => {
+  // Fixtures-from-schema: encode a typed value through its schema to produce the
+  // on-disk JSON shape. `encodeSync` round-trips the decoded type back to the
+  // unknown-input shape the classifier consumes.
+  const textPart = Schema.encodeSync(OpenCodeTextPartSchema)({
+    type: "text",
+    text: "qsr220 fabricated visible answer",
+  });
+  const reasoningPart = Schema.encodeSync(OpenCodeReasoningPartSchema)({
+    type: "reasoning",
+    text: "qsr220 fabricated reasoning trace",
+    time: { start: 1, end: 2 },
+  });
+  const reasoningStubPart = Schema.encodeSync(OpenCodeReasoningPartSchema)({
+    type: "reasoning",
+    text: "",
+    time: { start: 1, end: 2 },
+  });
+  const toolCompletedPart = Schema.encodeSync(OpenCodeToolPartSchema)({
+    type: "tool",
+    tool: "qsr220-fab-tool",
+    callID: "qsr220fabcall0001",
+    state: { status: "completed", input: { arg: "x" }, output: "ok", time: { start: 1, end: 2 } },
+  });
+  const toolRunningPart = Schema.encodeSync(OpenCodeToolPartSchema)({
+    type: "tool",
+    tool: "qsr220-fab-tool",
+    callID: "qsr220fabcall0002",
+    state: { status: "running", input: { arg: "y" }, output: null, time: { start: 3, end: null } },
+  });
+  const toolErrorPart = Schema.encodeSync(OpenCodeToolPartSchema)({
+    type: "tool",
+    tool: "qsr220-fab-tool",
+    callID: "qsr220fabcall0003",
+    state: { status: "error", input: null, output: "boom", time: { start: 4, end: 5 } },
+  });
+  const stepStartPart = Schema.encodeSync(OpenCodeStepStartPartSchema)({ type: "step-start" });
+  const stepFinishPart = Schema.encodeSync(OpenCodeStepFinishPartSchema)({
+    type: "step-finish",
+    reason: "stop",
+    cost: 0.01,
+  });
+  const compactionPart = Schema.encodeSync(OpenCodeCompactionPartSchema)({
+    type: "compaction",
+    auto: true,
+    tail_start_id: "qsr220fabtail0001",
+  });
+  const filePart = Schema.encodeSync(OpenCodeFilePartSchema)({
+    type: "file",
+    filename: "qsr220-fab-file.txt",
+    mime: "text/plain",
+    url: "file://qsr220-fab",
+  });
+  const patchPart = Schema.encodeSync(OpenCodePatchPartSchema)({
+    type: "patch",
+    hash: "qsr220fabhash000deadbeef",
+    files: ["qsr220-fab-file.txt"],
+  });
+  const userMessage = Schema.encodeSync(OpenCodeUserMessageSchema)({
+    role: "user",
+    time: { created: 1, start: null, end: null },
+  });
+  const assistantMessage = Schema.encodeSync(OpenCodeAssistantMessageSchema)({
+    role: "assistant",
+    time: { created: 2, start: null, end: null },
+  });
+
+  // --- one test per PART record type: signal(kind) / drop(named reason) -----
+
+  test("part text -> signal(message)", () => {
+    const d = classifyOpenCodePart(textPart);
+    expect(isSignal(d) && d.kind).toBe("message");
+  });
+
+  test("part reasoning -> signal(reasoning)", () => {
+    const d = classifyOpenCodePart(reasoningPart);
+    expect(isSignal(d) && d.kind).toBe("reasoning");
+  });
+
+  test("part reasoning empty-text stub still decodes -> signal(reasoning)", () => {
+    // The stub is a legitimate decoded record (signal); it is the CONTENT
+    // projection — not the classifier — that refuses to surface empty text.
+    const d = classifyOpenCodePart(reasoningStubPart);
+    expect(isSignal(d) && d.kind).toBe("reasoning");
+  });
+
+  test("part tool (completed) -> signal(tool_result)", () => {
+    const d = classifyOpenCodePart(toolCompletedPart);
+    expect(isSignal(d) && d.kind).toBe("tool_result");
+  });
+
+  test("part tool (error) -> signal(tool_result)", () => {
+    const d = classifyOpenCodePart(toolErrorPart);
+    expect(isSignal(d) && d.kind).toBe("tool_result");
+  });
+
+  test("part tool (running) -> signal(tool_call)", () => {
+    const d = classifyOpenCodePart(toolRunningPart);
+    expect(isSignal(d) && d.kind).toBe("tool_call");
+  });
+
+  test("part patch -> signal(artifact)", () => {
+    const d = classifyOpenCodePart(patchPart);
+    expect(isSignal(d) && d.kind).toBe("artifact");
+  });
+
+  test("part step-start -> drop(machinery)", () => {
+    const d = classifyOpenCodePart(stepStartPart);
+    expect(d._tag).toBe("drop");
+    expect(d._tag === "drop" && d.reason).toBe("opencode.part.step-start.machinery");
+  });
+
+  test("part step-finish -> drop(machinery)", () => {
+    const d = classifyOpenCodePart(stepFinishPart);
+    expect(d._tag === "drop" && d.reason).toBe("opencode.part.step-finish.machinery");
+  });
+
+  test("part compaction -> drop(machinery)", () => {
+    const d = classifyOpenCodePart(compactionPart);
+    expect(d._tag === "drop" && d.reason).toBe("opencode.part.compaction.machinery");
+  });
+
+  test("part file -> drop(machinery)", () => {
+    const d = classifyOpenCodePart(filePart);
+    expect(d._tag === "drop" && d.reason).toBe("opencode.part.file.machinery");
+  });
+
+  // --- one test per MESSAGE record type: signal(kind) -----------------------
+
+  test("message user -> signal(user_message)", () => {
+    const d = classifyOpenCodeMessage(userMessage);
+    expect(isSignal(d) && d.kind).toBe("user_message");
+  });
+
+  test("message assistant -> signal(assistant_message)", () => {
+    const d = classifyOpenCodeMessage(assistantMessage);
+    expect(isSignal(d) && d.kind).toBe("assistant_message");
+  });
+
+  // --- ZERO unknown pass-through: unrecognised type/role is a NAMED drop -----
+
+  test("unrecognised part type -> NAMED drop diagnostic, no passthrough, no throw", () => {
+    const diagnostics: DecodeDiagnostic[] = [];
+    const d = classifyOpenCodePart(
+      { type: "qsr220-fab-unknown-part", text: "should never pass through" },
+      diagnostics,
+    );
+    expect(d._tag).toBe("drop");
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]!.name).toBe("opencode.part.decode_failed");
+  });
+
+  test("unrecognised message role -> NAMED drop diagnostic, no passthrough", () => {
+    const diagnostics: DecodeDiagnostic[] = [];
+    const d = classifyOpenCodeMessage({ role: "qsr220-fab-unknown-role" }, diagnostics);
+    expect(d._tag).toBe("drop");
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]!.name).toBe("opencode.message.decode_failed");
+  });
+
+  // --- malformed-record test per MAJOR part type: NAMED diagnostic + drop ----
+
+  test("malformed text part (text not a string) -> NAMED drop, no throw", () => {
+    const diagnostics: DecodeDiagnostic[] = [];
+    const d = classifyOpenCodePart({ type: "text", text: 42 }, diagnostics);
+    expect(d._tag).toBe("drop");
+    expect(diagnostics[0]!.name).toBe("opencode.part.decode_failed");
+  });
+
+  test("malformed reasoning part (missing text) -> NAMED drop, no throw", () => {
+    const diagnostics: DecodeDiagnostic[] = [];
+    const d = classifyOpenCodePart({ type: "reasoning", time: { start: 1, end: 2 } }, diagnostics);
+    expect(d._tag).toBe("drop");
+    expect(diagnostics[0]!.name).toBe("opencode.part.decode_failed");
+  });
+
+  test("malformed tool part (tool name not a string) -> NAMED drop, no throw", () => {
+    const diagnostics: DecodeDiagnostic[] = [];
+    const d = classifyOpenCodePart({ type: "tool", tool: { nested: true } }, diagnostics);
+    expect(d._tag).toBe("drop");
+    expect(diagnostics[0]!.name).toBe("opencode.part.decode_failed");
+  });
+
+  test("malformed patch part (hash wrong type) -> NAMED drop, no throw", () => {
+    const diagnostics: DecodeDiagnostic[] = [];
+    const d = classifyOpenCodePart({ type: "patch", hash: 7 }, diagnostics);
+    expect(d._tag).toBe("drop");
+    expect(diagnostics[0]!.name).toBe("opencode.part.decode_failed");
+  });
+
+  test("malformed message payload (role wrong type) -> NAMED drop, no throw", () => {
+    const diagnostics: DecodeDiagnostic[] = [];
+    const d = classifyOpenCodeMessage({ role: 99 }, diagnostics);
+    expect(d._tag).toBe("drop");
+    expect(diagnostics[0]!.name).toBe("opencode.message.decode_failed");
+  });
+
+  test("garbage payloads never throw (fail-closed boundary)", () => {
+    for (const garbage of [null, undefined, 42, "raw string", [], { no: "type" }]) {
+      expect(() => classifyOpenCodePart(garbage)).not.toThrow();
+      expect(() => classifyOpenCodeMessage(garbage)).not.toThrow();
+      expect(classifyOpenCodePart(garbage)._tag).toBe("drop");
+      expect(classifyOpenCodeMessage(garbage)._tag).toBe("drop");
+    }
+  });
 });
