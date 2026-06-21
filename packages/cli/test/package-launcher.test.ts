@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -87,5 +87,12 @@ describe("package launcher", () => {
     expect(result.exitCode).toBe(1);
     expect(result.stdout).toBe("");
     expect(result.stderr).toContain(`Missing ${install.platformName}.`);
+  });
+
+  test("README documents config-backed remote ingest token routing", () => {
+    const readme = readFileSync(join(packageRoot, "README.md"), "utf8");
+
+    expect(readme).toContain("\"ingestToken\"");
+    expect(readme).toContain("Remote ingest requires `ingestToken`, `QUASAR_INGEST_TOKEN`, or");
   });
 });

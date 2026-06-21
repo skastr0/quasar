@@ -46,15 +46,16 @@ Or configure the default server once:
 {
   "schemaVersion": 3,
   "projectKey": "quasar",
-  "localServerUrl": "https://<quasar-service-tailnet-hostname>"
+  "localServerUrl": "https://<quasar-service-tailnet-hostname>",
+  "ingestToken": "<same-token-configured-on-the-mac-mini-server>"
 }
 ```
 
 `ingest` reads native local history folders on the machine running the CLI and
 POSTs mapped sessions to the configured server. The server owns idempotent SQLite
 writes, embedding cache lookup, and search-index queue draining.
-Remote ingest requires `QUASAR_INGEST_TOKEN` or `--ingest-token <token>`; read
-and search commands do not.
+Remote ingest requires `ingestToken`, `QUASAR_INGEST_TOKEN`, or
+`--ingest-token <token>`; read and search commands do not.
 
 Override provider roots when needed:
 
