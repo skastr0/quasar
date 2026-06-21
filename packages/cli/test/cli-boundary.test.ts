@@ -82,8 +82,8 @@ describe("CLI client/operator boundary", () => {
     expect(result.json.ok).toBe(false);
     expect(result.json.command).toBe("stats");
     expect(result.json.error?.type).toBe("ConfigurationError");
-    expect(result.json.error?.details?.acceptedEnv).toEqual(["QUASAR_LOCAL_SERVER_URL"]);
-    expect(result.json.error?.details?.acceptedConfigFields).toEqual(["localServerUrl"]);
+    expect(result.json.error?.details?.acceptedEnv).toEqual(["QUASAR_SERVER_URL"]);
+    expect(result.json.error?.details?.acceptedConfigFields).toEqual(["serverUrl"]);
   }, 15_000);
 
   test("search does not fall back to embedded lexical search", async () => {
@@ -97,7 +97,7 @@ describe("CLI client/operator boundary", () => {
 
   test("remote ingest fails before scanning when no ingest token is configured", async () => {
     const result = await runCli(["ingest", "--provider", "all", "--summary"], {
-      QUASAR_LOCAL_SERVER_URL: "http://127.0.0.1:1",
+      QUASAR_SERVER_URL: "http://127.0.0.1:1",
     });
 
     expect(result.exitCode).toBe(2);

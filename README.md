@@ -9,12 +9,12 @@ agent MCP tools. SQLite is the truth store and durable queue. LanceDB owns the
 derived lexical/vector/fusion search indexes on the Mac mini filesystem.
 
 The single current architecture direction is
-[docs/architecture/quasar-effect-local-server-plan-2026-06-18.md](docs/architecture/quasar-effect-local-server-plan-2026-06-18.md).
+[docs/architecture/quasar-effect-server-plan-2026-06-18.md](docs/architecture/quasar-effect-server-plan-2026-06-18.md).
 The measured corpus evidence and normalized entity model live in
 [docs/architecture/quasar-data-reality-plan-2026-06-11.md](docs/architecture/quasar-data-reality-plan-2026-06-11.md).
 
 Honest current state: this repository contains provider session parsing,
-normalization, redaction, a CLI, a local-server package under construction, and
+normalization, redaction, a CLI, a server package under construction, and
 search support through LanceDB. Adapters exist for the providers with data on a
 real host: Codex, Claude Code, OpenCode, Grok, Hermes, and Antigravity.
 Extraction is read-only; brittle local formats fail soft with diagnostics rather
@@ -24,7 +24,7 @@ than writing to native history.
 
 - `packages/core`: private shared schemas, adapter contracts, project/path normalization, importers.
 - `packages/cli`: the `quasar` CLI with JSON input envelopes.
-- `packages/local-server`: the local Effect server: SQLite truth, durable queue, workers, and HTTP control surface.
+- `packages/server`: the local Effect server: SQLite truth, durable queue, workers, and HTTP control surface.
 - `packages/search`: LanceDB search primitives.
 
 The dashboard is not present. Only the CLI is prepared for npm publication.
@@ -40,16 +40,16 @@ bun run test
 ## CLI
 
 Production ingest/search/read operations use the `quasar` CLI against the Mac
-mini local-server service:
+mini server service:
 
 ```bash
-export QUASAR_LOCAL_SERVER_URL=https://<quasar-service-tailnet-hostname>
+export QUASAR_SERVER_URL=https://<quasar-service-tailnet-hostname>
 quasar stats
 quasar search --mode lexical --query "project identity" --limit 3
 ```
 
 The client config file is `~/.config/quasar/config.json`; its canonical server
-field is `localServerUrl`. Client machines should point that field at the
+field is `serverUrl`. Client machines should point that field at the
 Tailscale Service hostname for `svc:quasar`, not the Mac mini device IP. Remote
 write ingest and daemon installs also require `ingestToken` in that config, or
 `QUASAR_INGEST_TOKEN` / `--ingest-token`.

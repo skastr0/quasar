@@ -1,10 +1,10 @@
 # Local-server operational closure proof — 2026-06-19
 
-This proof records the current production posture for the Quasar Effect local-server on the Mac mini. The canonical runtime is Docker + SQLite truth + embedded LanceDB derived search + Synthetic/Nomic embeddings. Access proof uses the direct Mac mini Tailscale IP, redacted below as `<mac-mini-tailscale-ip>`.
+This proof records the current production posture for the Quasar Effect server on the Mac mini. The canonical runtime is Docker + SQLite truth + embedded LanceDB derived search + Synthetic/Nomic embeddings. Access proof uses the direct Mac mini Tailscale IP, redacted below as `<mac-mini-tailscale-ip>`.
 
 ## Verdict
 
-PASS — the local-server path is connected end to end:
+PASS — the server path is connected end to end:
 
 - Docker service is running and healthy.
 - LaunchAgent incremental sync is installed and loaded with a 60 second interval.
@@ -22,13 +22,13 @@ PASS — the local-server path is connected end to end:
 Command:
 
 ```bash
-bun run local-server:ps
+bun run server:ps
 ```
 
 Result:
 
 ```text
-quasar-local-server-local-server-1   quasar-local-server:latest   Up ... (healthy)   0.0.0.0:6180->6180/tcp
+quasar-server-server-1   quasar-server:latest   Up ... (healthy)   0.0.0.0:6180->6180/tcp
 ```
 
 Command:
@@ -64,7 +64,7 @@ Operator note: `127.0.0.1:6180` on this Mac currently responds with a separate N
 Command:
 
 ```bash
-bun run local-server:sync-status
+bun run server:sync-status
 ```
 
 Result summary:
@@ -73,7 +73,7 @@ Result summary:
 {
   "ok": true,
   "command": "status",
-  "label": "com.quasar.local-server-sync",
+  "label": "com.quasar.server-sync",
   "installed": true,
   "loaded": true,
   "output_contains": ["run interval = 60 seconds", "last exit code = 0"]
@@ -83,7 +83,7 @@ Result summary:
 Manual tick command:
 
 ```bash
-bun run local-server:sync-tick
+bun run server:sync-tick
 ```
 
 Result summary:
@@ -105,7 +105,7 @@ The tick is intentionally uncapped by default. Freshness comes from frequent hos
 Command:
 
 ```bash
-bun run local-server:status
+bun run server:status
 ```
 
 Result summary:
@@ -144,9 +144,9 @@ Policy posture:
 Command:
 
 ```bash
-bun run local-server:maintain
-bun run local-server:lance
-bun run local-server:status -- --lance
+bun run server:maintain
+bun run server:lance
+bun run server:status -- --lance
 ```
 
 Result summary:
@@ -183,7 +183,7 @@ Result summary:
 
 SQLite `messages` is larger than the LanceDB row count because LanceDB indexes the message search surface (`user` and `assistant` rows). Tool calls and other structural rows remain outside semantic indexing by policy.
 
-Maintenance remains explicit. Run `bun run local-server:maintain` after large ingests or when status/LanceDB inspection shows unindexed rows, missing indexes, or derived-store drift.
+Maintenance remains explicit. Run `bun run server:maintain` after large ingests or when status/LanceDB inspection shows unindexed rows, missing indexes, or derived-store drift.
 
 ## Agent-serving proof
 
@@ -230,7 +230,7 @@ Summary:
 ```text
 packages/core:         12 files, 64 tests passed
 packages/search:        1 file, 12 tests passed
-packages/local-server:  9 files, 65 tests passed
+packages/server:  9 files, 65 tests passed
 packages/cli:           9 files, 42 tests passed
 ```
 
@@ -238,7 +238,7 @@ packages/cli:           9 files, 42 tests passed
 
 The system is ready to operate in the current architecture:
 
-1. Keep Docker local-server running on the Mac mini.
+1. Keep Docker server running on the Mac mini.
 2. Keep the 60-second LaunchAgent sync tick installed.
 3. Use direct Tailscale IP for agent wrappers and proofs.
 4. Let the server drain embedding/index jobs; do not run long-lived shell embedding jobs.

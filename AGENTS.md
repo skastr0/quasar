@@ -44,7 +44,7 @@ any shape decision.
 ## Canonical direction
 
 Exactly one implementation direction:
-`docs/architecture/quasar-effect-local-server-plan-2026-06-18.md`. The measured corpus
+`docs/architecture/quasar-effect-server-plan-2026-06-18.md`. The measured corpus
 facts and normalized entity model in
 `docs/architecture/quasar-data-reality-plan-2026-06-11.md` remain live evidence.
 

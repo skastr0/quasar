@@ -3,7 +3,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
-const DEFAULT_SERVER = process.env.QUASAR_LOCAL_SERVER_URL ?? "http://127.0.0.1:6180";
+const DEFAULT_SERVER = process.env.QUASAR_SERVER_URL ?? "http://127.0.0.1:6180";
 const DEFAULT_LIMIT = 5;
 
 const querySet = [
@@ -11,7 +11,7 @@ const querySet = [
     id: "project-retrieval",
     category: "project/session retrieval",
     query: "Quasar local server Effect architecture SQLite LanceDB Docker Tailscale",
-    intent: "Find sessions about the Effect local-server architecture.",
+    intent: "Find sessions about the Effect server architecture.",
   },
   {
     id: "code-debug",
@@ -77,7 +77,7 @@ const usage = () => {
   bun scripts/compare-local-search.mjs [--server URL] [--name active] [--profile name=URL ...] [--limit 5] [--modes lexical,semantic,fusion] [--out path.md] [--json path.json]
 
 Examples:
-  QUASAR_LOCAL_SERVER_URL=https://<quasar-service-tailnet-hostname> bun scripts/compare-local-search.mjs --name active
+  QUASAR_SERVER_URL=https://<quasar-service-tailnet-hostname> bun scripts/compare-local-search.mjs --name active
   bun scripts/compare-local-search.mjs --profile gemini=http://127.0.0.1:6180 --profile nomic=http://127.0.0.1:6181
 `);
 };
@@ -183,7 +183,7 @@ const renderMarkdown = (report, jsonArtifact) => {
   const lines = [
     `# Embedding retrieval comparison proof — ${report.generatedAt.slice(0, 10)}`,
     "",
-    "This proof compares Quasar retrieval behavior on fixed real agent-session queries. It is intentionally HTTP-level: each named profile points at a running local-server instance, so Gemini and Nomic can be compared without changing the script or mixing vector spaces.",
+    "This proof compares Quasar retrieval behavior on fixed real agent-session queries. It is intentionally HTTP-level: each named profile points at a running server instance, so Gemini and Nomic can be compared without changing the script or mixing vector spaces.",
     "",
     "Gemini spend is bounded to query embeddings for this fixed query set when a Gemini-profile server is included. Corpus embedding is not triggered by this script; server-side query embedding cache should make repeated runs no-op for already-seen query text.",
     "",

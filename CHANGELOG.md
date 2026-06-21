@@ -10,7 +10,7 @@ formats may still change.
 
 ### Changed
 
-- Reoriented the repository to the Effect local-server architecture direction:
+- Reoriented the repository to the Effect server architecture direction:
   SQLite truth store, durable queue, LanceDB search, package-owned CLI, and
   Docker/Tailscale deployment.
 

@@ -31,7 +31,7 @@ macOS and Linux on arm64/x64.
 Use the Tailscale Service hostname assigned to `svc:quasar`:
 
 ```bash
-export QUASAR_LOCAL_SERVER_URL=https://<quasar-service-tailnet-hostname>
+export QUASAR_SERVER_URL=https://<quasar-service-tailnet-hostname>
 export QUASAR_INGEST_TOKEN=<same-token-configured-on-the-mac-mini-server>
 
 quasar stats
@@ -46,7 +46,7 @@ Or configure the default server once:
 {
   "schemaVersion": 3,
   "projectKey": "quasar",
-  "localServerUrl": "https://<quasar-service-tailnet-hostname>",
+  "serverUrl": "https://<quasar-service-tailnet-hostname>",
   "ingestToken": "<same-token-configured-on-the-mac-mini-server>"
 }
 ```

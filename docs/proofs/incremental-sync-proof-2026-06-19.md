@@ -2,7 +2,7 @@
 
 ## Scope
 
-Proof for the local-server incremental sync path after switching scheduled ingest to:
+Proof for the server incremental sync path after switching scheduled ingest to:
 
 - one-minute launchd cadence
 - uncapped changed-session ingest by default
@@ -12,22 +12,22 @@ Proof for the local-server incremental sync path after switching scheduled inges
 
 ## Code proof
 
-- `packages/local-server/src/ingest.ts` passes `shouldParseSession` to provider streams unless `--force` is set.
+- `packages/server/src/ingest.ts` passes `shouldParseSession` to provider streams unless `--force` is set.
 - unchanged session probes are counted as `skipped` before adapter parse/yield work.
-- `packages/local-server/src/embeddings.ts` acknowledges stale embed jobs whose `(sessionId, seq, contentHash)` no longer exists in SQLite truth; these are superseded jobs, not provider failures.
-- `scripts/local-server-ops.mjs syncTick` runs `operator-ingest --provider all --summary` without a default `--limit`.
-- `scripts/install-local-server-sync.mjs` installs launchd with `StartInterval=60` unless overridden.
+- `packages/server/src/embeddings.ts` acknowledges stale embed jobs whose `(sessionId, seq, contentHash)` no longer exists in SQLite truth; these are superseded jobs, not provider failures.
+- `scripts/server-ops.mjs syncTick` runs `operator-ingest --provider all --summary` without a default `--limit`.
+- `scripts/install-server-sync.mjs` installs launchd with `StartInterval=60` unless overridden.
 
 ## Automated validation
 
 ```bash
-bun test packages/local-server/test/ingest.test.ts packages/local-server/test/embeddings.test.ts packages/local-server/test/ops-config.test.ts
+bun test packages/server/test/ingest.test.ts packages/server/test/embeddings.test.ts packages/server/test/ops-config.test.ts
 ```
 
 Result: 32 pass, 0 fail.
 
 ```bash
-bun run --cwd packages/local-server test
+bun run --cwd packages/server test
 ```
 
 Result: 62 pass, 0 fail.
@@ -36,22 +36,22 @@ Result: 62 pass, 0 fail.
 bun run typecheck
 ```
 
-Result: pass across `packages/core`, `packages/search`, `packages/local-server`, and `packages/cli`.
+Result: pass across `packages/core`, `packages/search`, `packages/server`, and `packages/cli`.
 
 ```bash
 pulsar score --diff HEAD~1..HEAD --changed-only --agent-view .
 ```
 
-Result: Pulsar routed one changed-scope warning for the already-hot `packages/local-server/src/embeddings.ts` file; no new functional failure was reported.
+Result: Pulsar routed one changed-scope warning for the already-hot `packages/server/src/embeddings.ts` file; no new functional failure was reported.
 
-Full root `bun run test` caveat: `packages/search/test/lancedb.test.ts` currently expects a reported `vector_idx`, while LanceDB reports only `text_idx` in three search-package tests. That failure is outside the incremental-sync slice and does not affect local-server ingest tests.
+Full root `bun run test` caveat: `packages/search/test/lancedb.test.ts` currently expects a reported `vector_idx`, while LanceDB reports only `text_idx` in three search-package tests. That failure is outside the incremental-sync slice and does not affect server ingest tests.
 
 ## Live Mac mini proof
 
 Docker service was rebuilt and recreated:
 
 ```bash
-bun run local-server:deploy
+bun run server:deploy
 ```
 
 Health/status after deploy:
@@ -72,7 +72,7 @@ Health/status after deploy:
 Manual uncapped sync tick:
 
 ```bash
-/usr/bin/time -l bun run local-server:sync-tick
+/usr/bin/time -l bun run server:sync-tick
 ```
 
 Observed result:
@@ -98,7 +98,7 @@ After server workers drained:
 Second uncapped summary sync tick after all sources were unchanged:
 
 ```bash
-/usr/bin/time -l bun run local-server:sync-tick
+/usr/bin/time -l bun run server:sync-tick
 ```
 
 Observed result:
@@ -113,14 +113,14 @@ Observed result:
 Launchd was reinstalled:
 
 ```bash
-bun run local-server:sync-uninstall
-bun run local-server:sync-install
-bun run local-server:sync-status
+bun run server:sync-uninstall
+bun run server:sync-install
+bun run server:sync-status
 ```
 
 Observed result:
 
-- LaunchAgent: `com.quasar.local-server-sync`
+- LaunchAgent: `com.quasar.server-sync`
 - installed: true
 - loaded: true
 - run interval: 60 seconds

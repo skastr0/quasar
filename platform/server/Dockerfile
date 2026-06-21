@@ -9,7 +9,7 @@ RUN apt-get update \
 COPY package.json bun.lock tsconfig.base.json ./
 COPY packages/core/package.json packages/core/package.json
 COPY packages/search/package.json packages/search/package.json
-COPY packages/local-server/package.json packages/local-server/package.json
+COPY packages/server/package.json packages/server/package.json
 COPY packages/cli/package.json packages/cli/package.json
 
 RUN bun install --frozen-lockfile

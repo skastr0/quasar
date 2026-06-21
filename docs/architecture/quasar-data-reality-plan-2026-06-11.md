@@ -1,9 +1,9 @@
 # Quasar — Data-Reality Plan
 
-Date: 2026-06-11; updated 2026-06-18 for the Effect local-server direction.
+Date: 2026-06-11; updated 2026-06-18 for the Effect server direction.
 Status: **canonical evidence**. This document owns measured corpus reality, provider
 mapping rules, and the normalized entity model. The implementation architecture lives in
-[quasar-effect-local-server-plan-2026-06-18.md](quasar-effect-local-server-plan-2026-06-18.md).
+[quasar-effect-server-plan-2026-06-18.md](quasar-effect-server-plan-2026-06-18.md).
 Provenance: owner decisions of 2026-06-11 after a full-corpus measurement (every file
 and row of all five providers parsed), superseding the v2 greenfield plan and the
 sync-contract/stop-line apparatus.
@@ -126,7 +126,7 @@ verification batteries. It is derived from SQLite truth and can be rebuilt.
 
 ## Build sequence (Tower, project `quasar`, forge orbit)
 
-Current work continues in Tower with the Effect local-server sequence: SQLite truth
+Current work continues in Tower with the Effect server sequence: SQLite truth
 store, durable queue, LanceDB indexing/search, embedding cache, Docker/Tailscale
 deployment, then full-corpus proof.
 

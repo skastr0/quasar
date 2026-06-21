@@ -1,4 +1,4 @@
-import type { IngestReport } from "../../local-server/src/ingest";
+import type { IngestReport } from "../../server/src/ingest";
 
 export const summarizeIngestReports = (reports: readonly IngestReport[]) => ({
   reports: reports.map((report) => ({

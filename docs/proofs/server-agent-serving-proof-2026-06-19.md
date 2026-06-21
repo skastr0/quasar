@@ -1,18 +1,18 @@
-# Quasar local-server agent serving proof — 2026-06-19
+# Quasar server agent serving proof — 2026-06-19
 
 ## Verdict
 
-PASS: the Effect local-server exposes the agent-facing read/search/tool-call surface
+PASS: the Effect server exposes the agent-facing read/search/tool-call surface
 over the Mac mini Tailscale IP. The serving path is SQLite truth plus LanceDB search;
 this proof does not add storage fields, indexes, embedding policy, or ingest behavior.
 
 ## Runtime under proof
 
 - URL: `http://<mac-mini-tailscale-ip>:6180`
-- Runtime: Docker local-server on the Mac mini
+- Runtime: Docker server on the Mac mini
 - Truth store: SQLite at `/data/quasar/quasar.sqlite`
 - Search: embedded LanceDB under `/data/quasar/search.lance`
-- Client mode: `QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180`
+- Client mode: `QUASAR_SERVER_URL=http://<mac-mini-tailscale-ip>:6180`
 
 ## Agent tool contract
 
@@ -47,7 +47,7 @@ Observed counts after deploy:
 Fusion search over real Quasar sessions with `projectKey` and `role` filter:
 
 ```bash
-curl -fsS 'http://<mac-mini-tailscale-ip>:6180/search/fusion?q=incremental%20sync%20local-server&projectKey=git%3Agithub.com%2Fskastr0%2Fquasar&role=user&limit=1' \
+curl -fsS 'http://<mac-mini-tailscale-ip>:6180/search/fusion?q=incremental%20sync%20server&projectKey=git%3Agithub.com%2Fskastr0%2Fquasar&role=user&limit=1' \
   | python3 -m json.tool
 ```
 
@@ -93,29 +93,29 @@ Returned the same `list_dir` row by stable tool-call id.
 
 ## CLI-wrapper proof
 
-Project list via `QUASAR_LOCAL_SERVER_URL`:
+Project list via `QUASAR_SERVER_URL`:
 
 ```bash
-QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180 \
+QUASAR_SERVER_URL=http://<mac-mini-tailscale-ip>:6180 \
   bun packages/cli/src/cli.ts projects --limit 1
 ```
 
-Fusion search via `QUASAR_LOCAL_SERVER_URL`:
+Fusion search via `QUASAR_SERVER_URL`:
 
 ```bash
-QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180 \
+QUASAR_SERVER_URL=http://<mac-mini-tailscale-ip>:6180 \
   bun packages/cli/src/cli.ts search \
     --mode fusion \
-    --query "incremental sync local-server" \
+    --query "incremental sync server" \
     --project-key git:github.com/skastr0/quasar \
     --role user \
     --limit 1
 ```
 
-Tool-call list via `QUASAR_LOCAL_SERVER_URL`:
+Tool-call list via `QUASAR_SERVER_URL`:
 
 ```bash
-QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180 \
+QUASAR_SERVER_URL=http://<mac-mini-tailscale-ip>:6180 \
   bun packages/cli/src/cli.ts tool-calls \
     --project-key git:github.com/skastr0/quasar \
     --provider grok \
@@ -123,10 +123,10 @@ QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180 \
     --limit 1
 ```
 
-Tool-call read via `QUASAR_LOCAL_SERVER_URL`:
+Tool-call read via `QUASAR_SERVER_URL`:
 
 ```bash
-QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180 \
+QUASAR_SERVER_URL=http://<mac-mini-tailscale-ip>:6180 \
   bun packages/cli/src/cli.ts tool-call \
     --id grok:tool:machine:de134fd406c9b3eb261fbf560c52390d:d259a2b6ef9ebaf565f6e71878dff67f
 ```
@@ -134,16 +134,16 @@ QUASAR_LOCAL_SERVER_URL=http://<mac-mini-tailscale-ip>:6180 \
 ## Automated validation
 
 ```bash
-bun test packages/local-server/test/search.test.ts packages/local-server/test/server.test.ts
-bun run --cwd packages/local-server test
-bun run --cwd packages/local-server typecheck
+bun test packages/server/test/search.test.ts packages/server/test/server.test.ts
+bun run --cwd packages/server test
+bun run --cwd packages/server typecheck
 ```
 
 Results:
 
 - targeted serving/search tests: pass
-- local-server full suite: 64 pass / 0 fail
-- local-server typecheck: pass
+- server full suite: 64 pass / 0 fail
+- server typecheck: pass
 
 ## Scope notes
 
