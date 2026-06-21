@@ -23,7 +23,14 @@ import {
   type NativeValue,
 } from "./common";
 import { type DecodeDiagnostic, decodeOrDrop, isSignal } from "./harness-schema";
-import { KimiWireRecordSchema } from "./kimi-schema";
+import {
+  classifyKimiRecord,
+  KimiWireRecordSchema,
+  type KimiAppendLoopEventRecord,
+  type KimiAppendMessageRecord,
+  type KimiUsageRecordType,
+  type KimiWireRecord,
+} from "./kimi-schema";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -96,6 +103,20 @@ const kimiTime = (time: unknown): string | undefined => {
   }
   if (typeof time === "string" && time.length > 0) return time;
   return undefined;
+};
+
+/**
+ * Concatenate the `text` parts of a decoded append_message into a single
+ * transcript string. The schema validated `content` as an array of unknown
+ * parts; we project only the string `text` fields (the only content shape the
+ * real corpus carries) and return undefined when there is none.
+ */
+const messageContentText = (msg: KimiAppendMessageRecord): string | undefined => {
+  const content = msg.message.content ?? [];
+  const textParts = content
+    .map((c) => recordFrom(c))
+    .flatMap((c) => (typeof c.text === "string" ? [c.text] : []));
+  return textParts.length > 0 ? textParts.join(" ") : undefined;
 };
 
 /**
@@ -185,18 +206,22 @@ const collectAgents = (
 type AgentLineEvent = {
   readonly lineNumber: number;
   readonly outerTime: number;
-  readonly record: Record<string, unknown>;
+  /** The decoded, schema-validated wire record (the typed discriminated union). */
+  readonly record: KimiWireRecord;
 };
 
 /**
- * Parse a single agent's wire.jsonl into tagged line-events, fail-closed.
+ * Parse a single agent's wire.jsonl into typed line-events, fail-closed.
  *
- * Every line is decoded through the shared `decodeOrDrop` boundary against
- * `KimiWireRecordSchema`: a malformed record (not an object, non-string `type`)
- * becomes a NAMED diagnostic (`kimi.wire.decode_failed`) in `diagnostics` and is
- * dropped — it never throws (the rest of the wire keeps importing) and never
- * silently coerces a half-record. Lines that fail JSON parse are already dropped
- * by `readJsonLines` upstream; this gate rejects structurally-invalid records.
+ * Every line is decoded through the shared `decodeOrDrop` boundary against the
+ * FULL `KimiWireRecordSchema` discriminated union (QSR-220): an unmodeled outer
+ * type, a malformed record (not an object, non-string/unknown `type`, wrong
+ * inner shape) becomes a NAMED diagnostic (`kimi.wire.decode_failed`) in
+ * `diagnostics` and is dropped — it never throws (the rest of the wire keeps
+ * importing) and never silently coerces a half-record. There is NO unknown
+ * pass-through: a line that does not match one of the modeled record types is
+ * rejected here, not carried forward as an ad-hoc untyped record. Lines that
+ * fail JSON parse are already dropped by `readJsonLines` upstream.
  */
 const collectAgentLineEvents = (
   agent: KimiAgent,
@@ -216,11 +241,12 @@ const collectAgentLineEvents = (
       diagnostics,
     });
     if (!isSignal(decision)) continue;
-    const record = recordFrom(value);
+    const record = decision.value;
+    // `metadata` is the one bootstrap record with no `time`; every other arm
+    // carries the optional epoch-ms ordering key.
+    const recordTime = "time" in record ? record.time : undefined;
     const outerTime =
-      typeof decision.value.time === "number" && Number.isFinite(decision.value.time)
-        ? decision.value.time
-        : 0;
+      typeof recordTime === "number" && Number.isFinite(recordTime) ? recordTime : 0;
     result.push({ lineNumber, outerTime, record });
   }
   return result;
@@ -303,120 +329,104 @@ const buildAgentSession = (
     const { lineNumber, outerTime, record } = lineEvents[seq]!;
     const agentId = agent.id;
     const wirePath = agent.wirePath;
-    const outerType = stringValue(record.type) ?? "unknown";
+    const outerType = record.type;
     const outerTimeIso = kimiTime(outerTime !== 0 ? outerTime : undefined);
 
     const eventId = eventIdFor(sessionId, seq, `${agentId}:${lineNumber}`);
 
-    // -----------------------------------------------------------------------
-    // context.append_message — user or system preamble only
-    // -----------------------------------------------------------------------
-    if (outerType === "context.append_message") {
-      const message = recordFrom(record.message);
-      const role = stringValue(message.role);
-      const originRecord = recordFrom(record.origin ?? message.origin);
-      const originKind = stringValue(originRecord.kind) ?? stringValue(record.originKind);
-      const isUserOrigin = originKind === "user";
+    // DECLARATIVE per-record-type dispatch (QSR-220). The decoded record is one
+    // of the modeled discriminated-union arms; `classifyKimiRecord` returns the
+    // single authoritative signal(kind)/drop(reason) verdict. There is no
+    // kind/role heuristic here any more and no unknown fall-through: a record
+    // that reached this point is already schema-valid, and a record type that is
+    // a DROP is explicitly discarded under its named reason (it never becomes an
+    // invented "unknown" event).
+    const verdict = classifyKimiRecord(record);
+    if (verdict._tag === "drop") {
+      // Lifecycle / accounting noise: not transcript signal. Dropped by name,
+      // not coerced into an event. (Diagnostics for these are intentionally
+      // silent — they are EXPECTED records, not malformed ones; only decode
+      // failures earn a `kimi.wire.decode_failed` diagnostic upstream.)
+      continue;
+    }
 
-      const contentArr = Array.isArray(message.content) ? message.content : [];
-      const textParts = contentArr
-        .map((c) => recordFrom(c))
-        .flatMap((c) => (stringValue(c.text) !== undefined ? [stringValue(c.text)!] : []));
-      const contentText = textParts.length > 0 ? textParts.join(" ") : undefined;
-
-      if (role === "user" && isUserOrigin) {
+    switch (verdict.kind) {
+      case "message.user": {
+        const msg = record as KimiAppendMessageRecord;
         eventDrafts.push({
           id: eventId,
           sequence: seq,
           timestamp: outerTimeIso,
           role: "user",
           kind: "message",
-          contentText,
-          contentSource: contentText,
+          contentText: messageContentText(msg),
+          contentSource: messageContentText(msg),
           rawReference: { sourcePath: wirePath, line: lineNumber, nativeType: outerType, agentId },
         });
-      } else {
+        break;
+      }
+      case "message.preamble": {
+        const msg = record as KimiAppendMessageRecord;
         eventDrafts.push({
           id: eventId,
           sequence: seq,
           timestamp: outerTimeIso,
           role: "system",
           kind: "preamble",
-          contentText,
-          contentSource: contentText,
+          contentText: messageContentText(msg),
+          contentSource: messageContentText(msg),
           rawReference: { sourcePath: wirePath, line: lineNumber, nativeType: outerType, agentId },
         });
+        break;
       }
-      continue;
-    }
-
-    // -----------------------------------------------------------------------
-    // context.append_loop_event — assistant output surface
-    // -----------------------------------------------------------------------
-    if (outerType === "context.append_loop_event") {
-      const event = recordFrom(record.event);
-      const eventType = stringValue(event.type) ?? "unknown";
-
-      if (eventType === "content.part") {
-        const part = recordFrom(event.part);
-        const partType = stringValue(part.type);
-
-        if (partType === "text") {
-          const text = stringValue(part.text);
-          eventDrafts.push({
-            id: eventId,
-            sequence: seq,
-            timestamp: outerTimeIso,
-            role: "assistant",
-            kind: "message",
-            contentText: text,
-            contentSource: text,
-            rawReference: {
-              sourcePath: wirePath,
-              line: lineNumber,
-              nativeType: "content.part:text",
-              agentId,
-            },
-          });
-        } else if (partType === "think") {
-          const think = stringValue(part.think);
-          eventDrafts.push({
-            id: eventId,
-            sequence: seq,
-            timestamp: outerTimeIso,
-            role: "thinking",
-            kind: "reasoning",
-            contentText: think,
-            contentSource: think,
-            rawReference: {
-              sourcePath: wirePath,
-              line: lineNumber,
-              nativeType: "content.part:think",
-              agentId,
-            },
-          });
-        } else {
-          eventDrafts.push({
-            id: eventId,
-            sequence: seq,
-            timestamp: outerTimeIso,
-            role: "unknown",
-            kind: "lifecycle",
-            rawReference: {
-              sourcePath: wirePath,
-              line: lineNumber,
-              nativeType: `content.part:${partType ?? "unknown"}`,
-              agentId,
-            },
-          });
-        }
-        continue;
+      case "assistant.text": {
+        const loop = record as KimiAppendLoopEventRecord;
+        const part = loop.event.type === "content.part" ? loop.event.part : undefined;
+        const text = part?.text;
+        eventDrafts.push({
+          id: eventId,
+          sequence: seq,
+          timestamp: outerTimeIso,
+          role: "assistant",
+          kind: "message",
+          contentText: text,
+          contentSource: text,
+          rawReference: {
+            sourcePath: wirePath,
+            line: lineNumber,
+            nativeType: "content.part:text",
+            agentId,
+          },
+        });
+        break;
       }
-
-      if (eventType === "tool.call") {
-        const toolCallId = stringValue(event.toolCallId);
-        const toolName = stringValue(event.name) ?? "kimi_tool";
-        const input = projectToolPayloadNativeValue(event.args);
+      case "assistant.think": {
+        const loop = record as KimiAppendLoopEventRecord;
+        const part = loop.event.type === "content.part" ? loop.event.part : undefined;
+        const think = part?.think;
+        eventDrafts.push({
+          id: eventId,
+          sequence: seq,
+          timestamp: outerTimeIso,
+          role: "thinking",
+          kind: "reasoning",
+          contentText: think,
+          contentSource: think,
+          rawReference: {
+            sourcePath: wirePath,
+            line: lineNumber,
+            nativeType: "content.part:think",
+            agentId,
+          },
+        });
+        break;
+      }
+      case "tool.call": {
+        const loop = record as KimiAppendLoopEventRecord;
+        const ev = loop.event.type === "tool.call" ? loop.event : undefined;
+        const toolCallId = ev?.toolCallId;
+        const toolName = ev?.name ?? "kimi_tool";
+        const input = projectToolPayloadNativeValue(ev?.args);
         const draft: KimiToolCallDraft = {
           id: scopedId(sessionId, "tool", toolCallId ?? eventId),
           eventId,
@@ -440,13 +450,14 @@ const buildAgentSession = (
             agentId,
           },
         });
-        continue;
+        break;
       }
-
-      if (eventType === "tool.result") {
-        const toolCallId = stringValue(event.toolCallId);
-        const resultRecord = recordFrom(event.result);
-        const output = projectToolPayloadNativeValue(resultRecord.output ?? event.result);
+      case "tool.result": {
+        const loop = record as KimiAppendLoopEventRecord;
+        const ev = loop.event.type === "tool.result" ? loop.event : undefined;
+        const toolCallId = ev?.toolCallId;
+        const resultRecord = recordFrom(ev?.result);
+        const output = projectToolPayloadNativeValue(resultRecord.output ?? ev?.result);
         const contentText =
           typeof resultRecord.output === "string"
             ? compactText(resultRecord.output)
@@ -507,113 +518,52 @@ const buildAgentSession = (
             },
           });
         }
-        continue;
+        break;
       }
+      case "summary": {
+        const summary =
+          record.type === "context.apply_compaction" ? record.summary : undefined;
+        eventDrafts.push({
+          id: eventId,
+          sequence: seq,
+          timestamp: outerTimeIso,
+          role: "assistant",
+          kind: "summary",
+          contentText: summary,
+          contentSource: summary,
+          rawReference: {
+            sourcePath: wirePath,
+            line: lineNumber,
+            nativeType: outerType,
+            agentId,
+          },
+        });
+        break;
+      }
+      case "usage": {
+        const usageRecord = record as KimiUsageRecordType;
+        const model = usageRecord.model;
+        const usage = usageRecord.usage;
+        const inputOther = usage?.inputOther;
+        const output = usage?.output;
+        const inputCacheRead = usage?.inputCacheRead;
+        const inputCacheCreation = usage?.inputCacheCreation;
 
-      eventDrafts.push({
-        id: eventId,
-        sequence: seq,
-        timestamp: outerTimeIso,
-        role: "unknown",
-        kind: "lifecycle",
-        rawReference: {
-          sourcePath: wirePath,
-          line: lineNumber,
-          nativeType: `loop_event:${eventType}`,
-          agentId,
-        },
-      });
-      continue;
+        const usageId = usageIdFor(sessionId, undefined, usageDrafts.length);
+        usageDrafts.push({
+          id: usageId,
+          timestamp: outerTimeIso,
+          ...(model !== undefined ? { model } : {}),
+          ...(inputOther !== undefined ? { inputTokens: inputOther } : {}),
+          ...(output !== undefined ? { outputTokens: output } : {}),
+          ...(inputCacheRead !== undefined ? { cacheReadInputTokens: inputCacheRead } : {}),
+          ...(inputCacheCreation !== undefined
+            ? { cacheCreationInputTokens: inputCacheCreation }
+            : {}),
+        });
+        break;
+      }
     }
-
-    // -----------------------------------------------------------------------
-    // context.apply_compaction → summary
-    // -----------------------------------------------------------------------
-    if (
-      outerType === "context.apply_compaction" ||
-      outerType === "micro_compaction" ||
-      outerType === "full_compaction"
-    ) {
-      const summary = stringValue(record.summary);
-      eventDrafts.push({
-        id: eventId,
-        sequence: seq,
-        timestamp: outerTimeIso,
-        role: "assistant",
-        kind: "summary",
-        contentText: summary,
-        contentSource: summary,
-        rawReference: {
-          sourcePath: wirePath,
-          line: lineNumber,
-          nativeType: outerType,
-          agentId,
-        },
-      });
-      continue;
-    }
-
-    // -----------------------------------------------------------------------
-    // usage.record → UsageRecord
-    // -----------------------------------------------------------------------
-    if (outerType === "usage.record") {
-      const model = stringValue(record.model);
-      const usage = recordFrom(record.usage);
-      const inputOther =
-        typeof usage.inputOther === "number" ? (usage.inputOther as number) : undefined;
-      const output =
-        typeof usage.output === "number" ? (usage.output as number) : undefined;
-      const inputCacheRead =
-        typeof usage.inputCacheRead === "number" ? (usage.inputCacheRead as number) : undefined;
-      const inputCacheCreation =
-        typeof usage.inputCacheCreation === "number"
-          ? (usage.inputCacheCreation as number)
-          : undefined;
-
-      const usageId = usageIdFor(sessionId, undefined, usageDrafts.length);
-      usageDrafts.push({
-        id: usageId,
-        timestamp: outerTimeIso,
-        ...(model !== undefined ? { model } : {}),
-        ...(inputOther !== undefined ? { inputTokens: inputOther } : {}),
-        ...(output !== undefined ? { outputTokens: output } : {}),
-        ...(inputCacheRead !== undefined ? { cacheReadInputTokens: inputCacheRead } : {}),
-        ...(inputCacheCreation !== undefined
-          ? { cacheCreationInputTokens: inputCacheCreation }
-          : {}),
-      });
-      eventDrafts.push({
-        id: eventId,
-        sequence: seq,
-        timestamp: outerTimeIso,
-        role: "unknown",
-        kind: "lifecycle",
-        rawReference: {
-          sourcePath: wirePath,
-          line: lineNumber,
-          nativeType: "usage.record",
-          agentId,
-        },
-      });
-      continue;
-    }
-
-    // -----------------------------------------------------------------------
-    // All other outer types → lifecycle
-    // -----------------------------------------------------------------------
-    eventDrafts.push({
-      id: eventId,
-      sequence: seq,
-      timestamp: outerTimeIso,
-      role: "unknown",
-      kind: "lifecycle",
-      rawReference: {
-        sourcePath: wirePath,
-        line: lineNumber,
-        nativeType: outerType,
-        agentId,
-      },
-    });
   }
 
   return buildSession({

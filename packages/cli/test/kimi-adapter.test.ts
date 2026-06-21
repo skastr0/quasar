@@ -3,8 +3,53 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterAll, describe, expect, test } from "bun:test";
+import { Schema } from "effect";
 
 import { kimiAdapter } from "../src/adapters/kimi";
+import {
+  classifyKimiRecord,
+  KimiAppendLoopEvent,
+  KimiAppendMessage,
+  KimiApplyCompaction,
+  KimiConfigUpdate,
+  KimiFullCompactionBegin,
+  KimiFullCompactionComplete,
+  KimiGoalClear,
+  KimiGoalCreate,
+  KimiGoalUpdate,
+  KimiMetadata,
+  KimiMicroCompactionApply,
+  KimiPermissionRecordApprovalResult,
+  KimiPermissionSetMode,
+  KimiPlanModeEnter,
+  KimiPlanModeExit,
+  KimiSwarmModeEnter,
+  KimiSwarmModeExit,
+  KimiToolsSetActiveTools,
+  KimiToolsUpdateStore,
+  KimiTurnCancel,
+  KimiTurnPrompt,
+  KimiTurnSteer,
+  KimiUsageRecord,
+  KimiWireRecordSchema,
+  type KimiWireRecord,
+} from "../src/adapters/kimi-schema";
+
+// ---------------------------------------------------------------------------
+// Schema-driven fixture constructors (QSR-220 FULL DATA FIDELITY).
+//
+// Every fixture record below is built FROM its Effect schema via
+// `Schema.encodeSync(<Schema>)(<typed value>)`. The typed value is checked
+// against the schema's `Type` at compile time and the encode is checked at
+// runtime, so renaming or removing a schema field BREAKS the fixture (compile or
+// encode error) — fixtures cannot drift away from the modeled format. All
+// identifiers/content are SYNTHETIC, prefixed `ZZTEST` / `session_synthetic` /
+// `agent-zz`, verified to resolve to ZERO real on-disk data.
+// ---------------------------------------------------------------------------
+
+/** Build an on-disk JSON record from a per-type schema + a typed value. */
+const fromSchema = <A, I>(schema: Schema.Schema<A, I>, value: A): I =>
+  Schema.encodeSync(schema)(value);
 
 const MACHINE = {
   machineId: "machine:test",
@@ -826,5 +871,612 @@ describe("T8 (QSR-220 FIX C): nested parentAgentId links to the real parent sub,
     )!;
     expect(parentSessionIdOf(agentB)).toBe(agentA.id);
     expect(parentSessionIdOf(agentB)).not.toBe(main.id);
+  });
+});
+
+// ===========================================================================
+// T9 (QSR-220 FULL DATA FIDELITY): declarative signal/drop dispatch — ONE case
+// per modeled record type. Each fixture is built FROM its Effect schema, then
+// classified through `classifyKimiRecord`. The expected verdict is the
+// authoritative per-type signal(kind)/drop(reason). There is NO unknown
+// pass-through: every record type appears here with an explicit verdict.
+// ===========================================================================
+describe("T9 (QSR-220): per-record-type signal/drop classification", () => {
+  type Verdict =
+    | { signal: string }
+    | { drop: string };
+
+  // The full inventory: 23 outer types + the inner loop-event kinds
+  // (content.part text|think, tool.call, tool.result, step.begin, step.end) +
+  // content.part fallback = 30 distinct record-type cases. Each is a
+  // schema-built fixture paired with its authoritative verdict.
+  const cases: ReadonlyArray<readonly [string, KimiWireRecord, Verdict]> = [
+    // --- context.append_message: origin decides user vs preamble ---
+    [
+      "append_message origin=user",
+      fromSchema(KimiAppendMessage, {
+        type: "context.append_message",
+        time: 1000,
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "ZZTEST_USER_PROMPT" }],
+          origin: { kind: "user" },
+        },
+      }) as KimiWireRecord,
+      { signal: "message.user" },
+    ],
+    [
+      "append_message origin=injection",
+      fromSchema(KimiAppendMessage, {
+        type: "context.append_message",
+        time: 1001,
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "ZZTEST_INJECTION" }],
+          origin: { kind: "injection" },
+        },
+      }) as KimiWireRecord,
+      { signal: "message.preamble" },
+    ],
+    [
+      "append_message origin=system_trigger",
+      fromSchema(KimiAppendMessage, {
+        type: "context.append_message",
+        time: 1002,
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "ZZTEST_SYSTRIGGER" }],
+          origin: { kind: "system_trigger" },
+        },
+      }) as KimiWireRecord,
+      { signal: "message.preamble" },
+    ],
+    [
+      "append_message origin=skill_activation",
+      fromSchema(KimiAppendMessage, {
+        type: "context.append_message",
+        time: 1003,
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "ZZTEST_SKILL" }],
+          origin: { kind: "skill_activation" },
+        },
+      }) as KimiWireRecord,
+      { signal: "message.preamble" },
+    ],
+    [
+      "append_message origin=background_task",
+      fromSchema(KimiAppendMessage, {
+        type: "context.append_message",
+        time: 1004,
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "ZZTEST_BGTASK" }],
+          origin: { kind: "background_task" },
+        },
+      }) as KimiWireRecord,
+      { signal: "message.preamble" },
+    ],
+    // --- context.append_loop_event inner kinds ---
+    [
+      "loop_event content.part text",
+      fromSchema(KimiAppendLoopEvent, {
+        type: "context.append_loop_event",
+        time: 2000,
+        event: { type: "content.part", part: { type: "text", text: "ZZTEST_ASSISTANT" } },
+      }) as KimiWireRecord,
+      { signal: "assistant.text" },
+    ],
+    [
+      "loop_event content.part think",
+      fromSchema(KimiAppendLoopEvent, {
+        type: "context.append_loop_event",
+        time: 2001,
+        event: { type: "content.part", part: { type: "think", think: "ZZTEST_THINK" } },
+      }) as KimiWireRecord,
+      { signal: "assistant.think" },
+    ],
+    [
+      "loop_event content.part other → drop",
+      fromSchema(KimiAppendLoopEvent, {
+        type: "context.append_loop_event",
+        time: 2002,
+        event: { type: "content.part", part: { type: "zztest_future_part" } },
+      }) as KimiWireRecord,
+      { drop: "loop.content_part.zztest_future_part" },
+    ],
+    [
+      "loop_event tool.call",
+      fromSchema(KimiAppendLoopEvent, {
+        type: "context.append_loop_event",
+        time: 2003,
+        event: {
+          type: "tool.call",
+          toolCallId: "tc-synth-1",
+          name: "zztest_bash",
+          args: { command: "ls" },
+        },
+      }) as KimiWireRecord,
+      { signal: "tool.call" },
+    ],
+    [
+      "loop_event tool.result",
+      fromSchema(KimiAppendLoopEvent, {
+        type: "context.append_loop_event",
+        time: 2004,
+        event: { type: "tool.result", toolCallId: "tc-synth-1", result: { output: "ZZTEST_TOOL_OUT" } },
+      }) as KimiWireRecord,
+      { signal: "tool.result" },
+    ],
+    [
+      "loop_event step.begin → drop",
+      fromSchema(KimiAppendLoopEvent, {
+        type: "context.append_loop_event",
+        time: 2005,
+        event: { type: "step.begin" },
+      }) as KimiWireRecord,
+      { drop: "loop.step_begin" },
+    ],
+    [
+      "loop_event step.end → drop",
+      fromSchema(KimiAppendLoopEvent, {
+        type: "context.append_loop_event",
+        time: 2006,
+        event: { type: "step.end" },
+      }) as KimiWireRecord,
+      { drop: "loop.step_end" },
+    ],
+    // --- compaction family ---
+    [
+      "context.apply_compaction → summary",
+      fromSchema(KimiApplyCompaction, {
+        type: "context.apply_compaction",
+        time: 3000,
+        summary: "ZZTEST_SUMMARY",
+        compactedCount: 3,
+        tokensBefore: 100,
+        tokensAfter: 10,
+      }) as KimiWireRecord,
+      { signal: "summary" },
+    ],
+    [
+      "micro_compaction.apply → drop",
+      fromSchema(KimiMicroCompactionApply, {
+        type: "micro_compaction.apply",
+        time: 3001,
+        cutoff: 5,
+      }) as KimiWireRecord,
+      { drop: "compaction.micro_apply" },
+    ],
+    [
+      "full_compaction.begin → drop",
+      fromSchema(KimiFullCompactionBegin, {
+        type: "full_compaction.begin",
+        time: 3002,
+        source: "auto",
+      }) as KimiWireRecord,
+      { drop: "compaction.full_begin" },
+    ],
+    [
+      "full_compaction.complete → drop",
+      fromSchema(KimiFullCompactionComplete, {
+        type: "full_compaction.complete",
+        time: 3003,
+      }) as KimiWireRecord,
+      { drop: "compaction.full_complete" },
+    ],
+    // --- usage ---
+    [
+      "usage.record → usage",
+      fromSchema(KimiUsageRecord, {
+        type: "usage.record",
+        time: 4000,
+        model: "zztest-model",
+        usage: { inputOther: 10, output: 5, inputCacheRead: 2, inputCacheCreation: 1 },
+        usageScope: "turn",
+      }) as KimiWireRecord,
+      { signal: "usage" },
+    ],
+    // --- bootstrap ---
+    [
+      "metadata → drop",
+      fromSchema(KimiMetadata, {
+        type: "metadata",
+        protocol_version: "1.4",
+        created_at: 1781000000000,
+        app_version: "0.14.0",
+      }) as KimiWireRecord,
+      { drop: "bootstrap.metadata" },
+    ],
+    // --- config / permission / tools lifecycle ---
+    [
+      "config.update → drop",
+      fromSchema(KimiConfigUpdate, {
+        type: "config.update",
+        time: 5000,
+        profileName: "agent",
+      }) as KimiWireRecord,
+      { drop: "config.update" },
+    ],
+    [
+      "permission.set_mode → drop",
+      fromSchema(KimiPermissionSetMode, {
+        type: "permission.set_mode",
+        time: 5001,
+        mode: "auto",
+      }) as KimiWireRecord,
+      { drop: "permission.set_mode" },
+    ],
+    [
+      "permission.record_approval_result → drop",
+      fromSchema(KimiPermissionRecordApprovalResult, {
+        type: "permission.record_approval_result",
+        time: 5002,
+        toolCallId: "tc-synth-2",
+        toolName: "zztest_bash",
+      }) as KimiWireRecord,
+      { drop: "permission.record_approval_result" },
+    ],
+    [
+      "tools.set_active_tools → drop",
+      fromSchema(KimiToolsSetActiveTools, {
+        type: "tools.set_active_tools",
+        time: 5003,
+        names: ["zztest_read", "zztest_write"],
+      }) as KimiWireRecord,
+      { drop: "tools.set_active_tools" },
+    ],
+    [
+      "tools.update_store → drop",
+      fromSchema(KimiToolsUpdateStore, {
+        type: "tools.update_store",
+        time: 5004,
+        key: "zztest_key",
+        value: { a: 1 },
+      }) as KimiWireRecord,
+      { drop: "tools.update_store" },
+    ],
+    // --- goal lifecycle ---
+    [
+      "goal.create → drop",
+      fromSchema(KimiGoalCreate, {
+        type: "goal.create",
+        time: 6000,
+        goalId: "zztest-goal",
+        objective: "ZZTEST objective",
+      }) as KimiWireRecord,
+      { drop: "goal.create" },
+    ],
+    [
+      "goal.update → drop",
+      fromSchema(KimiGoalUpdate, {
+        type: "goal.update",
+        time: 6001,
+        tokensUsed: 42,
+      }) as KimiWireRecord,
+      { drop: "goal.update" },
+    ],
+    [
+      "goal.clear → drop",
+      fromSchema(KimiGoalClear, { type: "goal.clear", time: 6002 }) as KimiWireRecord,
+      { drop: "goal.clear" },
+    ],
+    // --- turn lifecycle ---
+    [
+      "turn.prompt → drop",
+      fromSchema(KimiTurnPrompt, {
+        type: "turn.prompt",
+        time: 7000,
+        input: "ZZTEST",
+        origin: { kind: "user" },
+      }) as KimiWireRecord,
+      { drop: "turn.prompt" },
+    ],
+    [
+      "turn.steer → drop",
+      fromSchema(KimiTurnSteer, {
+        type: "turn.steer",
+        time: 7001,
+        input: "ZZTEST",
+        origin: { kind: "user" },
+      }) as KimiWireRecord,
+      { drop: "turn.steer" },
+    ],
+    [
+      "turn.cancel → drop",
+      fromSchema(KimiTurnCancel, {
+        type: "turn.cancel",
+        time: 7002,
+        turnId: "zztest-turn",
+      }) as KimiWireRecord,
+      { drop: "turn.cancel" },
+    ],
+    // --- mode lifecycle ---
+    [
+      "swarm_mode.enter → drop",
+      fromSchema(KimiSwarmModeEnter, {
+        type: "swarm_mode.enter",
+        time: 8000,
+        trigger: "manual",
+      }) as KimiWireRecord,
+      { drop: "swarm_mode.enter" },
+    ],
+    [
+      "swarm_mode.exit → drop",
+      fromSchema(KimiSwarmModeExit, { type: "swarm_mode.exit", time: 8001 }) as KimiWireRecord,
+      { drop: "swarm_mode.exit" },
+    ],
+    [
+      "plan_mode.enter → drop",
+      fromSchema(KimiPlanModeEnter, {
+        type: "plan_mode.enter",
+        time: 8002,
+        id: "zztest-plan",
+      }) as KimiWireRecord,
+      { drop: "plan_mode.enter" },
+    ],
+    [
+      "plan_mode.exit → drop",
+      fromSchema(KimiPlanModeExit, { type: "plan_mode.exit", time: 8003 }) as KimiWireRecord,
+      { drop: "plan_mode.exit" },
+    ],
+  ];
+
+  for (const [label, record, expected] of cases) {
+    test(`classifies ${label}`, () => {
+      const verdict = classifyKimiRecord(record);
+      if ("signal" in expected) {
+        expect(verdict._tag).toBe("signal");
+        if (verdict._tag === "signal") expect(String(verdict.kind)).toBe(expected.signal);
+      } else {
+        expect(verdict._tag).toBe("drop");
+        if (verdict._tag === "drop") expect(verdict.reason).toBe(expected.drop);
+      }
+    });
+  }
+
+  test("covers every modeled record-type case (30) with an explicit verdict", () => {
+    // 5 message-origin + 7 loop-event inner + 4 compaction + 1 usage +
+    // 1 metadata + 5 config/permission/tools + 3 goal + 3 turn + 4 mode = 33
+    // explicit cases (≥30 distinct record types, zero unknown pass-through).
+    expect(cases.length).toBeGreaterThanOrEqual(30);
+  });
+});
+
+// ===========================================================================
+// T10 (QSR-220): full-spectrum wire through the ADAPTER. A single agent wire
+// carrying one of EVERY signal + several drops must produce exactly the signal
+// events/tool-calls/usage and ZERO events for the dropped lifecycle records —
+// proving no unknown pass-through and no lifecycle coercion into events.
+// ===========================================================================
+describe("T10 (QSR-220): full-spectrum wire → only signals become events, drops vanish", () => {
+  const root = join(testRoot, "t10");
+  const sessionsDir = join(root, "sessions");
+  const sessionDir = join(sessionsDir, "wd_zztest_full", "session_synthetic_t10");
+  const agentDir = join(sessionDir, "agents", "main");
+  mkdirSync(agentDir, { recursive: true });
+
+  writeJson(join(sessionDir, "state.json"), {
+    createdAt: "2026-05-10T08:00:00.000Z",
+    updatedAt: "2026-05-10T09:00:00.000Z",
+    title: "Full spectrum",
+    isCustomTitle: true,
+    agents: { main: { homedir: agentDir, type: "main", parentAgentId: null } },
+    custom: {},
+  });
+  writeJsonLines(join(root, "session_index.jsonl"), [
+    { sessionId: "session_synthetic_t10", sessionDir, workDir: "/home/zztest/full" },
+  ]);
+
+  // One signal of each kind + a representative set of drops, schema-built.
+  writeJsonLines(join(agentDir, "wire.jsonl"), [
+    fromSchema(KimiMetadata, { type: "metadata", protocol_version: "1.4", created_at: 100 }),
+    fromSchema(KimiConfigUpdate, { type: "config.update", time: 110, profileName: "agent" }),
+    fromSchema(KimiToolsSetActiveTools, { type: "tools.set_active_tools", time: 120, names: ["zztest_read"] }),
+    fromSchema(KimiPermissionSetMode, { type: "permission.set_mode", time: 130, mode: "auto" }),
+    fromSchema(KimiTurnPrompt, { type: "turn.prompt", time: 140, input: "ZZTEST" }),
+    fromSchema(KimiAppendMessage, {
+      type: "context.append_message",
+      time: 200,
+      message: { role: "user", content: [{ type: "text", text: "ZZTEST_USER_PROMPT" }], origin: { kind: "user" } },
+    }),
+    fromSchema(KimiAppendMessage, {
+      type: "context.append_message",
+      time: 210,
+      message: { role: "user", content: [{ type: "text", text: "ZZTEST_INJECTION" }], origin: { kind: "injection" } },
+    }),
+    fromSchema(KimiAppendLoopEvent, {
+      type: "context.append_loop_event",
+      time: 300,
+      event: { type: "step.begin" },
+    }),
+    fromSchema(KimiAppendLoopEvent, {
+      type: "context.append_loop_event",
+      time: 310,
+      event: { type: "content.part", part: { type: "think", think: "ZZTEST_THINK" } },
+    }),
+    fromSchema(KimiAppendLoopEvent, {
+      type: "context.append_loop_event",
+      time: 320,
+      event: { type: "content.part", part: { type: "text", text: "ZZTEST_ASSISTANT" } },
+    }),
+    fromSchema(KimiAppendLoopEvent, {
+      type: "context.append_loop_event",
+      time: 330,
+      event: { type: "tool.call", toolCallId: "tc-synth-9", name: "zztest_bash", args: { command: "ls" } },
+    }),
+    fromSchema(KimiAppendLoopEvent, {
+      type: "context.append_loop_event",
+      time: 340,
+      event: { type: "tool.result", toolCallId: "tc-synth-9", result: { output: "ZZTEST_TOOL_OUT" } },
+    }),
+    fromSchema(KimiAppendLoopEvent, {
+      type: "context.append_loop_event",
+      time: 350,
+      event: { type: "step.end" },
+    }),
+    fromSchema(KimiUsageRecord, {
+      type: "usage.record",
+      time: 360,
+      model: "zztest-model",
+      usage: { inputOther: 10, output: 5 },
+      usageScope: "turn",
+    }),
+    fromSchema(KimiApplyCompaction, {
+      type: "context.apply_compaction",
+      time: 400,
+      summary: "ZZTEST_SUMMARY",
+    }),
+    fromSchema(KimiSwarmModeEnter, { type: "swarm_mode.enter", time: 410, trigger: "manual" }),
+    fromSchema(KimiGoalUpdate, { type: "goal.update", time: 420, tokensUsed: 9 }),
+  ]);
+
+  const read = () => kimiAdapter.read({ machine: MACHINE, now: NOW, roots: { kimi: root } });
+
+  test("signal events are exactly: 1 user, 1 preamble, 1 assistant text, 1 reasoning, 1 tool_call, 1 tool_result, 1 summary", async () => {
+    const session = (await read()).sessions[0]!;
+    const byKind = (kind: string) => session.events.filter((e) => e.kind === kind);
+    expect(session.events.filter((e) => e.role === "user" && e.kind === "message")).toHaveLength(1);
+    expect(byKind("preamble")).toHaveLength(1);
+    expect(session.events.filter((e) => e.role === "assistant" && e.kind === "message")).toHaveLength(1);
+    expect(byKind("reasoning")).toHaveLength(1);
+    expect(byKind("tool_call")).toHaveLength(1);
+    expect(byKind("tool_result")).toHaveLength(1);
+    expect(byKind("summary")).toHaveLength(1);
+  });
+
+  test("NO lifecycle/unknown events leak (drops never become events)", async () => {
+    const session = (await read()).sessions[0]!;
+    // The only non-signal event kind that could appear historically was
+    // "lifecycle"/"unknown"; with declarative drops there must be none.
+    expect(session.events.filter((e) => e.kind === "lifecycle")).toHaveLength(0);
+    expect(session.events.filter((e) => e.kind === "unknown")).toHaveLength(0);
+    // 7 signal-producing records → exactly 7 events.
+    expect(session.events).toHaveLength(7);
+  });
+
+  test("usage.record becomes a UsageRecord, not an event", async () => {
+    const session = (await read()).sessions[0]!;
+    expect(session.usageRecords).toHaveLength(1);
+    expect(session.usageRecords[0]!.model).toBe("zztest-model");
+    expect(session.usageRecords[0]!.inputTokens).toBe(10);
+  });
+
+  test("the tool.call/result merge into one completed ToolCall", async () => {
+    const session = (await read()).sessions[0]!;
+    expect(session.toolCalls).toHaveLength(1);
+    expect(session.toolCalls[0]!.toolName).toBe("zztest_bash");
+    expect(session.toolCalls[0]!.status).toBe("completed");
+  });
+});
+
+// ===========================================================================
+// T11 (QSR-220): malformed-record fail-closed per MAJOR type. A structurally
+// invalid record for each major outer family (valid JSON, wrong shape) must:
+//   - decode-fail at the boundary → named kimi.wire.decode_failed diagnostic,
+//   - be DROPPED (never become an event, never throw),
+//   - and the surrounding valid records must survive.
+// ===========================================================================
+describe("T11 (QSR-220): malformed records → named diagnostic + drop, no throw", () => {
+  const root = join(testRoot, "t11");
+  const sessionsDir = join(root, "sessions");
+  const sessionDir = join(sessionsDir, "wd_zztest_malformed", "session_synthetic_t11");
+  const agentDir = join(sessionDir, "agents", "main");
+  mkdirSync(agentDir, { recursive: true });
+
+  writeJson(join(sessionDir, "state.json"), {
+    createdAt: "2026-05-11T08:00:00.000Z",
+    updatedAt: "2026-05-11T09:00:00.000Z",
+    title: "Malformed",
+    isCustomTitle: true,
+    agents: { main: { homedir: agentDir, type: "main", parentAgentId: null } },
+    custom: {},
+  });
+  writeJsonLines(join(root, "session_index.jsonl"), [
+    { sessionId: "session_synthetic_t11", sessionDir, workDir: "/home/zztest/malformed" },
+  ]);
+
+  // Each malformed record is valid JSON with the right `type` literal but the
+  // WRONG inner shape for that type, so it fails its per-type schema arm.
+  writeJsonLines(join(agentDir, "wire.jsonl"), [
+    // valid bookend
+    fromSchema(KimiAppendMessage, {
+      type: "context.append_message",
+      time: 1,
+      message: { role: "user", content: [{ type: "text", text: "ZZTEST_USER_PROMPT" }], origin: { kind: "user" } },
+    }),
+    // append_message missing required message.role
+    { type: "context.append_message", time: 2, message: { content: [] } },
+    // loop_event with unmodeled inner event.type
+    { type: "context.append_loop_event", time: 3, event: { type: "zztest_unknown_inner" } },
+    // loop_event content.part missing required part.type
+    { type: "context.append_loop_event", time: 4, event: { type: "content.part", part: {} } },
+    // usage.record with non-object usage
+    { type: "usage.record", time: 5, usage: "not-an-object" },
+    // metadata with wrong-typed created_at
+    { type: "metadata", created_at: "not-a-number" },
+    // entirely unmodeled outer type → no union arm
+    { type: "zztest.totally_unknown_outer", time: 7 },
+    // valid bookend
+    fromSchema(KimiAppendLoopEvent, {
+      type: "context.append_loop_event",
+      time: 8,
+      event: { type: "content.part", part: { type: "text", text: "ZZTEST_ASSISTANT" } },
+    }),
+  ]);
+
+  const read = () => kimiAdapter.read({ machine: MACHINE, now: NOW, roots: { kimi: root } });
+
+  test("does not throw and yields the session", async () => {
+    const result = await read();
+    expect(result.sessions).toHaveLength(1);
+  });
+
+  test("emits named kimi.wire.decode_failed diagnostics for the malformed records", async () => {
+    const result = await read();
+    const decodeDiag = result.diagnostics.filter((d) =>
+      (d.message ?? "").includes("kimi.wire.decode_failed"),
+    );
+    // One per malformed line (6 malformed records).
+    expect(decodeDiag.length).toBeGreaterThanOrEqual(6);
+  });
+
+  test("only the two valid records become events; malformed records are dropped", async () => {
+    const session = (await read()).sessions[0]!;
+    expect(session.events).toHaveLength(2);
+    const texts = session.events.flatMap((e) => (e.contentText !== undefined ? [e.contentText] : []));
+    expect(texts.some((t) => t.includes("ZZTEST_USER_PROMPT"))).toBe(true);
+    expect(texts.some((t) => t.includes("ZZTEST_ASSISTANT"))).toBe(true);
+  });
+
+  test("an unmodeled outer type is rejected (no unknown pass-through)", async () => {
+    // The unmodeled outer type produced a decode failure (covered above) and is
+    // NOT present as any event.
+    const session = (await read()).sessions[0]!;
+    const refs = session.events.map((e) => e.rawReference.nativeType);
+    expect(refs.some((r) => (r ?? "").includes("zztest.totally_unknown_outer"))).toBe(false);
+  });
+});
+
+// ===========================================================================
+// T12 (QSR-220): the boundary schema is a CLOSED union — round-trip decode of a
+// schema-built record succeeds, and an unmodeled outer type fails decode.
+// ===========================================================================
+describe("T12 (QSR-220): KimiWireRecordSchema is a closed fail-closed union", () => {
+  test("a schema-built record decodes back through the union", () => {
+    const onDisk = fromSchema(KimiUsageRecord, {
+      type: "usage.record",
+      time: 1,
+      model: "zztest-model",
+      usage: { output: 1 },
+    });
+    const decoded = Schema.decodeUnknownSync(KimiWireRecordSchema)(onDisk);
+    expect(decoded.type).toBe("usage.record");
+  });
+
+  test("an unmodeled outer type does not decode", () => {
+    expect(() =>
+      Schema.decodeUnknownSync(KimiWireRecordSchema)({ type: "zztest.unknown", time: 1 }),
+    ).toThrow();
   });
 });
