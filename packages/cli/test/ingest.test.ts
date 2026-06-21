@@ -1,4 +1,4 @@
-import type { NormalizedSession } from "@skastr0/quasar-core";
+import type { NormalizedSession } from "../src/core/schemas";
 import { afterEach, describe, expect, test } from "bun:test";
 
 import { adaptersByProvider } from "../src/adapters/registry";

@@ -34,9 +34,6 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test"
   },
-  "dependencies": {
-    "@skastr0/quasar-core": "workspace:*"
-  },
   "optionalDependencies": {
     "@skastr0/quasar-cli-darwin-arm64": "0.1.7",
     "@skastr0/quasar-cli-darwin-x64": "0.1.7",

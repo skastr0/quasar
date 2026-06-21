@@ -1,11 +1,11 @@
-import {
-  redactSensitive,
-  stableWideHash,
-  type ContentBlock,
-  type NormalizedSession,
-  type SessionEvent,
-  type ToolCall,
-} from "@skastr0/quasar-core";
+import { stableWideHash } from "./core/hash";
+import { redactSensitive } from "./core/redaction";
+import type {
+  ContentBlock,
+  NormalizedSession,
+  SessionEvent,
+  ToolCall,
+} from "./core/schemas";
 
 import type { MappedSession, MessageRole } from "./model";
 

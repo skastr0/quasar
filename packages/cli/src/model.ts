@@ -1,4 +1,4 @@
-import type { Provider } from "@skastr0/quasar-core";
+import type { Provider } from "./core/schemas";
 
 export type MessageRole = "user" | "assistant" | "reasoning";
 

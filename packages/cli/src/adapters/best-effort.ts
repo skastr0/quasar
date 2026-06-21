@@ -1,4 +1,4 @@
-import type { Provider, SessionEventKind, SessionRole, ToolCall, UsageRecord } from "@skastr0/quasar-core";
+import type { Provider, SessionEventKind, SessionRole, ToolCall, UsageRecord } from "../core/schemas";
 import {
   kindFromNative,
   numberValue,

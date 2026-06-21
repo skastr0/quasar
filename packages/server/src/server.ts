@@ -9,6 +9,7 @@ import { ingestMappedSession } from "./ingest";
 import { ok } from "./json";
 import { SearchMaintenance } from "./maintenance";
 import type { MappedSession } from "./model";
+import { Provider } from "./provider";
 import { AppLayer } from "./runtime";
 import { DerivedSearch, messageSearchFilter } from "./search";
 import { VECTOR_READY_FILTER } from "./searchPolicy";
@@ -51,7 +52,7 @@ const isFingerprintProbe = (value: unknown): value is { readonly sessionId: stri
   && isString(value.sourceFingerprint)
   && value.sourceFingerprint.trim() !== "";
 
-const providers = new Set<string>(["claude", "codex", "opencode", "grok", "hermes", "kimi", "antigravity"]);
+const providers = new Set<string>(Provider.literals);
 
 const roles = new Set<string>(["user", "assistant", "reasoning"]);
 

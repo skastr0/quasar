@@ -2,7 +2,7 @@ import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { collectAdapterStream, type SessionAdapter } from "./types";
-import type { SessionEdge, ToolCall, UsageRecord } from "@skastr0/quasar-core";
+import type { SessionEdge, ToolCall, UsageRecord } from "../core/schemas";
 import {
   buildSession,
   collectFiles,

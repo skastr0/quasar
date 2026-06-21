@@ -22,8 +22,7 @@ than writing to native history.
 
 ## Workspace
 
-- `packages/core`: private shared schemas, adapter contracts, project/path normalization, importers.
-- `packages/cli`: the `quasar` CLI with JSON input envelopes.
+- `packages/cli`: the `quasar` CLI — provider history parsing (adapters), session mapping, ingest client, and JSON query commands.
 - `packages/server`: the local Effect server: SQLite truth, durable queue, workers, and HTTP control surface.
 - `packages/search`: LanceDB search primitives.
 

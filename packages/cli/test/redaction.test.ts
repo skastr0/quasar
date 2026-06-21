@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { compactText } from "../src/adapters/common";
-import { redactSensitive } from "@skastr0/quasar-core";
+import { redactSensitive } from "../src/core/redaction";
 
 describe("redaction", () => {
   test("strips encrypted native payload fields before transport and indexing", () => {

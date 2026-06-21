@@ -3,10 +3,10 @@ import { basename, dirname, join, relative } from "node:path";
 
 import { Option, Schema } from "effect";
 
-import { stableJsonHash, stableWideHash } from "@skastr0/quasar-core";
-import { gitRemoteForPath } from "@skastr0/quasar-core";
-import { resolveProjectIdentity } from "@skastr0/quasar-core";
-import { redactSensitive } from "@skastr0/quasar-core";
+import { stableJsonHash, stableWideHash } from "../core/hash";
+import { gitRemoteForPath } from "../core/git-identity";
+import { resolveProjectIdentity } from "../core/project-normalization";
+import { redactSensitive } from "../core/redaction";
 import type {
   Artifact,
   ContentBlock,
@@ -20,7 +20,7 @@ import type {
   SourceRoot,
   ToolCall,
   UsageRecord,
-} from "@skastr0/quasar-core";
+} from "../core/schemas";
 import type { AdapterDiscoverOptions } from "./types";
 
 export type NativeValue =

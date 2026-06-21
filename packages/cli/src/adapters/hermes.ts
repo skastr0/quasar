@@ -3,7 +3,7 @@ import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync, statSync } 
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
-import type { Artifact, SessionEdge, SessionEventKind, ToolCall, UsageRecord } from "@skastr0/quasar-core";
+import type { Artifact, SessionEdge, SessionEventKind, ToolCall, UsageRecord } from "../core/schemas";
 import {
   buildSession,
   compactText,

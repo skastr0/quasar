@@ -1,6 +1,7 @@
 import { statSync } from "node:fs";
 
-import { loadMachineIdentity, type Provider } from "@skastr0/quasar-core";
+import { loadMachineIdentity } from "./core/machine";
+import type { Provider } from "./core/schemas";
 
 import { sourceFingerprintFor } from "./adapters/common";
 import { adaptersByProvider, stableAdapters } from "./adapters/registry";

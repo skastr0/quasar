@@ -4,8 +4,8 @@ import { join } from "node:path";
 
 import { afterAll, describe, expect, test } from "vitest";
 
-import { gitRemoteForPath } from "../src/git-identity";
-import { resolveProjectIdentity } from "../src/project-normalization";
+import { gitRemoteForPath } from "../src/core/git-identity";
+import { resolveProjectIdentity } from "../src/core/project-normalization";
 
 const root = mkdtempSync(join(tmpdir(), "quasar-git-identity-"));
 

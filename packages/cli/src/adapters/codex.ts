@@ -6,8 +6,8 @@ import {
   collectAdapterStream,
   type SessionAdapter,
 } from "./types";
-import type { NormalizedSession, SessionEventKind, SessionRole, ToolCall, UsageRecord } from "@skastr0/quasar-core";
-import { stableWideHash } from "@skastr0/quasar-core";
+import type { NormalizedSession, SessionEventKind, SessionRole, ToolCall, UsageRecord } from "../core/schemas";
+import { stableWideHash } from "../core/hash";
 import {
   buildSession,
   collectFiles,
