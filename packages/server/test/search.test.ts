@@ -338,25 +338,31 @@ describe("DerivedSearch", () => {
     expect((rows[0]?.vector as readonly number[] | undefined)?.length).toBe(768);
   });
 
-  test("indexSession creates text_idx inline (optimize-on-ingest); createLexicalIndex is idempotent", async () => {
-    const [after, afterExplicit] = await withSearch(
+  test("createLexicalIndex builds text_idx after indexSession; subsequent calls are idempotent", async () => {
+    const [afterIndex, afterCreate, afterIdempotent] = await withSearch(
       Effect.gen(function* () {
         const store = yield* LocalStore;
         const derived = yield* DerivedSearch;
         yield* store.upsertSession(mappedSession([message(1, "alpha terminal") ]));
         yield* derived.indexSession("session-a");
-        const after = yield* derived.stats;
-        // createLexicalIndex should be idempotent when the index already exists.
+        // indexSession writes rows but does not optimize inline — text_idx is not present yet.
+        const afterIndex = yield* derived.stats;
+        // createLexicalIndex (called by the maintenance worker) folds rows into the FTS index.
         yield* derived.createLexicalIndex;
-        const afterExplicit = yield* derived.stats;
-        return [after, afterExplicit] as const;
+        const afterCreate = yield* derived.stats;
+        // Calling createLexicalIndex again is idempotent.
+        yield* derived.createLexicalIndex;
+        const afterIdempotent = yield* derived.stats;
+        return [afterIndex, afterCreate, afterIdempotent] as const;
       }),
     );
 
-    // After indexSession, text_idx is already present (optimize-on-ingest).
-    expect(after.indices.map((index) => index.name)).toContain("text_idx");
+    // After indexSession alone, text_idx is NOT present.
+    expect(afterIndex.indices.map((index) => index.name)).not.toContain("text_idx");
+    // After createLexicalIndex, text_idx is present.
+    expect(afterCreate.indices.map((index) => index.name)).toContain("text_idx");
     // Calling createLexicalIndex again is idempotent.
-    expect(afterExplicit.indices.map((index) => index.name)).toContain("text_idx");
+    expect(afterIdempotent.indices.map((index) => index.name)).toContain("text_idx");
   });
 
   test("provider column is derived from sessionId prefix and searchable via provider filter", async () => {

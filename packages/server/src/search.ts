@@ -138,25 +138,13 @@ export const DerivedSearchLive = Layer.effect(
             yield* search.upsertMessageRows({ rows: profileRows, tableName: profileTable, vectorDimension: profile.dimensions });
           }
 
-          // Optimize-on-ingest: fold newly-written rows into the FTS index so search
-          // sees them immediately. create-MISSING only (replace:false) to avoid the
-          // LanceDB commit-conflict we hit with replace:true on every write. optimize()
-          // is incremental (cost ~ new rows). Errors are tolerated — a missed optimize
-          // degrades freshness but never corrupts data; the readiness gate catches it.
-          yield* search.createMessageIndexes({ tableName: LEXICAL_TABLE, includeVector: false, replace: false }).pipe(
-            Effect.catchAll(() => Effect.void),
-          );
-          yield* search.optimizeTable({ tableName: LEXICAL_TABLE }).pipe(
-            Effect.catchAll(() => Effect.void),
-          );
-          if (profileTable !== LEXICAL_TABLE) {
-            yield* search.createMessageIndexes({ tableName: profileTable, includeVector: true, replace: false, vectorRowsFilter: VECTOR_READY_FILTER }).pipe(
-              Effect.catchAll(() => Effect.void),
-            );
-            yield* search.optimizeTable({ tableName: profileTable }).pipe(
-              Effect.catchAll(() => Effect.void),
-            );
-          }
+          // Index maintenance (create-missing + optimize) is NOT done per session:
+          // optimize() compacts the whole table, so doing it on every indexSession
+          // makes a bulk re-index O(sessions * table) — glacial. The coalesced
+          // maintenance worker (maintenance.ts maintain()) folds newly-written rows
+          // into the FTS/vector indexes once writers are idle, per table. Until then
+          // the readiness gate keeps /search fail-closed (503), so the rows are never
+          // served unindexed. indexSession is now a pure, fast write.
 
           // Watermark: record that this session's index is now current.
           yield* store.markSessionIndexed(sessionId, nowIso()).pipe(

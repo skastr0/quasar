@@ -494,11 +494,7 @@ const httpIdleTimeoutSeconds = (): number => {
 
 const maintenanceRun = Effect.gen(function* () {
   const maintenance = yield* SearchMaintenance;
-  const params = yield* query;
-  const report = yield* maintenance.maintain({
-    includeVector: booleanParam(params, "vector", true),
-    optimize: booleanParam(params, "optimize", true),
-  });
+  const report = yield* maintenance.maintain();
   return json(ok("maintenance/run", report));
 });
 
