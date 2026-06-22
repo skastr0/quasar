@@ -34,7 +34,7 @@ export const MESSAGE_SEARCH_COLUMNS = [
 ] as const;
 
 export type SearchVector = readonly number[];
-export type SearchRole = "user" | "assistant";
+export type SearchRole = "user" | "assistant" | "reasoning";
 
 export interface SearchRow {
   readonly key: string;

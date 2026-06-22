@@ -63,7 +63,7 @@ const keyFor = (message: Pick<MessageRow, "sessionId" | "seq" | "role">) =>
 const toSearchRows = (messages: readonly MessageRow[], vectorDimensions: number): MessageSearchRow[] =>
   messages.flatMap((message) => {
     const decision = decideSearchDocument(message);
-    if (!decision.lexical || (message.role !== "user" && message.role !== "assistant")) return [];
+    if (!decision.lexical) return [];
     return [
       {
         sessionId: message.sessionId,

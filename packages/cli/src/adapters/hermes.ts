@@ -362,6 +362,110 @@ const statusFromFinishReason = (finishReason: unknown) => {
 
 type DecodedReasoning = ReturnType<typeof projectedReasoningFields>;
 
+/**
+ * Peel the hermes `messages.content` TEXT column down to the leaf prose value.
+ *
+ * The column stores one of two shapes on disk:
+ *   - Plain prose ("hello!") — kept VERBATIM, never inspected further.
+ *   - A JSON blob (starts with '{' or '[') — the harness structural wrapper is
+ *     stripped; only the leaf message text is kept:
+ *       • object:  .content (string) | .parts[*].text joined by " "
+ *       • array:   every item's .text joined by " "
+ *
+ * When content is absent or yields nothing after peeling, fall back to the
+ * codex_message_items column (codex-bridged messages): join all
+ * items[*].content[*].text.
+ *
+ * EXTRACTION RULE: peel the known per-harness envelope → leaf value, VERBATIM.
+ * NEVER classify prose-vs-json. NEVER reformat or pretty-print content.
+ * Agent-generated JSON is legitimate content and kept as-is (it only gets
+ * peeled if the OUTER wrapper is the harness envelope, not because its value
+ * happens to look like JSON).
+ */
+const extractHermesContentText = (
+  rawContent: string | null | undefined,
+  codexMessageItems: DecodedReasoning["codexMessageItems"],
+): string | undefined => {
+  const raw = typeof rawContent === "string" && rawContent.length > 0 ? rawContent : undefined;
+
+  if (raw !== undefined && raw[0] !== "{" && raw[0] !== "[") {
+    // Plain prose — keep verbatim (no compaction; compactText runs downstream).
+    return raw;
+  }
+
+  // JSON-blob path: parse and peel the harness envelope.
+  if (raw !== undefined) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      // Not valid JSON despite starting with { or [. Treat as verbatim prose.
+      return raw;
+    }
+
+    const extractText = (value: unknown): string | undefined => {
+      if (typeof value === "string") return value.length > 0 ? value : undefined;
+      if (Array.isArray(value)) {
+        const parts = value.flatMap((item) => {
+          const t = extractText(item);
+          return t !== undefined ? [t] : [];
+        });
+        return parts.length > 0 ? parts.join(" ") : undefined;
+      }
+      if (value !== null && typeof value === "object") {
+        const record = value as Record<string, unknown>;
+        // .content (string) or .parts[*].text are the two hermes envelope shapes.
+        const fromContent = typeof record.content === "string" ? record.content : undefined;
+        if (fromContent !== undefined && fromContent.length > 0) return fromContent;
+        if (record.parts !== undefined) {
+          const parts = (Array.isArray(record.parts) ? record.parts : [record.parts]).flatMap(
+            (part) => {
+              if (part !== null && typeof part === "object") {
+                const t = (part as Record<string, unknown>).text;
+                return typeof t === "string" && t.length > 0 ? [t] : [];
+              }
+              return [];
+            },
+          );
+          if (parts.length > 0) return parts.join(" ");
+        }
+        // Array-of-objects shape: try .text on each element.
+        const fromText = typeof record.text === "string" ? record.text : undefined;
+        if (fromText !== undefined && fromText.length > 0) return fromText;
+      }
+      return undefined;
+    };
+
+    const extracted = extractText(parsed);
+    if (extracted !== undefined) return extracted;
+  }
+
+  // Codex-bridged fallback: join all items[*].content[*].text.
+  if (codexMessageItems !== undefined && Array.isArray(codexMessageItems)) {
+    const parts: string[] = [];
+    for (const item of codexMessageItems as Array<Record<string, unknown>>) {
+      const content = item.content;
+      if (!Array.isArray(content)) continue;
+      for (const block of content as Array<Record<string, unknown>>) {
+        const t = typeof block.text === "string" ? block.text : undefined;
+        if (t !== undefined && t.length > 0) parts.push(t);
+      }
+    }
+    if (parts.length > 0) return parts.join(" ");
+  }
+
+  return undefined;
+};
+
+/**
+ * Extract the reasoning prose from a message row. Reasoning is first-class and
+ * searchable — not restricted to contentBlocks. Priority: reasoning_content
+ * (the display-facing field Hermes populates for most providers), then
+ * reasoning (the raw scratchpad).
+ */
+const extractReasoningText = (message: HermesMessageRow): string | undefined =>
+  stringValue(message.reasoning_content) ?? stringValue(message.reasoning);
+
 const messageContent = (message: HermesMessageRow, reasoning: DecodedReasoning): NativeValue => {
   const reasoningDetails = projectSessionNativeValue(reasoning.reasoningDetails as NativeValue);
   const codexReasoningItems = projectSessionNativeValue(reasoning.codexReasoningItems as NativeValue);
@@ -588,23 +692,75 @@ const buildHermesSessionFromRows = (
     if (usage !== undefined) usageRecords.push(usage);
     const reasoning = projectedReasoningFields(message, diagnostics);
     const content = messageContent(message, reasoning);
-    return [
-      {
-        id: eventId,
-        nativeEventId,
-        sequence: index,
-        timestamp: isoFromEpoch(message.timestamp),
-        // Declarative role from the classifier — NOT the shared `roleFrom`
-        // heuristic (which mislabels `session_meta` as "unknown").
-        role: decision.value.role satisfies SessionRole,
-        kind: decision.kind,
-        contentText: compactText(content),
-        contentSource: content,
-        contentBlocks: messageBlocks(sessionId, eventId, message, reasoning),
-        ...(eventToolCallId !== undefined ? { toolCallId: eventToolCallId } : {}),
-        rawReference: { sourcePath: dbPath, table: "messages", rowId: nativeEventId, nativeType: "message" },
-      },
-    ];
+
+    // Extract the leaf prose from the content TEXT column. When the column
+    // stores a JSON blob (starts with '{' or '['), peel the harness envelope
+    // and surface only the inner text. Plain prose is kept VERBATIM.
+    const mainContentText = extractHermesContentText(
+      stringValue(message.content) ?? null,
+      reasoning.codexMessageItems,
+    );
+
+    // Reasoning is first-class and searchable. Extract the prose now so it can
+    // surface as a separate reasoning event (kind="reasoning", role="thinking")
+    // in addition to the contentBlocks it already occupies. This ensures
+    // reasoning text is findable via contentText search.
+    const reasoningProse = extractReasoningText(message);
+
+    const mainEvent = {
+      id: eventId,
+      nativeEventId,
+      sequence: index,
+      timestamp: isoFromEpoch(message.timestamp),
+      // Declarative role from the classifier — NOT the shared `roleFrom`
+      // heuristic (which mislabels `session_meta` as "unknown").
+      role: decision.value.role satisfies SessionRole,
+      kind: decision.kind,
+      // For reasoning-only events (kind="reasoning"), surfacing the reasoning
+      // prose as contentText makes it searchable. For regular messages,
+      // contentText is the extracted prose from the content column.
+      contentText: decision.kind === "reasoning" && mainContentText === undefined
+        ? (reasoningProse !== undefined ? compactText(reasoningProse) : compactText(content))
+        : (mainContentText !== undefined ? compactText(mainContentText) : compactText(content)),
+      contentSource: content,
+      contentBlocks: messageBlocks(sessionId, eventId, message, reasoning),
+      ...(eventToolCallId !== undefined ? { toolCallId: eventToolCallId } : {}),
+      rawReference: { sourcePath: dbPath, table: "messages", rowId: nativeEventId, nativeType: "message" },
+    };
+
+    // When reasoning co-occurs with conversational content (the assistant row
+    // carries BOTH content and reasoning_content/reasoning), emit a dedicated
+    // reasoning event so the reasoning prose becomes independently searchable.
+    // This does NOT apply to reasoning-only rows (already classified as
+    // kind="reasoning") or tool_call / tool_result rows.
+    const shouldEmitReasoningEvent =
+      reasoningProse !== undefined &&
+      decision.kind === "message" &&
+      mainContentText !== undefined;
+
+    if (!shouldEmitReasoningEvent) {
+      return [mainEvent];
+    }
+
+    // Reasoning event: kind="reasoning", role="thinking" (the valid SessionRole
+    // closest to "reasoning"). Sequence advances once more so IDs are dense.
+    const reasoningIndex = sequence;
+    sequence += 1;
+    const reasoningEventId = eventIdFor(sessionId, reasoningIndex, `${nativeEventId}:reasoning`);
+    const reasoningEvent = {
+      id: reasoningEventId,
+      nativeEventId: `${nativeEventId}:reasoning`,
+      sequence: reasoningIndex,
+      timestamp: isoFromEpoch(message.timestamp),
+      role: "thinking" as SessionRole,
+      kind: "reasoning" as const,
+      contentText: compactText(reasoningProse),
+      contentSource: { reasoning_content: stringValue(message.reasoning_content), reasoning: stringValue(message.reasoning) } as NativeValue,
+      contentBlocks: contentBlocksFromNative(sessionId, reasoningEventId, [{ type: "thinking", thinking: reasoningProse }]),
+      rawReference: { sourcePath: dbPath, table: "messages", rowId: nativeEventId, nativeType: "message_reasoning" },
+    };
+
+    return [mainEvent, reasoningEvent];
   });
 
   return buildSession({

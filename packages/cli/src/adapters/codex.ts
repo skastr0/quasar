@@ -149,6 +149,99 @@ const isInjectedWrapperMessage = (payload: CodexRecord): boolean => {
 };
 
 /**
+ * Extract the leaf message text from a codex payload by its `type` discriminant,
+ * peeling the harness envelope and returning the verbatim content only.
+ *
+ * Per-shape rules (grounded against the measured on-disk corpus 2026-06-22):
+ *
+ *  event_msg.user_message  → payload.message   (the raw user text)
+ *  event_msg.agent_message → payload.message   (the agent prose)
+ *  response_item.message   → payload.content when it is a string; otherwise
+ *                             join the `text` fields of typed content blocks
+ *                             (input_text / output_text / …) with "\n\n"
+ *  response_item.reasoning → join content[*].text for text blocks; fall back
+ *                             to summary text; NEVER read encrypted_content
+ *
+ * Returns undefined when no leaf text can be found (empty stub, image-only
+ * payload, etc.). The caller falls back to the generic `compactText(content)`
+ * path for all other payload types (tool calls, usage, lifecycle, …).
+ *
+ * NON-NEGOTIABLE: the returned value is the verbatim leaf — no reformatting,
+ * no JSON re-encoding, no isMostlyProse gate. Agent-generated JSON that the
+ * user/agent actually wrote is legitimate searchable content and is kept as-is.
+ */
+export const codexMessageText = (
+  payloadType: string | undefined,
+  payload: CodexRecord,
+): string | undefined => {
+  // event_msg.user_message / event_msg.agent_message: leaf lives in `message`.
+  if (payloadType === "user_message" || payloadType === "agent_message") {
+    const msg = payload.message;
+    if (typeof msg === "string" && msg.length > 0) return msg;
+    return undefined;
+  }
+
+  // response_item.message: leaf is content (string) or joined block texts.
+  if (payloadType === "message") {
+    const content = payload.content;
+    if (typeof content === "string") return content.length > 0 ? content : undefined;
+    if (Array.isArray(content)) {
+      const parts: string[] = [];
+      for (const item of content) {
+        if (typeof item === "string") {
+          if (item.length > 0) parts.push(item);
+        } else if (item !== null && typeof item === "object") {
+          const text = (item as CodexRecord).text;
+          if (typeof text === "string" && text.length > 0) parts.push(text);
+        }
+      }
+      return parts.length > 0 ? parts.join("\n\n") : undefined;
+    }
+    return undefined;
+  }
+
+  // response_item.reasoning: join content block texts; fall back to summary.
+  // NEVER touch encrypted_content.
+  if (payloadType === "reasoning") {
+    const content = payload.content;
+    if (Array.isArray(content)) {
+      const parts: string[] = [];
+      for (const item of content) {
+        if (typeof item === "string") {
+          if (item.length > 0) parts.push(item);
+        } else if (item !== null && typeof item === "object") {
+          const text = (item as CodexRecord).text;
+          if (typeof text === "string" && text.length > 0) parts.push(text);
+        }
+      }
+      if (parts.length > 0) return parts.join("\n\n");
+    } else if (typeof content === "string" && content.length > 0) {
+      return content;
+    }
+    // summary fallback: may be a string or an array of summary blocks.
+    const summary = payload.summary;
+    if (typeof summary === "string" && summary.length > 0) return summary;
+    if (Array.isArray(summary)) {
+      const parts: string[] = [];
+      for (const item of summary) {
+        if (typeof item === "string") {
+          if (item.length > 0) parts.push(item);
+        } else if (item !== null && typeof item === "object") {
+          const text = (item as CodexRecord).text;
+          if (typeof text === "string" && text.length > 0) parts.push(text);
+        }
+      }
+      if (parts.length > 0) return parts.join("\n\n");
+    }
+    return undefined;
+  }
+
+  // All other payload types: no envelope peeling needed here — the caller uses
+  // the generic compactText(content) path which is correct for them.
+  return undefined;
+};
+
+/**
  * Map a raw codex role string to the canonical `SessionRole`. Local to this
  * adapter (QSR-220): the codex adapter owns its own role parsing rather than
  * importing a shared heuristic, so the role mapping is declarative here.
@@ -742,6 +835,12 @@ async function* streamCodexSessionFromFile(
     // surface as bare events: no contentText/contentSource means no blocks and
     // no fallback JSON dump on the search surface.
     const hasTurnContent = kind !== "message" || codexMessageHasTurnContent(payloadRecord);
+    // Peel the harness envelope to the verbatim leaf text for message/reasoning
+    // records. codexMessageText returns undefined for all other payload types so
+    // those fall through to the generic compactText(content) path unchanged.
+    // NON-NEGOTIABLE: no prose-vs-json gate, no reformatting — leaf is kept verbatim.
+    const leafText = codexMessageText(payloadType, payloadRecord);
+    const resolvedContentText = leafText !== undefined ? leafText : compactText(content);
     slice.events.push({
       id: eventId,
       nativeEventId,
@@ -750,7 +849,7 @@ async function* streamCodexSessionFromFile(
       role,
       kind,
       ...(hasTurnContent
-        ? { contentText: compactText(content), contentSource: content }
+        ? { contentText: resolvedContentText, contentSource: content }
         : {}),
       ...(toolCallId !== undefined ? { toolCallId } : {}),
       rawReference: {

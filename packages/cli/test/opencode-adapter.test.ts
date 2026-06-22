@@ -247,7 +247,7 @@ describe("opencode adapter", () => {
 
       expect(result.sessions).toHaveLength(1);
       const session = result.sessions[0]!;
-      expect(session.events).toHaveLength(5);
+      expect(session.events).toHaveLength(6);
 
       // User text part becomes a text block.
       const userEvent = session.events[0]!;
@@ -282,14 +282,21 @@ describe("opencode adapter", () => {
         output: "file.txt",
       });
 
+      // QSR-224: the assistant's reasoning part surfaces as a SEPARATE
+      // kind="reasoning"/role="thinking" event so reasoning is role-filterable in search.
+      const reasoningEvent = session.events[2]!;
+      expect(reasoningEvent.role).toBe("thinking");
+      expect(reasoningEvent.kind).toBe("reasoning");
+      expect(reasoningEvent.contentText).toBe("I should measure first");
+
       // Machinery-only turn carries no content at all.
-      const machineryEvent = session.events[2]!;
+      const machineryEvent = session.events[3]!;
       expect(machineryEvent.contentText).toBeUndefined();
       expect(machineryEvent.contentBlocks).toHaveLength(0);
 
       // The garbage row: SQL pruning removed summary.diffs from the projected
       // content, and rawBytes reports the pre-prune size for the ingest line.
-      const garbageEvent = session.events[3]!;
+      const garbageEvent = session.events[4]!;
       expect(garbageEvent.rawReference.rawBytes).toBeGreaterThanOrEqual(1_048_576);
       expect(JSON.stringify(garbageEvent.contentBlocks).length).toBeLessThan(10_000);
       // Sound rows still report small raw byte counts.
@@ -298,7 +305,7 @@ describe("opencode adapter", () => {
       // Empty stubs (blank reasoning plaintext, blank text) are machinery: the
       // event carries no turn content, so no {"type":"reasoning"} envelope dump
       // can reach the search surface.
-      const emptyEvent = session.events[4]!;
+      const emptyEvent = session.events[5]!;
       expect(emptyEvent.role).toBe("assistant");
       expect(emptyEvent.contentText).toBeUndefined();
       expect(emptyEvent.contentBlocks).toHaveLength(0);
