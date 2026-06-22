@@ -5,6 +5,7 @@ import { LocalServerConfigLive } from "./config";
 import { makeEmbeddingsLayer } from "./embeddings";
 import { SearchMaintenanceLive } from "./maintenance";
 import { DerivedSearchLive } from "./search";
+import { SearchReadinessLive } from "./searchReadiness";
 import { DurableQueueLive, IngestCoordinatorLive } from "./services";
 import { makeLocalStoreLayer } from "./store";
 import { WorkerSupervisorLive } from "./workers";
@@ -20,8 +21,9 @@ const DataQueueLayer = Layer.mergeAll(
 const DataSearchLayer = DerivedSearchLive.pipe(Layer.provideMerge(DataQueueLayer));
 const WithEmbeddingsLayer = makeEmbeddingsLayer().pipe(Layer.provideMerge(DataSearchLayer));
 const WithMaintenanceLayer = SearchMaintenanceLive.pipe(Layer.provideMerge(WithEmbeddingsLayer));
+const WithReadinessLayer = SearchReadinessLive.pipe(Layer.provideMerge(WithMaintenanceLayer));
 
-export const AppLayer = WorkerSupervisorLive.pipe(Layer.provideMerge(WithMaintenanceLayer));
+export const AppLayer = WorkerSupervisorLive.pipe(Layer.provideMerge(WithReadinessLayer));
 
 export const AppRuntime = ManagedRuntime.make(AppLayer);
 

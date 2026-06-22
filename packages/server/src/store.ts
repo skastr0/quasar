@@ -58,6 +58,16 @@ export interface LocalStoreService {
     readonly offset?: number;
   }) => Effect.Effect<readonly IngestRunRow[], SqliteStoreError>;
   readonly stats: Effect.Effect<StoreStats, SqliteStoreError>;
+  /** Mark a session as having a stale search index. Called in the same transaction as upsertSession. */
+  readonly markSessionIndexStale: (sessionId: string) => Effect.Effect<void, SqliteStoreError>;
+  /** Mark a session as having a fresh search index, recording the indexedAt timestamp. */
+  readonly markSessionIndexed: (sessionId: string, indexedAt: string) => Effect.Effect<void, SqliteStoreError>;
+  /** Count sessions whose indexed_at is NULL or predates their updated_at (stale index). */
+  readonly countStaleIndexSessions: () => Effect.Effect<number, SqliteStoreError>;
+  /** Count searchable messages that lack a real vector (contentHash LIKE 'unembedded:%'). */
+  readonly countUnembeddedMessages: () => Effect.Effect<number, SqliteStoreError>;
+  /** Count searchable messages total. */
+  readonly countSearchableMessages: () => Effect.Effect<number, SqliteStoreError>;
   readonly close: Effect.Effect<void>;
 }
 
@@ -172,6 +182,13 @@ const migrate = (db: Database): void => {
   if (!sessionColumns.has("parent_session_id")) {
     db.exec("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT");
   }
+  // Idempotent column add for search index watermark (QSR-223). NULL means
+  // not-yet-indexed. Set to the ISO timestamp when indexSession last completed.
+  // Set to NULL in the same transaction as upsertSession to mark stale immediately.
+  if (!sessionColumns.has("indexed_at")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN indexed_at TEXT");
+    db.exec("CREATE INDEX IF NOT EXISTS sessions_stale_index ON sessions(indexed_at, updated_at)");
+  }
 };
 
 const count = (db: Database, table: string): number =>
@@ -242,6 +259,8 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
             $messageCount: mapped.session.messageCount,
             $toolCallCount: mapped.session.toolCallCount,
           });
+          // Mark search index stale in the same transaction so search sees stale immediately.
+          db.prepare("UPDATE sessions SET indexed_at = NULL WHERE session_id = ?").run(mapped.session.sessionId);
           for (const message of mapped.messages) {
             insertMessage.run({
               $sessionId: message.sessionId,
@@ -390,6 +409,40 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
             toolCalls: count(db, "tool_calls"),
             ingestRuns: count(db, "ingest_runs"),
           })),
+          markSessionIndexStale: (sessionId) =>
+            trySqlite("markSessionIndexStale", () => {
+              db.prepare("UPDATE sessions SET indexed_at = NULL WHERE session_id = ?").run(sessionId);
+            }),
+          markSessionIndexed: (sessionId, indexedAt) =>
+            trySqlite("markSessionIndexed", () => {
+              db.prepare("UPDATE sessions SET indexed_at = ? WHERE session_id = ?").run(indexedAt, sessionId);
+            }),
+          countStaleIndexSessions: () =>
+            trySqlite("countStaleIndexSessions", () => {
+              // A session is stale if indexed_at is NULL or indexed_at < updated_at (ignoring sessions with no updated_at).
+              const row = db.query(
+                "SELECT COUNT(*) AS count FROM sessions WHERE indexed_at IS NULL OR (updated_at IS NOT NULL AND indexed_at < updated_at)",
+              ).get() as { count: number };
+              return row.count;
+            }),
+          countUnembeddedMessages: () =>
+            trySqlite("countUnembeddedMessages", () => {
+              // Messages that need embedding have roles in the searchable set; count approximated
+              // via SQLite: role IN ('user','assistant','reasoning') so we count only indexable messages
+              // with placeholder contentHash values (the full unembedded check happens in LanceDB).
+              // We count ALL messages here since the contentHash prefix is set for searchable-role messages.
+              const row = db.query(
+                "SELECT COUNT(*) AS count FROM messages WHERE role IN ('user', 'assistant', 'reasoning') AND content_hash LIKE 'unembedded:%'",
+              ).get() as { count: number };
+              return row.count;
+            }),
+          countSearchableMessages: () =>
+            trySqlite("countSearchableMessages", () => {
+              const row = db.query(
+                "SELECT COUNT(*) AS count FROM messages WHERE role IN ('user', 'assistant', 'reasoning')",
+              ).get() as { count: number };
+              return row.count;
+            }),
           close: Effect.sync(() => db.close()),
         } satisfies LocalStoreService;
       }),

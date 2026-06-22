@@ -12,6 +12,7 @@ import type { MappedSession } from "./model";
 import { Provider } from "./provider";
 import { AppLayer } from "./runtime";
 import { DerivedSearch, messageSearchFilter } from "./search";
+import { SearchReadiness, type SearchMode } from "./searchReadiness";
 import { VECTOR_READY_FILTER } from "./searchPolicy";
 import { DurableQueue, Embeddings, IngestCoordinator, WorkerSupervisor } from "./services";
 import { LocalStore } from "./store";
@@ -27,6 +28,29 @@ const unauthorized = (route: string, message: string) =>
 
 const serviceUnavailable = (route: string, message: string) =>
   json({ ok: false, route, error: { type: "ServiceUnavailable", message } }, { status: 503 });
+
+const searchIndexNotReady = (
+  route: string,
+  message: string,
+  staleCount: number,
+  missingVectorCount: number,
+  indexStats: unknown,
+) =>
+  json(
+    {
+      ok: false,
+      route,
+      error: {
+        type: "ServiceUnavailable",
+        code: "SearchIndexNotReady",
+        message,
+        staleCount,
+        missingVectorCount,
+        indexStats,
+      },
+    },
+    { status: 503 },
+  );
 
 const notFound = (route: string, message: string) =>
   json({ ok: false, route, error: { type: "NotFound", message } }, { status: 404 });
@@ -151,6 +175,33 @@ const health = Effect.gen(function* () {
   const store = yield* LocalStore;
   const stats = yield* store.stats.pipe(Effect.either);
   return json(ok("health", { status: "ok", home: config.home, sqlite: store.dbPath, stats }));
+});
+
+// /ready: 200 only when ALL search modes pass assertSearchReady.
+// /health: always 200 if the process is up (never blocks on index state).
+const ready = Effect.gen(function* () {
+  const readiness = yield* SearchReadiness;
+  const [lexical, semantic, fusion] = yield* Effect.all([
+    readiness.assertSearchReady("lexical"),
+    readiness.assertSearchReady("semantic"),
+    readiness.assertSearchReady("fusion"),
+  ]);
+  const allReady = lexical.ok && semantic.ok && fusion.ok;
+  if (!allReady) {
+    return json(
+      {
+        ok: false,
+        error: {
+          type: "ServiceUnavailable",
+          code: "SearchIndexNotReady",
+          message: "Search index is not ready",
+          modes: { lexical, semantic, fusion },
+        },
+      },
+      { status: 503 },
+    );
+  }
+  return json(ok("ready", { status: "ready", modes: { lexical, semantic, fusion } }));
 });
 
 const status = Effect.gen(function* () {
@@ -325,7 +376,27 @@ const ingestSession = Effect.gen(function* () {
   return json(ok("ingest/session", { outcome }), { status });
 });
 
+const requireSearchReady = (route: string, mode: SearchMode) =>
+  Effect.gen(function* () {
+    const readiness = yield* SearchReadiness;
+    const result = yield* readiness.assertSearchReady(mode);
+    if (!result.ok) {
+      return searchIndexNotReady(
+        route,
+        result.reason ?? "search index not ready",
+        result.staleCount,
+        result.missingVectorCount,
+        result.indexStats,
+      );
+    }
+    // Empty corpus (rowCount === 0, sqliteSearchableCount === 0) is legitimate — return null
+    // to signal "proceed with the search" to callers.
+    return null;
+  });
+
 const lexicalSearch = Effect.gen(function* () {
+  const notReadyResponse = yield* requireSearchReady("search/lexical", "lexical");
+  if (notReadyResponse !== null) return notReadyResponse;
   const search = yield* DerivedSearch;
   const params = yield* query;
   const text = params.get("q") ?? params.get("query");
@@ -354,6 +425,8 @@ const vectorReadyFilter = (params: URLSearchParams): string | undefined => {
 };
 
 const semanticSearch = Effect.gen(function* () {
+  const notReadyResponse = yield* requireSearchReady("search/semantic", "semantic");
+  if (notReadyResponse !== null) return notReadyResponse;
   const search = yield* LanceDb;
   const embeddings = yield* Embeddings;
   const params = yield* query;
@@ -375,6 +448,8 @@ const semanticSearch = Effect.gen(function* () {
 });
 
 const fusionSearch = Effect.gen(function* () {
+  const notReadyResponse = yield* requireSearchReady("search/fusion", "fusion");
+  if (notReadyResponse !== null) return notReadyResponse;
   const search = yield* LanceDb;
   const embeddings = yield* Embeddings;
   const params = yield* query;
@@ -440,7 +515,7 @@ const maintenanceRepair = Effect.gen(function* () {
 
 const routes = HttpRouter.empty.pipe(
   HttpRouter.get("/health", health),
-  HttpRouter.get("/ready", health),
+  HttpRouter.get("/ready", ready),
   HttpRouter.get("/status", status),
   HttpRouter.get("/projects", projects),
   HttpRouter.get("/sessions", sessions),
