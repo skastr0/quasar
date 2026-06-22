@@ -56,7 +56,7 @@ export const enqueueDownstreamJobs = (queue: DurableQueueService, session: Mappe
             contentHash: message.contentHash,
             embeddingProfile: embeddingJobNamespace,
           },
-          idempotencyKey: `embed-message:${embeddingJobNamespace}:${message.contentHash}`,
+          idempotencyKey: `embed-message:${embeddingJobNamespace}:${message.sessionId}:${message.seq}:${message.contentHash}`,
           maxAttempts: embeddingMaxAttempts,
         }),
       { concurrency: 16 },
