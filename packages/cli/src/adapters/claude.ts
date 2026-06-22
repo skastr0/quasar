@@ -570,6 +570,11 @@ async function* streamClaude(options: AdapterOptions) {
     // sessions — they are excluded from ingest entirely.
     if (isClaudeJournalFile(path)) continue;
     const sourcePath = logicalPathFor(path, projectsRoot, logicalProjectsRoot);
+    // Stat-level gate: skip unchanged files BEFORE opening them for content read.
+    if (options.shouldReadFile !== undefined) {
+      const stat = statSync(path);
+      if (!options.shouldReadFile(path, stat)) continue;
+    }
     const { session, diagnostics } = buildClaudeSessionFromFile(
       path,
       sourcePath,

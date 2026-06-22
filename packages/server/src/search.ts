@@ -33,6 +33,8 @@ export interface DerivedSearchService {
     readonly query: string;
     readonly projectKey?: string;
     readonly role?: string;
+    /** Optional allow-list of provider names (e.g. ["codex", "opencode"]). Empty or omitted = all providers. */
+    readonly providers?: readonly string[];
     readonly limit?: number;
   }) => Effect.Effect<readonly SearchHit[], unknown>;
 }
@@ -42,8 +44,14 @@ export class DerivedSearch extends Context.Tag("@quasar/DerivedSearch")<
   DerivedSearchService
 >() {}
 
+/** Derive provider from a sessionId of the form `<provider>:<rest>`. */
+export const providerFromSessionId = (sessionId: string): string => {
+  const colon = sessionId.indexOf(":");
+  return colon === -1 ? sessionId : sessionId.slice(0, colon);
+};
+
 export const messageSearchFilter = (
-  options: { readonly projectKey?: string; readonly role?: string },
+  options: { readonly projectKey?: string; readonly role?: string; readonly providers?: readonly string[] },
   base?: string,
 ): string | undefined => {
   const filters: string[] = [];
@@ -55,6 +63,14 @@ export const messageSearchFilter = (
   }
   if (options.role !== undefined) {
     filters.push(`role = '${options.role.replaceAll("'", "''")}'`);
+  }
+  if (options.providers !== undefined && options.providers.length > 0) {
+    if (options.providers.length === 1) {
+      filters.push(`provider = '${options.providers[0]!.replaceAll("'", "''")}'`);
+    } else {
+      const list = options.providers.map((p) => `'${p.replaceAll("'", "''")}'`).join(", ");
+      filters.push(`provider IN (${list})`);
+    }
   }
   return filters.length === 0 ? undefined : filters.join(" AND ");
 };
@@ -72,6 +88,7 @@ const toSearchRows = (messages: readonly MessageRow[], vectorDimensions: number)
         seq: message.seq,
         role: message.role,
         projectKey: message.projectKey,
+        provider: providerFromSessionId(message.sessionId),
         text: message.text,
         contentHash: indexedContentHash(message),
         vector: Array.from({ length: vectorDimensions }, () => 0),
@@ -161,12 +178,12 @@ export const DerivedSearchLive = Layer.effect(
         vectorRowsFilter: VECTOR_READY_FILTER,
       }),
       stats: search.tableStats({ tableName: profileTable }),
-      lexicalSearch: ({ query, projectKey, role, limit }) =>
+      lexicalSearch: ({ query, projectKey, role, providers, limit }) =>
         search.ftsSearch({
           tableName: LEXICAL_TABLE,
           query,
           limit,
-          filter: messageSearchFilter({ projectKey, role }),
+          filter: messageSearchFilter({ projectKey, role, providers }),
           select: MESSAGE_SEARCH_COLUMNS,
         }),
     });

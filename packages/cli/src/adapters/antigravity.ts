@@ -574,6 +574,13 @@ async function* streamAntigravity(options: AdapterOptions): AsyncGenerator<Adapt
     if (skipped < (options.skip ?? 0)) { skipped++; continue; }
     if (sessionCount >= (options.limit ?? Number.POSITIVE_INFINITY)) break;
 
+    // Stat-level gate: skip the transcript BEFORE opening it when the file
+    // has not changed since the last ingest.
+    if (options.shouldReadFile !== undefined) {
+      const stat = statSync(transcriptPath);
+      if (!options.shouldReadFile(transcriptPath, stat)) continue;
+    }
+
     // Pre-parse gate: stat the transcript file as the per-session change signal.
     if (options.shouldParseSession !== undefined) {
       const stat = statSync(transcriptPath);

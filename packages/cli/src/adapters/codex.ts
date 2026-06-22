@@ -917,6 +917,12 @@ async function* streamCodex(options: AdapterOptions) {
   let rejectedCount = 0;
   for (const { path, scan } of files) {
     const sourcePath = logicalPathFor(path, scan.physicalRoot, scan.logicalScanRoot);
+    // Stat-level gate: skip files whose mtime+size match the last ingest record
+    // BEFORE the expensive first-record read (readCodexNativeId opens the file).
+    if (options.shouldReadFile !== undefined) {
+      const stat = statSync(path);
+      if (!options.shouldReadFile(path, stat)) continue;
+    }
     // The codex native id is the content-sourced session_meta.payload.id, so the
     // pre-parse probe must read it from the first JSON record to derive the same canonical
     // sessionId the full parse would; a file missing it is boundary-rejected.

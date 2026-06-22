@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -745,6 +745,53 @@ describe("QSR-220 lineage: parent points at a DROPPED record -> nearest kept anc
 // the child's `agentId`), also recoverable from the `{parentUuid}/subagents/…`
 // path. mapSession projects `subagent_of` onto SessionRow.parentSessionId.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// shouldReadFile stat-gate: an unchanged file is skipped before content read.
+// ---------------------------------------------------------------------------
+describe("shouldReadFile stat-gate: unchanged file skipped without content read", () => {
+  const root = mkdtempSync(join(tmpdir(), "quasar-claude-statgate-"));
+  afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+  const SID = "deadbeef-0000-4000-8000-0000000000f0";
+  const projectDir = join(root, "projects", "-Users-fixtureuser-statgateapp");
+  mkdirSync(projectDir, { recursive: true });
+  const filePath = join(projectDir, `${SID}.jsonl`);
+  writeFileSync(filePath, mainSessionRecords(SID));
+
+  test("shouldReadFile returning false skips the file entirely — no session emitted", async () => {
+    const checkedPaths: string[] = [];
+    const result = await claudeAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { claude: root },
+      shouldReadFile: (path, stat) => {
+        checkedPaths.push(path);
+        // Simulate "file not changed" for our target file.
+        void stat;
+        return false;
+      },
+    });
+    // Gate was consulted for the file.
+    expect(checkedPaths.some((p) => p === filePath)).toBe(true);
+    // No content was read — no session emitted.
+    expect(result.sessions).toHaveLength(0);
+  });
+
+  test("shouldReadFile returning true lets the file through — session emitted", async () => {
+    const fileStat = statSync(filePath);
+    const result = await claudeAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { claude: root },
+      shouldReadFile: (_path, stat) => {
+        // Accept any file whose size matches (always true for our fixture).
+        return stat.size === fileStat.size;
+      },
+    });
+    expect(result.sessions).toHaveLength(1);
+  });
+});
+
 describe("QSR-220 subagent_of session lineage", () => {
   const root = mkdtempSync(join(tmpdir(), "quasar-claude-subof-"));
   afterAll(() => rmSync(root, { recursive: true, force: true }));

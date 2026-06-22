@@ -31,6 +31,13 @@ export interface AdapterDiscoverOptions {
    * behavior: every discovered session is parsed and yielded.
    */
   readonly shouldParseSession?: (probe: SessionParseProbe) => boolean | Promise<boolean>;
+  /**
+   * Stat-level gate. Called by adapters BEFORE opening a session file. Return
+   * false to skip the file entirely — no content read, no fingerprint probe.
+   * Used by the ingest manifest to suppress reads for files whose mtime+size
+   * match the last successful ingest record.
+   */
+  readonly shouldReadFile?: (path: string, stat: import("node:fs").Stats) => boolean;
 }
 
 export interface AdapterReadResult {

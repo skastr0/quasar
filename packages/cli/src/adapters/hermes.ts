@@ -879,6 +879,13 @@ async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStr
       logicalRoot !== undefined
         ? dbPath.replace(root, logicalRoot)
         : dbPath;
+    // Stat-level gate: skip unchanged DB files BEFORE copying and opening them.
+    // An unchanged state.db means no session in this profile has changed;
+    // skip the entire profile without opening the file.
+    if (options.shouldReadFile !== undefined) {
+      const stat = statSync(dbPath);
+      if (!options.shouldReadFile(dbPath, stat)) continue;
+    }
     const tempDb = copyDatabaseForRead(dbPath);
     const db = await maybeDatabase(tempDb.path);
     let profileSessionCount = 0;

@@ -8,7 +8,7 @@ import { Effect, Layer } from "effect";
 
 import type { MappedSession } from "../src/model";
 import { embeddingProfileFromEnv, embeddingProfileSearchTable } from "../src/embeddingProfiles";
-import { DerivedSearch, DerivedSearchLive, messageSearchFilter } from "../src/search";
+import { DerivedSearch, DerivedSearchLive, messageSearchFilter, providerFromSessionId } from "../src/search";
 import { LocalStore, makeLocalStoreLayer } from "../src/store";
 import { VECTOR_READY_FILTER } from "../src/searchPolicy";
 
@@ -99,7 +99,65 @@ const withSearch = <A>(
   });
 };
 
+const mappedSessionFor = (
+  sessionId: string,
+  provider: string,
+  messages: MappedSession["messages"],
+): MappedSession => ({
+  project: { projectKey: "project-a", displayName: "Project A", rawPath: "/tmp/project-a" },
+  session: {
+    sessionId,
+    projectKey: "project-a",
+    provider,
+    agentName: provider,
+    title: `Search fixture (${provider})`,
+    startedAt: "2026-06-18T10:00:00.000Z",
+    updatedAt: "2026-06-18T10:01:00.000Z",
+    sourcePath: `/history/${sessionId}.jsonl`,
+    sourceFingerprint: `fingerprint-${messages.length}-${provider}`,
+    host: "host-a",
+    identitySchemeVersion: 1,
+    messageCount: messages.length,
+    toolCallCount: 0,
+  },
+  messages,
+  toolCalls: [],
+});
+
+const messageFor = (sessionId: string, seq: number, text: string): MappedSession["messages"][number] => ({
+  sessionId,
+  seq,
+  role: seq === 1 ? "user" : "assistant",
+  text,
+  ts: `2026-06-18T10:0${seq}:00.000Z`,
+  projectKey: "project-a",
+  contentHash: `hash-${sessionId}-${seq}-${text.replaceAll(" ", "-")}`,
+});
+
 describe("DerivedSearch", () => {
+  test("providerFromSessionId extracts prefix before first colon", () => {
+    expect(providerFromSessionId("codex:abc123")).toBe("codex");
+    expect(providerFromSessionId("opencode:some:nested:id")).toBe("opencode");
+    expect(providerFromSessionId("session-a")).toBe("session-a");
+    expect(providerFromSessionId("")).toBe("");
+  });
+
+  test("messageSearchFilter with single provider emits equality predicate", () => {
+    expect(messageSearchFilter({ providers: ["codex"] })).toBe("provider = 'codex'");
+  });
+
+  test("messageSearchFilter with multiple providers emits IN predicate", () => {
+    expect(messageSearchFilter({ providers: ["codex", "opencode"] })).toBe(
+      "provider IN ('codex', 'opencode')",
+    );
+  });
+
+  test("messageSearchFilter with providers + role + base combines all clauses", () => {
+    expect(
+      messageSearchFilter({ role: "user", providers: ["codex"] }, VECTOR_READY_FILTER),
+    ).toBe("contentHash NOT LIKE 'unembedded:%' AND role = 'user' AND provider = 'codex'");
+  });
+
   test("message search filters combine vector readiness with project and role filters", () => {
     expect(messageSearchFilter({ projectKey: "project-a", role: "assistant" }, VECTOR_READY_FILTER)).toBe(
       "contentHash NOT LIKE 'unembedded:%' AND projectKey = 'project-a' AND role = 'assistant'",
@@ -299,5 +357,61 @@ describe("DerivedSearch", () => {
     expect(after.indices.map((index) => index.name)).toContain("text_idx");
     // Calling createLexicalIndex again is idempotent.
     expect(afterExplicit.indices.map((index) => index.name)).toContain("text_idx");
+  });
+
+  test("provider column is derived from sessionId prefix and searchable via provider filter", async () => {
+    const codexSessionId = "codex:session-001";
+    const opencodeSessionId = "opencode:session-001";
+
+    const [codexHits, opencodeHits, allHits, codexRows] = await withSearch(
+      Effect.gen(function* () {
+        const store = yield* LocalStore;
+        const derived = yield* DerivedSearch;
+        const search = yield* LanceDb;
+
+        // Ingest one codex session and one opencode session, both with "memory" in text.
+        yield* store.upsertSession(
+          mappedSessionFor(codexSessionId, "codex", [
+            messageFor(codexSessionId, 1, "codex memory fragment"),
+          ]),
+        );
+        yield* store.upsertSession(
+          mappedSessionFor(opencodeSessionId, "opencode", [
+            messageFor(opencodeSessionId, 1, "opencode memory fragment"),
+          ]),
+        );
+        yield* derived.indexSession(codexSessionId);
+        yield* derived.indexSession(opencodeSessionId);
+        yield* derived.createLexicalIndex;
+
+        const codexHits = yield* derived.lexicalSearch({
+          query: "memory",
+          providers: ["codex"],
+          limit: 10,
+        });
+        const opencodeHits = yield* derived.lexicalSearch({
+          query: "memory",
+          providers: ["opencode"],
+          limit: 10,
+        });
+        const allHits = yield* derived.lexicalSearch({ query: "memory", limit: 10 });
+
+        // Read raw rows to verify the provider column is populated correctly.
+        const codexRows = yield* search.readMessageRowsBySession({
+          sessionId: codexSessionId,
+          select: ["provider"],
+        });
+
+        return [codexHits, opencodeHits, allHits, codexRows] as const;
+      }),
+    );
+
+    // Provider filter restricts results to the matching harness.
+    expect(codexHits.map((h) => h.row.sessionId)).toEqual([codexSessionId]);
+    expect(opencodeHits.map((h) => h.row.sessionId)).toEqual([opencodeSessionId]);
+    // Without a provider filter both sessions are returned.
+    expect(allHits).toHaveLength(2);
+    // The raw LanceDB row carries the correct provider value.
+    expect(codexRows.map((r) => r.provider)).toEqual(["codex"]);
   });
 });

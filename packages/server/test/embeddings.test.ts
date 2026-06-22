@@ -702,6 +702,7 @@ describe("Embeddings", () => {
             seq: 1,
             role: "user",
             projectKey: "project-a",
+            provider: "codex",
             text: "alpha terminal",
             contentHash: "unembedded:hash-a",
             vector: vector(0),

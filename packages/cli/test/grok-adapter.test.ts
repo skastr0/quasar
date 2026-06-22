@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -617,6 +617,72 @@ describe("QSR-220 grok adapter end-to-end: signal kept, telemetry dropped, garba
       // ingest still produced the session (available diagnostic present too).
       expect(result.diagnostics.some((d) => d.status === "error")).toBe(true);
       expect(result.diagnostics.some((d) => d.status === "available")).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// shouldReadFile stat-gate: an unchanged chat_history.jsonl is skipped
+// before any sidecar reads.
+// ---------------------------------------------------------------------------
+describe("shouldReadFile stat-gate: unchanged chat_history.jsonl skipped without content read", () => {
+  const GATE_SESSION_UUID = "01900000-0000-7000-8000-0000000000f1";
+  const GATE_PROJECT_KEY = encodeURIComponent("/qsr/fab/grok-statgate");
+
+  test("shouldReadFile returning false skips the session entirely — no session emitted", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-grok-statgate-"));
+    try {
+      const sessionDir = join(root, "sessions", GATE_PROJECT_KEY, GATE_SESSION_UUID);
+      mkdirSync(sessionDir, { recursive: true });
+      const chatPath = join(sessionDir, "chat_history.jsonl");
+      writeJsonLines(chatPath, [
+        { type: "user", content: "gate test user message" },
+        { type: "assistant", content: "gate test assistant reply" },
+      ]);
+
+      const checkedPaths: string[] = [];
+      const result = await grokAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { grok: root },
+        shouldReadFile: (path, stat) => {
+          checkedPaths.push(path);
+          void stat;
+          // Reject all files.
+          return false;
+        },
+      });
+      // Gate was consulted for the chat_history.jsonl.
+      expect(checkedPaths.some((p) => p === chatPath)).toBe(true);
+      // No session emitted — content was never read.
+      expect(result.sessions).toHaveLength(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("shouldReadFile returning true lets the file through — session emitted", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-grok-statgate2-"));
+    try {
+      const sessionDir = join(root, "sessions", GATE_PROJECT_KEY, GATE_SESSION_UUID);
+      mkdirSync(sessionDir, { recursive: true });
+      const chatPath = join(sessionDir, "chat_history.jsonl");
+      writeJsonLines(chatPath, [
+        { type: "user", content: "gate test user message" },
+        { type: "assistant", content: "gate test assistant reply" },
+      ]);
+      const fileStat = statSync(chatPath);
+
+      const result = await grokAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { grok: root },
+        shouldReadFile: (_path, stat) => stat.size === fileStat.size,
+      });
+      expect(result.sessions).toHaveLength(1);
+      expect(result.sessions[0]!.provider).toBe("grok");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

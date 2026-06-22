@@ -684,11 +684,19 @@ async function* streamKimi(options: AdapterOptions): AsyncGenerator<AdapterStrea
     if (skipped < (options.skip ?? 0)) { skipped++; continue; }
     if (sessionCount >= (options.limit ?? Number.POSITIVE_INFINITY)) break;
 
+    // Stat-level gate on state.json BEFORE opening it or any wire.jsonl.
+    // An unchanged state.json means the whole agent tree is unchanged; skip
+    // the entire session entry (main + all sub-agents) without reading anything.
+    const stateJsonPath = join(sessionDir, "state.json");
+    if (options.shouldReadFile !== undefined && existsSync(stateJsonPath)) {
+      const stat = statSync(stateJsonPath);
+      if (!options.shouldReadFile(stateJsonPath, stat)) continue;
+    }
+
     // Pre-parse gate keys off the MAIN session id. The whole agent tree shares
     // one state.json fingerprint, so a hit skips the entire entry (main + subs)
     // together — they always change together.
     if (options.shouldParseSession !== undefined) {
-      const stateJsonPath = join(sessionDir, "state.json");
       if (existsSync(stateJsonPath)) {
         const stat = statSync(stateJsonPath);
         const probe = {
@@ -706,7 +714,6 @@ async function* streamKimi(options: AdapterOptions): AsyncGenerator<AdapterStrea
       decodeDiagnostics,
     );
 
-    const stateJsonPath = join(sessionDir, "state.json");
     for (const session of sessions) {
       yield {
         type: "session",

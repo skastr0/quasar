@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -1149,4 +1149,51 @@ describe("codex full data fidelity — declarative signal/drop per record type",
       expect(diagnostics.some((d) => d.name === malformed.diagnostic)).toBe(true);
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// shouldReadFile stat-gate: an unchanged file is skipped before content read.
+// ---------------------------------------------------------------------------
+describe("shouldReadFile stat-gate: unchanged rollout file skipped without content read", () => {
+  const gateRoot = mkdtempSync(join(tmpdir(), "quasar-codex-statgate-"));
+  afterAll(() => rmSync(gateRoot, { recursive: true, force: true }));
+
+  const GATE_UUID = "0fab0000-fab0-7fab-8fab-00000000cafe";
+  const sessionDir = join(gateRoot, "sessions", "2026", "06", "22");
+  mkdirSync(sessionDir, { recursive: true });
+  const filePath = join(sessionDir, rolloutFilename("2026-06-22T00-00-00", GATE_UUID));
+  writeFileSync(filePath, rolloutLines(FIXTURE_CWD, GATE_UUID));
+
+  test("shouldReadFile returning false skips the file entirely — no session emitted, readCodexNativeId not called", async () => {
+    const checkedPaths: string[] = [];
+    const result = await codexAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { codex: gateRoot },
+      shouldReadFile: (path, stat) => {
+        checkedPaths.push(path);
+        void stat;
+        // Reject all files.
+        return false;
+      },
+    });
+    // Gate was consulted for our rollout file.
+    expect(checkedPaths.some((p) => p === filePath)).toBe(true);
+    // No content was read — no session emitted, no error about missing session_meta.id.
+    expect(result.sessions).toHaveLength(0);
+    // No error diagnostic about missing session_meta.id (content never opened).
+    expect(result.diagnostics.some((d) => d.message?.includes("session_meta"))).toBe(false);
+  });
+
+  test("shouldReadFile returning true lets the file through — session emitted", async () => {
+    const fileStat = statSync(filePath);
+    const result = await codexAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { codex: gateRoot },
+      shouldReadFile: (_path, stat) => stat.size === fileStat.size,
+    });
+    expect(result.sessions).toHaveLength(1);
+    expect(result.sessions[0]!.provider).toBe("codex");
+  });
 });
