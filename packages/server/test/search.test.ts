@@ -280,21 +280,24 @@ describe("DerivedSearch", () => {
     expect((rows[0]?.vector as readonly number[] | undefined)?.length).toBe(768);
   });
 
-  test("stats expose missing explicit indexes before maintenance creates them", async () => {
-    const [before, after] = await withSearch(
+  test("indexSession creates text_idx inline (optimize-on-ingest); createLexicalIndex is idempotent", async () => {
+    const [after, afterExplicit] = await withSearch(
       Effect.gen(function* () {
         const store = yield* LocalStore;
         const derived = yield* DerivedSearch;
         yield* store.upsertSession(mappedSession([message(1, "alpha terminal") ]));
         yield* derived.indexSession("session-a");
-        const before = yield* derived.stats;
-        yield* derived.createLexicalIndex;
         const after = yield* derived.stats;
-        return [before, after] as const;
+        // createLexicalIndex should be idempotent when the index already exists.
+        yield* derived.createLexicalIndex;
+        const afterExplicit = yield* derived.stats;
+        return [after, afterExplicit] as const;
       }),
     );
 
-    expect(before.indices.map((index) => index.name)).not.toContain("text_idx");
+    // After indexSession, text_idx is already present (optimize-on-ingest).
     expect(after.indices.map((index) => index.name)).toContain("text_idx");
+    // Calling createLexicalIndex again is idempotent.
+    expect(afterExplicit.indices.map((index) => index.name)).toContain("text_idx");
   });
 });
