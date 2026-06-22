@@ -451,6 +451,52 @@ const partContentProjection = (part: ClassifiedPart): NativeValue | undefined =>
   };
 };
 
+/**
+ * Extract the plain-text content from classified parts in part order.
+ * - type === "text" → the part's own .text field
+ * - tool/artifact/machinery parts → no text contribution
+ * Blank strings are skipped. Returns undefined when no non-blank text exists.
+ * This is the canonical contentText source for assistant message events; it
+ * never JSON-serialises the content envelope. Reasoning parts are excluded
+ * here — they surface as a separate kind="reasoning"/role="thinking" event
+ * via partsReasoningText so they are role-filterable in the search index.
+ */
+const partsContentText = (parts: ClassifiedPart[]): string | undefined => {
+  const texts: string[] = [];
+  for (const part of parts) {
+    if (!isSignalPart(part)) continue;
+    const value = part.decision.value;
+    if (value.type === "text") {
+      const t = value.text;
+      if (typeof t === "string" && t.trim().length > 0) texts.push(t);
+    }
+  }
+  if (texts.length > 0) return texts.join("\n\n");
+  return undefined;
+};
+
+/**
+ * Extract reasoning prose from classified parts in part order.
+ * - type === "reasoning" with non-blank .text → collected
+ * - Encrypted-reasoning stubs (empty .text) → skipped
+ * Returns undefined when no non-blank reasoning text exists.
+ * The result is emitted as a separate kind="reasoning"/role="thinking" event
+ * so reasoning is independently searchable and role-filterable.
+ */
+const partsReasoningText = (parts: ClassifiedPart[]): string | undefined => {
+  const texts: string[] = [];
+  for (const part of parts) {
+    if (!isSignalPart(part)) continue;
+    const value = part.decision.value;
+    if (value.type === "reasoning") {
+      const t = value.text;
+      if (typeof t === "string" && t.trim().length > 0) texts.push(t);
+    }
+  }
+  if (texts.length > 0) return texts.join("\n\n");
+  return undefined;
+};
+
 const messageContentProjection = (
   data: Record<string, NativeValue | undefined>,
   parts: ClassifiedPart[],
@@ -586,6 +632,9 @@ const eventFromMessage = (
   parts: ClassifiedPart[],
   sessionId: SessionId,
   diagnostics: DecodeDiagnostic[],
+  // mutable sequence counter shared with the caller so co-occurring reasoning
+  // events get distinct, dense sequence numbers (mirrors hermes.ts pattern)
+  sequenceRef: { current: number },
 ) => {
   const data = parseMessageData(message);
   // Declarative role dispatch: the message payload is classified through the
@@ -609,32 +658,89 @@ const eventFromMessage = (
     return kind === "tool_call" || kind === "tool_result";
   });
   const eventId = eventIdFor(sessionId, index, message.id);
+  // contentText for the assistant event: type==="text" parts ONLY.
+  // type==="reasoning" parts are excluded here; they surface as a separate
+  // kind="reasoning"/role="thinking" event so reasoning is role-filterable in
+  // the search index.  The legacy fallback handles the rare message row that
+  // carries a bare string in data.content/data.text with no part rows.
+  const textOnlyContentText = hasTurnContent
+    ? (partsContentText(parts) ??
+        compactText(contentRecord.content as NativeValue | undefined) ??
+        compactText(contentRecord.text as NativeValue | undefined))
+    : undefined;
+  const mainEvent = {
+    id: eventId,
+    nativeEventId: message.id,
+    sequence: index,
+    timestamp: new Date(message.time_created).toISOString(),
+    role,
+    kind: isToolTurn ? ("tool_call" as const) : ("message" as const),
+    ...(hasTurnContent
+      ? {
+          contentText: textOnlyContentText,
+          contentSource: content,
+        }
+      : {}),
+    rawReference: {
+      sourcePath: dbPath,
+      table: "message",
+      rowId: message.id,
+      nativeType: "message",
+      ...(typeof message.raw_bytes === "number" && Number.isFinite(message.raw_bytes)
+        ? { rawBytes: message.raw_bytes }
+        : {}),
+    },
+  };
+
+  // When an assistant message carries reasoning parts, emit a dedicated
+  // reasoning event so the reasoning prose becomes independently searchable
+  // and role-filterable.  A single opencode message can carry reasoning,
+  // visible text, AND tool calls in the same turn — all three are valid
+  // simultaneously.  User and unknown messages never carry reasoning parts.
+  const reasoningProse = partsReasoningText(parts);
+  const shouldEmitReasoningEvent =
+    reasoningProse !== undefined &&
+    role === "assistant";
+
+  // Co-occurring reasoning event (mirrors hermes.ts): a separate
+  // kind="reasoning"/role="thinking" event so reasoning prose is independently
+  // searchable and role-filterable. Returned via an array literal (NOT
+  // typeof mainEvent[]) so the kind="reasoning" literal is not narrowed to the
+  // main event's "message"|"tool_call" kind union.
+  const events = shouldEmitReasoningEvent
+    ? (() => {
+        const reasoningIndex = sequenceRef.current;
+        sequenceRef.current += 1;
+        const reasoningEventId = eventIdFor(sessionId, reasoningIndex, `${message.id}:reasoning`);
+        return [
+          mainEvent,
+          {
+            id: reasoningEventId,
+            nativeEventId: `${message.id}:reasoning`,
+            sequence: reasoningIndex,
+            timestamp: new Date(message.time_created).toISOString(),
+            role: "thinking" as SessionRole,
+            kind: "reasoning" as const,
+            contentText: compactText(reasoningProse),
+            contentSource: { reasoning: reasoningProse } as NativeValue,
+            rawReference: {
+              sourcePath: dbPath,
+              table: "message",
+              rowId: message.id,
+              nativeType: "message_reasoning",
+            },
+          },
+        ];
+      })()
+    : [mainEvent];
+
   return {
     eventId,
     parentId: typeof data.parentID === "string" ? data.parentID : undefined,
     toolCalls: collectToolCalls(parts, sessionId, message.id, eventId),
     usageRecord: usageFromMessage(sessionId, eventId, index, data),
     artifacts: collectArtifacts(sessionId, dbPath, eventId, parts),
-    event: {
-      id: eventId,
-      nativeEventId: message.id,
-      sequence: index,
-      timestamp: new Date(message.time_created).toISOString(),
-      role,
-      kind: isToolTurn ? ("tool_call" as const) : ("message" as const),
-      ...(hasTurnContent
-        ? { contentText: compactText(content as NativeValue), contentSource: content }
-        : {}),
-      rawReference: {
-        sourcePath: dbPath,
-        table: "message",
-        rowId: message.id,
-        nativeType: "message",
-        ...(typeof message.raw_bytes === "number" && Number.isFinite(message.raw_bytes)
-          ? { rawBytes: message.raw_bytes }
-          : {}),
-      },
-    },
+    events,
   };
 };
 
@@ -703,7 +809,11 @@ const buildOpenCodeSessionFromRows = (
   // DBs without the column) carry no agent: fall back to the provider name.
   const agentName = stringValue(sessionRow.agent) ?? "opencode";
   const messageIdToEventId = new Map<string, string>();
-  const events = messages.map((message, index) => {
+  // Sequence counter shared across all eventFromMessage calls so co-occurring
+  // reasoning events get distinct, dense sequence numbers beyond the message
+  // index space.  Starts at messages.length so there is no collision.
+  const sequenceRef = { current: messages.length };
+  const events = messages.flatMap((message, index) => {
     const result = eventFromMessage(
       dbPath,
       message,
@@ -711,6 +821,7 @@ const buildOpenCodeSessionFromRows = (
       partsByMessage.get(message.id) ?? [],
       sessionId,
       diagnostics,
+      sequenceRef,
     );
     messageIdToEventId.set(message.id, result.eventId);
     if (result.parentId !== undefined) {
@@ -726,7 +837,7 @@ const buildOpenCodeSessionFromRows = (
     toolCalls.push(...result.toolCalls);
     if (result.usageRecord !== undefined) usageRecords.push(result.usageRecord);
     artifacts.push(...result.artifacts);
-    return result.event;
+    return result.events;
   });
   return buildSession({
     provider: "opencode",

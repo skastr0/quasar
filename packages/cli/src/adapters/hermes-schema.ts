@@ -241,6 +241,14 @@ const hasReasoning = (row: HermesMessageRow): boolean =>
   (row.codex_reasoning_items !== undefined && row.codex_reasoning_items !== null);
 
 /**
+ * A row with `codex_message_items` carries real conversational content via the
+ * codex bridge (the `content` TEXT column is absent/null in this path). We
+ * treat such a row as having content so it is not dropped as `empty_assistant`.
+ */
+const hasCodexContent = (row: HermesMessageRow): boolean =>
+  row.codex_message_items !== undefined && row.codex_message_items !== null;
+
+/**
  * Classify a decoded message row into a SIGNAL (kind + mapped role) or a DROP
  * (named reason). `decodedCalls` is the already-decoded tool_calls array so the
  * tool_call vs message branch is keyed on real structure, not a string sniff.
@@ -270,12 +278,13 @@ export const classifyMessage = (
     if (hasToolCalls(decodedCalls)) {
       return signal("tool_call", { kind: "tool_call", role: "assistant" });
     }
-    // Reasoning-only assistant turn (no content) → reasoning. When content is
-    // present the reasoning is carried as an extra block on a normal message.
-    if (hasReasoning(row) && !present(row.content)) {
+    // Reasoning-only assistant turn (no content, no codex bridge) → reasoning.
+    // When content is present the reasoning is carried as an extra block on a
+    // normal message (handled via extractReasoningText in hermes.ts).
+    if (hasReasoning(row) && !present(row.content) && !hasCodexContent(row)) {
       return signal("reasoning", { kind: "reasoning", role: "assistant" });
     }
-    if (present(row.content) || hasReasoning(row)) {
+    if (present(row.content) || hasReasoning(row) || hasCodexContent(row)) {
       return signal("message", { kind: "message", role: "assistant" });
     }
     return drop("hermes.message.empty_assistant");

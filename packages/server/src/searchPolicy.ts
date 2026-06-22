@@ -24,8 +24,8 @@ export interface SearchDocumentPolicyStats {
   readonly ignored: number;
 }
 
-export const isSearchableRole = (role: string): role is "user" | "assistant" =>
-  role === "user" || role === "assistant";
+export const isSearchableRole = (role: string): role is "user" | "assistant" | "reasoning" =>
+  role === "user" || role === "assistant" || role === "reasoning";
 
 export const decideSearchDocument = (message: Pick<MessageRow, "role" | "text">): SearchDocumentDecision => {
   const textBytes = textEncoder.encode(message.text).byteLength;

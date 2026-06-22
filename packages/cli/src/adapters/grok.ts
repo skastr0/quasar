@@ -303,6 +303,114 @@ const grokArtifacts = (
     ];
   });
 
+/**
+ * Strip a leading/trailing `<user_query>...</user_query>` or
+ * `<user_info>...</user_info>` wrapper if the ENTIRE text is the wrapper.
+ * Only removes the wrapper tags; the inner content is kept verbatim.
+ * Both wrappers are harness-injected; `<user_info>` carries env/OS context
+ * (mutually exclusive with `<user_query>` in any given record).
+ */
+const stripUserQueryWrapper = (text: string): string => {
+  const trimmed = text.trim();
+  for (const [openTag, closeTag] of [
+    ["<user_query>", "</user_query>"],
+    ["<user_info>", "</user_info>"],
+  ] as const) {
+    if (trimmed.startsWith(openTag) && trimmed.endsWith(closeTag)) {
+      return trimmed.slice(openTag.length, trimmed.length - closeTag.length).trim();
+    }
+  }
+  return text;
+};
+
+/**
+ * Extract the leaf text from a grok content value.
+ * - string: use directly (strip user_query wrapper)
+ * - array: join `.text` from items with `.text` field (e.g. [{type:"text",text:"..."}])
+ * - object with `.text`: extract the text field (e.g. {type:"text",text:"..."})
+ * - other: return undefined (caller handles as NativeValue)
+ */
+const extractGrokContentLeaf = (content: unknown): string | undefined => {
+  if (typeof content === "string") {
+    return stripUserQueryWrapper(content);
+  }
+  if (Array.isArray(content)) {
+    const parts: string[] = [];
+    for (const item of content) {
+      if (item === null || typeof item !== "object") continue;
+      const itemRecord = item as Record<string, unknown>;
+      // Accept {type:"text", text:"..."} or any {text:"..."} block
+      if (typeof itemRecord.text === "string") {
+        parts.push(itemRecord.text);
+      }
+    }
+    const joined = parts.join("").trim();
+    return joined.length > 0 ? stripUserQueryWrapper(joined) : undefined;
+  }
+  if (content !== null && typeof content === "object") {
+    const rec = content as Record<string, unknown>;
+    if (typeof rec.text === "string") return stripUserQueryWrapper(rec.text);
+  }
+  return undefined;
+};
+
+/**
+ * Peel the known per-harness grok envelope down to the leaf message value.
+ *
+ * Record shapes:
+ *   - chat_history: record.content (string | [{type:"text",text:"..."}])
+ *   - updates: record.params.update.content (string | [{text:"..."}])
+ *   - fallback: record.text, record.message, record.delta
+ *
+ * The leaf is returned VERBATIM — no prose-vs-json classification, no
+ * reformatting. Agent-generated JSON inside a text block is legitimate
+ * searchable content and is preserved as-is.
+ */
+export const extractGrokProse = (record: Record<string, unknown>): string | undefined => {
+  // 1. Direct content field (chat_history user/assistant/tool_result/system)
+  if (record.content !== undefined) {
+    const leaf = extractGrokContentLeaf(record.content);
+    if (leaf !== undefined) return leaf;
+  }
+  // 2. updates.jsonl: params.update.content
+  const params = recordFrom(record.params);
+  const update = recordFrom(params.update);
+  if (update.content !== undefined) {
+    const leaf = extractGrokContentLeaf(update.content);
+    if (leaf !== undefined) return leaf;
+  }
+  // 3. Direct text / message / delta fallbacks
+  if (typeof record.text === "string") return stripUserQueryWrapper(record.text);
+  if (typeof record.message === "string") return stripUserQueryWrapper(record.message);
+  if (typeof record.delta === "string") return stripUserQueryWrapper(record.delta);
+  return undefined;
+};
+
+/**
+ * Extract plaintext reasoning text from a STANDALONE `{type:"reasoning"}` record.
+ * The dominant shape: `record.summary` is an array of `{type?, text}` items.
+ * Fallback: top-level `record.text` field.
+ * This is distinct from the EMBEDDED path (record.reasoning inside an assistant
+ * record) handled by `grokReasoningText`.
+ */
+const grokStandaloneReasoningText = (record: Record<string, unknown>): string | undefined => {
+  // Primary: summary[*].text joined
+  if (Array.isArray(record.summary)) {
+    const parts: string[] = [];
+    for (const item of record.summary) {
+      if (item !== null && typeof item === "object") {
+        const t = (item as Record<string, unknown>).text;
+        if (typeof t === "string") parts.push(t);
+      }
+    }
+    const joined = parts.join("").trim();
+    if (joined.length > 0) return joined;
+  }
+  // Fallback: top-level text field
+  if (typeof record.text === "string" && record.text.length > 0) return record.text;
+  return undefined;
+};
+
 /** Extract plaintext reasoning text from an assistant record's `reasoning` field. */
 const grokReasoningText = (record: Record<string, unknown>): string | undefined => {
   const reasoningField = record.reasoning;
@@ -311,6 +419,19 @@ const grokReasoningText = (record: Record<string, unknown>): string | undefined 
     typeof reasoningField === "string"
       ? recordFrom(parseJsonString(reasoningField))
       : recordFrom(reasoningField);
+  // Try reasoning.summary[*].text first (encrypted reasoning block with plaintext summary)
+  if (Array.isArray(reasoningRecord.summary)) {
+    const summaryParts: string[] = [];
+    for (const item of reasoningRecord.summary) {
+      if (item !== null && typeof item === "object") {
+        const s = (item as Record<string, unknown>).text;
+        if (typeof s === "string") summaryParts.push(s);
+      }
+    }
+    const summaryText = summaryParts.join("").trim();
+    if (summaryText.length > 0) return summaryText;
+  }
+  // Fallback: reasoning.text
   return stringValue(reasoningRecord.text);
 };
 
@@ -503,7 +624,7 @@ const buildGrokSessionFromChatPath = (
         timestamp: grokTime(record),
         role: grokRole(type),
         kind: toolCallId !== undefined ? ("tool_call" as const) : classified.kind,
-        contentText: compactText(content),
+        contentText: extractGrokProse(record) ?? compactText(content),
         contentSource: content,
         ...(toolCallId !== undefined ? { toolCallId } : {}),
         rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: type },
@@ -520,10 +641,26 @@ const buildGrokSessionFromChatPath = (
         timestamp: grokTime(record),
         role: grokRole(type),
         kind: classified.kind,
-        contentText: compactText(content),
+        contentText: extractGrokProse(record) ?? compactText(content),
         contentSource: content,
         ...(toolCallId !== undefined ? { toolCallId } : {}),
         rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: type },
+      });
+    } else if (type === "reasoning") {
+      // Standalone {type:"reasoning"} — the DOMINANT shape (~86% of grok reasoning).
+      // Plaintext lives in record.summary[*].text (joined), not in record.content.
+      // classifyGrokChat already confirmed a non-empty summaryText exists (else it
+      // would have dropped the record as `encrypted_reasoning`).
+      const contentText = grokStandaloneReasoningText(record);
+      result.push({
+        id: eventId,
+        nativeEventId,
+        sequence: index,
+        timestamp: grokTime(record),
+        role: "thinking" as const,
+        kind: "reasoning" as const,
+        ...(contentText !== undefined ? { contentText } : {}),
+        rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: "reasoning" },
       });
     } else {
       // user / system / backend_tool_call: kind comes from the classifier.
@@ -537,7 +674,7 @@ const buildGrokSessionFromChatPath = (
         timestamp: grokTime(record),
         role: grokRole(type),
         kind: classified.kind,
-        contentText: compactText(content),
+        contentText: extractGrokProse(record) ?? compactText(content),
         contentSource: content,
         ...(toolCallId !== undefined ? { toolCallId } : {}),
         rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: type },
@@ -583,6 +720,10 @@ const buildGrokSessionFromChatPath = (
     const eventId = eventIdFor(sessionId, index, `updates:${lineNumber}`);
     const toolCallId = collectTool(eventId, innerUpdate);
     const content = grokContentProjection(innerUpdate);
+    // extractGrokProse on innerUpdate finds content directly (innerUpdate IS params.update).
+    // For the `content` field on innerUpdate (e.g. agent_message_chunk.content), it peels the
+    // leaf string from the content block array.
+    const proseText = extractGrokProse(innerUpdate) ?? compactText(content);
     return [
       {
         id: eventId,
@@ -590,7 +731,7 @@ const buildGrokSessionFromChatPath = (
         timestamp: grokTime(record),
         role: "system" as const,
         kind: classified.kind,
-        contentText: compactText(content),
+        contentText: proseText,
         contentSource: content,
         ...(toolCallId !== undefined ? { toolCallId } : {}),
         rawReference: { sourcePath: updatePath, line: lineNumber, nativeType: subtype ?? "update" },
