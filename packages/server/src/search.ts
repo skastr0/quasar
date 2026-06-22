@@ -129,13 +129,45 @@ export const DerivedSearchLive = Layer.effect(
           const lexicalRows = toSearchRows(messages, lexicalDimensions);
           const profileRows = profileTable === LEXICAL_TABLE ? lexicalRows : toSearchRows(messages, profile.dimensions);
           const nextKeys = new Set(profileRows.map((row) => keyFor(row)));
-          const profileOrphansDeleted = yield* deleteOrphans(profileTable, sessionId, nextKeys);
+
+          // Read the profile (vector) table's existing rows ONCE — this drives
+          // BOTH orphan deletion AND the no-clobber guard. The embed worker owns
+          // the vector column on the profile table; re-writing an already-embedded
+          // row here would overwrite its real vector with a zero placeholder — the
+          // bulk-re-index clobber that left rows permanently unembedded (index runs
+          // after embed, resets the vector, and the per-row embed idempotency stops
+          // a re-embed). So EXCLUDE already-embedded keys from the profile upsert
+          // and leave those rows to the embed worker; index writes only new rows.
+          const profileExisting = yield* search.readMessageRowsBySession({
+            sessionId, tableName: profileTable, limit: 100_000, select: ["key", "contentHash"],
+          }).pipe(Effect.catchAll(() => Effect.succeed([] as readonly Record<string, unknown>[])));
+          const profileOrphanKeys = profileExisting
+            .map((row) => row.key)
+            .filter((key): key is string => typeof key === "string" && !nextKeys.has(key));
+          if (profileOrphanKeys.length > 0) {
+            yield* search.deleteByKeys({ tableName: profileTable, keys: profileOrphanKeys }).pipe(Effect.catchAll(() => Effect.void));
+          }
+          const profileOrphansDeleted = profileOrphanKeys.length;
+          const embeddedKeys = new Set(
+            profileExisting
+              .filter((row) =>
+                typeof row.key === "string" &&
+                typeof row.contentHash === "string" &&
+                !(row.contentHash as string).startsWith("unembedded:"))
+              .map((row) => row.key as string),
+          );
+
+          // Lexical (FTS-only) table: index owns it entirely; the embed worker
+          // never writes it, so a full upsert is safe (no clobber possible).
           const lexicalOrphansDeleted = profileTable === LEXICAL_TABLE ? 0 : yield* deleteOrphans(LEXICAL_TABLE, sessionId, nextKeys);
-          if (lexicalRows.length > 0) {
+          if (profileTable !== LEXICAL_TABLE && lexicalRows.length > 0) {
             yield* search.upsertMessageRows({ rows: lexicalRows, tableName: LEXICAL_TABLE, vectorDimension: lexicalDimensions });
           }
-          if (profileTable !== LEXICAL_TABLE && profileRows.length > 0) {
-            yield* search.upsertMessageRows({ rows: profileRows, tableName: profileTable, vectorDimension: profile.dimensions });
+          // Profile (vector) table: write only NEW/unembedded rows; preserve the
+          // embed worker's vectors on already-embedded keys.
+          const profileRowsToWrite = profileRows.filter((row) => !embeddedKeys.has(keyFor(row)));
+          if (profileRowsToWrite.length > 0) {
+            yield* search.upsertMessageRows({ rows: profileRowsToWrite, tableName: profileTable, vectorDimension: profile.dimensions });
           }
 
           // Index maintenance (create-missing + optimize) is NOT done per session:
