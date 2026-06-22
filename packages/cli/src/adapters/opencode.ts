@@ -988,6 +988,13 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
     }
     return;
   }
+  // Stat-level gate: skip the DB entirely if the file has not changed since
+  // the last ingest. An unchanged DB means no session has changed; skip
+  // the copy and open without reading any content.
+  if (options.shouldReadFile !== undefined) {
+    const stat = statSync(dbPath);
+    if (!options.shouldReadFile(dbPath, stat)) return;
+  }
   const tempDb = copyDatabaseForRead(dbPath);
   const db = await maybeDatabase(tempDb.path);
   if (db === undefined) {

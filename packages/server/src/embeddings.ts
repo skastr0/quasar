@@ -1,5 +1,5 @@
 import { google, type GoogleEmbeddingModelOptions } from "@ai-sdk/google";
-import { LanceDb } from "./lancedb";
+import { LanceDb, type SearchRole } from "./lancedb";
 import { embedMany } from "ai";
 import { Database } from "bun:sqlite";
 import { Effect, Layer, Schema } from "effect";
@@ -11,6 +11,13 @@ import { ensureParentDir, sqlitePath } from "./paths";
 import { isSemanticSearchDocument } from "./searchPolicy";
 import { DurableQueue, Embeddings, type EmbeddingCacheRow } from "./services";
 import { LocalStore } from "./store";
+
+// Provider prefix of a sessionId (matches search.providerFromSessionId); kept
+// local to avoid importing the search layer into the embed worker.
+const providerForSessionId = (sessionId: string): string => {
+  const colon = sessionId.indexOf(":");
+  return colon === -1 ? sessionId : sessionId.slice(0, colon);
+};
 import { makeSyntheticEmbedder, SyntheticEmbeddingError } from "./syntheticEmbeddings";
 
 const textEncoder = new TextEncoder();
@@ -246,10 +253,11 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
           const toVectorRow = (message: MessageRow, vector: readonly number[]) => ({
             sessionId: message.sessionId,
             seq: message.seq,
-            role: message.role as "user" | "assistant",
+            role: message.role as SearchRole,
             projectKey: message.projectKey,
             text: message.text,
             contentHash: message.contentHash,
+            provider: providerForSessionId(message.sessionId),
             vector,
           });
 

@@ -29,6 +29,7 @@ export const MESSAGE_SEARCH_COLUMNS = [
   "seq",
   "role",
   "projectKey",
+  "provider",
   "text",
   "contentHash",
 ] as const;
@@ -48,6 +49,8 @@ export interface MessageSearchRow {
   readonly seq: number;
   readonly role: SearchRole;
   readonly projectKey: string;
+  /** Provider name derived from the sessionId prefix (substring before the first ':'). */
+  readonly provider: string;
   readonly text: string;
   readonly contentHash: string;
   readonly vector: SearchVector;
@@ -257,6 +260,7 @@ export const createMessageSearchSchema = (dimensions = GEMINI_EMBEDDING_DIMENSIO
     new Field("seq", new Int32(), false),
     new Field("role", new Utf8(), false),
     new Field("projectKey", new Utf8(), false),
+    new Field("provider", new Utf8(), false),
     new Field(DEFAULT_TEXT_COLUMN, new Utf8(), false),
     new Field("contentHash", new Utf8(), false),
     new Field(
@@ -329,6 +333,7 @@ const messageRowsForLance = (rows: readonly MessageSearchRow[]): Record<string, 
       seq: row.seq,
       role: row.role,
       projectKey: row.projectKey,
+      provider: row.provider,
       text: row.text,
       contentHash: row.contentHash,
       vector: row.vector,

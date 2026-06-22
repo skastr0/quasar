@@ -1,4 +1,6 @@
-import { statSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 
 import { loadMachineIdentity } from "./core/machine";
 import type { Provider } from "./core/schemas";
@@ -9,11 +11,54 @@ import type { SessionParseProbe } from "./adapters/types";
 import { mapSession } from "./map";
 import type { MappedSession, MessageRole } from "./model";
 
+// ---------------------------------------------------------------------------
+// Ingest manifest — persistent stat cache for incremental ingest
+// ---------------------------------------------------------------------------
+
+export interface ManifestEntry {
+  readonly mtimeMs: number;
+  readonly size: number;
+}
+
+/** path -> { mtimeMs, size } recorded after a successful postMappedSession */
+export type IngestManifest = Record<string, ManifestEntry>;
+
+const manifestPath = (override?: string): string =>
+  override ?? resolve(process.env.QUASAR_DAEMON_HOME ?? join(homedir(), ".config", "quasar"), "ingest-manifest.json");
+
+export const loadManifest = (path?: string): IngestManifest => {
+  const file = manifestPath(path);
+  try {
+    const raw = readFileSync(file, "utf8");
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as IngestManifest;
+    }
+  } catch {
+    // missing or corrupt → start fresh
+  }
+  return {};
+};
+
+export const saveManifest = (manifest: IngestManifest, path?: string): void => {
+  const file = manifestPath(path);
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify(manifest, null, 2), "utf8");
+};
+
+export const clearManifest = (path?: string): void => {
+  saveManifest({}, path);
+};
+
+// ---------------------------------------------------------------------------
+
 export interface IngestOptions {
   readonly provider: Provider | "all";
   readonly limit?: number;
   readonly force?: boolean;
   readonly ingestToken?: string;
+  /** Override path for the ingest manifest (default: QUASAR_DAEMON_HOME/ingest-manifest.json). */
+  readonly manifestPath?: string;
 }
 
 export interface SearchDocumentPolicyStats {
@@ -189,23 +234,27 @@ const ingestProviderRemote = async (
   provider: Provider,
   options: IngestOptions,
   serverUrl: string,
-): Promise<IngestReport> => {
+  manifest: IngestManifest,
+): Promise<{ report: IngestReport; manifestUpdates: IngestManifest }> => {
   const startedAt = Date.now();
   const adapter = adaptersByProvider.get(provider);
   if (adapter?.stream === undefined) {
     return {
-      provider,
-      sessionsSeen: 0,
-      sessionsWritten: 0,
-      sessionsSkipped: 0,
-      sessionsFailed: 1,
-      messagesWritten: 0,
-      toolCallsWritten: 0,
-      jobsEnqueued: 0,
-      searchDocuments: { total: 0, semanticEligible: 0, ignored: 0 },
-      outcomes: [],
-      failures: [{ sessionId: provider, diagnostic: "provider_stream_unavailable", error: `Provider ${provider} does not expose a stream` }],
-      durationMs: Date.now() - startedAt,
+      report: {
+        provider,
+        sessionsSeen: 0,
+        sessionsWritten: 0,
+        sessionsSkipped: 0,
+        sessionsFailed: 1,
+        messagesWritten: 0,
+        toolCallsWritten: 0,
+        jobsEnqueued: 0,
+        searchDocuments: { total: 0, semanticEligible: 0, ignored: 0 },
+        outcomes: [],
+        failures: [{ sessionId: provider, diagnostic: "provider_stream_unavailable", error: `Provider ${provider} does not expose a stream` }],
+        durationMs: Date.now() - startedAt,
+      },
+      manifestUpdates: {},
     };
   }
 
@@ -220,6 +269,7 @@ const ingestProviderRemote = async (
   let ignored = 0;
   const outcomes: SessionIngestOutcome[] = [];
   const failures: { sessionId: string; diagnostic: string; error: string }[] = [];
+  const manifestUpdates: IngestManifest = {};
 
   const shouldParseSession = options.force === true
     ? undefined
@@ -243,12 +293,25 @@ const ingestProviderRemote = async (
         }
       };
 
+  /**
+   * Stat-level gate: suppress content reads for files whose mtime+size match
+   * the last successful ingest record. --force bypasses this entirely.
+   */
+  const shouldReadFile = options.force === true
+    ? undefined
+    : (path: string, stat: import("node:fs").Stats): boolean => {
+        const entry = manifest[path];
+        if (entry === undefined) return true;
+        return entry.mtimeMs !== stat.mtimeMs || entry.size !== stat.size;
+      };
+
   const stream = adapter.stream({
     machine: loadMachineIdentity(),
     now: new Date().toISOString(),
     roots: configuredRoots(),
     limit: options.limit,
     shouldParseSession,
+    shouldReadFile,
   });
 
   for await (const item of stream) {
@@ -285,6 +348,14 @@ const ingestProviderRemote = async (
         const searchDocuments = outcome.searchDocuments ?? summarizeSearchDocumentPolicy(mapped.messages);
         semanticEligible += searchDocuments.semanticEligible;
         ignored += searchDocuments.ignored;
+        // Record in manifest: physicalPath preferred (same path the adapter stat'd)
+        const physicalPath = item.sourceUnit?.physicalPath ?? item.session.sourcePath;
+        try {
+          const fileStat = statSync(physicalPath);
+          manifestUpdates[physicalPath] = { mtimeMs: fileStat.mtimeMs, size: fileStat.size };
+        } catch {
+          // non-fatal: best-effort manifest update
+        }
       } else if (outcome.status === "skipped") {
         sessionsSkipped += 1;
       } else {
@@ -299,18 +370,21 @@ const ingestProviderRemote = async (
   }
 
   return {
-    provider,
-    sessionsSeen,
-    sessionsWritten,
-    sessionsSkipped,
-    sessionsFailed,
-    messagesWritten,
-    toolCallsWritten,
-    jobsEnqueued,
-    searchDocuments: { total: messagesWritten, semanticEligible, ignored },
-    outcomes,
-    failures,
-    durationMs: Date.now() - startedAt,
+    report: {
+      provider,
+      sessionsSeen,
+      sessionsWritten,
+      sessionsSkipped,
+      sessionsFailed,
+      messagesWritten,
+      toolCallsWritten,
+      jobsEnqueued,
+      searchDocuments: { total: messagesWritten, semanticEligible, ignored },
+      outcomes,
+      failures,
+      durationMs: Date.now() - startedAt,
+    },
+    manifestUpdates,
   };
 };
 
@@ -322,9 +396,25 @@ export const ingestRemote = async (
     options.provider === "all"
       ? stableAdapters.map((adapter) => adapter.provider)
       : [options.provider];
+
+  // Load manifest once; --force skips the stat gate but still persists updates
+  // so the manifest stays current for the next non-forced run.
+  const manifest = loadManifest(options.manifestPath);
   const reports: IngestReport[] = [];
+  let merged: IngestManifest = { ...manifest };
+
   for (const provider of providers) {
-    reports.push(await ingestProviderRemote(provider, options, serverUrl));
+    const { report, manifestUpdates } = await ingestProviderRemote(provider, options, serverUrl, manifest);
+    reports.push(report);
+    merged = { ...merged, ...manifestUpdates };
   }
+
+  // Persist only when there are new entries to record.
+  const hasUpdates = Object.keys(merged).length !== Object.keys(manifest).length
+    || Object.entries(merged).some(([k, v]) => manifest[k]?.mtimeMs !== v.mtimeMs || manifest[k]?.size !== v.size);
+  if (hasUpdates) {
+    saveManifest(merged, options.manifestPath);
+  }
+
   return reports;
 };

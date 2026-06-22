@@ -407,10 +407,18 @@ const lexicalSearch = Effect.gen(function* () {
     query: text,
     projectKey: params.get("projectKey") ?? undefined,
     role: params.get("role") ?? undefined,
+    providers: parseProviders(params),
     limit: positiveInt(params, "limit", 10),
   });
   return json(ok("search/lexical", { matches }));
 });
+
+const parseProviders = (params: URLSearchParams): readonly string[] | undefined => {
+  const raw = params.get("provider");
+  if (raw === null || raw.trim() === "") return undefined;
+  const list = raw.split(",").map((p) => p.trim()).filter((p) => p.length > 0);
+  return list.length > 0 ? list : undefined;
+};
 
 const vectorReadyFilter = (params: URLSearchParams): string | undefined => {
   const projectKey = params.get("projectKey");
@@ -419,6 +427,7 @@ const vectorReadyFilter = (params: URLSearchParams): string | undefined => {
     {
       projectKey: projectKey === null || projectKey.trim() === "" ? undefined : projectKey,
       role: role === null || role.trim() === "" ? undefined : role,
+      providers: parseProviders(params),
     },
     VECTOR_READY_FILTER,
   );

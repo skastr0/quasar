@@ -792,6 +792,13 @@ async function* streamGrok(options: AdapterOptions): AsyncGenerator<AdapterStrea
   yield { type: "sourceRoot", sourceRoot: rootRecord };
   let sessionCount = 0;
   for (const chatPath of files) {
+    // Stat-level gate on the canonical chat file BEFORE touching any sidecar
+    // files. An unchanged chat_history.jsonl means the session's primary content
+    // has not changed; the whole session is skipped.
+    if (options.shouldReadFile !== undefined) {
+      const stat = statSync(chatPath);
+      if (!options.shouldReadFile(chatPath, stat)) continue;
+    }
     // Cheap pre-parse gate over the full session surface: chat is canonical,
     // while events/updates are optional sidecars whose late creation must
     // invalidate the prior ingest.
