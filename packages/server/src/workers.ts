@@ -3,26 +3,12 @@ import { Effect, Layer, Ref } from "effect";
 import { SearchMaintenance } from "./maintenance";
 import { Embeddings, WorkerSupervisor, type WorkerSupervisorStatus } from "./services";
 
-const envFlag = (name: string, fallback: boolean): boolean => {
-  const raw = process.env[name]?.trim().toLowerCase();
-  if (raw === undefined || raw === "") return fallback;
-  return raw === "1" || raw === "true" || raw === "yes";
-};
-
-const envFlagAny = (names: readonly string[], fallback: boolean): boolean => {
-  for (const name of names) {
-    const raw = process.env[name]?.trim();
-    if (raw !== undefined && raw !== "") return envFlag(name, fallback);
-  }
-  return fallback;
-};
-
-const envInt = (name: string, fallback: number): number => {
-  const raw = process.env[name]?.trim();
-  if (raw === undefined || raw === "") return fallback;
-  const parsed = Number(raw);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
-};
+// Tuning constants — no env overrides; workers always run.
+const WORKER_IDLE_INTERVAL_MS = 5_000;
+const WORKER_BUSY_INTERVAL_MS = 100;
+const WORKER_LEASE_MS = 600_000;
+const EMBEDDING_BATCH_LIMIT = 1_000;
+const INDEX_BATCH_LIMIT = 100;
 
 const renderError = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const reportLeased = (report: unknown): number =>
@@ -35,22 +21,11 @@ export const WorkerSupervisorLive = Layer.scoped(
   Effect.gen(function* () {
     const embeddings = yield* Embeddings;
     const maintenance = yield* SearchMaintenance;
-    const enabled = envFlag("QUASAR_WORKERS_ENABLED", false);
-    const intervalMs = envInt("QUASAR_WORKER_INTERVAL_MS", 5_000);
-    const embeddingWorkerEnabled = envFlagAny(["QUASAR_EMBEDDING_WORKER_ENABLED", "QUASAR_EMBEDDINGS_WORKER_ENABLED"], enabled);
-    const indexWorkerEnabled = envFlag("QUASAR_INDEX_REPAIR_WORKER_ENABLED", enabled);
-    const freshnessWorkerEnabled = envFlag("QUASAR_FRESHNESS_WORKER_ENABLED", enabled);
-    const maintenanceWorkerEnabled = envFlag("QUASAR_MAINTENANCE_WORKER_ENABLED", enabled);
-    const workerConfigs = [
-      { name: "embeddings", enabled: embeddingWorkerEnabled },
-      { name: "index-repair", enabled: indexWorkerEnabled },
-      { name: "freshness", enabled: freshnessWorkerEnabled },
-      { name: "maintenance", enabled: maintenanceWorkerEnabled },
-    ] as const;
-    const workers = workerConfigs.filter((worker) => worker.enabled).map((worker) => worker.name);
+
+    const workers = ["embeddings", "index-repair", "maintenance"] as const;
     const state = yield* Ref.make<WorkerSupervisorStatus>({
-      enabled: workers.length > 0,
-      workers,
+      enabled: true,
+      workers: [...workers],
       lastReports: {},
       lastErrors: {},
     });
@@ -77,51 +52,33 @@ export const WorkerSupervisorLive = Layer.scoped(
 
     const embeddingOnce = () => embeddings.processBatch({
       workerId: "embedding-worker",
-      limit: envInt("QUASAR_EMBEDDING_WORKER_LIMIT", 1_000),
-      leaseMs: envInt("QUASAR_WORKER_LEASE_MS", 600_000),
+      limit: EMBEDDING_BATCH_LIMIT,
+      leaseMs: WORKER_LEASE_MS,
     });
     const indexOnce = () => maintenance.repairOnce({
       workerId: "index-worker",
-      limit: envInt("QUASAR_INDEX_WORKER_LIMIT", 100),
-      leaseMs: envInt("QUASAR_WORKER_LEASE_MS", 600_000),
+      limit: INDEX_BATCH_LIMIT,
+      leaseMs: WORKER_LEASE_MS,
     });
-    const freshnessOnce = () => maintenance.reconcileFreshness({
-      limit: envInt("QUASAR_FRESHNESS_LIMIT", 500),
-    });
-    const maintenanceOnce = () => maintenance.maintain({
-      includeVector: envFlag("QUASAR_MAINTENANCE_VECTOR", true),
-      optimize: envFlag("QUASAR_MAINTENANCE_OPTIMIZE", true),
-    });
-
-    const anyWorkerEnabled = workerConfigs.some((worker) => worker.enabled);
+    const maintenanceOnce = () => maintenance.maintain();
 
     const tickOnce = Effect.gen(function* () {
-      if (embeddingWorkerEnabled || !anyWorkerEnabled) yield* runWorker("embeddings", embeddingOnce());
-      if (indexWorkerEnabled || !anyWorkerEnabled) yield* runWorker("index-repair", indexOnce());
-      if (freshnessWorkerEnabled || !anyWorkerEnabled) yield* runWorker("freshness", freshnessOnce());
-      if (maintenanceWorkerEnabled || !anyWorkerEnabled) yield* runWorker("maintenance", maintenanceOnce());
+      yield* runWorker("embeddings", embeddingOnce());
+      yield* runWorker("index-repair", indexOnce());
+      yield* runWorker("maintenance", maintenanceOnce());
       return yield* Ref.get(state);
     });
 
     const loopWorker = (name: string, effect: () => Effect.Effect<unknown, unknown>) =>
       Effect.gen(function* () {
         const report = yield* runWorker(name, effect());
-        const delayMs = reportLeased(report) > 0 ? envInt("QUASAR_WORKER_BUSY_INTERVAL_MS", 100) : intervalMs;
+        const delayMs = reportLeased(report) > 0 ? WORKER_BUSY_INTERVAL_MS : WORKER_IDLE_INTERVAL_MS;
         yield* Effect.sleep(`${delayMs} millis`);
       }).pipe(Effect.forever, Effect.forkScoped);
 
-    if (embeddingWorkerEnabled) {
-      yield* loopWorker("embeddings", embeddingOnce);
-    }
-    if (indexWorkerEnabled) {
-      yield* loopWorker("index-repair", indexOnce);
-    }
-    if (freshnessWorkerEnabled) {
-      yield* loopWorker("freshness", freshnessOnce);
-    }
-    if (maintenanceWorkerEnabled) {
-      yield* loopWorker("maintenance", maintenanceOnce);
-    }
+    yield* loopWorker("embeddings", embeddingOnce);
+    yield* loopWorker("index-repair", indexOnce);
+    yield* loopWorker("maintenance", maintenanceOnce);
 
     return WorkerSupervisor.of({
       status: Ref.get(state),

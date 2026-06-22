@@ -27,10 +27,7 @@ export interface RepairReport {
 }
 
 export interface SearchMaintenanceService {
-  readonly maintain: (options?: {
-    readonly includeVector?: boolean;
-    readonly optimize?: boolean;
-  }) => Effect.Effect<MaintenanceReport, unknown>;
+  readonly maintain: () => Effect.Effect<MaintenanceReport, unknown>;
   readonly reconcileFreshness: (options?: {
     readonly limit?: number;
     readonly now?: string;
@@ -68,19 +65,40 @@ export const SearchMaintenanceLive = Layer.effect(
     const activeTables = profileTable === DEFAULT_SEARCH_TABLE ? [DEFAULT_SEARCH_TABLE] : [DEFAULT_SEARCH_TABLE, profileTable];
 
     return SearchMaintenance.of({
-      maintain: (options = {}) =>
+      maintain: () =>
         Effect.gen(function* () {
-          const indexesCreated = ["text_idx"];
-          yield* derived.createLexicalIndex;
-          if (options.includeVector ?? true) {
-            yield* derived.createVectorIndex;
+          // Coalesced + conflict-free. optimize() compacts the whole table, so it
+          // runs HERE (not per indexSession) and ONLY when the writers for that
+          // table are idle, so it never races an upsert (the LanceDB
+          // commit-conflict). Per table: the FTS table is written only by
+          // index-session -> safe once index-session is idle; the vector table is
+          // written by index-session AND embed-message -> needs both idle. The
+          // readiness gate keeps /search 503 until a quiet tick folds rows in, so
+          // skipping when busy never serves unindexed rows.
+          const byKind = yield* queue.statsByKind.pipe(Effect.catchAll(() => Effect.succeed([] as const)));
+          const inflight = (kind: string): number => {
+            const s = byKind.find((k) => k.kind === kind);
+            return s ? s.pending + s.leased : 0;
+          };
+          const idxBusy = inflight("index-session") > 0;
+          const embBusy = inflight("embed-message") > 0;
+          const indexesCreated: string[] = [];
+          let optimized = false;
+
+          if (!idxBusy) {
+            yield* derived.createLexicalIndex.pipe(Effect.catchAll(() => Effect.void));
+            indexesCreated.push("text_idx");
+            yield* search.optimizeTable({ tableName: DEFAULT_SEARCH_TABLE }).pipe(Effect.catchAll(() => Effect.void));
+            optimized = true;
+          }
+          if (profileTable !== DEFAULT_SEARCH_TABLE && !idxBusy && !embBusy) {
+            yield* derived.createVectorIndex.pipe(Effect.catchAll(() => Effect.void));
             indexesCreated.push("vector_idx");
+            yield* search.optimizeTable({ tableName: profileTable }).pipe(Effect.catchAll(() => Effect.void));
+            optimized = true;
           }
-          if (options.optimize ?? true) {
-            yield* Effect.forEach(activeTables, (tableName) => search.optimizeTable({ tableName }), { discard: true });
-          }
-          const stats = yield* derived.stats;
-          return { indexesCreated, optimized: options.optimize ?? true, stats };
+          const stats = yield* derived.stats.pipe(Effect.catchAll(() => Effect.succeed({ skipped: idxBusy || embBusy } as unknown)));
+          return { indexesCreated, optimized, stats };
         }),
 
       reconcileFreshness: (options = {}) =>

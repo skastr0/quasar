@@ -19,12 +19,7 @@ export interface SessionIngestOutcome {
   readonly searchDocuments?: SearchDocumentPolicyStats;
 }
 
-const positiveIntEnv = (name: string, fallback: number): number => {
-  const raw = process.env[name]?.trim();
-  if (raw === undefined || raw === "") return fallback;
-  const parsed = Number(raw);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
-};
+const EMBEDDING_JOB_MAX_ATTEMPTS = 12;
 
 const searchableMessages = (session: MappedSession): readonly MessageRow[] =>
   session.messages.filter(isSemanticSearchDocument);
@@ -32,7 +27,7 @@ const searchableMessages = (session: MappedSession): readonly MessageRow[] =>
 export const enqueueDownstreamJobs = (queue: DurableQueueService, session: MappedSession): Effect.Effect<number, unknown> =>
   Effect.gen(function* () {
     const embeddingJobNamespace = embeddingProfileJobNamespace(embeddingProfileFromEnv());
-    const embeddingMaxAttempts = positiveIntEnv("QUASAR_EMBEDDING_JOB_MAX_ATTEMPTS", 12);
+    const embeddingMaxAttempts = EMBEDDING_JOB_MAX_ATTEMPTS;
     const messages = searchableMessages(session);
     yield* queue.enqueue({
       kind: "index-session",

@@ -183,7 +183,7 @@ describe("SearchMaintenance", () => {
         const maintenance = yield* SearchMaintenance;
         yield* store.upsertSession(mappedSession());
         yield* search.indexSession("session-a");
-        return yield* maintenance.maintain({ includeVector: false, optimize: true });
+        return yield* maintenance.maintain();
       }),
     );
 

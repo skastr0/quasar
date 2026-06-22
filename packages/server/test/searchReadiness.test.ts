@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { Effect, Layer } from "effect";
 
 import type { MappedSession } from "../src/model";
+import { SearchMaintenance, SearchMaintenanceLive } from "../src/maintenance";
 import { DerivedSearch, DerivedSearchLive } from "../src/search";
 import { SearchReadiness, SearchReadinessLive } from "../src/searchReadiness";
 import { DurableQueue, makeDurableQueueLayer } from "../src/services";
@@ -54,7 +55,7 @@ const msg = (seq: number, role: "user" | "assistant" = "user"): MappedSession["m
 });
 
 const withReadiness = <A>(
-  run: Effect.Effect<A, unknown, LocalStore | LanceDb | DurableQueue | DerivedSearch | SearchReadiness>,
+  run: Effect.Effect<A, unknown, LocalStore | LanceDb | DurableQueue | DerivedSearch | SearchReadiness | SearchMaintenance>,
 ) => {
   const sqlite = join(tempDir(), "quasar.sqlite");
   const lance = join(tempDir(), "search.lance");
@@ -63,7 +64,8 @@ const withReadiness = <A>(
   const searchLayer = DerivedSearchLive.pipe(Layer.provide(dataLayer));
   const allData = Layer.mergeAll(dataLayer, queueLayer, searchLayer);
   const readinessLayer = SearchReadinessLive.pipe(Layer.provide(allData));
-  return Effect.runPromise(run.pipe(Effect.provide(Layer.mergeAll(allData, readinessLayer))));
+  const maintenanceLayer = SearchMaintenanceLive.pipe(Layer.provide(allData));
+  return Effect.runPromise(run.pipe(Effect.provide(Layer.mergeAll(allData, readinessLayer, maintenanceLayer))));
 };
 
 describe("SearchReadiness", () => {
@@ -131,14 +133,18 @@ describe("SearchReadiness", () => {
     expect(result.reason).toContain("stale index watermark");
   });
 
-  test("ready after full index cycle: upsert → indexSession → watermark set", async () => {
+  test("ready after full index cycle: upsert → indexSession → maintain → watermark set", async () => {
     const result = await withReadiness(
       Effect.gen(function* () {
         const store = yield* LocalStore;
         const derived = yield* DerivedSearch;
+        const maintenance = yield* SearchMaintenance;
         const readiness = yield* SearchReadiness;
         yield* store.upsertSession(mappedSession("session-a", [msg(1), msg(2, "assistant")]));
         yield* derived.indexSession("session-a");
+        // The always-on maintenance worker folds newly-written rows into the FTS index.
+        // Call maintain() directly here to simulate one worker tick.
+        yield* maintenance.maintain();
         return yield* readiness.assertSearchReady("lexical");
       }),
     );
@@ -195,9 +201,12 @@ describe("SearchReadiness", () => {
       Effect.gen(function* () {
         const store = yield* LocalStore;
         const derived = yield* DerivedSearch;
+        const maintenance = yield* SearchMaintenance;
         const readiness = yield* SearchReadiness;
         yield* store.upsertSession(mappedSession("session-a", [msg(1)]));
         yield* derived.indexSession("session-a");
+        // The maintenance worker folds rows into the FTS index; simulate one tick.
+        yield* maintenance.maintain();
         // No embed jobs → pendingEmbedJobs=0; no unembedded SQLite messages.
         return yield* readiness.assertSearchReady("semantic");
       }),
@@ -240,17 +249,19 @@ describe("SearchReadiness", () => {
     expect(building.reason).toMatch(/row count mismatch|table not found|searchable messages/i);
   });
 
-  test("optimize-on-ingest makes a freshly-indexed session searchable without manual maintain", async () => {
-    // indexSession now calls createMessageIndexes + optimizeTable inline.
-    // After indexSession, the FTS index should be active (numUnindexedTextRows=0).
+  test("maintenance worker makes a freshly-indexed session searchable", async () => {
+    // indexSession writes rows to LanceDB but does not optimize inline.
+    // The always-on maintenance worker folds rows into the FTS index per table
+    // once writers are idle. Call maintain() directly to simulate one worker tick.
     const [readiness, hits] = await withReadiness(
       Effect.gen(function* () {
         const store = yield* LocalStore;
         const derived = yield* DerivedSearch;
+        const maintenance = yield* SearchMaintenance;
         const readiness = yield* SearchReadiness;
         yield* store.upsertSession(mappedSession("session-a", [msg(1)]));
         yield* derived.indexSession("session-a");
-        // No manual createLexicalIndex call needed here — indexSession does it.
+        yield* maintenance.maintain();
         const result = yield* readiness.assertSearchReady("lexical");
         const hits = yield* derived.lexicalSearch({ query: "message text", limit: 10 });
         return [result, hits] as const;
@@ -259,7 +270,7 @@ describe("SearchReadiness", () => {
 
     expect(readiness.ok).toBe(true);
     expect(readiness.indexStats.numUnindexedTextRows).toBe(0);
-    // lexicalSearch should find the message without a separate maintenance run.
+    // lexicalSearch finds the message after the maintenance worker runs.
     expect(hits.length).toBeGreaterThan(0);
   });
 
