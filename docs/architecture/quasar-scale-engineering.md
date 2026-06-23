@@ -58,6 +58,24 @@ At `num_partitions=244` (=1M//4096), `num_sub_vectors=96` (=768//8), `cosine`:
 [^gpu]: https://lancedb.com/documentation/guides/indexing/gpu-indexing/
 [^storage]: https://docs.lancedb.com/storage
 
+### E8 — vector index recall (REAL embeddings, the C2 decision)  *(DONE)*
+Methodology iterations (each caught a real flaw before it shipped):
+- random 768-d vectors → recall 31–39% — **invalid**: random high-dim vectors are near-equidistant (no NN structure for any ANN to recover). Discarded.
+- real nomic vectors, no refine → IVF_PQ 77% / IVF_FLAT 85% — floor numbers; `nprobes` was a no-op (default 20 ≥ partitions) and `refineFactor` unused.
+- real nomic vectors (100k, above the 65,536 PQ-training floor the KMeans warning names), proper query params:
+
+| config | recall@10 | p50 |
+|---|---|---|
+| ivfPq nprobe=20, refine=none | 67% | 7.4ms |
+| **ivfPq nprobe=20, refine=10** | **97%** | 9.4ms |
+| **ivfPq nprobe=40, refine=25** | **98%** | 9.7ms |
+| ivfFlat nprobe=20 / 40 (lossless) | 81% | 12–14ms |
+
+- Decision: **C2 = IVF_PQ (numPartitions=rows//4096, numSubVectors=dim//8) + query-time `nprobes` + `refineFactor`** above the PQ floor; below 65,536 rows keep `ivfFlat(numPartitions:1)` (brute is sub-10ms at that scale and PQ can't train). `refineFactor` reranks `limit×factor` candidates with full-precision vectors, recovering PQ loss to ~98% recall@10 at ~10ms vs brute-scan's ~seconds at 1M. [^vec][^refine] (recall@10 is tie/duplicate-confounded in this corpus, so ~98% ≈ the practical exact ceiling; the grep end-to-end gate is the final quality arbiter.)
+- ! `quasar-dev` CLI search is broken (`Failed to parse JSON`) — the server endpoint works (curl-verified). CLI fix is part of the planned CLI rewrite.
+
+[^refine]: https://lancedb.github.io/lancedb/js/classes/VectorQuery/ (refineFactor: fetch limit×factor, rerank with full vectors)
+
 ## Scale ceiling (honest, doc-grounded)
 - LanceDB OSS (embedded, what we run) *"comfortably handles **millions** of vectors on a single node."* **Billions = Enterprise/distributed** (distributed indexing, RaBitQ, HNSW centroid routing; p99 21ms @ 10B). [^faq][^10b]
 - Therefore: the MacBook near-term (~1M rows) is dead-center the safe zone. Tens of millions: safe with IVF_PQ + object storage. Hundreds of millions: edge (docs: >500M needs more fragments). Genuine billions on a single embedded node is **outside the OSS envelope** — a distributed/Enterprise decision, not a config tweak.

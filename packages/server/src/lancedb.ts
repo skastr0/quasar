@@ -23,6 +23,13 @@ export const GEMINI_EMBEDDING_DIMENSIONS = 1536;
 export const MESSAGE_VECTOR_INDEX_NAME = "vector_idx";
 export const MESSAGE_TEXT_INDEX_NAME = "text_idx";
 export const MESSAGE_SESSION_INDEX_NAME = "sessionId_idx";
+// Vector ANN tuning (evidence E8). IVF_PQ is built only above the PQ k-means
+// training floor (LanceDB warns below 65536); it is queried with nprobes +
+// refineFactor, which recovers PQ quantization loss to ~98% recall@10 @ ~10ms
+// vs brute-scan's ~seconds at 1M. [docs.lancedb.com vector-index / VectorQuery]
+const IVF_PQ_MIN_ROWS = 65536;
+const VECTOR_SEARCH_NPROBES = 40;
+const VECTOR_SEARCH_REFINE_FACTOR = 25;
 
 export const MESSAGE_SEARCH_COLUMNS = [
   "key",
@@ -561,13 +568,33 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
           // Cannot train a useful vector index until enough rows carry real vectors; skip gracefully.
           return;
         }
+        // Vector index (E8): below the PQ training floor keep brute-scan ivfFlat
+        // (sub-10ms at that scale, and PQ k-means cannot train); at/above the
+        // floor use IVF_PQ at documented params (numPartitions=rows//4096,
+        // numSubVectors=dim//8). Queried with nprobes + refineFactor for ~98%
+        // recall@10. dim is read from the table schema; if unknown or not
+        // divisible by 8, fall back to the lossless brute index. [vector-index doc]
+        const vectorDim = yield* Effect.tryPromise({
+          try: async () => {
+            const schema = await table.schema();
+            const field = schema.fields.find((f) => f.name === DEFAULT_VECTOR_COLUMN);
+            const size = (field?.type as { listSize?: number } | undefined)?.listSize;
+            return typeof size === "number" && size > 0 ? size : undefined;
+          },
+          catch: () => undefined,
+        }).pipe(Effect.catchAll(() => Effect.succeed(undefined as number | undefined)));
+        const useIvfPq = vectorRows >= IVF_PQ_MIN_ROWS && vectorDim !== undefined && vectorDim % 8 === 0;
+        const vectorConfig = useIvfPq
+          ? lancedb.Index.ivfPq({
+              distanceType: "cosine",
+              numPartitions: Math.max(1, Math.floor(vectorRows / 4096)),
+              numSubVectors: Math.floor((vectorDim as number) / 8),
+            })
+          : lancedb.Index.ivfFlat({ distanceType: "cosine", numPartitions: 1 });
         yield* Effect.tryPromise({
           try: () =>
             table.createIndex(DEFAULT_VECTOR_COLUMN, {
-              config: lancedb.Index.ivfFlat({
-                distanceType: "cosine",
-                numPartitions: 1,
-              }),
+              config: vectorConfig,
               name: MESSAGE_VECTOR_INDEX_NAME,
               replace,
               waitTimeoutSeconds: 60,
@@ -869,6 +896,8 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
         let query = table
           .vectorSearch([...request.vector])
           .column(vectorColumn)
+          .nprobes(VECTOR_SEARCH_NPROBES)
+          .refineFactor(VECTOR_SEARCH_REFINE_FACTOR)
           .limit(limitOrDefault(request.limit))
           .select(selectOrDefault(request.select));
         if (request.filter !== undefined) {
@@ -927,6 +956,8 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
           .query()
           .nearestTo([...request.vector])
           .column(vectorColumn)
+          .nprobes(VECTOR_SEARCH_NPROBES)
+          .refineFactor(VECTOR_SEARCH_REFINE_FACTOR)
           .fullTextSearch(request.query, { columns: textColumn })
           .rerank(reranker)
           .limit(limit);
