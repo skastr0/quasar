@@ -3,7 +3,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
-const DEFAULT_SERVER = process.env.QUASAR_SERVER_URL ?? "http://127.0.0.1:6180";
+const DEFAULT_SERVER = process.env.QUASAR_SERVER_URL ?? "http://127.0.0.1:7180";
 const DEFAULT_LIMIT = 5;
 
 const querySet = [
