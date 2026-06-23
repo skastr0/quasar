@@ -36,7 +36,7 @@ const command =
   : rawCommand;
 const cliPackage = {
   name: "@skastr0/quasar-cli",
-  version: "0.1.7",
+  version: "0.2.0",
 };
 
 const server = (): string | undefined => arg("--server") ?? configuredServerUrl();
@@ -55,9 +55,9 @@ class ConfigurationError extends Error {
             acceptedEnv: ["QUASAR_SERVER_URL"],
             acceptedConfigFields: ["serverUrl"],
             examples: [
-              "quasar <command> --server http://127.0.0.1:6180",
-              "export QUASAR_SERVER_URL=http://127.0.0.1:6180",
-              `write {"serverUrl":"http://127.0.0.1:6180"} to ${defaultClientConfigPath()}`,
+              "quasar <command> --server http://127.0.0.1:7180",
+              "export QUASAR_SERVER_URL=http://127.0.0.1:7180",
+              `write {"serverUrl":"http://127.0.0.1:7180"} to ${defaultClientConfigPath()}`,
             ],
           }
         : {
@@ -104,10 +104,10 @@ const xml = (value: string) => value
 const daemonBinary = () => arg("--binary") ?? process.env.QUASAR_DAEMON_BINARY ?? process.execPath;
 
 const daemonInterval = () => {
-  const raw = arg("--interval-seconds") ?? process.env.QUASAR_DAEMON_INTERVAL_SECONDS ?? "60";
+  const raw = arg("--interval-seconds") ?? process.env.QUASAR_DAEMON_INTERVAL_SECONDS ?? "15";
   const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed < 60) {
-    throw new Error(`--interval-seconds must be an integer >= 60, got ${raw}`);
+  if (!Number.isInteger(parsed) || parsed < 10) {
+    throw new Error(`--interval-seconds must be an integer >= 10, got ${raw}`);
   }
   return parsed;
 };
