@@ -107,30 +107,26 @@ describe("SearchReadiness", () => {
     expect(result.reason).toMatch(/row count mismatch|table not found|searchable messages/i);
   });
 
-  test("not ready when rows exist but text_idx has unindexed rows", async () => {
-    // Write rows to LanceDB without creating the FTS index.
+  test("serves despite a stale index watermark — a catching-up tail is not degraded (C1)", async () => {
+    // E3 + docs.lancedb.com/indexing/fts-index: LanceDB serves rows regardless of
+    // whether the FTS index has caught up; an unindexed/stale tail yields
+    // complete-or-current results, never wrong ones. Staleness is DISCLOSED, not a 503.
     const result = await withReadiness(
       Effect.gen(function* () {
         const store = yield* LocalStore;
         const derived = yield* DerivedSearch;
         const readiness = yield* SearchReadiness;
         yield* store.upsertSession(mappedSession("session-a", [msg(1)]));
-        // indexSession writes rows but also calls createMessageIndexes + optimizeTable.
-        // We need to isolate: upsert session → LanceDB rows present, but check BEFORE
-        // the FTS index is active. Since indexSession now auto-creates the index,
-        // we use store.markSessionIndexStale to simulate a stale watermark after indexing.
-        yield* derived.indexSession("session-a");
-        // Force the watermark back to stale to simulate a session that was re-ingested
-        // but not yet re-indexed (the staleness path that the gate must catch).
+        yield* derived.indexSession("session-a"); // LanceDB table now exists with the row
+        // Re-mark the watermark stale (re-ingested-but-not-yet-reindexed).
         yield* store.markSessionIndexStale("session-a");
         return yield* readiness.assertSearchReady("lexical");
       }),
     );
 
-    // Watermark is stale even though LanceDB row count matches.
-    expect(result.ok).toBe(false);
+    // Table exists → serve. Watermark staleness is disclosed but never blocks.
+    expect(result.ok).toBe(true);
     expect(result.indexStats.staleSessions).toBeGreaterThan(0);
-    expect(result.reason).toContain("stale index watermark");
   });
 
   test("ready after full index cycle: upsert → indexSession → maintain → watermark set", async () => {
@@ -155,22 +151,12 @@ describe("SearchReadiness", () => {
     expect(result.indexStats.numUnindexedTextRows).toBe(0);
   });
 
-  test("semantic/fusion not ready when unembedded messages remain", async () => {
-    // contentHash LIKE 'unembedded:%' is set by indexedContentHash() for all
-    // searchable-role messages (since they haven't been embedded yet).
-    // After indexSession, SQLite messages still have their original contentHash
-    // from the ingest, not the 'unembedded:' prefix. The prefix is only added
-    // when writing to LanceDB (via indexedContentHash in search.ts). However,
-    // SQLite's messages table stores the RAW contentHash. The store.countUnembeddedMessages()
-    // method counts messages WHERE content_hash LIKE 'unembedded:%' — but the
-    // ingest sets plain contentHashes, not unembedded: ones.
-    //
-    // The actual semantic readiness depends on embed-message queue jobs and
-    // LanceDB VECTOR_READY_FILTER rows (not SQLite messages). For the SQLite
-    // countUnembeddedMessages() method to return > 0, messages would need
-    // contentHash='unembedded:...' which isn't what ingest writes.
-    //
-    // So: semantic not-ready is signalled by pendingEmbedJobs > 0.
+  test("serves semantic while embeds are pending — incomplete-but-correct, disclosed not blocked (C1)", async () => {
+    // E5 + E3: rows still pending embed are simply ABSENT from vector results
+    // (incomplete-but-correct), surfaced via indexStats.pendingEmbedJobs /
+    // missingVectorCount. Semantic still serves the embedded subset — no 503.
+    // The embed frontier is ~one synthetic round-trip (~400ms measured), not a
+    // gate. This is the difference between "incomplete" and "garbage".
     const result = await withReadiness(
       Effect.gen(function* () {
         const store = yield* LocalStore;
@@ -178,7 +164,7 @@ describe("SearchReadiness", () => {
         const queue = yield* DurableQueue;
         const readiness = yield* SearchReadiness;
         yield* store.upsertSession(mappedSession("session-a", [msg(1)]));
-        yield* derived.indexSession("session-a");
+        yield* derived.indexSession("session-a"); // table exists
         // Enqueue an embed-message job to simulate pending embedding work.
         yield* queue.enqueue({
           kind: "embed-message",
@@ -189,10 +175,8 @@ describe("SearchReadiness", () => {
       }),
     );
 
-    expect(result.ok).toBe(false);
-    expect(result.missingVectorCount).toBeGreaterThanOrEqual(0);
+    expect(result.ok).toBe(true);
     expect(result.indexStats.pendingEmbedJobs).toBeGreaterThan(0);
-    expect(result.reason).toContain("embed-message jobs pending/leased");
   });
 
   test("semantic ready after all embed jobs complete", async () => {
