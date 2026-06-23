@@ -186,48 +186,32 @@ export const SearchReadinessLive = Layer.effect(
             return { ok: true, mode, staleCount: 0, missingVectorCount: 0, indexStats } satisfies ReadinessResult;
           }
 
-          // ── Lexical readiness ───────────────────────────────────────────────
-          const rowCountMismatch = lanceRowCount !== sqliteSearchableCount;
-          const textIndexStale = numUnindexedTextRows > 0;
-          const watermarkStale = staleSessions > 0;
-
-          const staleCount = numUnindexedTextRows + (rowCountMismatch ? Math.abs(lanceRowCount - sqliteSearchableCount) : 0);
-          const lexicalReady = !rowCountMismatch && !textIndexStale && !watermarkStale;
-
-          if (mode === "lexical") {
-            if (!lexicalReady) {
-              const reasons: string[] = [];
-              if (rowCountMismatch) reasons.push(`row count mismatch: lance=${lanceRowCount} sqlite=${sqliteSearchableCount}`);
-              if (textIndexStale) reasons.push(`text_idx has ${numUnindexedTextRows} unindexed rows`);
-              if (watermarkStale) reasons.push(`${staleSessions} sessions have stale index watermark`);
-              return { ok: false, mode, staleCount, missingVectorCount: 0, indexStats, reason: reasons.join("; ") } satisfies ReadinessResult;
-            }
-            return { ok: true, mode, staleCount: 0, missingVectorCount: 0, indexStats } satisfies ReadinessResult;
-          }
-
-          // ── Semantic / fusion readiness (superset of lexical) ───────────────
-          const semanticReady = lexicalReady && unembeddedVectorRows === 0 && pendingEmbedJobs === 0;
-
-          if (!semanticReady) {
-            const reasons: string[] = [];
-            if (!lexicalReady) {
-              if (rowCountMismatch) reasons.push(`row count mismatch: lance=${lanceRowCount} sqlite=${sqliteSearchableCount}`);
-              if (textIndexStale) reasons.push(`text_idx has ${numUnindexedTextRows} unindexed rows`);
-              if (watermarkStale) reasons.push(`${staleSessions} sessions have stale index watermark`);
-            }
-            if (unembeddedVectorRows > 0) reasons.push(`${unembeddedVectorRows} messages lack real vectors`);
-            if (pendingEmbedJobs > 0) reasons.push(`${pendingEmbedJobs} embed-message jobs pending/leased`);
-            return {
-              ok: false,
-              mode,
-              staleCount,
-              missingVectorCount: unembeddedVectorRows,
-              indexStats,
-              reason: reasons.join("; "),
-            } satisfies ReadinessResult;
-          }
-
-          return { ok: true, mode, staleCount: 0, missingVectorCount: 0, indexStats } satisfies ReadinessResult;
+          // ── Serve unless we genuinely cannot ────────────────────────────────
+          // Evidence E3 (docs.lancedb.com/indexing/fts-index, confirmed by a 30k-row
+          // measurement): LanceDB FTS AND vector search BOTH include newly-added,
+          // un-optimized rows — FTS via a flat scan on the unindexed portion, vector
+          // via flat scan. So a catching-up index returns COMPLETE-or-CURRENT results,
+          // never WRONG ones. An unindexed/stale tail is therefore a latency property,
+          // not a correctness one, and is DISCLOSED via indexStats — never a 503.
+          //
+          // "Rather crash than serve garbage" is preserved: the hard failures above
+          // (LanceDB read error, or table-missing while SQLite has rows) and the
+          // catch-all below still fail closed, and the garbage SOURCES (raw-JSON
+          // message text, vector clobber, stale table handle) are fixed. A
+          // catching-up index is not garbage.
+          //
+          // Semantic frontier: rows still pending embed are simply ABSENT from vector
+          // results (incomplete-but-correct), surfaced as missingVectorCount so the
+          // caller can see how far behind the embed frontier is. Lexical has no such
+          // frontier (FTS needs no embedding).
+          const disclosedStale = numUnindexedTextRows + (lanceRowCount !== sqliteSearchableCount ? Math.abs(lanceRowCount - sqliteSearchableCount) : 0);
+          return {
+            ok: true,
+            mode,
+            staleCount: disclosedStale,
+            missingVectorCount: unembeddedVectorRows,
+            indexStats,
+          } satisfies ReadinessResult;
         }).pipe(
           // Absolute catch-all: any unexpected exception → fail closed.
           Effect.catchAll((error: unknown) =>
