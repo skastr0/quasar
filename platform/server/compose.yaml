@@ -12,10 +12,11 @@ services:
     env_file:
       - ./.env
     ports:
-      # For Mac mini Tailscale access, set QUASAR_PUBLISH_HOST to the Mac mini's
-      # Tailscale IP if Docker Desktop can bind it; otherwise use 0.0.0.0 and
-      # rely on Tailscale ACLs / macOS firewall. Prefer IP over MagicDNS.
-      - "${QUASAR_PUBLISH_HOST:-0.0.0.0}:${QUASAR_LOCAL_PORT:-6180}:6180"
+      # Canonical quasar API is published on QUASAR_PUBLISH_PORT (host) -> 6180
+      # (container). 7180 is dedicated to quasar; 6180 on this host belongs to an
+      # unrelated dev server. QUASAR_PUBLISH_HOST=0.0.0.0 binds loopback + the
+      # Tailscale interface, so the canonical URL is http://<tailnet-ip>:7180.
+      - "${QUASAR_PUBLISH_HOST:-0.0.0.0}:${QUASAR_PUBLISH_PORT:-7180}:6180"
     volumes:
       - quasar-data:/data/quasar
     environment:
