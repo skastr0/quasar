@@ -94,6 +94,14 @@ Methodology iterations (each caught a real flaw before it shipped):
 - run an external suite (LongMemEval/LoCoMo subset) for comparability to Mem0/Supermemory.
 **Framing:** Quasar is a *conversation/memory* engine, not a code-search engine (Sourcegraph/Windsurf own code-structure) — do not chase that lane.
 
+### E10 — second-opinion review (grok/opencode/agy) + measured fixes  *(DONE)*
+grok **rejected** / antigravity **failed** the C1–C3 change set with convergent, valid findings (opencode worker errored). Each fixed with evidence:
+- **B — recall at scale (the big catch):** nprobes=40 was fine at 100k but my "1M validated" was latency-only. Measured recall@10 at **1M** (clustered vectors, partitions=244): refine=25 → **65%** at every nprobe (40/100/244); **refine=50 → 100% @ nprobes=40, p50 23ms**. So `refineFactor` (candidate-set width), not nprobes, is the scale lever. Fix: `VECTOR_SEARCH_REFINE_FACTOR` 25→50.
+- **A — frozen index:** `createMessageIndexes` early-returned forever once `vector_idx` existed → ivfFlat never became IVF_PQ as a corpus crossed the floor (matters for the MacBook ingest growing past 65,536). Fix: it now compares the existing index type to the desired one and force-replaces on mismatch (ivfFlat→IVF_PQ); a matching type is kept (optimize folds new rows in). Partition-drift rebuild (perf-creep at extreme growth) is a tracked follow-up.
+- **C — build timeout:** `waitTimeoutSeconds` 60→1800 (IVF_PQ build is ~123s/1M per E7; 60s would time out at scale).
+- **D — garbage invariant: clean.** Unembedded zero-vector rows are excluded from BOTH semantic and fusion via `VECTOR_READY_FILTER` (server.ts:453/477). The re-ingest stale window serves brief was-true content (freshness-lag), not wrong results; minimized by event-driven indexing (C5).
+- Honest gap surfaced: recall at **10M** with real (less-clustered) data is unproven — nprobe scaling there is a validate-when-approaching follow-up.
+
 ## Scale ceiling (honest, doc-grounded)
 - LanceDB OSS (embedded, what we run) *"comfortably handles **millions** of vectors on a single node."* **Billions = Enterprise/distributed** (distributed indexing, RaBitQ, HNSW centroid routing; p99 21ms @ 10B). [^faq][^10b]
 - Therefore: the MacBook near-term (~1M rows) is dead-center the safe zone. Tens of millions: safe with IVF_PQ + object storage. Hundreds of millions: edge (docs: >500M needs more fragments). Genuine billions on a single embedded node is **outside the OSS envelope** — a distributed/Enterprise decision, not a config tweak.

@@ -28,8 +28,16 @@ export const MESSAGE_SESSION_INDEX_NAME = "sessionId_idx";
 // refineFactor, which recovers PQ quantization loss to ~98% recall@10 @ ~10ms
 // vs brute-scan's ~seconds at 1M. [docs.lancedb.com vector-index / VectorQuery]
 const IVF_PQ_MIN_ROWS = 65536;
+// refineFactor is the recall lever at scale (review finding B): measured recall@10
+// at 1M was 65% with refine=25 but 100% with refine=50 (nprobes=40, p50 23ms) —
+// refine widens the full-precision rerank candidate set (limit×factor), which is
+// what scale needs; nprobes=40 is sufficient (more only adds latency). 10M-scale
+// nprobe scaling is a follow-up to validate when the corpus approaches it.
 const VECTOR_SEARCH_NPROBES = 40;
-const VECTOR_SEARCH_REFINE_FACTOR = 25;
+const VECTOR_SEARCH_REFINE_FACTOR = 50;
+// IVF_PQ build is ~123s/1M (E7) and tens of minutes at 10M; a 60s build timeout
+// would fail the maintenance worker's index build at scale (review finding C).
+const VECTOR_INDEX_BUILD_TIMEOUT_SECONDS = 1800;
 
 export const MESSAGE_SEARCH_COLUMNS = [
   "key",
@@ -557,9 +565,6 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
         if (request.includeVector === false) {
           return;
         }
-        if (existingIndexNames.has(MESSAGE_VECTOR_INDEX_NAME) && !replace) {
-          return;
-        }
         const vectorRows = yield* Effect.tryPromise({
           try: () => table.countRows(request.vectorRowsFilter),
           catch: (cause) => makeOperationError(tableName, "countRows", cause),
@@ -584,6 +589,16 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
           catch: () => undefined,
         }).pipe(Effect.catchAll(() => Effect.succeed(undefined as number | undefined)));
         const useIvfPq = vectorRows >= IVF_PQ_MIN_ROWS && vectorDim !== undefined && vectorDim % 8 === 0;
+        // Migrate the existing index when its type no longer matches the desired
+        // one as the corpus crosses the PQ floor (review finding A: the index must
+        // not stay frozen as the corpus grows). ivfFlat -> IVF_PQ is forced via
+        // replace; a matching type is left in place (optimize() folds new rows in).
+        const existingVec = existingIndexes.find((index) => index.name === MESSAGE_VECTOR_INDEX_NAME);
+        const existingIsPq = existingVec !== undefined && /pq/i.test((existingVec as { indexType?: string }).indexType ?? "");
+        if (existingVec !== undefined && existingIsPq === useIvfPq && !replace) {
+          return; // correct index type already present
+        }
+        const mustReplace = replace || existingVec !== undefined;
         const vectorConfig = useIvfPq
           ? lancedb.Index.ivfPq({
               distanceType: "cosine",
@@ -596,8 +611,8 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
             table.createIndex(DEFAULT_VECTOR_COLUMN, {
               config: vectorConfig,
               name: MESSAGE_VECTOR_INDEX_NAME,
-              replace,
-              waitTimeoutSeconds: 60,
+              replace: mustReplace,
+              waitTimeoutSeconds: VECTOR_INDEX_BUILD_TIMEOUT_SECONDS,
             }),
           catch: (cause) => detectIndexNotReady(tableName, MESSAGE_VECTOR_INDEX_NAME, "createVectorIndex", cause),
         });
