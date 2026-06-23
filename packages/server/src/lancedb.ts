@@ -22,6 +22,7 @@ export const DEFAULT_FUSION_K = 60;
 export const GEMINI_EMBEDDING_DIMENSIONS = 1536;
 export const MESSAGE_VECTOR_INDEX_NAME = "vector_idx";
 export const MESSAGE_TEXT_INDEX_NAME = "text_idx";
+export const MESSAGE_SESSION_INDEX_NAME = "sessionId_idx";
 
 export const MESSAGE_SEARCH_COLUMNS = [
   "key",
@@ -526,6 +527,23 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
                 waitTimeoutSeconds: 60,
               }),
             catch: (cause) => detectIndexNotReady(tableName, MESSAGE_TEXT_INDEX_NAME, "createFtsIndex", cause),
+          });
+        }
+
+        // Scalar BTREE on sessionId — the per-session deleteOrphans / no-clobber
+        // reads filter by sessionId; without this they are O(table) per call
+        // (evidence E2). BTREE build is trivial (E7: 0.1s @ 1M) and works at any
+        // size, so it is unconditional. [docs.lancedb.com scalar-index]
+        if (replace || !existingIndexNames.has(MESSAGE_SESSION_INDEX_NAME)) {
+          yield* Effect.tryPromise({
+            try: () =>
+              table.createIndex("sessionId", {
+                config: lancedb.Index.btree(),
+                name: MESSAGE_SESSION_INDEX_NAME,
+                replace,
+                waitTimeoutSeconds: 60,
+              }),
+            catch: (cause) => detectIndexNotReady(tableName, MESSAGE_SESSION_INDEX_NAME, "createSessionIndex", cause),
           });
         }
 

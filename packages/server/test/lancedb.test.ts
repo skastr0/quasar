@@ -134,7 +134,7 @@ describe("LanceDb", () => {
       }),
     );
 
-    expect(result.indexNames).toEqual(["text_idx", "vector_idx"]);
+    expect([...result.indexNames].sort()).toEqual(["sessionId_idx", "text_idx", "vector_idx"]);
     expect(result.hits.map((hit) => hit.key)).toContain("session-b:1:assistant");
     expect(result.hits.map((hit) => hit.key)).toContain("session-c:1:assistant");
     expect(result.hits[0]?.key).toBe("session-a:1:user");
@@ -200,7 +200,7 @@ describe("LanceDb", () => {
       }),
     );
 
-    expect(indexNames).toEqual(["text_idx"]);
+    expect([...indexNames].sort()).toEqual(["sessionId_idx", "text_idx"]);
   });
 
   test("semantic search can filter out lexical-only placeholder vectors", async () => {
@@ -435,8 +435,8 @@ describe("LanceDb", () => {
       }),
     );
 
-    expect(firstStats.indices.map((index) => index.name).sort()).toEqual(["text_idx", "vector_idx"]);
-    expect(secondStats.indices.map((index) => index.name).sort()).toEqual(["text_idx", "vector_idx"]);
+    expect(firstStats.indices.map((index) => index.name).sort()).toEqual(["sessionId_idx", "text_idx", "vector_idx"]);
+    expect(secondStats.indices.map((index) => index.name).sort()).toEqual(["sessionId_idx", "text_idx", "vector_idx"]);
     expect(secondStats.disk.totalBytes).toBe(firstStats.disk.totalBytes);
   });
 
@@ -503,7 +503,7 @@ describe("LanceDb", () => {
     );
 
     expect(stats.rowCount).toBe(1);
-    expect(stats.indices.map((index) => index.name).sort()).toEqual(["text_idx", "vector_idx"]);
+    expect(stats.indices.map((index) => index.name).sort()).toEqual(["sessionId_idx", "text_idx", "vector_idx"]);
     expect(stats.indices[0]?.numIndexedRows).toBe(1);
     expect(stats.disk.totalBytes).toBeGreaterThan(0);
     expect(stats.disk.dataBytes).toBeGreaterThanOrEqual(0);
