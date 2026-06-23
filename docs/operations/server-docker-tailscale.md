@@ -18,7 +18,7 @@ chmod 600 platform/server/.env
 Set at least:
 
 - `QUASAR_PUBLISH_HOST=0.0.0.0` unless Docker can bind the Tailscale IP directly.
-- `QUASAR_LOCAL_PORT=6180`.
+- `QUASAR_PUBLISH_PORT=7180` (host publish port; the container always binds 6180 internally). 7180 is dedicated to quasar — 6180 on the Mac mini belongs to an unrelated dev server. The canonical client URL is `http://<mac-mini-tailnet-ip>:7180`.
 - `QUASAR_INGEST_TOKEN=<long random token>`. Remote write ingest is disabled unless this is configured, and client machines must send the same token.
 - `QUASAR_EMBEDDING_PROVIDER=synthetic` and Synthetic/Nomic profile values for bulk text embeddings.
 - `SYNTHETIC_API_KEY` in the environment or the invoking shell. `scripts/server-ops.mjs deploy` will also read it from the Mac mini interactive zsh environment when it is not already exported.
@@ -102,7 +102,7 @@ On the Mac mini, verify the service host:
 tailscale serve get-config --all
 tailscale serve status --json
 tailscale status --json | jq -r '.Self.CapMap."service-host"[0]."svc:quasar"[]'
-curl -fsS http://127.0.0.1:6180/health
+curl -fsS http://127.0.0.1:7180/health
 ```
 
 If the service hostname does not resolve on the Mac mini itself, inspect the
