@@ -518,6 +518,75 @@ const maintenanceRepair = Effect.gen(function* () {
   return json(ok("maintenance/repair", report));
 });
 
+// Minimal self-contained dashboard served at the canonical root URL. No external
+// assets or egress: it calls the same-origin /status and /search/{mode} endpoints.
+const DASHBOARD_HTML = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Quasar</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; background:#0b0e14; color:#c9d1d9; }
+  header { padding:16px 20px; border-bottom:1px solid #1c2230; display:flex; align-items:baseline; gap:12px; }
+  header h1 { margin:0; font-size:18px; color:#7ee787; letter-spacing:1px; }
+  header .status { color:#768390; font-size:12px; }
+  main { max-width:920px; margin:0 auto; padding:20px; }
+  form { display:flex; gap:8px; margin-bottom:16px; flex-wrap:wrap; }
+  input[type=text] { flex:1; min-width:240px; padding:10px 12px; background:#11151f; border:1px solid #1c2230; border-radius:6px; color:#c9d1d9; font:inherit; }
+  select, button { padding:10px 12px; background:#11151f; border:1px solid #1c2230; border-radius:6px; color:#c9d1d9; font:inherit; cursor:pointer; }
+  button { background:#238636; border-color:#2ea043; color:#fff; }
+  button:hover { background:#2ea043; }
+  .meta { color:#768390; font-size:12px; margin-bottom:12px; min-height:16px; }
+  .result { padding:12px; border:1px solid #1c2230; border-radius:6px; margin-bottom:10px; background:#0e121b; }
+  .result .head { display:flex; gap:10px; align-items:center; font-size:12px; color:#768390; margin-bottom:6px; }
+  .badge { padding:1px 8px; border-radius:10px; background:#1c2230; color:#7ee787; font-size:11px; }
+  .result .text { white-space:pre-wrap; word-break:break-word; color:#adbac7; }
+  .empty { color:#768390; padding:24px; text-align:center; }
+</style>
+</head>
+<body>
+<header><h1>QUASAR</h1><span class="status" id="status">connecting…</span></header>
+<main>
+  <form id="f">
+    <input type="text" id="q" placeholder="search session memory…" autofocus>
+    <select id="mode"><option value="fusion">fusion</option><option value="lexical">lexical</option><option value="semantic">semantic</option></select>
+    <button type="submit">search</button>
+  </form>
+  <div class="meta" id="meta"></div>
+  <div id="results"></div>
+</main>
+<script>
+  var statusEl=document.getElementById("status");
+  fetch("/status").then(function(r){return r.json()}).then(function(d){
+    var s=(((d.data||{}).sqlite||{}).right)||{};
+    statusEl.textContent="server ok"+(s.sessions!=null?(" · "+s.sessions+" sessions"):"");
+  }).catch(function(){statusEl.textContent="server unreachable";});
+  function esc(s){return String(s==null?"":s).replace(/[&<>]/g,function(c){return c==="&"?"&amp;":c==="<"?"&lt;":"&gt;";});}
+  var resultsEl=document.getElementById("results"), metaEl=document.getElementById("meta");
+  document.getElementById("f").addEventListener("submit",function(e){
+    e.preventDefault();
+    var q=document.getElementById("q").value.trim(), mode=document.getElementById("mode").value;
+    if(!q){return;}
+    metaEl.textContent="searching…"; resultsEl.innerHTML=""; var t0=Date.now();
+    fetch("/search/"+mode+"?q="+encodeURIComponent(q)+"&limit=20").then(function(r){return r.json()}).then(function(d){
+      var m=((d.data||{}).matches)||[];
+      metaEl.textContent=m.length+" results · "+mode+" · "+(Date.now()-t0)+"ms";
+      if(!m.length){resultsEl.innerHTML='<div class="empty">no matches</div>';return;}
+      resultsEl.innerHTML=m.map(function(x){
+        var row=x.row||x, sid=String(row.sessionId||""), prov=sid.split(":")[0]||"?", text=String(row.text||row.preview||"");
+        return '<div class="result"><div class="head"><span class="badge">'+esc(prov)+'</span><span>'+esc(sid)+'</span></div><div class="text">'+esc(text.slice(0,600))+'</div></div>';
+      }).join("");
+    }).catch(function(err){metaEl.textContent="error: "+err;});
+  });
+</script>
+</body>
+</html>`;
+
+const dashboard = HttpServerResponse.html(DASHBOARD_HTML);
+
 const routes = HttpRouter.empty.pipe(
   HttpRouter.get("/health", health),
   HttpRouter.get("/ready", ready),
@@ -537,7 +606,7 @@ const routes = HttpRouter.empty.pipe(
   HttpRouter.get("/maintenance/run", maintenanceRun),
   HttpRouter.get("/maintenance/freshness", maintenanceFreshness),
   HttpRouter.get("/maintenance/repair", maintenanceRepair),
-  HttpRouter.get("/", json(ok("root", { service: "quasar-server" }))),
+  HttpRouter.get("/", dashboard),
   HttpRouter.get("*", json({ ok: false, error: { type: "NotFound", message: "No route" } }, { status: 404 })),
 );
 
