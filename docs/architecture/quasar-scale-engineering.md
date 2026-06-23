@@ -76,6 +76,24 @@ Methodology iterations (each caught a real flaw before it shipped):
 
 [^refine]: https://lancedb.github.io/lancedb/js/classes/VectorQuery/ (refineFactor: fetch limit×factor, rerank with full vectors)
 
+### E9 — live deploy + quality gate (C1+C2+C3)  *(DONE)*
+- Deployed C1 (gate) + C2 (IVF_PQ) + C3 (BTREE); migrated the live nomic index ivfFlat→IVF_PQ (deduped a duplicate `vector_idx`). Live indices: `text_idx:FTS, sessionId_idx:BTree, vector_idx:IvfPq`.
+- **Quality gate: IDENTICAL top-5 results** on 10 cross-harness queries, brute/exact baseline vs IVF_PQ+refine → **zero relevance regression** (98% recall@10 ⇒ no end-to-end change), all clean (json=0), all cross-harness.
+- Latency (warm, end-to-end via server): semantic ~0.13s, fusion ~0.14s (was ~0.32s/0.42s on brute; raw IVF_PQ query ~10ms). First query after rebuild ~1.1s (cold index page-in — pre-warm is a cheap follow-up).
+- Commits: `daa0997` C1, `bdbd5b7` C3, `99792f5` C2 (on main).
+
+## Competitive position + "by a mile" roadmap (scorecard wj3rwempk)
+**Uncontested moat (no competitor has the data model):** cross-harness unification of the *full raw* message corpus across 7 AI harnesses, local + zero-egress, hybrid BM25+vector+RRF. Quasar-ahead: cross-harness + semantic-over-raw-history. Parity: local/private, agent-MCP.
+**Honest gaps (quasar-behind) → the by-a-mile bar (measurable):**
+- exact-identifier latency (rg sub-10ms cold) → expand benchmark to 20q incl exact-identifier/boolean/fuzzy, **never lose the exact-identifier lane**, beat rg+ugrep ≥18/20.
+- no cross-encoder reranker → add one (top-50–200), target **+7 nDCG@10** (the single biggest published lever).
+- mid-tier embed model (nomic ~62 MTEB) → bake-off vs a ≥70-MTEB model (Qwen3-Embedding), target **+10% recall@10**.
+- freshness lag → **ingest→searchable < 60s** end-to-end, exposed via /freshness (embed frontier is ~400ms per E5 — very achievable).
+- scale unproven beyond ~180k → validate IVF_PQ recall + p95 at **1M and 10M** (p95 semantic <400ms, lexical <50ms; E7 covers 1M ingest/index/latency).
+- ship **cross-harness aggregation** queries as first-class demoable features ("every session where grok disagreed with claude") — the one thing no competitor can answer at all.
+- run an external suite (LongMemEval/LoCoMo subset) for comparability to Mem0/Supermemory.
+**Framing:** Quasar is a *conversation/memory* engine, not a code-search engine (Sourcegraph/Windsurf own code-structure) — do not chase that lane.
+
 ## Scale ceiling (honest, doc-grounded)
 - LanceDB OSS (embedded, what we run) *"comfortably handles **millions** of vectors on a single node."* **Billions = Enterprise/distributed** (distributed indexing, RaBitQ, HNSW centroid routing; p99 21ms @ 10B). [^faq][^10b]
 - Therefore: the MacBook near-term (~1M rows) is dead-center the safe zone. Tens of millions: safe with IVF_PQ + object storage. Hundreds of millions: edge (docs: >500M needs more fragments). Genuine billions on a single embedded node is **outside the OSS envelope** — a distributed/Enterprise decision, not a config tweak.
