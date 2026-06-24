@@ -30,7 +30,7 @@ const usage = {
     "bun scripts/server-ops.mjs deploy",
     "bun scripts/server-ops.mjs status --lance",
     "bun scripts/server-ops.mjs lance",
-    "bun scripts/server-ops.mjs maintain --vector true --optimize true",
+    "bun scripts/server-ops.mjs maintain",
     "bun scripts/server-ops.mjs exec -- sh -lc 'ls -lah /data/quasar'",
   ],
 };
@@ -81,7 +81,7 @@ switch (command) {
     break;
   }
   case "maintain":
-    containerGetJson("/maintenance/run?vector=true&optimize=true");
+    containerGetJson("/maintenance/run");
     break;
   case "backup":
     backupTruth();
