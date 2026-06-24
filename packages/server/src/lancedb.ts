@@ -1,7 +1,7 @@
 import * as lancedb from "@lancedb/lancedb";
 import { Field, FixedSizeList, Float32, Int32, Schema as ArrowSchema, Utf8 } from "apache-arrow";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
-import { readdir, stat } from "node:fs/promises";
+import { readdir, rm, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -9,7 +9,6 @@ import type {
   Connection,
   IndexConfig,
   IndexStatistics,
-  OptimizeStats,
   Table,
   TableStatistics,
 } from "@lancedb/lancedb";
@@ -170,13 +169,6 @@ export interface HybridSearchRequest extends TableRequest {
   readonly select?: readonly string[];
 }
 
-export interface OptimizeTableRequest extends TableRequest {
-  /** Remove versions older than this date. Defaults to now (all old versions). */
-  readonly cleanupOlderThan?: Date;
-  /** Delete unverified files older than cleanupOlderThan. Only set true when no concurrent writers. */
-  readonly deleteUnverified?: boolean;
-}
-
 export interface TableStatsRequest extends TableRequest {}
 
 export interface IndexInfo {
@@ -204,11 +196,6 @@ export interface TableStatsReport {
   readonly disk: DiskSizeBreakdown;
   readonly tableStats: TableStatistics;
   readonly indices: readonly IndexInfo[];
-}
-
-export interface OptimizeTableReport {
-  readonly tableName: string;
-  readonly stats: OptimizeStats;
 }
 
 export interface SearchHit {
@@ -532,6 +519,21 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
         });
         const existingIndexNames = new Set(existingIndexes.map((index) => index.name));
 
+        // On replace, DROP each existing index before recreating, rather than relying
+        // on createIndex({replace:true}). createIndex(replace) on an existing FTS index
+        // takes a "load legacy FTS index" merge path that panics in the Rust
+        // inverted-index builder (lance#1987) and aborts the process; a clean
+        // drop+create builds fresh and avoids it. Drops are best-effort.
+        if (replace) {
+          for (const name of [MESSAGE_TEXT_INDEX_NAME, MESSAGE_SESSION_INDEX_NAME, MESSAGE_VECTOR_INDEX_NAME]) {
+            if (!existingIndexNames.has(name)) continue;
+            yield* Effect.tryPromise({
+              try: () => table.dropIndex(name),
+              catch: (cause) => makeOperationError(tableName, `dropIndex(${name})`, cause),
+            }).pipe(Effect.catchAll(() => Effect.void));
+          }
+        }
+
         if (replace || !existingIndexNames.has(MESSAGE_TEXT_INDEX_NAME)) {
           yield* Effect.tryPromise({
             try: () =>
@@ -618,20 +620,16 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
         });
       });
 
-    const optimizeTable = (request: OptimizeTableRequest = {}): Effect.Effect<OptimizeTableReport, LanceDbError> =>
+    // Cheap row count — used by the maintenance worker to skip rebuilding when the
+    // table's data has not changed since the last rebuild (idle quiescence).
+    const countRows = (request: TableRequest = {}): Effect.Effect<number, LanceDbError> =>
       Effect.gen(function* () {
         const tableName = tableNameOrDefault(request.tableName);
         const table = yield* openTable({ tableName });
-        const cleanupOlderThan = request.cleanupOlderThan ?? new Date();
-        const stats = yield* Effect.tryPromise({
-          try: () =>
-            table.optimize({
-              cleanupOlderThan,
-              deleteUnverified: request.deleteUnverified ?? false,
-            }),
-          catch: (cause) => makeOperationError(tableName, "optimize", cause),
+        return yield* Effect.tryPromise({
+          try: () => table.countRows(),
+          catch: (cause) => makeOperationError(tableName, "countRows", cause),
         });
-        return { tableName, stats };
       });
 
     const tableStats = (request: TableStatsRequest = {}): Effect.Effect<TableStatsReport, LanceDbError> =>
@@ -995,13 +993,49 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
         }));
       });
 
+    const listIndexDirNames = (request: TableRequest = {}): Effect.Effect<readonly string[]> =>
+      Effect.promise(async () => {
+        try {
+          const entries = await readdir(
+            join(tableDirPath(dataDir, tableNameOrDefault(request.tableName)), "_indices"),
+            { withFileTypes: true },
+          );
+          return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+        } catch {
+          return [];
+        }
+      });
+
+    // Delete named `_indices/<uuid>` dirs. Snapshot the names BEFORE a full index
+    // rebuild, then call this: the rebuild has written fresh dirs under new names, so
+    // every snapshot name is provably superseded and safe to remove. This is the GC
+    // LanceDB does NOT perform (lance#7207, open) — optimize prunes version manifests
+    // but never the orphaned index directories (measured: 5,765 dirs / 67GB).
+    const deleteIndexDirsByName = (request: {
+      readonly tableName?: string;
+      readonly names: readonly string[];
+    }): Effect.Effect<number> =>
+      Effect.promise(async () => {
+        const base = join(tableDirPath(dataDir, tableNameOrDefault(request.tableName)), "_indices");
+        let deleted = 0;
+        for (const name of request.names) {
+          try {
+            await rm(join(base, name), { recursive: true, force: true });
+            deleted += 1;
+          } catch {
+            // best-effort; a still-mapped dir is unlinked and freed on close
+          }
+        }
+        return deleted;
+      });
+
     return {
       dataDir,
       connect: Effect.succeed(connection),
       openTable,
       ensureMessageTable,
       createMessageIndexes,
-      optimizeTable,
+      countRows,
       tableStats,
       ensureTable,
       upsertMessageRows,
@@ -1013,6 +1047,8 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
       vectorSearch,
       ftsSearch,
       hybridSearch,
+      listIndexDirNames,
+      deleteIndexDirsByName,
     } as const;
   });
 
