@@ -175,7 +175,7 @@ describe("SearchMaintenance", () => {
     expect(fresh).toEqual({ sessionsChecked: 1, freshSessions: 1, repairsEnqueued: 0, staleSessions: [] });
   });
 
-  test("maintain creates indexes, optimizes, and returns proof stats", async () => {
+  test("maintain rebuilds changed tables, reclaims old dirs, and returns proof stats", async () => {
     const report = await withMaintenance(
       Effect.gen(function* () {
         const store = yield* LocalStore;
@@ -187,8 +187,8 @@ describe("SearchMaintenance", () => {
       }),
     );
 
-    expect(report.indexesCreated).toEqual(["text_idx"]);
-    expect(report.optimized).toBe(true);
+    const lexical = report.rebuilt.find((entry) => entry.tableName === "messages");
+    expect(lexical?.rebuilt).toBe(true);
     expect((report.stats as { rowCount: number }).rowCount).toBe(1);
   });
 

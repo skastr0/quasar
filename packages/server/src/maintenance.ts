@@ -1,15 +1,33 @@
 import { DEFAULT_SEARCH_TABLE, LanceDb } from "./lancedb";
-import { Context, Effect, Layer } from "effect";
+import { Context, Effect, Layer, Ref } from "effect";
 
 import { embeddingProfileFromEnv, embeddingProfileSearchTable } from "./embeddingProfiles";
 import { DerivedSearch } from "./search";
-import { indexedContentHash, isSearchableRole, normalizeIndexedContentHash } from "./searchPolicy";
+import { indexedContentHash, isSearchableRole, normalizeIndexedContentHash, VECTOR_READY_FILTER } from "./searchPolicy";
 import { DurableQueue } from "./services";
 import { LocalStore } from "./store";
 
+// How the index stays both bounded AND fresh, minimally: on a throttled tick, when a
+// table's data has changed since its last rebuild, REBUILD all its indexes from
+// scratch (drop-then-create) and delete the previous index dirs. The rebuild folds
+// every row (LanceDB's optimize is unnecessary — queries flat-scan the unindexed
+// tail, grounded against lance source) and is intrinsically leak-free; deleting the
+// pre-rebuild snapshot is the only thing that reclaims superseded dirs, because
+// LanceDB never does (lance#7207, open). No per-tick optimize, no dir budget, no
+// grace window — those were scaffolding around optimize's leak.
+//
+// A full rebuild is O(rows) (~10-20s at this scale), so it is throttled to this
+// interval, which must stay well above the rebuild duration so rebuilds never dominate.
+const MAINTAIN_INTERVAL_MS = 120_000;
+
+export interface IndexRebuildReport {
+  readonly tableName: string;
+  readonly rebuilt: boolean;
+  readonly reclaimed: number;
+}
+
 export interface MaintenanceReport {
-  readonly indexesCreated: readonly string[];
-  readonly optimized: boolean;
+  readonly rebuilt: readonly IndexRebuildReport[];
   readonly stats: unknown;
 }
 
@@ -63,18 +81,56 @@ export const SearchMaintenanceLive = Layer.effect(
     const derived = yield* DerivedSearch;
     const profileTable = embeddingProfileSearchTable(embeddingProfileFromEnv());
     const activeTables = profileTable === DEFAULT_SEARCH_TABLE ? [DEFAULT_SEARCH_TABLE] : [DEFAULT_SEARCH_TABLE, profileTable];
+    const lastHeavyAt = yield* Ref.make(new Map<string, number>());
+    const lastRebuiltRows = yield* Ref.make(new Map<string, number>());
+
+    // Rebuild a table's indexes from scratch and reclaim the pre-rebuild dirs, but
+    // ONLY if its row count changed since the last rebuild (idle quiescence — an
+    // unchanged table would rebuild an identical index for nothing). Snapshot BEFORE
+    // the rebuild: the rebuild writes fresh dirs under new uuids and repoints the
+    // manifest, so every snapshot name is then superseded and safe to delete. Runs
+    // only under maintain()'s writer-idle guard, so no reader/writer races the delete.
+    const maybeRebuild = (
+      tableName: string,
+      rebuild: Effect.Effect<unknown, unknown>,
+    ): Effect.Effect<IndexRebuildReport> =>
+      Effect.gen(function* () {
+        // Per-table throttle: a full rebuild is O(rows), so it runs at most once per
+        // interval PER TABLE (advanced only on an actual rebuild, so an idle table is
+        // re-checked cheaply each tick and rebuilds promptly the moment data changes,
+        // independent of the other table's cadence).
+        const now = Date.now();
+        const sinceRebuild = now - ((yield* Ref.get(lastHeavyAt)).get(tableName) ?? 0);
+        if (sinceRebuild < MAINTAIN_INTERVAL_MS) return { tableName, rebuilt: false, reclaimed: 0 };
+        const rows = yield* search.countRows({ tableName }).pipe(Effect.catchAll(() => Effect.succeed(-1)));
+        if (rows < 0) return { tableName, rebuilt: false, reclaimed: 0 }; // table not created yet
+        const last = (yield* Ref.get(lastRebuiltRows)).get(tableName);
+        if (last === rows) return { tableName, rebuilt: false, reclaimed: 0 }; // unchanged since last rebuild
+        const snapshot = yield* search.listIndexDirNames({ tableName });
+        const rebuilt = yield* Effect.either(rebuild);
+        if (rebuilt._tag === "Left") {
+          yield* Effect.logError(
+            `quasar.index.rebuild_failed table=${tableName} :: ${rebuilt.left instanceof Error ? rebuilt.left.message : String(rebuilt.left)}`,
+          );
+          return { tableName, rebuilt: false, reclaimed: 0 };
+        }
+        const reclaimed = yield* search.deleteIndexDirsByName({ tableName, names: snapshot });
+        yield* Ref.update(lastHeavyAt, (map) => new Map(map).set(tableName, now));
+        yield* Ref.update(lastRebuiltRows, (map) => new Map(map).set(tableName, rows));
+        return { tableName, rebuilt: true, reclaimed };
+      });
 
     return SearchMaintenance.of({
       maintain: () =>
         Effect.gen(function* () {
-          // Coalesced + conflict-free. optimize() compacts the whole table, so it
-          // runs HERE (not per indexSession) and ONLY when the writers for that
-          // table are idle, so it never races an upsert (the LanceDB
-          // commit-conflict). Per table: the FTS table is written only by
-          // index-session -> safe once index-session is idle; the vector table is
-          // written by index-session AND embed-message -> needs both idle. The
-          // readiness gate keeps /search 503 until a quiet tick folds rows in, so
-          // skipping when busy never serves unindexed rows.
+          // The rebuild runs HERE (not per indexSession) and ONLY when the table's
+          // writers are idle, so it never races an upsert (LanceDB commit-conflict).
+          // The FTS (lexical) table is written only by index-session; the vector table
+          // by index-session AND embed-message, so it needs both idle. lastHeavyAt
+          // throttles the O(rows) rebuild so it can't run on every worker tick, and is
+          // only advanced when work actually ran, so a long busy stretch never starves
+          // maintenance once writers go idle. Search stays correct meanwhile: queries
+          // flat-scan the unindexed tail and the readiness gate fails closed.
           const byKind = yield* queue.statsByKind.pipe(Effect.catchAll(() => Effect.succeed([] as const)));
           const inflight = (kind: string): number => {
             const s = byKind.find((k) => k.kind === kind);
@@ -82,23 +138,30 @@ export const SearchMaintenanceLive = Layer.effect(
           };
           const idxBusy = inflight("index-session") > 0;
           const embBusy = inflight("embed-message") > 0;
-          const indexesCreated: string[] = [];
-          let optimized = false;
+          const rebuilt: IndexRebuildReport[] = [];
 
+          // Each table self-throttles and skips when unchanged (see maybeRebuild); here
+          // we only gate on writer-idle so a rebuild never races an in-flight write. The
+          // lexical table is written by index-session; the vector table also by
+          // embed-message, so it additionally needs embed idle.
           if (!idxBusy) {
-            yield* derived.createLexicalIndex.pipe(Effect.catchAll(() => Effect.void));
-            indexesCreated.push("text_idx");
-            yield* search.optimizeTable({ tableName: DEFAULT_SEARCH_TABLE }).pipe(Effect.catchAll(() => Effect.void));
-            optimized = true;
-          }
-          if (profileTable !== DEFAULT_SEARCH_TABLE && !idxBusy && !embBusy) {
-            yield* derived.createVectorIndex.pipe(Effect.catchAll(() => Effect.void));
-            indexesCreated.push("vector_idx");
-            yield* search.optimizeTable({ tableName: profileTable }).pipe(Effect.catchAll(() => Effect.void));
-            optimized = true;
+            rebuilt.push(
+              yield* maybeRebuild(
+                DEFAULT_SEARCH_TABLE,
+                search.createMessageIndexes({ tableName: DEFAULT_SEARCH_TABLE, includeVector: false, replace: true }),
+              ),
+            );
+            if (profileTable !== DEFAULT_SEARCH_TABLE && !embBusy) {
+              rebuilt.push(
+                yield* maybeRebuild(
+                  profileTable,
+                  search.createMessageIndexes({ tableName: profileTable, includeVector: true, vectorRowsFilter: VECTOR_READY_FILTER, replace: true }),
+                ),
+              );
+            }
           }
           const stats = yield* derived.stats.pipe(Effect.catchAll(() => Effect.succeed({ skipped: idxBusy || embBusy } as unknown)));
-          return { indexesCreated, optimized, stats };
+          return { rebuilt, stats };
         }),
 
       reconcileFreshness: (options = {}) =>

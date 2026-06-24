@@ -512,37 +512,145 @@ describe("LanceDb", () => {
     expect(stats.tableStats.numRows).toBe(1);
   });
 
-  test("optimizeTable compacts and reports prune stats", async () => {
+  test("repeated rebuilds leak old index dirs; snapshot-then-delete keeps _indices bounded", async () => {
+    // LanceDB never GCs superseded `_indices/<uuid>` dirs (lance#7207): each index
+    // (re)build leaves the prior dir on disk. The maintenance GC is the only reclaim —
+    // snapshot the dir names, rebuild fresh (new uuids), delete the snapshot, which is
+    // now provably superseded and so can never touch a live dir. Proves both halves:
+    // rebuilds leak, and snapshot-then-delete bounds to ~the live index count.
     const dataDir = await makeTempDir();
     const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));
     const vector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, (_, index) =>
       index === 0 ? 1 : 0,
     );
 
-    const report = await runtime.runPromise(
+    const result = await runtime.runPromise(
       Effect.gen(function* () {
         const search = yield* LanceDb;
         yield* search.upsertMessageRows({
           rows: [
-            {
-              sessionId: "session-a",
-              seq: 1,
-              role: "user",
-              projectKey: "project-a",
-              provider: "codex",
-              text: "first text",
-              contentHash: "hash-a",
-              vector,
-            },
+            { sessionId: "session-a", seq: 1, role: "user", projectKey: "project-a", provider: "codex", text: "first text", contentHash: "hash-a", vector },
           ],
         });
         yield* search.createMessageIndexes();
-        return yield* search.optimizeTable({ cleanupOlderThan: new Date() });
+        // Repeated rebuilds WITHOUT deleting accumulate orphaned dirs (the leak).
+        for (let cycle = 0; cycle < 5; cycle += 1) yield* search.createMessageIndexes({ replace: true });
+        const before = yield* search.listIndexDirNames({});
+        // The GC step: snapshot, rebuild, delete the snapshot.
+        yield* search.createMessageIndexes({ replace: true });
+        const reclaimed = yield* search.deleteIndexDirsByName({ names: before });
+        const after = yield* search.listIndexDirNames({});
+        return { beforeCount: before.length, reclaimed, afterCount: after.length };
       }),
     );
 
-    expect(report.tableName).toBe("messages");
-    expect(report.stats.compaction).toBeDefined();
-    expect(report.stats.prune).toBeDefined();
+    expect(result.beforeCount).toBeGreaterThan(2); // rebuilds leaked dirs beyond the live set
+    expect(result.reclaimed).toBe(result.beforeCount); // every snapshot dir deleted
+    expect(result.afterCount).toBeLessThan(result.beforeCount); // reclaimed
+    expect(result.afterCount).toBeLessThanOrEqual(2); // ~live index count (text_idx + sessionId_idx; no vector <100 rows)
+  });
+
+  test("rows added after indexing stay searchable before the next rebuild (no ingested-but-invisible)", async () => {
+    // Product invariant: an ingested row must be findable immediately, even before
+    // the index folds it in. Seed + index, then append a NEW row with NO rebuild,
+    // and require both lexical (FTS tail scan) and semantic (vector) to return it.
+    const dataDir = await makeTempDir();
+    const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));
+    const seedVector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, (_, i) => (i === 0 ? 1 : 0));
+    const tailVector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, (_, i) => (i === 7 ? 1 : 0));
+
+    const found = await runtime.runPromise(
+      Effect.gen(function* () {
+        const search = yield* LanceDb;
+        yield* search.upsertMessageRows({
+          rows: [
+            { sessionId: "seed", seq: 0, role: "user", projectKey: "p", provider: "codex", text: "seed document", contentHash: "h-seed", vector: seedVector },
+          ],
+        });
+        yield* search.createMessageIndexes();
+        // Tail row appended AFTER indexing, with NO optimize/reindex.
+        yield* search.upsertMessageRows({
+          rows: [
+            { sessionId: "tail", seq: 0, role: "user", projectKey: "p", provider: "codex", text: "tail needle unindexed", contentHash: "h-tail", vector: tailVector },
+          ],
+        });
+        const lex = yield* search.ftsSearch({ query: "needle", limit: 5 }).pipe(Effect.catchAll(() => Effect.succeed([])));
+        const vec = yield* search.vectorSearch({ vector: tailVector, vectorDimension: GEMINI_EMBEDDING_DIMENSIONS, limit: 5 }).pipe(Effect.catchAll(() => Effect.succeed([])));
+        return { lexKeys: lex.map((hit) => hit.key), vecKeys: vec.map((hit) => hit.key) };
+      }),
+    );
+
+    expect(found.lexKeys).toContain("tail:0:user");
+    expect(found.vecKeys).toContain("tail:0:user");
+  });
+
+  test("GC on a populated vector table: bounded dirs, all 3 search modes, zero row/vector loss", async () => {
+    // Ground-truth experiment for the council plan (on real lance 0.30.0): the full
+    // self-GC sequence on a table carrying FTS + BTree + a real vector index must
+    // (a) drop the leaked dir count to ~the live set, (b) keep lexical/semantic/fusion
+    // all returning the right row, (c) lose zero rows, (d) leave vector data intact
+    // (no clobber from the vector-index rebuild).
+    const dataDir = await makeTempDir();
+    const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));
+    const dim = GEMINI_EMBEDDING_DIMENSIONS;
+    const vecFor = (i: number) => Array.from({ length: dim }, (_, d) => (d === i % dim ? 1 : 0));
+    const rows = Array.from({ length: 150 }, (_, i) => ({
+      sessionId: `s${i % 5}`,
+      seq: i,
+      role: "user" as const,
+      projectKey: "p",
+      provider: "codex",
+      text: `document ${i} needle${i}`,
+      contentHash: `h${i}`,
+      vector: vecFor(i),
+    }));
+
+    const r = await runtime.runPromise(
+      Effect.gen(function* () {
+        const search = yield* LanceDb;
+        yield* search.upsertMessageRows({ rows, vectorDimension: dim });
+        yield* search.createMessageIndexes({ includeVector: true });
+        // 5 more rows, then repeated rebuilds (no optimize) to leak orphaned dirs.
+        yield* search.upsertMessageRows({
+          rows: Array.from({ length: 5 }, (_, c) => ({ sessionId: "s0", seq: 200 + c, role: "user" as const, projectKey: "p", provider: "codex", text: `churn ${c}`, contentHash: `c${c}`, vector: vecFor(c) })),
+          vectorDimension: dim,
+        });
+        for (let cycle = 0; cycle < 4; cycle += 1) yield* search.createMessageIndexes({ replace: true, includeVector: true });
+        const before = yield* search.listIndexDirNames({});
+        yield* search.createMessageIndexes({ replace: true, includeVector: true });
+        const reclaimed = yield* search.deleteIndexDirsByName({ names: before });
+        const after = yield* search.listIndexDirNames({});
+        const lex = yield* search.ftsSearch({ query: "needle42", limit: 5 });
+        const vec = yield* search.vectorSearch({ vector: vecFor(42), vectorDimension: dim, limit: 5 });
+        const hyb = yield* search.hybridSearch({ query: "needle42", vector: vecFor(42), limit: 5 });
+        const rowCount = (yield* search.readRows({ limit: 100_000, select: ["key"] })).length;
+        const stored = (yield* search.readMessageRowsBySession({ sessionId: "s2", limit: 100_000, select: ["key", "vector"] })).find((x) => x.key === "s2:42:user");
+        return {
+          beforeCount: before.length,
+          reclaimed,
+          afterCount: after.length,
+          lex: lex.map((hit) => hit.key),
+          vec: vec.map((hit) => hit.key),
+          hyb: hyb.length,
+          rowCount,
+          // lance returns the vector as an Arrow Vector (not a typed/plain array) —
+          // materialize with Array.from. Value intact at 42 == rebuild did not clobber.
+          vectorOk:
+            stored?.vector != null &&
+            (stored.vector as { length: number }).length === dim &&
+            Array.from(stored.vector as Iterable<number>)[42] === 1,
+        };
+      }),
+    );
+
+    expect(r.beforeCount).toBeGreaterThan(3); // rebuilds leaked dirs
+    expect(r.afterCount).toBeLessThan(r.beforeCount); // GC reclaimed
+    expect(r.afterCount).toBeLessThanOrEqual(6); // bounded near live (3 indexes)
+    expect(r.reclaimed).toBe(r.beforeCount);
+    expect(r.rowCount).toBe(155); // 150 + 5 churn — zero row loss
+    expect(r.lex).toContain("s2:42:user"); // lexical finds it post-GC
+    expect(r.vec).toContain("s2:42:user"); // semantic finds it post-GC
+    expect(r.hyb).toBeGreaterThan(0); // fusion works post-GC
+    expect(r.vectorOk).toBe(true); // vector data intact — no clobber
   });
 });
