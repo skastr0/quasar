@@ -5,6 +5,7 @@ import { homedir, platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 import { configuredIngestToken, configuredServerUrl, defaultClientConfigPath } from "./client-config";
+import { Provider, SessionRole } from "./core/schemas";
 import { ingestFailureError, ingestReportPayload } from "./ingest-report";
 import { ingestRemote } from "./ingest";
 import { fail, ok, writeJson } from "./json";
@@ -185,14 +186,18 @@ const uninstallDaemon = () => {
 const daemonStatus = () => {
   const paths = daemonPaths();
   const result = platform() === "darwin" ? spawnSync("launchctl", ["print", `${launchDomain()}/${daemonLabel}`], { encoding: "utf8" }) : undefined;
+  const loaded = result?.status === 0;
+  // launchctl print dumps the daemon's EnvironmentVariables block, which holds
+  // QUASAR_INGEST_TOKEN. Never surface that raw output; derive only run-state.
+  const running = loaded ? /\bstate\s*=\s*running\b/.test(result?.stdout ?? "") : false;
   return {
     label: daemonLabel,
     plist: paths.plist,
     installed: existsSync(paths.plist),
-    loaded: result?.status === 0,
+    loaded,
+    running,
     lock: { path: paths.lock, held: existsSync(paths.lock) },
     logs: { stdout: paths.stdout, stderr: paths.stderr },
-    output: result?.status === 0 ? result.stdout : result?.stderr,
   };
 };
 
@@ -322,6 +327,53 @@ const fetchServer = async (name: string, path: string, params: Record<string, st
   }
 };
 
+class CommandInputError extends Error {
+  override readonly name = "CommandInputError";
+  readonly details: unknown;
+
+  constructor(message: string, details: unknown) {
+    super(message);
+    this.details = details;
+  }
+}
+
+const rejectInput = (name: string, error: unknown): false => {
+  writeJson(fail(name, error));
+  process.exitCode = 1;
+  return false;
+};
+
+const checkEnum = (name: string, flag: string, allowed: readonly string[]): boolean => {
+  const value = arg(flag);
+  if (value === undefined || allowed.includes(value)) return true;
+  return rejectInput(name, new CommandInputError(`${flag} must be one of: ${allowed.join(", ")}`, {
+    path: flag,
+    expected: allowed,
+    received: value,
+    hint: `Pass one of: ${allowed.join(", ")}.`,
+  }));
+};
+
+const checkInt = (name: string, flag: string, min: number): boolean => {
+  const raw = arg(flag);
+  if (raw === undefined) return true;
+  const parsed = Number(raw);
+  if (Number.isInteger(parsed) && parsed >= min) return true;
+  return rejectInput(name, new CommandInputError(`${flag} must be an integer >= ${min}`, {
+    path: flag,
+    expected: `integer >= ${min}`,
+    received: raw,
+    hint: `Pass a whole number >= ${min}.`,
+  }));
+};
+
+const SEARCH_MODES = ["lexical", "semantic", "fusion"] as const;
+const INGEST_RUN_STATUSES = ["running", "completed", "failed"] as const;
+const TOGGLE_VALUES = ["true", "false"] as const;
+const PROVIDERS = Provider.literals;
+const INGEST_PROVIDERS = ["all", ...PROVIDERS] as const;
+const ROLES = SessionRole.literals;
+
 switch (command) {
   case "daemon": {
     const subcommand = process.argv[3] ?? "status";
@@ -338,6 +390,7 @@ switch (command) {
     break;
   }
   case "ingest": {
+    if (!(checkEnum("ingest", "--provider", INGEST_PROVIDERS) && checkInt("ingest", "--limit", 1))) break;
     const base = requireServer("ingest");
     if (base === undefined) break;
     const ingestToken = requireIngestToken("ingest");
@@ -364,10 +417,12 @@ switch (command) {
     break;
   }
   case "projects": {
+    if (!(checkInt("projects", "--limit", 1) && checkInt("projects", "--offset", 0))) break;
     await fetchServer("projects", "/projects", { limit: arg("--limit"), offset: arg("--offset") });
     break;
   }
   case "sessions": {
+    if (!(checkEnum("sessions", "--provider", PROVIDERS) && checkInt("sessions", "--limit", 1) && checkInt("sessions", "--offset", 0))) break;
     await fetchServer("sessions", "/sessions", {
       provider: arg("--provider"),
       projectKey: arg("--project-key"),
@@ -379,14 +434,19 @@ switch (command) {
   case "messages": {
     const sessionId = arg("--session-id");
     if (sessionId === undefined) {
-      writeJson(fail("messages", new Error("--session-id is required")));
-      process.exitCode = 1;
+      rejectInput("messages", new CommandInputError("--session-id is required", {
+        field: "--session-id",
+        expected: "a session id",
+        hint: "Pass --session-id <id> (find ids via `quasar sessions`).",
+      }));
       break;
     }
+    if (!checkInt("messages", "--limit", 1)) break;
     await fetchServer("messages", "/messages", { sessionId, limit: arg("--limit") });
     break;
   }
   case "tool-calls": {
+    if (!(checkEnum("tool-calls", "--provider", PROVIDERS) && checkInt("tool-calls", "--limit", 1) && checkInt("tool-calls", "--offset", 0))) break;
     await fetchServer("tool-calls", "/tool-calls", {
       sessionId: arg("--session-id"),
       projectKey: arg("--project-key"),
@@ -400,26 +460,33 @@ switch (command) {
   case "tool-call": {
     const id = arg("--id");
     if (id === undefined) {
-      writeJson(fail("tool-call", new Error("--id is required")));
-      process.exitCode = 1;
+      rejectInput("tool-call", new CommandInputError("--id is required", {
+        field: "--id",
+        expected: "a tool-call id",
+        hint: "Pass --id <id> (find ids via `quasar tool-calls`).",
+      }));
       break;
     }
     await fetchServer("tool-call", "/tool-call", { id });
     break;
   }
   case "ingest-runs": {
+    if (!(checkEnum("ingest-runs", "--status", INGEST_RUN_STATUSES) && checkInt("ingest-runs", "--limit", 1) && checkInt("ingest-runs", "--offset", 0))) break;
     await fetchServer("ingest-runs", "/ingest-runs", { status: arg("--status"), limit: arg("--limit"), offset: arg("--offset") });
     break;
   }
   case "maintain": {
+    if (!(checkEnum("maintain", "--vector", TOGGLE_VALUES) && checkEnum("maintain", "--optimize", TOGGLE_VALUES))) break;
     await fetchServer("maintain", "/maintenance/run", { vector: arg("--vector"), optimize: arg("--optimize") });
     break;
   }
   case "freshness": {
+    if (!checkInt("freshness", "--limit", 1)) break;
     await fetchServer("freshness", "/maintenance/freshness", { limit: arg("--limit") });
     break;
   }
   case "repair-index": {
+    if (!(checkInt("repair-index", "--limit", 1) && checkInt("repair-index", "--lease-ms", 1))) break;
     await fetchServer("repair-index", "/maintenance/repair", { limit: arg("--limit"), leaseMs: arg("--lease-ms") });
     break;
   }
@@ -428,6 +495,7 @@ switch (command) {
     break;
   }
   case "search": {
+    if (!(checkEnum("search", "--mode", SEARCH_MODES) && checkEnum("search", "--role", ROLES) && checkInt("search", "--limit", 1))) break;
     const query = arg("--query") ?? arg("-q") ?? "";
     const mode = arg("--mode") ?? "lexical";
     await fetchServer("search", `/search/${mode}`, { q: query, limit: arg("--limit"), projectKey: arg("--project-key"), role: arg("--role") });
@@ -437,12 +505,11 @@ switch (command) {
     writeJson(ok("version", cliPackage));
     break;
   }
-  case "help":
-  default:
+  case "help": {
     writeJson(
       ok("help", {
         commands: [
-          "ingest --provider all|claude|codex|opencode|hermes|grok --server https://<quasar-service-tailnet-hostname> [--limit n] [--force] [--summary]",
+          "ingest --provider all|codex|claude|opencode|grok|kimi|hermes|antigravity [--server url] [--limit n] [--force] [--summary]",
           "daemon install --server https://<quasar-service-tailnet-hostname> --ingest-token <token> [--interval-seconds 60]",
           "daemon status",
           "daemon uninstall",
@@ -478,4 +545,12 @@ switch (command) {
         },
       }),
     );
+    break;
+  }
+  default:
+    rejectInput(command, new CommandInputError(`unknown command: ${command}`, {
+      received: command,
+      expected: "a known command",
+      hint: "Run `quasar help` for the command list.",
+    }));
 }
