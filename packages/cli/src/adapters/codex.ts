@@ -1,6 +1,7 @@
 import { createReadStream, existsSync, readdirSync, statSync, type Stats } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
+import { Brand } from "effect";
 
 import {
   collectAdapterStream,
@@ -48,6 +49,19 @@ type CodexUsageDraft = Omit<
 >;
 type CodexEventDraft = Parameters<typeof buildSession>[0]["events"][number];
 type CodexEdgeDraft = NonNullable<Parameters<typeof buildSession>[0]["sessionEdges"]>[number];
+type CodexSessionIdV1LegacyHeader = string & Brand.Brand<"CodexSessionIdV1LegacyHeader">;
+const CodexSessionIdV1LegacyHeader = Brand.nominal<CodexSessionIdV1LegacyHeader>();
+type CodexSessionIdV2SessionMeta = string & Brand.Brand<"CodexSessionIdV2SessionMeta">;
+const CodexSessionIdV2SessionMeta = Brand.nominal<CodexSessionIdV2SessionMeta>();
+type CodexNativeIdVariant = "legacy_header_v1" | "session_meta_v2";
+type CodexNativeIdProbe = {
+  readonly id: CodexSessionId;
+  readonly variant: CodexNativeIdVariant;
+};
+type CodexLegacyProjectHints = {
+  readonly projectPath?: string;
+  readonly gitRemote?: string;
+};
 
 const payloadRecordFrom = (value: unknown): CodexRecord =>
   value !== null && typeof value === "object" ? (value as CodexRecord) : {};
@@ -57,6 +71,19 @@ const payloadTypeFrom = (payload: CodexRecord) =>
 
 const codexNativeType = (recordType: string, payloadType: string | undefined) =>
   payloadType === undefined ? recordType : `${recordType}.${payloadType}`;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ROLLOUT_UUID_RE = /^rollout-.+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i;
+
+const normalizedUuid = (value: unknown): string | undefined =>
+  typeof value === "string" && UUID_RE.test(value) ? value.toLowerCase() : undefined;
+
+const hasOwn = (record: CodexRecord, key: string): boolean =>
+  Object.prototype.hasOwnProperty.call(record, key);
+
+const filenameUuid = (path: string): string | undefined => {
+  const match = ROLLOUT_UUID_RE.exec(basename(path));
+  return match?.[1]?.toLowerCase();
+};
 
 /**
  * Codex injects machine-authored context into the transcript as ordinary
@@ -243,7 +270,7 @@ export const codexMessageText = (
 
 /**
  * Map a raw codex role string to the canonical `SessionRole`. Local to this
- * adapter (QSR-220): the codex adapter owns its own role parsing rather than
+ * adapter: the codex adapter owns its own role parsing rather than
  * importing a shared heuristic, so the role mapping is declarative here.
  */
 const codexRoleLiteralFrom = (value: string | undefined): SessionRole => {
@@ -545,22 +572,96 @@ const projectPathFromSessionMeta = (value: unknown) => {
       : undefined;
 };
 
+const nonEmptyString = (value: unknown): string | undefined =>
+  typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+
+const firstStringField = (record: CodexRecord, fields: readonly string[]): string | undefined => {
+  for (const field of fields) {
+    const value = nonEmptyString(record[field]);
+    if (value !== undefined) return value;
+  }
+  return undefined;
+};
+
+const LEGACY_PROJECT_PATH_FIELDS = [
+  "cwd",
+  "working_dir",
+  "workingDir",
+  "root",
+  "root_dir",
+  "rootDir",
+  "worktree",
+  "worktree_path",
+  "worktreePath",
+  "repo_path",
+  "repoPath",
+  "repository_path",
+  "repositoryPath",
+] as const;
+
+const LEGACY_GIT_REMOTE_FIELDS = [
+  "repository_url",
+  "repositoryUrl",
+  "remote_url",
+  "remoteUrl",
+  "repo_url",
+  "repoUrl",
+  "origin",
+  "remote",
+  "url",
+] as const;
+
+const legacyProjectHintsFromHeader = (value: unknown): CodexLegacyProjectHints => {
+  const record = recordFrom(value);
+  if (!isLegacyHeaderRecord(record)) return {};
+  const git = recordFrom(record.git);
+  const projectPath = firstStringField(git, LEGACY_PROJECT_PATH_FIELDS);
+  const gitRemote = firstStringField(git, LEGACY_GIT_REMOTE_FIELDS);
+  return {
+    ...(projectPath !== undefined ? { projectPath } : {}),
+    ...(gitRemote !== undefined ? { gitRemote } : {}),
+  };
+};
+
+const hasLegacyProjectHint = (value: unknown): boolean => {
+  const hints = legacyProjectHintsFromHeader(value);
+  return hints.projectPath !== undefined || hints.gitRemote !== undefined;
+};
+
 /**
- * The codex native session id is the bare UUIDv7 the harness assigns at
- * `session_meta.payload.id` (the first JSON record of every rollout file) — content-sourced,
- * not derived from the filename stem. The stem embeds a timestamp (provenance)
- * and is path-derived, so two re-keyings of the same conversation under
- * different filenames would otherwise diverge. Reading the canonical uuid
- * re-keys codex sessions to their clean id.
+ * Codex has at least two private first-record formats. The current format
+ * carries the native id at `session_meta.payload.id`; the legacy header format
+ * carries it at top-level `id`. Both are content-sourced. The filename UUID is
+ * used only as a legacy integrity check, never as the primary id source.
  */
 const sessionIdFromSessionMeta = (value: unknown): string | undefined => {
   const record = recordFrom(value);
   if (record.type !== "session_meta") return undefined;
   const payload = recordFrom(record.payload);
-  return typeof payload.id === "string" && payload.id.length > 0
-    ? payload.id
-    : undefined;
+  return normalizedUuid(payload.id);
 };
+
+const legacySessionIdFromHeader = (value: unknown, path: string): string | undefined => {
+  const record = recordFrom(value);
+  if (record.type !== undefined) return undefined;
+  if (!isLegacyHeaderRecord(record)) return undefined;
+  if (!hasLegacyProjectHint(value)) return undefined;
+  const id = normalizedUuid(record.id);
+  if (id === undefined) return undefined;
+  return id === filenameUuid(path) ? id : undefined;
+};
+
+const isLegacyHeaderRecord = (record: CodexRecord): boolean =>
+  record.type === undefined &&
+  hasOwn(record, "id") &&
+  hasOwn(record, "timestamp") &&
+  hasOwn(record, "instructions") &&
+  hasOwn(record, "git") &&
+  typeof record.timestamp === "string" &&
+  typeof record.instructions === "string" &&
+  record.git !== null &&
+  typeof record.git === "object" &&
+  !Array.isArray(record.git);
 
 /**
  * A rollout file missing `session_meta.payload.id` is a contract breach at the
@@ -571,6 +672,74 @@ const sessionIdFromSessionMeta = (value: unknown): string | undefined => {
  */
 export const CODEX_MISSING_SESSION_META_ID =
   "codex.session_meta.payload.id.missing";
+export const CODEX_SESSION_META_ID_INVALID =
+  "codex.session_meta.payload.id.invalid";
+export const CODEX_LEGACY_HEADER_ID_INVALID =
+  "codex.legacy_header.id.invalid";
+export const CODEX_LEGACY_HEADER_SHAPE_INVALID =
+  "codex.legacy_header.shape.invalid";
+export const CODEX_LEGACY_HEADER_PROJECT_MISSING =
+  "codex.legacy_header.project.missing";
+export const CODEX_LEGACY_HEADER_ID_FILENAME_MISMATCH =
+  "codex.legacy_header.id.filename_mismatch";
+export const CODEX_LEGACY_SESSION_META_IGNORED =
+  "codex.legacy_header.session_meta_ignored";
+export const CODEX_FIRST_RECORD_JSON_INVALID =
+  "codex.first_record.json.invalid";
+export const CODEX_MISSING_NATIVE_SESSION_ID =
+  "codex.native_session_id.missing";
+
+const nativeIdDiagnostic = (value: unknown, sourcePath: string) => {
+  const record = recordFrom(value);
+  if (record.type === "session_meta") {
+    const payload = recordFrom(record.payload);
+    if (payload.id !== undefined) {
+      return {
+        name: CODEX_SESSION_META_ID_INVALID,
+        message: `${CODEX_SESSION_META_ID_INVALID}: ${sourcePath} has a session_meta.payload.id that is not a UUID; wrote zero rows for this session.`,
+      };
+    }
+    return {
+      name: CODEX_MISSING_SESSION_META_ID,
+      message: `${CODEX_MISSING_SESSION_META_ID}: ${sourcePath} has no session_meta.payload.id; wrote zero rows for this session.`,
+    };
+  }
+  if (record.type === undefined && record.id !== undefined) {
+    if (normalizedUuid(record.id) === undefined) {
+      return {
+        name: CODEX_LEGACY_HEADER_ID_INVALID,
+        message: `${CODEX_LEGACY_HEADER_ID_INVALID}: ${sourcePath} has a legacy header id that is not a UUID; wrote zero rows for this session.`,
+      };
+    }
+    if (!isLegacyHeaderRecord(record)) {
+      return {
+        name: CODEX_LEGACY_HEADER_SHAPE_INVALID,
+        message: `${CODEX_LEGACY_HEADER_SHAPE_INVALID}: ${sourcePath} has an untyped id record that is not the measured legacy header shape; wrote zero rows for this session.`,
+      };
+    }
+    if (!hasLegacyProjectHint(value)) {
+      return {
+        name: CODEX_LEGACY_HEADER_PROJECT_MISSING,
+        message: `${CODEX_LEGACY_HEADER_PROJECT_MISSING}: ${sourcePath} has a legacy header git object without a usable project path or remote; wrote zero rows for this session.`,
+      };
+    }
+    return {
+      name: CODEX_LEGACY_HEADER_ID_FILENAME_MISMATCH,
+      message: `${CODEX_LEGACY_HEADER_ID_FILENAME_MISMATCH}: ${sourcePath} legacy header id does not match the rollout filename UUID; wrote zero rows for this session.`,
+    };
+  }
+  return {
+    name: CODEX_MISSING_NATIVE_SESSION_ID,
+    message: `${CODEX_MISSING_NATIVE_SESSION_ID}: ${sourcePath} has no recognized Codex native session id; wrote zero rows for this session.`,
+  };
+};
+
+const firstRecordJsonDiagnostic = (error: unknown, sourcePath: string) => ({
+  name: CODEX_FIRST_RECORD_JSON_INVALID,
+  message: `${CODEX_FIRST_RECORD_JSON_INVALID}: ${sourcePath} first JSON record could not be parsed; wrote zero rows for this session.${
+    error instanceof CodexJsonLineParseError ? ` line=${error.lineNumber}` : ""
+  }`,
+});
 
 /**
  * Codex subagents are separate rollout-*.jsonl files, each with its own UUIDv7.
@@ -664,18 +833,39 @@ function* walkFilesWithStats(
   yield* visit(walkInput.root);
 }
 
-/** Read only the codex native id (session_meta.payload.id) from the first JSON record. */
-const readCodexNativeId = async (
+const readFirstCodexJsonRecord = async (
   path: string,
   parseOptions: { readonly strictJsonLines?: boolean },
-): Promise<string | undefined> => {
+): Promise<unknown> => {
   for await (const { value } of readCodexJsonLines(path, {
     strict: parseOptions.strictJsonLines,
   })) {
-    const id = sessionIdFromSessionMeta(value);
-    if (id !== undefined) return id;
-    // session_meta is the first JSON record of every rollout file; if the first record is not
-    // a session_meta carrying an id, the file is malformed at the boundary.
+    return value;
+  }
+  return undefined;
+};
+
+/** Read only the codex native id from the first JSON record. */
+const readCodexNativeId = async (
+  path: string,
+  parseOptions: { readonly strictJsonLines?: boolean },
+): Promise<CodexNativeIdProbe | undefined> => {
+  const value = await readFirstCodexJsonRecord(path, parseOptions);
+  if (value !== undefined) {
+    const sessionMetaId = sessionIdFromSessionMeta(value);
+    if (sessionMetaId !== undefined) {
+      return {
+        id: CodexSessionId(CodexSessionIdV2SessionMeta(sessionMetaId)),
+        variant: "session_meta_v2",
+      };
+    }
+    const legacyHeaderId = legacySessionIdFromHeader(value, path);
+    if (legacyHeaderId !== undefined) {
+      return {
+        id: CodexSessionId(CodexSessionIdV1LegacyHeader(legacyHeaderId)),
+        variant: "legacy_header_v1",
+      };
+    }
     return undefined;
   }
   return undefined;
@@ -685,16 +875,17 @@ async function* streamCodexSessionFromFile(
   path: string,
   sourcePath: string,
   logicalSessionsRoot: string,
-  rawNativeId: string,
+  nativeIdProbe: CodexNativeIdProbe,
   options: AdapterOptions,
   decodeDiagnostics: DecodeDiagnostic[],
   parseOptions: { readonly strictJsonLines?: boolean } = {},
 ): AsyncGenerator<NormalizedSession> {
-  const nativeSessionId = CodexSessionId(rawNativeId);
+  const nativeSessionId = nativeIdProbe.id;
   const sessionId = sessionIdFor("codex", nativeSessionId);
   const toolCallsById = new Map<string, CodexToolCallDraft>();
   const toolCallEventByToolId = new Map<string, string>();
   let projectPath: string | undefined;
+  let gitRemote: string | undefined;
   // Subagent lineage + agent identity, sourced fail-closed from the decoded
   // session_meta. Defaults: no parent, agentName "codex" (a main session).
   let agentName = "codex";
@@ -709,6 +900,7 @@ async function* streamCodexSessionFromFile(
       sessionId,
       nativeSessionId,
       nativeProjectKey: projectPath,
+      gitRemote,
       sourceRoot: logicalSessionsRoot,
       sourcePath,
       projectPath,
@@ -739,13 +931,27 @@ async function* streamCodexSessionFromFile(
   for await (const { value, lineNumber, recordIndex } of readCodexJsonLines(path, {
     strict: parseOptions.strictJsonLines,
   })) {
+    const rawRecord = recordFrom(value);
+    if (nativeIdProbe.variant === "legacy_header_v1" && recordIndex === 0) {
+      const hints = legacyProjectHintsFromHeader(value);
+      projectPath ??= hints.projectPath;
+      gitRemote ??= hints.gitRemote;
+      continue;
+    }
+    if (nativeIdProbe.variant === "legacy_header_v1" && rawRecord.type === "session_meta") {
+      decodeDiagnostics.push({
+        name: CODEX_LEGACY_SESSION_META_IGNORED,
+        message: `${CODEX_LEGACY_SESSION_META_IGNORED}: ignored session_meta inside legacy-header rollout at ${sourcePath}:${lineNumber}.`,
+      });
+      continue;
+    }
     projectPath ??= projectPathFromSessionMeta(value);
     // Fail-closed decode of the session_meta record (the first JSON record) for
     // subagent lineage + agentName ONLY. The named diagnostic for a garbage
     // session_meta is emitted by the unified classifier below (single source),
     // so this block routes its decode failure into a throwaway sink to avoid a
     // duplicate. Lineage is projected ONLY from a successfully decoded record.
-    if (recordFrom(value).type === "session_meta") {
+    if (rawRecord.type === "session_meta") {
       const decision = decodeOrDrop(CodexSessionMetaSchema, value, {
         kind: "session_meta" as const,
         diagnosticName: CODEX_SESSION_META_DECODE_FAILED,
@@ -784,7 +990,7 @@ async function* streamCodexSessionFromFile(
     const payloadValue = record.payload;
     const payloadRecord = payloadRecordFrom(payloadValue);
     const payloadType = payloadTypeFrom(payloadRecord);
-    // QSR-220: route EVERY record through the declarative fail-closed classifier.
+    // Route EVERY record through the declarative fail-closed classifier.
     // It returns a SIGNAL (kept, with a mapped SessionEventKind) or a DROP
     // (discarded, with a NAMED reason). A schema failure or unmodeled type is a
     // named decode diagnostic + a DROP — never a throw, never an `unknown`
@@ -915,6 +1121,10 @@ async function* streamCodex(options: AdapterOptions) {
   }
   let sessionCount = 0;
   let rejectedCount = 0;
+  const variantCounts: Record<CodexNativeIdVariant, number> = {
+    legacy_header_v1: 0,
+    session_meta_v2: 0,
+  };
   for (const { path, scan } of files) {
     const sourcePath = logicalPathFor(path, scan.physicalRoot, scan.logicalScanRoot);
     // Stat-level gate: skip files whose mtime+size match the last ingest record
@@ -923,11 +1133,17 @@ async function* streamCodex(options: AdapterOptions) {
       const stat = statSync(path);
       if (!options.shouldReadFile(path, stat)) continue;
     }
-    // The codex native id is the content-sourced session_meta.payload.id, so the
-    // pre-parse probe must read it from the first JSON record to derive the same canonical
-    // sessionId the full parse would; a file missing it is boundary-rejected.
-    const nativeId = await readCodexNativeId(path, {});
-    if (nativeId === undefined) {
+    let nativeIdProbe: CodexNativeIdProbe | undefined;
+    let nativeIdError: unknown;
+    try {
+      nativeIdProbe = await readCodexNativeId(path, { strictJsonLines: true });
+    } catch (error) {
+      nativeIdError = error;
+    }
+    if (nativeIdProbe === undefined) {
+      const diagnostic = nativeIdError !== undefined
+        ? firstRecordJsonDiagnostic(nativeIdError, sourcePath)
+        : nativeIdDiagnostic(await readFirstCodexJsonRecord(path, {}), sourcePath);
       rejectedCount += 1;
       yield {
         type: "diagnostic" as const,
@@ -937,18 +1153,19 @@ async function* streamCodex(options: AdapterOptions) {
           status: "error" as const,
           parserConfidence: "documented" as const,
           rootPath: scan.logicalScanRoot,
-          message: `${CODEX_MISSING_SESSION_META_ID}: ${sourcePath} has no session_meta.payload.id; wrote zero rows for this session.`,
-          details: { sourcePath, physicalPath: path },
+          message: diagnostic.message,
+          details: { diagnostic: diagnostic.name, sourcePath, physicalPath: path },
         },
       };
       continue;
     }
+    variantCounts[nativeIdProbe.variant] += 1;
     // Cheap pre-parse gate: a stat (size/mtime) is the per-session change
     // signal, so an unchanged rollout file never reaches the line parse.
     if (options.shouldParseSession !== undefined) {
       const stat = statSync(path);
       const probe = {
-        sessionId: sessionIdFor("codex", CodexSessionId(nativeId)),
+        sessionId: sessionIdFor("codex", nativeIdProbe.id),
         sourceFingerprint: sourceFingerprintFor(stat),
       };
       if ((await options.shouldParseSession(probe)) === false) continue;
@@ -959,12 +1176,12 @@ async function* streamCodex(options: AdapterOptions) {
     // never aborts the file and never coerces silently.
     const decodeDiagnostics: DecodeDiagnostic[] = [];
     for await (const session of streamCodexSessionFromFile(
-        path,
-        sourcePath,
-        scan.logicalScanRoot,
-        nativeId,
-        options,
-        decodeDiagnostics,
+      path,
+      sourcePath,
+      scan.logicalScanRoot,
+      nativeIdProbe,
+      options,
+      decodeDiagnostics,
     )) {
       yield {
         type: "session" as const,
@@ -988,7 +1205,7 @@ async function* streamCodex(options: AdapterOptions) {
           parserConfidence: "documented" as const,
           rootPath: scan.logicalScanRoot,
           message: `Codex record dropped (${diagnostic.name}) for ${sourcePath}.`,
-          details: { error: diagnostic.message, sourcePath, physicalPath: path },
+          details: { diagnostic: diagnostic.name, error: diagnostic.message, sourcePath, physicalPath: path },
         },
       };
     }
@@ -1003,8 +1220,8 @@ async function* streamCodex(options: AdapterOptions) {
       rootPath: logicalSessionsRoot,
       message:
         rejectedCount > 0
-          ? `Discovered ${sessionCount} Codex session(s); rejected ${rejectedCount} file(s) missing session_meta.payload.id.`
-          : `Discovered ${sessionCount} Codex session(s).`,
+          ? `Discovered ${sessionCount} Codex session(s); variants legacy_header_v1=${variantCounts.legacy_header_v1}, session_meta_v2=${variantCounts.session_meta_v2}; rejected ${rejectedCount} file(s) missing a recognized native session id.`
+          : `Discovered ${sessionCount} Codex session(s); variants legacy_header_v1=${variantCounts.legacy_header_v1}, session_meta_v2=${variantCounts.session_meta_v2}.`,
     },
   };
 }

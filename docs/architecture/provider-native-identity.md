@@ -17,24 +17,48 @@ row.
 
 ## Codex
 
-**Native id source:** the `session_meta.payload.id` field — the bare UUIDv7 the
-Codex harness assigns at session creation — read from the first JSON record of the rollout
-file. This is the `CodexSessionId`.
+**Native id source:** the first JSON record of each rollout file. Codex has at
+least two measured private first-record formats:
 
-**Where it lives:** every rollout file's first JSON record is a `session_meta` record
-whose `payload.id` is the canonical session UUIDv7 (e.g.,
-`01900000-0000-7000-8000-000000000001`). The same uuid is also embedded in the
-filename (`rollout-<ISO datetime>-<uuid>.jsonl`), but the filename stem is NOT
-used: it embeds a timestamp (provenance) and is path-derived, so the
-content-sourced `payload.id` is the canonical key.
+- `legacy_header_v1`: top-level `id` on a record shaped like
+  `{ id, timestamp, instructions, git }`.
+- `session_meta_v2`: `session_meta.payload.id`.
+
+Both are promoted into the branded `CodexSessionId`.
+
+**Where it lives:** rollout files are named
+`rollout-<ISO datetime>-<uuid>.jsonl`. For `session_meta_v2`, the
+content-sourced `payload.id` is the canonical key. For `legacy_header_v1`, the
+top-level `id` is accepted only when the first record has the measured legacy
+header shape and the id is a UUID matching the filename UUID. This intentionally
+makes legacy acceptance path-sensitive: the filename UUID is an integrity check
+for that legacy format, not the primary id source.
 
 **Boundary rejection:** a rollout file whose first JSON record carries no
-`session_meta.payload.id` is a contract breach. The adapter writes zero rows for
-that file, emits the named diagnostic `codex.session_meta.payload.id.missing`,
-and continues. It never falls back to the filename stem.
+recognized native id is rejected with zero rows and a named diagnostic:
+
+- `codex.session_meta.payload.id.missing`
+- `codex.session_meta.payload.id.invalid`
+- `codex.legacy_header.id.invalid`
+- `codex.legacy_header.shape.invalid`
+- `codex.legacy_header.project.missing`
+- `codex.legacy_header.id.filename_mismatch`
+- `codex.first_record.json.invalid`
+- `codex.native_session_id.missing`
+
+**Legacy internal drops:** after a `legacy_header_v1` file is accepted, any
+later `session_meta` record inside that file is ignored with
+`codex.legacy_header.session_meta_ignored` so it cannot alter project identity
+or subagent lineage for the legacy session id.
+
+**Legacy project identity:** `legacy_header_v1` project hints are taken only
+from the accepted first-record `git` object. A later `session_meta` in the same
+legacy file is not a trusted project source. A legacy header whose `git` object
+does not carry a usable project path or remote is rejected rather than accepted
+into the low-confidence `unknown-project` fallback.
 
 **Why path-independent:** only the in-content uuid enters the hash — never the
-filename and never the parent directory chain. Two files carrying the same
+parent directory chain. For `session_meta_v2`, two files carrying the same
 `session_meta.payload.id` under different parent paths AND different rollout
 filenames produce the same `CodexSessionId` and therefore the same `SessionId`.
 

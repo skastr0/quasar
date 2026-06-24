@@ -5,7 +5,16 @@ import { join } from "node:path";
 import { Schema } from "effect";
 import { afterAll, describe, expect, test } from "bun:test";
 
-import { codexAdapter } from "../src/adapters/codex";
+import {
+  CODEX_FIRST_RECORD_JSON_INVALID,
+  CODEX_LEGACY_HEADER_ID_INVALID,
+  CODEX_LEGACY_HEADER_ID_FILENAME_MISMATCH,
+  CODEX_LEGACY_HEADER_PROJECT_MISSING,
+  CODEX_LEGACY_HEADER_SHAPE_INVALID,
+  CODEX_LEGACY_SESSION_META_IGNORED,
+  CODEX_SESSION_META_ID_INVALID,
+  codexAdapter,
+} from "../src/adapters/codex";
 import { sessionIdFor } from "../src/adapters/common";
 import {
   CODEX_RECORD_REGISTRY,
@@ -137,6 +146,41 @@ const rolloutLines = (cwd: string, id: string = FIXTURE_UUID) =>
       },
     }),
   ].join("\n");
+
+const legacyHeaderLines = (id: string = FIXTURE_UUID) =>
+  [
+    line({
+      id,
+      timestamp: NOW,
+      instructions: "qsr fabricated legacy header",
+      git: { repository_url: "git@github.com:skastr0/quasar-legacy.git" },
+    }),
+    line({
+      timestamp: NOW,
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "qsr fabricated legacy human turn" }],
+      },
+    }),
+    line({
+      timestamp: NOW,
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "qsr fabricated legacy assistant reply" }],
+      },
+    }),
+  ].join("\n");
+
+const diagnosticCode = (diagnostic: { readonly details?: unknown } | undefined): string | undefined => {
+  const details = diagnostic?.details;
+  if (details === null || typeof details !== "object") return undefined;
+  const code = (details as { readonly diagnostic?: unknown }).diagnostic;
+  return typeof code === "string" ? code : undefined;
+};
 
 const root = mkdtempSync(join(tmpdir(), "quasar-codex-adapter-"));
 
@@ -413,7 +457,7 @@ describe("codex adapter", () => {
   });
 
   // ---------------------------------------------------------------------------
-  // AC#5 — idempotency proof (content-sourced id)
+  // Idempotency proof (content-sourced id)
   //
   // The codex native id is session_meta.payload.id — NOT the filename stem. To
   // prove the id is content-sourced and path/filename-INDEPENDENT, the two
@@ -423,7 +467,7 @@ describe("codex adapter", () => {
   // This FAILS if codex ever reverts to deriving the id from the filename stem,
   // since the stems differ.
   // ---------------------------------------------------------------------------
-  test("AC#5 idempotency: identical session_meta.payload.id under different parent paths AND filenames → byte-identical session.id", async () => {
+  test("identical session_meta.payload.id under different parent paths AND filenames produces byte-identical session.id", async () => {
     // Tree A simulates a host path (e.g. /Users/me/Library/…)
     const hostRoot = mkdtempSync(join(tmpdir(), "quasar-codex-host-"));
     // Tree B simulates a Docker /history mount
@@ -524,8 +568,367 @@ describe("codex adapter", () => {
     }
   });
 
+  test("accepts legacy header rollout when top-level id matches filename UUID", async () => {
+    const legacyRoot = mkdtempSync(join(tmpdir(), "quasar-codex-legacy-"));
+    try {
+      const dir = join(legacyRoot, "sessions", "2025", "08", "21");
+      mkdirSync(dir, { recursive: true });
+      const legacyUuid = "0fab0000-fab0-4fab-8fab-000000000031";
+      writeFileSync(
+        join(dir, rolloutFilename("2025-08-21T12-34-07", legacyUuid)),
+        legacyHeaderLines(legacyUuid),
+      );
+
+      const result = await codexAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { codex: legacyRoot },
+      });
+
+      expect(result.sessions).toHaveLength(1);
+      expect(result.sessions[0]!.nativeSessionId).toBe(legacyUuid);
+      expect(result.sessions[0]!.projectIdentity.projectIdentityKey).toBe(
+        "git:github.com/skastr0/quasar-legacy",
+      );
+      expect(result.sessions[0]!.projectIdentity.displayName).toBe("quasar-legacy");
+      expect(result.sessions[0]!.events).toHaveLength(2);
+      expect(result.diagnostics.some((diagnostic) =>
+        diagnostic.message.includes("codex.unknown_record_type"),
+      )).toBe(false);
+      expect(result.diagnostics.at(-1)?.message).toContain("legacy_header_v1=1");
+    } finally {
+      rmSync(legacyRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects legacy header rollout when top-level id does not match filename UUID", async () => {
+    const legacyRoot = mkdtempSync(join(tmpdir(), "quasar-codex-legacy-reject-"));
+    try {
+      const dir = join(legacyRoot, "sessions", "2025", "08", "21");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, rolloutFilename("2025-08-21T12-34-07", "0fab0000-fab0-4fab-8fab-000000000031")),
+        legacyHeaderLines("0fab0000-fab0-4fab-8fab-000000000032"),
+      );
+
+      const result = await codexAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { codex: legacyRoot },
+      });
+
+      expect(result.sessions).toHaveLength(0);
+      const rejection = result.diagnostics.find((diagnostic) =>
+        diagnostic.message.includes(CODEX_LEGACY_HEADER_ID_FILENAME_MISMATCH),
+      );
+      expect(rejection).toBeDefined();
+      expect(rejection?.status).toBe("error");
+      expect(diagnosticCode(rejection)).toBe(CODEX_LEGACY_HEADER_ID_FILENAME_MISMATCH);
+    } finally {
+      rmSync(legacyRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects untyped id record that is not the measured legacy header shape", async () => {
+    const legacyRoot = mkdtempSync(join(tmpdir(), "quasar-codex-legacy-shape-reject-"));
+    try {
+      const dir = join(legacyRoot, "sessions", "2025", "08", "21");
+      mkdirSync(dir, { recursive: true });
+      const legacyUuid = "0fab0000-fab0-4fab-8fab-000000000031";
+      writeFileSync(
+        join(dir, rolloutFilename("2025-08-21T12-34-07", legacyUuid)),
+        [
+          line({ id: legacyUuid }),
+          line({
+            timestamp: NOW,
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "qsr fabricated malformed legacy turn" }],
+            },
+          }),
+        ].join("\n"),
+      );
+
+      const result = await codexAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { codex: legacyRoot },
+      });
+
+      expect(result.sessions).toHaveLength(0);
+      const rejection = result.diagnostics.find((diagnostic) =>
+        diagnostic.message.includes(CODEX_LEGACY_HEADER_SHAPE_INVALID),
+      );
+      expect(rejection).toBeDefined();
+      expect(rejection?.status).toBe("error");
+      expect(diagnosticCode(rejection)).toBe(CODEX_LEGACY_HEADER_SHAPE_INVALID);
+    } finally {
+      rmSync(legacyRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects legacy header rollout when git object has no project hint", async () => {
+    const legacyRoot = mkdtempSync(join(tmpdir(), "quasar-codex-legacy-project-reject-"));
+    try {
+      const dir = join(legacyRoot, "sessions", "2025", "08", "21");
+      mkdirSync(dir, { recursive: true });
+      const legacyUuid = "0fab0000-fab0-4fab-8fab-000000000031";
+      writeFileSync(
+        join(dir, rolloutFilename("2025-08-21T12-34-07", legacyUuid)),
+        [
+          line({
+            id: legacyUuid,
+            timestamp: NOW,
+            instructions: "qsr fabricated legacy header",
+            git: {},
+          }),
+          line({
+            timestamp: NOW,
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "qsr fabricated legacy turn" }],
+            },
+          }),
+        ].join("\n"),
+      );
+
+      const result = await codexAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { codex: legacyRoot },
+      });
+
+      expect(result.sessions).toHaveLength(0);
+      const rejection = result.diagnostics.find((diagnostic) =>
+        diagnostic.message.includes(CODEX_LEGACY_HEADER_PROJECT_MISSING),
+      );
+      expect(rejection).toBeDefined();
+      expect(rejection?.status).toBe("error");
+      expect(diagnosticCode(rejection)).toBe(CODEX_LEGACY_HEADER_PROJECT_MISSING);
+    } finally {
+      rmSync(legacyRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects legacy header rollout when measured header fields have wrong types", async () => {
+    const legacyRoot = mkdtempSync(join(tmpdir(), "quasar-codex-legacy-shape-type-reject-"));
+    try {
+      const dir = join(legacyRoot, "sessions", "2025", "08", "21");
+      mkdirSync(dir, { recursive: true });
+      const legacyUuid = "0fab0000-fab0-4fab-8fab-000000000031";
+      writeFileSync(
+        join(dir, rolloutFilename("2025-08-21T12-34-07", legacyUuid)),
+        [
+          line({
+            id: legacyUuid,
+            timestamp: 123,
+            instructions: ["not", "a", "string"],
+            git: "not-an-object",
+          }),
+          line({
+            timestamp: NOW,
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "qsr fabricated malformed legacy turn" }],
+            },
+          }),
+        ].join("\n"),
+      );
+
+      const result = await codexAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { codex: legacyRoot },
+      });
+
+      expect(result.sessions).toHaveLength(0);
+      const rejection = result.diagnostics.find((diagnostic) =>
+        diagnostic.message.includes(CODEX_LEGACY_HEADER_SHAPE_INVALID),
+      );
+      expect(rejection).toBeDefined();
+      expect(rejection?.status).toBe("error");
+      expect(diagnosticCode(rejection)).toBe(CODEX_LEGACY_HEADER_SHAPE_INVALID);
+    } finally {
+      rmSync(legacyRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects legacy header rollout when top-level id is not a UUID", async () => {
+    const legacyRoot = mkdtempSync(join(tmpdir(), "quasar-codex-legacy-id-reject-"));
+    try {
+      const dir = join(legacyRoot, "sessions", "2025", "08", "21");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, rolloutFilename("2025-08-21T12-34-07", "0fab0000-fab0-4fab-8fab-000000000031")),
+        legacyHeaderLines("not-a-uuid"),
+      );
+
+      const result = await codexAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { codex: legacyRoot },
+      });
+
+      expect(result.sessions).toHaveLength(0);
+      const rejection = result.diagnostics.find((diagnostic) =>
+        diagnostic.message.includes(CODEX_LEGACY_HEADER_ID_INVALID),
+      );
+      expect(rejection).toBeDefined();
+      expect(rejection?.status).toBe("error");
+      expect(diagnosticCode(rejection)).toBe(CODEX_LEGACY_HEADER_ID_INVALID);
+    } finally {
+      rmSync(legacyRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects session_meta rollout when payload id is not a UUID", async () => {
+    const invalidRoot = mkdtempSync(join(tmpdir(), "quasar-codex-session-meta-id-reject-"));
+    try {
+      const dir = join(invalidRoot, "sessions", "2026", "06", "24");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, rolloutFilename("2026-06-24T12-00-00", "0fab0000-fab0-4fab-8fab-000000000033")),
+        rolloutLines(FIXTURE_CWD, "not-a-uuid"),
+      );
+
+      const result = await codexAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { codex: invalidRoot },
+      });
+
+      expect(result.sessions).toHaveLength(0);
+      const rejection = result.diagnostics.find((diagnostic) =>
+        diagnostic.message.includes(CODEX_SESSION_META_ID_INVALID),
+      );
+      expect(rejection).toBeDefined();
+      expect(rejection?.status).toBe("error");
+      expect(diagnosticCode(rejection)).toBe(CODEX_SESSION_META_ID_INVALID);
+    } finally {
+      rmSync(invalidRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects rollout when first nonblank JSON record is malformed", async () => {
+    const invalidRoot = mkdtempSync(join(tmpdir(), "quasar-codex-first-record-invalid-"));
+    try {
+      const dir = join(invalidRoot, "sessions", "2026", "06", "24");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, rolloutFilename("2026-06-24T12-00-00", "0fab0000-fab0-4fab-8fab-000000000033")),
+        [
+          "{not-json",
+          rolloutLines(FIXTURE_CWD, "0fab0000-fab0-4fab-8fab-000000000033"),
+        ].join("\n"),
+      );
+
+      const result = await codexAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { codex: invalidRoot },
+      });
+
+      expect(result.sessions).toHaveLength(0);
+      const rejection = result.diagnostics.find((diagnostic) =>
+        diagnostic.message.includes(CODEX_FIRST_RECORD_JSON_INVALID),
+      );
+      expect(rejection).toBeDefined();
+      expect(rejection?.status).toBe("error");
+      expect(diagnosticCode(rejection)).toBe(CODEX_FIRST_RECORD_JSON_INVALID);
+    } finally {
+      rmSync(invalidRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("ignores later session_meta records inside legacy header rollouts", async () => {
+    const legacyRoot = mkdtempSync(join(tmpdir(), "quasar-codex-legacy-session-meta-ignore-"));
+    try {
+      const dir = join(legacyRoot, "sessions", "2025", "08", "21");
+      mkdirSync(dir, { recursive: true });
+      const legacyUuid = "0fab0000-fab0-4fab-8fab-000000000031";
+      const poisonParentUuid = "0fab0000-fab0-4fab-8fab-000000000099";
+      writeFileSync(
+        join(dir, rolloutFilename("2025-08-21T12-34-07", legacyUuid)),
+        [
+          line({
+            id: legacyUuid,
+            timestamp: NOW,
+            instructions: "qsr fabricated legacy header",
+            git: { repository_url: "git@github.com:skastr0/quasar-legacy.git" },
+          }),
+          line({
+            timestamp: NOW,
+            type: "session_meta",
+            payload: {
+              id: "0fab0000-fab0-4fab-8fab-000000000032",
+              timestamp: NOW,
+              cwd: "/poison/project",
+              type: "session_meta",
+              source: {
+                subagent: {
+                  thread_spawn: {
+                    parent_thread_id: poisonParentUuid,
+                    agent_nickname: "poison-agent",
+                  },
+                },
+              },
+            },
+          }),
+          line({
+            timestamp: NOW,
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "qsr fabricated legacy human turn" }],
+            },
+          }),
+          line({
+            timestamp: NOW,
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "qsr fabricated legacy assistant reply" }],
+            },
+          }),
+        ].join("\n"),
+      );
+
+      const result = await codexAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { codex: legacyRoot },
+      });
+
+      expect(result.sessions).toHaveLength(1);
+      const session = result.sessions[0]!;
+      expect(session.nativeSessionId).toBe(legacyUuid);
+      expect(session.agentName).toBe("codex");
+      expect(session.nativeProjectKey).not.toBe("/poison/project");
+      expect(session.projectIdentity.projectIdentityKey).toBe(
+        "git:github.com/skastr0/quasar-legacy",
+      );
+      expect(session.sessionEdges).toHaveLength(0);
+      const diagnostic = result.diagnostics.find((item) =>
+        item.message.includes(CODEX_LEGACY_SESSION_META_IGNORED),
+      );
+      expect(diagnostic).toBeDefined();
+      expect(diagnostic?.status).toBe("unsupported");
+      expect(diagnosticCode(diagnostic)).toBe(CODEX_LEGACY_SESSION_META_IGNORED);
+    } finally {
+      rmSync(legacyRoot, { recursive: true, force: true });
+    }
+  });
+
   // ---------------------------------------------------------------------------
-  // QSR-220 — first-class subagents.
+  // First-class subagents.
   //
   // Codex subagents are separate rollout-*.jsonl files, each with its own
   // UUIDv7. A subagent rollout records its spawning parent AND its identity
@@ -769,7 +1172,7 @@ describe("codex adapter", () => {
 });
 
 // ===========================================================================
-// QSR-220 FULL DATA FIDELITY — per-record-type declarative signal/drop dispatch.
+// Full data fidelity — per-record-type declarative signal/drop dispatch.
 //
 // Every distinct on-disk record type is modeled and routed through the
 // fail-closed classifier. There is ZERO `unknown` pass-through: every record is
@@ -1182,7 +1585,9 @@ describe("shouldReadFile stat-gate: unchanged rollout file skipped without conte
     // No content was read — no session emitted, no error about missing session_meta.id.
     expect(result.sessions).toHaveLength(0);
     // No error diagnostic about missing session_meta.id (content never opened).
-    expect(result.diagnostics.some((d) => d.message?.includes("session_meta"))).toBe(false);
+    expect(result.diagnostics.some((d) =>
+      d.status === "error" && d.message?.includes("session_meta"),
+    )).toBe(false);
   });
 
   test("shouldReadFile returning true lets the file through — session emitted", async () => {
