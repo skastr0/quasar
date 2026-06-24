@@ -32,7 +32,7 @@
     "server:health": "bun scripts/server-ops.mjs health",
     "server:status": "bun scripts/server-ops.mjs status",
     "server:lance": "bun scripts/server-ops.mjs lance",
-    "server:maintain": "bun scripts/server-ops.mjs maintain --vector true --optimize true",
+    "server:maintain": "bun scripts/server-ops.mjs maintain",
     "server:backup": "bun scripts/server-ops.mjs backup",
     "proof:retrieval": "bun scripts/compare-local-search.mjs",
     "build:npm-packages": "bun run --cwd packages/cli build:npm-packages",

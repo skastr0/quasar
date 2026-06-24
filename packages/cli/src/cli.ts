@@ -37,7 +37,7 @@ const command =
   : rawCommand;
 const cliPackage = {
   name: "@skastr0/quasar-cli",
-  version: "0.2.0",
+  version: "0.2.1",
 };
 
 const server = (): string | undefined => arg("--server") ?? configuredServerUrl();
@@ -369,7 +369,6 @@ const checkInt = (name: string, flag: string, min: number): boolean => {
 
 const SEARCH_MODES = ["lexical", "semantic", "fusion"] as const;
 const INGEST_RUN_STATUSES = ["running", "completed", "failed"] as const;
-const TOGGLE_VALUES = ["true", "false"] as const;
 const PROVIDERS = Provider.literals;
 const INGEST_PROVIDERS = ["all", ...PROVIDERS] as const;
 const ROLES = SessionRole.literals;
@@ -476,8 +475,7 @@ switch (command) {
     break;
   }
   case "maintain": {
-    if (!(checkEnum("maintain", "--vector", TOGGLE_VALUES) && checkEnum("maintain", "--optimize", TOGGLE_VALUES))) break;
-    await fetchServer("maintain", "/maintenance/run", { vector: arg("--vector"), optimize: arg("--optimize") });
+    await fetchServer("maintain", "/maintenance/run");
     break;
   }
   case "freshness": {
@@ -519,7 +517,7 @@ switch (command) {
           "tool-calls [--session-id id] [--project-key key] [--provider name] [--tool-name name] [--limit n] [--offset n]",
           "tool-call --id id",
           "ingest-runs [--status running|completed|failed] [--limit n]",
-          "maintain [--vector true|false] [--optimize true|false] [--server url]",
+          "maintain [--server url]",
           "freshness [--limit n] [--server url]",
           "repair-index [--limit n] [--lease-ms n] [--server url]",
           "workers [--server url]",
