@@ -106,7 +106,60 @@ const adapterFor = (sessions: readonly NormalizedSession[], options: { readonly 
   },
 });
 
+const diagnosticAdapter = (): SessionAdapter => ({
+  id: "diagnostic-adapter",
+  provider: "claude",
+  displayName: "Diagnostic Adapter",
+  stable: true,
+  defaultRoot: () => undefined,
+  read: async () => ({
+    sourceRoots: [],
+    sessions: [],
+    diagnostics: [{
+      adapterId: "diagnostic-adapter",
+      provider: "claude",
+      status: "error",
+      parserConfidence: "documented",
+      rootPath: "/history",
+      message: "fixture adapter diagnostic",
+      details: { diagnostic: "fixture.adapter.boundary", sourcePath: "/history/bad.jsonl" },
+    }],
+  }),
+  stream: async function* () {
+    yield {
+      type: "diagnostic" as const,
+      diagnostic: {
+        adapterId: "diagnostic-adapter",
+        provider: "claude" as const,
+        status: "error" as const,
+        parserConfidence: "documented" as const,
+        rootPath: "/history",
+        message: "fixture adapter diagnostic",
+        details: { diagnostic: "fixture.adapter.boundary", sourcePath: "/history/bad.jsonl" },
+      },
+    };
+  },
+});
+
 describe("ingestRemote", () => {
+  test("remote ingest reports adapter error diagnostics as failures", async () => {
+    adaptersByProvider.set("claude", diagnosticAdapter());
+
+    const reports = await ingestRemote(
+      { provider: "claude", ingestToken: "token-a" },
+      "http://127.0.0.1:1",
+    );
+
+    expect(reports[0]?.sessionsSeen).toBe(0);
+    expect(reports[0]?.sessionsWritten).toBe(0);
+    expect(reports[0]?.sessionsFailed).toBe(1);
+    expect(reports[0]?.failures).toEqual([{
+      sessionId: "/history/bad.jsonl",
+      diagnostic: "fixture.adapter.boundary",
+      error: "fixture adapter diagnostic",
+    }]);
+  });
+
   test("remote ingest retries transient server write failures", async () => {
     adaptersByProvider.set("claude", adapterFor([session("remote-retry")]));
     let writeAttempts = 0;

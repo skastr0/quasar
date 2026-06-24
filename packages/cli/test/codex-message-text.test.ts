@@ -37,8 +37,8 @@ const NOW = "2026-06-22T00:00:00.000Z";
 const FIXTURE_CWD = "/qsr/fab/extract-proj";
 const line = (value: unknown) => JSON.stringify(value);
 
-// All UUIDs are fabricated in the 0fab-extract namespace — zero real matches.
-const EXTRACT_UUID = "0fab0000-fab0-7fab-8fab-000000extr01";
+// All UUIDs are fabricated in the 0fab namespace — zero real matches.
+const EXTRACT_UUID = "0fab0000-fab0-7fab-8fab-000000000001";
 
 const root = mkdtempSync(join(tmpdir(), "quasar-codex-extract-"));
 
@@ -176,7 +176,7 @@ describe("codex message-text extraction (integration)", () => {
   test("event_msg.user_message contentText is the verbatim leaf — not a JSON envelope", async () => {
     const dir = join(root, "sessions", "2026", "06", "22");
     mkdirSync(dir, { recursive: true });
-    const uuid = "0fab0000-fab0-7fab-8fab-000000extr01";
+    const uuid = EXTRACT_UUID;
     const userText = "qsr fabricated user question for extraction regression";
     writeFileSync(
       join(dir, `rollout-2026-06-22T00-00-00-${uuid}.jsonl`),
@@ -231,7 +231,7 @@ describe("codex message-text extraction (integration)", () => {
 
   test("response_item.message contentText is the leaf block text — not a JSON envelope", async () => {
     // Use the session already written above.
-    const uuid = "0fab0000-fab0-7fab-8fab-000000extr01";
+    const uuid = EXTRACT_UUID;
     const result = await codexAdapter.read({
       machine: MACHINE,
       now: NOW,
@@ -253,7 +253,7 @@ describe("codex message-text extraction (integration)", () => {
   test("response_item.reasoning yields role=thinking with prose contentText — no serialized envelope", async () => {
     const dir = join(root, "sessions", "2026", "06", "22", "reasoning");
     mkdirSync(dir, { recursive: true });
-    const uuid = "0fab0000-fab0-7fab-8fab-000000extr02";
+    const uuid = "0fab0000-fab0-7fab-8fab-000000000002";
     const reasoningProse = "qsr fabricated reasoning: let me analyze the options carefully before responding.";
     writeFileSync(
       join(dir, `rollout-2026-06-22T01-00-00-${uuid}.jsonl`),

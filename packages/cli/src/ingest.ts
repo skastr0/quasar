@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 import { loadMachineIdentity } from "./core/machine";
-import type { Provider } from "./core/schemas";
+import type { AdapterDiagnostic, Provider } from "./core/schemas";
 
 import { sourceFingerprintFor } from "./adapters/common";
 import { adaptersByProvider, stableAdapters } from "./adapters/registry";
@@ -140,6 +140,22 @@ const fingerprintForItem = (item: {
 };
 
 const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+const diagnosticTarget = (diagnostic: AdapterDiagnostic, fallback: string): string => {
+  const details = diagnostic.details;
+  if (details !== null && typeof details === "object") {
+    const sourcePath = (details as { readonly sourcePath?: unknown }).sourcePath;
+    if (typeof sourcePath === "string" && sourcePath.length > 0) return sourcePath;
+  }
+  return diagnostic.rootPath ?? fallback;
+};
+const diagnosticCode = (diagnostic: AdapterDiagnostic): string => {
+  const details = diagnostic.details;
+  if (details !== null && typeof details === "object") {
+    const code = (details as { readonly diagnostic?: unknown }).diagnostic;
+    if (typeof code === "string" && code.length > 0) return code;
+  }
+  return "adapter_diagnostic";
+};
 const remoteWriteAttempts = 3;
 const remoteWriteRetryDelayMs = 250;
 
@@ -315,6 +331,17 @@ const ingestProviderRemote = async (
   });
 
   for await (const item of stream) {
+    if (item.type === "diagnostic") {
+      if (item.diagnostic.status === "error") {
+        sessionsFailed += 1;
+        failures.push({
+          sessionId: diagnosticTarget(item.diagnostic, provider),
+          diagnostic: diagnosticCode(item.diagnostic),
+          error: item.diagnostic.message,
+        });
+      }
+      continue;
+    }
     if (item.type !== "session") continue;
     sessionsSeen += 1;
     let sourceFingerprint: string;

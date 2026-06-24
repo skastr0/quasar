@@ -8,6 +8,17 @@ formats may still change.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-06-24
+
+### Fixed
+
+- Added a bounded Codex `legacy_header_v1` fallback for rollout files whose
+  first record carries the native session id at top-level `id`.
+- Rejected malformed or hintless Codex legacy headers with named diagnostics
+  instead of silently reporting an empty ingest or collapsing sessions into
+  `unknown-project`.
+- Preserved adapter diagnostic codes in remote ingest failure reports.
+
 ### Changed
 
 - Reoriented the repository to the Effect server architecture direction:
