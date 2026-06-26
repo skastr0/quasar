@@ -14,7 +14,7 @@ describe("server ops config", () => {
     expect(compose).toContain("QUASAR_LOCAL_SQLITE: /data/quasar/quasar.sqlite");
     expect(compose).toContain("QUASAR_SEARCH_DATA_DIR: /data/quasar/search.lance");
     expect(dockerfile).toContain('CMD ["bun", "packages/server/src/main.ts"');
-    expect(dockerfile).toContain("/ready");
+    expect(dockerfile).toContain("/health");
     expect(dockerfile).not.toContain("packages/server/src/cli.ts");
   });
 
@@ -33,6 +33,7 @@ describe("server ops config", () => {
     expect(ops).toContain("case \"lance\"");
     expect(ops).toContain("case \"ready\"");
     expect(ops).toContain('getJson("/ready")');
+    expect(ops).toContain('getJson("/health")');
     expect(ops).toContain("@lancedb/lancedb");
     expect(ops).toContain("VACUUM INTO");
     expect(ops).toContain("quasar-truth-backup.tar");
