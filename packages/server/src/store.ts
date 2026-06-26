@@ -1,7 +1,10 @@
 import { Database } from "bun:sqlite";
 import { Context, Effect, Layer, Schema } from "effect";
 
-import type { IngestRunRow, MappedSession, MessageRow, ProjectRow, SessionRow, ToolCallRow } from "./model";
+import type { DivergenceAggregate, DivergenceRow, IngestRunRow, MappedSession, MessageRow, ProjectRow, SessionRow, SessionVersion, ToolCallRow } from "./model";
+import type { IndexProof } from "./verify";
+import { messageSearchKey } from "./lancedb";
+import { isSearchableRole, normalizeIndexedContentHash } from "./searchPolicy";
 import { ensureParentDir, sqlitePath } from "./paths";
 
 export class SqliteStoreError extends Schema.TaggedError<SqliteStoreError>()(
@@ -60,9 +63,23 @@ export interface LocalStoreService {
   readonly stats: Effect.Effect<StoreStats, SqliteStoreError>;
   /** Mark a session as having a stale search index. Called in the same transaction as upsertSession. */
   readonly markSessionIndexStale: (sessionId: string) => Effect.Effect<void, SqliteStoreError>;
-  /** Mark a session as having a fresh search index, recording the indexedAt timestamp. */
-  readonly markSessionIndexed: (sessionId: string, indexedAt: string) => Effect.Effect<void, SqliteStoreError>;
-  /** Count sessions whose indexed_at is NULL or predates their updated_at (stale index). */
+  /** Stamp a session's index watermark — ONLY with a witnessed IndexProof. There is
+   * no (sessionId, isoString) form: you cannot assert "indexed" without a read-back. */
+  readonly markSessionIndexed: (proof: IndexProof) => Effect.Effect<void, SqliteStoreError>;
+  /** The searchable (key -> normalized contentHash) pairs SQLite expects in the index,
+   * built from the same searchable predicate and key function the writer uses. */
+  readonly intendedPairs: (sessionId: string) => Effect.Effect<ReadonlyMap<string, string>, SqliteStoreError>;
+  /** Cheap (updated_at, message_count) snapshot to guard verifyIndexed against TOCTOU. */
+  readonly sessionVersion: (sessionId: string) => Effect.Effect<SessionVersion, SqliteStoreError>;
+  /** Record/replace a session's divergence in the divergence-only ledger. */
+  readonly putDivergence: (divergence: DivergenceRow) => Effect.Effect<void, SqliteStoreError>;
+  /** Clear a session's divergence row once it converges. */
+  readonly clearDivergence: (sessionId: string) => Effect.Effect<void, SqliteStoreError>;
+  /** O(divergent) roll-up that feeds the readiness gate without scanning the corpus. */
+  readonly divergenceAggregate: Effect.Effect<DivergenceAggregate, SqliteStoreError>;
+  /** Divergent sessions for the healer, worst-first. */
+  readonly divergentSessions: (limit: number) => Effect.Effect<readonly DivergenceRow[], SqliteStoreError>;
+  /** Count sessions whose indexed_at is NULL or predates updated_at (diagnostics only, NOT the gate). */
   readonly countStaleIndexSessions: () => Effect.Effect<number, SqliteStoreError>;
   /** Count searchable messages that lack a real vector (contentHash LIKE 'unembedded:%'). */
   readonly countUnembeddedMessages: () => Effect.Effect<number, SqliteStoreError>;
@@ -158,6 +175,18 @@ const migrate = (db: Database): void => {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       PRIMARY KEY (model, content_hash)
+    );
+    CREATE TABLE IF NOT EXISTS index_divergence (
+      session_id TEXT PRIMARY KEY,
+      expected INTEGER NOT NULL,
+      present INTEGER NOT NULL,
+      missing_count INTEGER NOT NULL,
+      stale_count INTEGER NOT NULL,
+      extra_count INTEGER NOT NULL,
+      missing_keys TEXT NOT NULL,
+      stale_keys TEXT NOT NULL,
+      extra_keys TEXT NOT NULL,
+      updated_at TEXT NOT NULL
     );
   `);
   // Idempotent column adds for an existing sessions table predating the
@@ -413,9 +442,74 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
             trySqlite("markSessionIndexStale", () => {
               db.prepare("UPDATE sessions SET indexed_at = NULL WHERE session_id = ?").run(sessionId);
             }),
-          markSessionIndexed: (sessionId, indexedAt) =>
+          markSessionIndexed: (proof) =>
             trySqlite("markSessionIndexed", () => {
-              db.prepare("UPDATE sessions SET indexed_at = ? WHERE session_id = ?").run(indexedAt, sessionId);
+              db.prepare("UPDATE sessions SET indexed_at = ? WHERE session_id = ?").run(proof.at, proof.sessionId);
+            }),
+          intendedPairs: (sessionId) =>
+            trySqlite("intendedPairs", () => {
+              const rows = db
+                .query("SELECT seq, role, content_hash AS contentHash FROM messages WHERE session_id = ? ORDER BY seq ASC")
+                .all(sessionId) as { seq: number; role: string; contentHash: string }[];
+              const pairs = new Map<string, string>();
+              for (const row of rows) {
+                const role = row.role;
+                if (!isSearchableRole(role)) continue;
+                const digest = normalizeIndexedContentHash(row.contentHash);
+                if (digest === undefined) continue;
+                pairs.set(messageSearchKey({ sessionId, seq: row.seq, role }), digest);
+              }
+              return pairs;
+            }),
+          sessionVersion: (sessionId) =>
+            trySqlite("sessionVersion", () => {
+              const row = db
+                .query("SELECT updated_at AS updatedAt, message_count AS messageCount FROM sessions WHERE session_id = ?")
+                .get(sessionId) as { updatedAt: string | null; messageCount: number } | null;
+              return { updatedAt: row?.updatedAt ?? null, messageCount: row?.messageCount ?? 0 };
+            }),
+          putDivergence: (divergence) =>
+            trySqlite("putDivergence", () => {
+              db.prepare(
+                `INSERT INTO index_divergence(session_id, expected, present, missing_count, stale_count, extra_count, missing_keys, stale_keys, extra_keys, updated_at)
+                 VALUES ($sessionId, $expected, $present, $missing, $stale, $extra, $missingKeys, $staleKeys, $extraKeys, $updatedAt)
+                 ON CONFLICT(session_id) DO UPDATE SET expected = excluded.expected, present = excluded.present, missing_count = excluded.missing_count, stale_count = excluded.stale_count, extra_count = excluded.extra_count, missing_keys = excluded.missing_keys, stale_keys = excluded.stale_keys, extra_keys = excluded.extra_keys, updated_at = excluded.updated_at`,
+              ).run({
+                $sessionId: divergence.sessionId,
+                $expected: divergence.expected,
+                $present: divergence.present,
+                $missing: divergence.missingKeys.length,
+                $stale: divergence.staleKeys.length,
+                $extra: divergence.extraKeys.length,
+                $missingKeys: JSON.stringify(divergence.missingKeys),
+                $staleKeys: JSON.stringify(divergence.staleKeys),
+                $extraKeys: JSON.stringify(divergence.extraKeys),
+                $updatedAt: new Date().toISOString(),
+              });
+            }),
+          clearDivergence: (sessionId) =>
+            trySqlite("clearDivergence", () => {
+              db.prepare("DELETE FROM index_divergence WHERE session_id = ?").run(sessionId);
+            }),
+          divergenceAggregate: trySqlite("divergenceAggregate", () => {
+            const row = db
+              .query("SELECT COUNT(*) AS sessions, COALESCE(SUM(missing_count), 0) AS missing, COALESCE(SUM(stale_count), 0) AS stale, COALESCE(SUM(extra_count), 0) AS extra FROM index_divergence")
+              .get() as { sessions: number; missing: number; stale: number; extra: number };
+            return { sessions: row.sessions, missing: row.missing, stale: row.stale, extra: row.extra };
+          }),
+          divergentSessions: (limit) =>
+            trySqlite("divergentSessions", () => {
+              const rows = db
+                .query("SELECT session_id AS sessionId, expected, present, missing_keys AS missingKeys, stale_keys AS staleKeys, extra_keys AS extraKeys FROM index_divergence ORDER BY (missing_count + stale_count + extra_count) DESC LIMIT ?")
+                .all(limit) as { sessionId: string; expected: number; present: number; missingKeys: string; staleKeys: string; extraKeys: string }[];
+              return rows.map((row) => ({
+                sessionId: row.sessionId,
+                expected: row.expected,
+                present: row.present,
+                missingKeys: JSON.parse(row.missingKeys) as string[],
+                staleKeys: JSON.parse(row.staleKeys) as string[],
+                extraKeys: JSON.parse(row.extraKeys) as string[],
+              }));
             }),
           countStaleIndexSessions: () =>
             trySqlite("countStaleIndexSessions", () => {
