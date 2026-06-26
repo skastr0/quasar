@@ -32,6 +32,55 @@ import { LocalStore } from "./store";
 
 export type SearchMode = "lexical" | "semantic" | "fusion";
 
+/** How incomplete the index may be before search fails closed, as a fraction of the
+ * searchable corpus. A product decision; default conservative. Env-overridable. */
+const shortfallTolerance = (): number => {
+  const raw = Number(process.env.QUASAR_SEARCH_SHORTFALL_TOLERANCE);
+  return Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : 0.0001;
+};
+
+interface CoverageVerdict {
+  readonly serve: boolean;
+  readonly completeness: number;
+  readonly structural: boolean;
+  readonly reason?: string;
+}
+
+/**
+ * Classify a coverage gap (replaces the exact-equality cliff). Structural divergence
+ * — extra rows (present-but-unexpected) or stale rows (present-but-wrong-content),
+ * either of which can surface deleted or wrong results — fails closed regardless of
+ * magnitude. A pure missing-only shortfall serves degraded with disclosed coverage
+ * while under tolerance, and fails closed above it.
+ */
+const classifyCoverage = (params: {
+  readonly expected: number;
+  readonly missing: number;
+  readonly extra: number;
+  readonly stale: number;
+}): CoverageVerdict => {
+  if (params.extra > 0 || params.stale > 0) {
+    return {
+      serve: false,
+      completeness: 0,
+      structural: true,
+      reason: `structural index divergence (extra=${params.extra}, stale=${params.stale})`,
+    };
+  }
+  if (params.expected === 0) return { serve: true, completeness: 1, structural: false };
+  const ratio = params.missing / params.expected;
+  const completeness = Math.max(0, 1 - ratio);
+  if (ratio > shortfallTolerance()) {
+    return {
+      serve: false,
+      completeness,
+      structural: false,
+      reason: `index shortfall ${ratio.toFixed(6)} exceeds tolerance ${shortfallTolerance()} (missing ${params.missing} of ${params.expected})`,
+    };
+  }
+  return { serve: true, completeness, structural: false };
+};
+
 /** Raw diagnostic counters included in every ReadinessResult. */
 export interface IndexStats {
   /** Number of rows currently in the LanceDB messages table. */
@@ -66,6 +115,9 @@ export interface ReadinessResult {
   readonly syntheticEmbeddingReady?: boolean;
   /** Synthetic embedding failure reason when readiness fails closed. */
   readonly syntheticEmbeddingReason?: string;
+  /** Disclosed coverage in [0,1] when serving a degraded (incomplete-but-bounded)
+   * index or failing on a shortfall; omitted at full coverage (silence is semantic). */
+  readonly completeness?: number;
   readonly reason?: string;
 }
 
@@ -123,6 +175,9 @@ export const SearchReadinessLive = Layer.effect(
           const sqliteSearchableCount = yield* store.countSearchableMessages();
           const staleSessions = yield* store.countStaleIndexSessions().pipe(
             Effect.catchAll(() => Effect.succeed(1)),
+          );
+          const divergence = yield* store.divergenceAggregate.pipe(
+            Effect.catchAll(() => Effect.succeed({ sessions: 0, missing: 0, stale: 0, extra: 0 })),
           );
           const unembeddedVectorRows = yield* store.countUnembeddedMessages().pipe(
             Effect.catchAll(() => Effect.succeed(0)),
@@ -298,48 +353,65 @@ export const SearchReadinessLive = Layer.effect(
             } satisfies ReadinessResult;
           }
 
-          if (rowCountMismatch) {
+          // Classify-then-gate (replaces the exact-equality cliff). The divergence-only
+          // ledger supplies the stale (present-but-wrong-content) signal a row-count
+          // comparison cannot see; the coarse lexical/vector counts supply missing/extra.
+          const lexicalCoverage = classifyCoverage({
+            expected: sqliteSearchableCount,
+            missing: Math.max(0, sqliteSearchableCount - lanceRowCount),
+            extra: Math.max(0, lanceRowCount - sqliteSearchableCount),
+            stale: divergence.stale,
+          });
+          if (!lexicalCoverage.serve) {
             return {
               ok: false,
               mode,
               staleCount: disclosedStale,
               missingVectorCount,
               indexStats,
+              completeness: lexicalCoverage.completeness,
               syntheticEmbeddingReady: needsVectorIndex ? syntheticEmbeddingResult.ok : undefined,
               syntheticEmbeddingReason: needsVectorIndex ? syntheticEmbeddingResult.reason : undefined,
-              reason: `LanceDB row count ${lanceRowCount} does not match SQLite searchable count ${sqliteSearchableCount}`,
+              reason: lexicalCoverage.reason,
             } satisfies ReadinessResult;
           }
 
-          if (needsVectorIndex && (vectorRowCount !== sqliteSearchableCount || pendingEmbedJobs > 0 || unembeddedVectorRows > 0)) {
+          const vectorCoverage: CoverageVerdict = needsVectorIndex
+            ? classifyCoverage({
+                expected: sqliteSearchableCount,
+                missing: Math.max(0, sqliteSearchableCount - vectorRowCount) + pendingEmbedJobs + unembeddedVectorRows,
+                extra: Math.max(0, vectorRowCount - sqliteSearchableCount),
+                stale: 0,
+              })
+            : { serve: true, completeness: 1, structural: false };
+          if (needsVectorIndex && !vectorCoverage.serve) {
             return {
               ok: false,
               mode,
               staleCount: disclosedStale,
               missingVectorCount,
               indexStats,
-              syntheticEmbeddingReady: needsVectorIndex ? syntheticEmbeddingResult.ok : undefined,
-              syntheticEmbeddingReason: needsVectorIndex ? syntheticEmbeddingResult.reason : undefined,
-              reason: vectorRowCount !== sqliteSearchableCount
-                ? `Vector search table row count ${vectorRowCount} does not match SQLite searchable count ${sqliteSearchableCount}`
-                : `Vector search frontier is still moving: pending=${pendingEmbedJobs}, unembedded=${unembeddedVectorRows}`,
+              completeness: vectorCoverage.completeness,
+              syntheticEmbeddingReady: syntheticEmbeddingResult.ok,
+              syntheticEmbeddingReason: syntheticEmbeddingResult.reason,
+              reason: vectorCoverage.reason,
             } satisfies ReadinessResult;
           }
 
-          // ── Serve unless we genuinely cannot ────────────────────────────────
-          // Lexical can serve while FTS catches up: LanceDB includes the unindexed
-          // tail via flat scan, so the text tail is a disclosed latency property.
-          // Semantic/fusion require the active vector table to cover the searchable
-          // corpus, and they fail closed if Synthetic embeddings are unavailable.
+          // ── Serve (possibly degraded) unless Synthetic embeddings are missing ──
+          // Lexical serves while FTS catches up: LanceDB includes the unindexed tail
+          // via flat scan, so the text tail is a disclosed latency property, not a 503.
           if (!syntheticReady) {
             return syntheticFailure(mode, disclosedStale, missingVectorCount, indexStats, undefined, syntheticEmbeddingResult.reason);
           }
+          const completeness = Math.min(lexicalCoverage.completeness, vectorCoverage.completeness);
           return {
             ok: true,
             mode,
             staleCount: disclosedStale,
             missingVectorCount: 0,
             indexStats,
+            completeness: completeness < 1 ? completeness : undefined,
             syntheticEmbeddingReady: needsVectorIndex ? syntheticEmbeddingResult.ok : undefined,
             syntheticEmbeddingReason: needsVectorIndex ? syntheticEmbeddingResult.reason : undefined,
           } satisfies ReadinessResult;
