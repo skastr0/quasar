@@ -12,8 +12,7 @@ import { embeddingProfileFromEnv, embeddingProfileSearchTable } from "./embeddin
 import type { MessageRow } from "./model";
 import { decideSearchDocument, indexedContentHash, VECTOR_READY_FILTER } from "./searchPolicy";
 import { LocalStore } from "./store";
-
-const nowIso = () => new Date().toISOString();
+import { IndexDivergent, matchState, mergeDivergence, verifyIndexed } from "./verify";
 
 const LEXICAL_TABLE = "messages";
 
@@ -176,12 +175,36 @@ export const DerivedSearchLive = Layer.effect(
           // maintenance worker (maintenance.ts maintain()) folds newly-written rows
           // into the FTS/vector indexes once writers are idle, per table. Until then
           // the readiness gate keeps /search fail-closed (503), so the rows are never
-          // served unindexed. indexSession is now a pure, fast write.
+          // served unindexed.
 
-          // Watermark: record that this session's index is now current.
-          yield* store.markSessionIndexed(sessionId, nowIso()).pipe(
-            Effect.catchAll(() => Effect.void),
+          // Verify the write against a read-back, then either stamp (Converged — the
+          // SOLE site indexed_at is set, and only with a witnessed proof) or surface
+          // Divergent so the index-session retry/maxAttempts machinery heals it. A
+          // short write can no longer be stamped: the disproving keys force Divergent.
+          const state = yield* verifyIndexed(sessionId).pipe(
+            Effect.provideService(LocalStore, store),
+            Effect.provideService(LanceDb, search),
           );
+          yield* matchState(state, {
+            NeverIndexed: () => Effect.void,
+            Converged: (converged) =>
+              store.markSessionIndexed(converged.proof).pipe(
+                Effect.zipRight(store.clearDivergence(converged.sessionId)),
+              ),
+            Divergent: (divergent) =>
+              store.putDivergence(mergeDivergence(divergent.sessionId, divergent.deltas)).pipe(
+                Effect.zipRight(
+                  Effect.fail(
+                    new IndexDivergent({
+                      sessionId: divergent.sessionId,
+                      missing: divergent.deltas.reduce((total, delta) => total + delta.missingKeys.length, 0),
+                      stale: divergent.deltas.reduce((total, delta) => total + delta.staleKeys.length, 0),
+                      extra: divergent.deltas.reduce((total, delta) => total + delta.extraKeys.length, 0),
+                    }),
+                  ),
+                ),
+              ),
+          });
 
           const semanticRowsUpserted = messages.filter((message) => decideSearchDocument(message).semantic).length;
           return {

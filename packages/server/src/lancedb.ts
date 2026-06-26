@@ -284,7 +284,7 @@ export class LanceDbOperationFailed extends Schema.TaggedError<LanceDbOperationF
   },
 ) {}
 
-type LanceDbError =
+export type LanceDbError =
   | ConnectionFailed
   | DimensionMismatch
   | IndexNotReady
