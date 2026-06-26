@@ -3,9 +3,10 @@ import { Context, Effect, Layer, Ref } from "effect";
 
 import { embeddingProfileFromEnv, embeddingProfileSearchTable } from "./embeddingProfiles";
 import { DerivedSearch } from "./search";
-import { indexedContentHash, isSearchableRole, normalizeIndexedContentHash, VECTOR_READY_FILTER } from "./searchPolicy";
+import { VECTOR_READY_FILTER } from "./searchPolicy";
 import { DurableQueue } from "./services";
 import { LocalStore } from "./store";
+import { mergeDivergence, verifyIndexed } from "./verify";
 
 // How the index stays both bounded AND fresh, minimally: on a throttled tick, when a
 // table's data has changed since its last refresh, first try optimize on the table,
@@ -48,6 +49,7 @@ export interface SearchMaintenanceService {
   readonly maintain: () => Effect.Effect<MaintenanceReport, unknown>;
   readonly reconcileFreshness: (options?: {
     readonly limit?: number;
+    readonly offset?: number;
     readonly now?: string;
   }) => Effect.Effect<FreshnessReport, unknown>;
   readonly repairOnce: (options: {
@@ -63,12 +65,6 @@ export class SearchMaintenance extends Context.Tag("@quasar/SearchMaintenance")<
   SearchMaintenanceService
 >() {}
 
-const sameContentHashes = (expected: readonly string[], actual: readonly string[]) => {
-  if (expected.length !== actual.length) return false;
-  const actualSet = new Set(actual);
-  return expected.every((value) => actualSet.has(value));
-};
-
 const isIndexSessionPayload = (payload: unknown): payload is { readonly sessionId: string } =>
   typeof payload === "object" && payload !== null && typeof (payload as { sessionId?: unknown }).sessionId === "string";
 
@@ -80,7 +76,6 @@ export const SearchMaintenanceLive = Layer.effect(
     const search = yield* LanceDb;
     const derived = yield* DerivedSearch;
     const profileTable = embeddingProfileSearchTable(embeddingProfileFromEnv());
-    const activeTables = profileTable === DEFAULT_SEARCH_TABLE ? [DEFAULT_SEARCH_TABLE] : [DEFAULT_SEARCH_TABLE, profileTable];
     const lastHeavyAt = yield* Ref.make(new Map<string, number>());
     const lastRefreshedRows = yield* Ref.make(new Map<string, number>());
 
@@ -171,53 +166,40 @@ export const SearchMaintenanceLive = Layer.effect(
           return { rebuilt, stats };
         }),
 
+      // Rolling reconciler: for each session in the batch, measure its index state
+      // (keyed (key, contentHash) diff vs a Lance read-back — strictly more precise
+      // than the old content-hash set compare) and heal. Converged stamps the proof
+      // and clears the ledger; Divergent records the exact divergence and enqueues a
+      // targeted index-session repair (idempotency-keyed, so a pending repair is not
+      // duplicated). This is the producer that fills the divergence ledger the gate
+      // reads, and the edge that was missing from the worker loop.
       reconcileFreshness: (options = {}) =>
         Effect.gen(function* () {
-          const sessions = yield* store.listSessions({ limit: options.limit ?? 500 });
+          const sessions = yield* store.listSessions({ limit: options.limit ?? 200, offset: options.offset ?? 0 });
           let freshSessions = 0;
           let repairsEnqueued = 0;
           const staleSessions: string[] = [];
 
           for (const session of sessions) {
-            const messages = yield* store.readMessages(session.sessionId, 100_000);
-            const expected = messages
-              .filter((message) => isSearchableRole(message.role))
-              .map(indexedContentHash);
-            const rowsByTable = yield* Effect.forEach(
-              activeTables,
-              (tableName) =>
-                search.readMessageRowsBySession({
-                  sessionId: session.sessionId,
-                  tableName,
-                  limit: 100_000,
-                  select: ["contentHash"],
-                }).pipe(Effect.catchAll(() => Effect.succeed([]))),
-              { concurrency: 1 },
+            const state = yield* verifyIndexed(session.sessionId).pipe(
+              Effect.provideService(LocalStore, store),
+              Effect.provideService(LanceDb, search),
             );
-            const normalizedExpected = expected
-              .map(normalizeIndexedContentHash)
-              .filter((value): value is string => value !== undefined);
-            const tablesAreFresh = rowsByTable.every((rows) => {
-              const actual = rows
-                .map((row) => row.contentHash)
-                .map(normalizeIndexedContentHash)
-                .filter((value): value is string => value !== undefined);
-              return sameContentHashes(normalizedExpected, actual);
-            });
-
-            if (tablesAreFresh) {
+            if (state._tag === "Converged") {
+              yield* store.markSessionIndexed(state.proof);
+              yield* store.clearDivergence(state.sessionId);
               freshSessions += 1;
-              continue;
+            } else if (state._tag === "Divergent") {
+              yield* store.putDivergence(mergeDivergence(state.sessionId, state.deltas));
+              yield* queue.enqueue({
+                kind: "index-session",
+                payload: { sessionId: state.sessionId },
+                idempotencyKey: `index-session:${state.sessionId}`,
+                nextRunAt: options.now,
+              });
+              repairsEnqueued += 1;
+              staleSessions.push(state.sessionId);
             }
-
-            staleSessions.push(session.sessionId);
-            yield* queue.enqueue({
-              kind: "index-session",
-              payload: { sessionId: session.sessionId },
-              idempotencyKey: `index-session:${session.sessionId}`,
-              nextRunAt: options.now,
-            });
-            repairsEnqueued += 1;
           }
 
           return { sessionsChecked: sessions.length, freshSessions, repairsEnqueued, staleSessions };

@@ -94,13 +94,16 @@ describe("WorkerSupervisor", () => {
     );
 
     expect(status.enabled).toBe(true);
-    expect(Object.keys(status.lastReports)).toEqual(["embeddings", "index-repair", "maintenance"]);
+    expect(Object.keys(status.lastReports).sort()).toEqual(["embeddings", "index-repair", "maintenance", "reconcile"]);
     expect(status.lastErrors).toEqual({});
-    expect(queueStats).toEqual([]);
+    // The rolling reconcile worker may enqueue a targeted index-session repair for a
+    // not-yet-indexed session; the contract asserted here is that the embed-message
+    // work was drained.
+    expect(queueStats.filter((k) => k.kind === "embed-message" && k.pending + k.leased > 0)).toEqual([]);
     expect(rows[0]?.contentHash).toBe("hash-a");
   });
 
-  test("workers are always on: status reflects all three active workers", async () => {
+  test("workers are always on: status reflects all active workers", async () => {
     const status = await withWorkers(
       Effect.gen(function* () {
         const workers = yield* WorkerSupervisor;
@@ -109,6 +112,6 @@ describe("WorkerSupervisor", () => {
     );
 
     expect(status.enabled).toBe(true);
-    expect(status.workers).toEqual(["embeddings", "index-repair", "maintenance"]);
+    expect(status.workers).toEqual(["embeddings", "index-repair", "maintenance", "reconcile"]);
   });
 });
