@@ -19,7 +19,8 @@ const usage = {
     restart: "restart the running service",
     ps: "show compose service state",
     logs: "follow server logs; pass --no-follow to print once",
-    health: "GET /health from the local server",
+    ready: "GET /ready from the local server",
+    health: "GET /health from the local server (liveness)",
     status: "GET /status from the local server; pass --lance for LanceDB stats",
     lance: "inspect all LanceDB tables and indexes directly inside the container",
     exec: "run a command inside the container after --",
@@ -61,6 +62,10 @@ switch (command) {
     break;
   case "logs":
     docker(rest.includes("--no-follow") ? ["logs", "--tail=200", "server"] : ["logs", "-f", "--tail=200", "server"]);
+    break;
+  case "ready":
+    if (rest.includes("--external")) await getJson("/ready");
+    else containerGetJson("/ready");
     break;
   case "health":
     if (rest.includes("--external")) await getJson("/health");
@@ -158,7 +163,7 @@ function containerGetJson(path) {
 
 function withShellSecrets(env) {
   const next = { ...env };
-  for (const key of ["SYNTHETIC_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"]) {
+  for (const key of ["SYNTHETIC_API_KEY"]) {
     if (next[key]?.trim()) continue;
     const value = readInteractiveShellEnv(key);
     if (value) next[key] = value;

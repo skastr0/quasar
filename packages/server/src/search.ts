@@ -1,5 +1,5 @@
 import {
-  GEMINI_EMBEDDING_DIMENSIONS,
+  DEFAULT_MESSAGE_VECTOR_DIMENSIONS,
   LanceDb,
   MESSAGE_SEARCH_COLUMNS,
   type MessageSearchRow,
@@ -103,7 +103,7 @@ export const DerivedSearchLive = Layer.effect(
     const search = yield* LanceDb;
     const profile = embeddingProfileFromEnv();
     const profileTable = embeddingProfileSearchTable(profile);
-    const lexicalDimensions = profileTable === LEXICAL_TABLE ? profile.dimensions : GEMINI_EMBEDDING_DIMENSIONS;
+    const lexicalDimensions = DEFAULT_MESSAGE_VECTOR_DIMENSIONS;
 
     const deleteOrphans = (tableName: string, sessionId: string, nextKeys: ReadonlySet<string>) =>
       Effect.gen(function* () {

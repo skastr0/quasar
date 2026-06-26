@@ -159,6 +159,10 @@ describe("HTTP server", () => {
       expect(forced.data.outcome.status).toBe("ok");
       expect(messages.data.rows.map((row: { text: string }) => row.text)).toEqual(["forced http rewrite", "assistant-only http memory"]);
       expect(status.data.queue.pending).toBe(3);
+      expect(status.data.lance).toEqual({
+        _tag: "Right",
+        right: "skipped; pass ?lance=true for LanceDB table stats",
+      });
     } finally {
       proc.kill();
       await proc.exited;
@@ -207,7 +211,7 @@ describe("HTTP server", () => {
         body: JSON.stringify({
           session: {
             ...unknownProviderSession,
-            session: { ...unknownProviderSession.session, provider: "gemini-cli" },
+            session: { ...unknownProviderSession.session, provider: "nova-cli" },
           },
         }),
       });
@@ -248,6 +252,7 @@ describe("HTTP server", () => {
       cwd: join(import.meta.dir, ".."),
       env: {
         ...process.env,
+        QUASAR_SEARCH_PROFILE: "1",
         QUASAR_LOCAL_SQLITE: sqlite,
         QUASAR_SEARCH_DATA_DIR: lance,
       },
@@ -257,7 +262,7 @@ describe("HTTP server", () => {
 
     try {
       await waitFor(`http://127.0.0.1:${port}/health`);
-      const [projects, messages, toolCalls, wrongProviderToolCalls, toolCall, missingToolCallId, search, roleSearch] = await Promise.all([
+      const [projects, messages, toolCalls, wrongProviderToolCalls, toolCall, missingToolCallId, search, roleSearch, statusProfile] = await Promise.all([
         fetch(`http://127.0.0.1:${port}/projects`).then((response) => response.json()),
         fetch(`http://127.0.0.1:${port}/messages?sessionId=session-http`).then((response) => response.json()),
         fetch(`http://127.0.0.1:${port}/tool-calls?provider=codex&toolName=shell_command`).then((response) => response.json()),
@@ -266,6 +271,7 @@ describe("HTTP server", () => {
         fetch(`http://127.0.0.1:${port}/tool-call`).then((response) => response.json()),
         fetch(`http://127.0.0.1:${port}/search/lexical?q=hello`).then((response) => response.json()),
         fetch(`http://127.0.0.1:${port}/search/lexical?q=http&role=assistant`).then((response) => response.json()),
+        fetch(`http://127.0.0.1:${port}/status?lance=true`).then((response) => response.json()),
       ]);
 
       expect(projects.data.rows.map((row: { projectKey: string }) => row.projectKey)).toEqual(["project-http"]);
@@ -275,6 +281,14 @@ describe("HTTP server", () => {
       expect(toolCall.data.row.toolName).toBe("shell_command");
       expect(missingToolCallId.ok).toBe(false);
       expect(missingToolCallId.error.type).toBe("BadRequest");
+      expect(search.data.receipt).toMatchObject({ route: "search/lexical", mode: "lexical", query: "hello" });
+      expect(typeof search.data.receipt.startedAt).toBe("string");
+      expect(typeof search.data.receipt.completedAt).toBe("string");
+      expect(statusProfile.data.lance.activeVectorTableName).not.toBe("messages");
+      expect(statusProfile.data.lance.activeVectorTableName).toStartWith("messages_");
+      expect(statusProfile.data.lance.defaultTable._tag).toBe("Right");
+      expect(statusProfile.data.lance.activeVectorTable._tag).toBe("Right");
+      expect(statusProfile.data.workers.workers).toEqual(["embeddings", "index-repair", "maintenance"]);
       expect(search.data.matches.map((hit: { row: { text: string } }) => hit.row.text)).toEqual(["hello over http"]);
       expect(roleSearch.data.matches.map((hit: { row: { text: string } }) => hit.row.text)).toEqual(["assistant-only http memory"]);
     } finally {

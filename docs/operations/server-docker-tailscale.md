@@ -20,7 +20,7 @@ Set at least:
 - `QUASAR_PUBLISH_HOST=0.0.0.0` unless Docker can bind the Tailscale IP directly.
 - `QUASAR_PUBLISH_PORT=7180` (host publish port; the container always binds 6180 internally). 7180 is dedicated to quasar — 6180 on the Mac mini belongs to an unrelated dev server. The canonical client URL is `http://<mac-mini-tailnet-ip>:7180`.
 - `QUASAR_INGEST_TOKEN=<long random token>`. Remote write ingest is disabled unless this is configured, and client machines must send the same token.
-- `QUASAR_EMBEDDING_PROVIDER=synthetic` and Synthetic/Nomic profile values for bulk text embeddings.
+- Synthetic API embedding profile values for bulk text embeddings.
 - `SYNTHETIC_API_KEY` in the environment or the invoking shell. `scripts/server-ops.mjs deploy` will also read it from the Mac mini interactive zsh environment when it is not already exported.
 
 Keep `QUASAR_HOME=/data/quasar` pinned in compose. That preserves Quasar's machine identity and idempotency across container rebuilds.
@@ -33,7 +33,7 @@ Use package scripts from the repo root:
 bun run server:deploy      # build/recreate service after code/env changes
 bun run server:ps          # compose service state
 bun run server:logs        # follow logs
-bun run server:health      # lightweight health check
+bun run server:ready       # lightweight readiness check
 bun run server:status      # SQLite/queue/cache status
 bun run server:lance       # direct LanceDB table/index inventory
 bun run server:maintain    # LanceDB indexes/optimize inside container
@@ -68,7 +68,7 @@ bun scripts/server-ops.mjs exec -- sh -lc 'du -sh /data/quasar/*'
 
    ```bash
    bun run server:ps
-   bun run server:health
+   bun run server:ready
    bun run server:status
    bun run server:lance
    ```
@@ -76,7 +76,7 @@ bun scripts/server-ops.mjs exec -- sh -lc 'du -sh /data/quasar/*'
 5. From another Tailnet client, verify the `svc:quasar` Tailscale Service:
 
    ```bash
-   curl -fsS https://<quasar-service-tailnet-hostname>/health
+   curl -fsS https://<quasar-service-tailnet-hostname>/ready
    curl -fsS https://<quasar-service-tailnet-hostname>/status
    ```
 
@@ -102,7 +102,7 @@ On the Mac mini, verify the service host:
 tailscale serve get-config --all
 tailscale serve status --json
 tailscale status --json | jq -r '.Self.CapMap."service-host"[0]."svc:quasar"[]'
-curl -fsS http://127.0.0.1:7180/health
+curl -fsS http://127.0.0.1:7180/ready
 ```
 
 If the service hostname does not resolve on the Mac mini itself, inspect the
@@ -120,14 +120,14 @@ the TailVIP advertised for `svc:quasar`:
 ```bash
 tailvip="$(tailscale status --json | jq -r '.Self.CapMap."service-host"[0]."svc:quasar"[0]')"
 curl -fsS --resolve <quasar-service-tailnet-hostname>:443:"$tailvip" \
-  https://<quasar-service-tailnet-hostname>/health
+  https://<quasar-service-tailnet-hostname>/ready
 ```
 
 That proves only the service host and SNI proxy. It does not replace remote
 client proof. From a remote tailnet client with service access:
 
 ```bash
-curl -fsS https://<quasar-service-tailnet-hostname>/health
+curl -fsS https://<quasar-service-tailnet-hostname>/ready
 
 tmp="$(mktemp -d)"
 printf '%s\n' '{"schemaVersion":3,"projectKey":"quasar","serverUrl":"https://<quasar-service-tailnet-hostname>"}' > "$tmp/config.json"
@@ -281,7 +281,6 @@ runs as a client that reads local histories and POSTs them to the server over HT
 Use one active embedding profile per running server process. For the Mac mini default:
 
 ```env
-QUASAR_EMBEDDING_PROVIDER=synthetic
 QUASAR_EMBEDDING_MODEL=hf:nomic-ai/nomic-embed-text-v1.5
 QUASAR_EMBEDDING_DIMENSIONS=768
 QUASAR_EMBEDDING_TASK=search_document
@@ -294,7 +293,7 @@ QUASAR_FRESHNESS_WORKER_ENABLED=false
 QUASAR_MAINTENANCE_WORKER_ENABLED=false
 ```
 
-The embedding worker drains `embed-message` jobs; the index repair worker drains `index-session` jobs into LanceDB. The cache namespace and vector table are profile-scoped. Quasar does not intentionally embed one message into multiple provider spaces during ordinary operation. Side-by-side provider comparison is an explicit proof workflow, not daemon behavior.
+The embedding worker drains `embed-message` jobs; the index repair worker drains `index-session` jobs into LanceDB. The cache namespace and vector table are profile-scoped. Quasar does not intentionally embed one message into multiple embedding spaces during ordinary operation. Side-by-side profile comparison is an explicit proof workflow, not daemon behavior.
 
 ## Maintenance
 

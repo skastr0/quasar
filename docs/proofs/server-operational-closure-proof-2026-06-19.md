@@ -1,6 +1,6 @@
 # Local-server operational closure proof — 2026-06-19
 
-This proof records the current production posture for the Quasar Effect server on the Mac mini. The canonical runtime is Docker + SQLite truth + embedded LanceDB derived search + Synthetic/Nomic embeddings. Access proof uses the direct Mac mini Tailscale IP, redacted below as `<mac-mini-tailscale-ip>`.
+This proof records the current production posture for the Quasar Effect server on the Mac mini. The canonical runtime is Docker + SQLite truth + embedded LanceDB derived search + Synthetic API embeddings. Access proof uses the direct Mac mini Tailscale IP, redacted below as `<mac-mini-tailscale-ip>`.
 
 ## Verdict
 
@@ -10,7 +10,7 @@ PASS — the server path is connected end to end:
 - LaunchAgent incremental sync is installed and loaded with a 60 second interval.
 - Manual incremental sync tick scans all configured providers and skips unchanged sessions without enqueuing duplicate work.
 - SQLite truth contains the expected corpus scale.
-- Synthetic/Nomic is the active embedding profile.
+- Synthetic API is the active embedding profile.
 - Worker queue is empty; embedding and index-repair workers are enabled and idle.
 - LanceDB has the lexical message table and active-profile vector table with FTS/vector indexes; maintenance was run and the indexed row counts are current.
 - Fusion search over the direct Tailscale IP returns real hits.
@@ -242,6 +242,6 @@ The system is ready to operate in the current architecture:
 2. Keep the 60-second LaunchAgent sync tick installed.
 3. Use direct Tailscale IP for agent wrappers and proofs.
 4. Let the server drain embedding/index jobs; do not run long-lived shell embedding jobs.
-5. Use Synthetic/Nomic as the default bulk text embedding profile.
+5. Use Synthetic API as the default bulk text embedding profile.
 6. Run explicit maintenance after large ingest bursts.
 7. Back up SQLite truth and machine identity; rebuild LanceDB as derived state when needed.

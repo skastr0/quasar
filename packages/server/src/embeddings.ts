@@ -1,6 +1,4 @@
-import { google, type GoogleEmbeddingModelOptions } from "@ai-sdk/google";
 import { LanceDb, type SearchRole } from "./lancedb";
-import { embedMany } from "ai";
 import { Database } from "bun:sqlite";
 import { Effect, Layer, Schema } from "effect";
 import { createHash } from "node:crypto";
@@ -9,8 +7,9 @@ import { embeddingProfileFromEnv, embeddingProfileSearchTable, type EmbeddingPro
 import type { MessageRow, QueueJobRow } from "./model";
 import { ensureParentDir, sqlitePath } from "./paths";
 import { isSemanticSearchDocument } from "./searchPolicy";
-import { DurableQueue, Embeddings, type EmbeddingCacheRow } from "./services";
+import { DurableQueue, Embeddings, type EmbeddingCacheRow, type EmbeddingReadinessStatus } from "./services";
 import { LocalStore } from "./store";
+import { makeSyntheticEmbedder, SyntheticEmbeddingError } from "./syntheticEmbeddings";
 
 // Provider prefix of a sessionId (matches search.providerFromSessionId); kept
 // local to avoid importing the search layer into the embed worker.
@@ -18,11 +17,11 @@ const providerForSessionId = (sessionId: string): string => {
   const colon = sessionId.indexOf(":");
   return colon === -1 ? sessionId : sessionId.slice(0, colon);
 };
-import { makeSyntheticEmbedder, SyntheticEmbeddingError } from "./syntheticEmbeddings";
 
 const textEncoder = new TextEncoder();
 const DEFAULT_EMBEDDING_API_BATCH_SIZE = 100;
 const DEFAULT_EMBEDDING_DOCUMENT_CHUNK_CHARS = 12_000;
+const DEFAULT_EMBEDDING_READINESS_CACHE_TTL_MS = 30_000;
 const RETRYABLE_EMBEDDING_BASE_DELAY_MS = 30_000;
 const RETRYABLE_EMBEDDING_MAX_DELAY_MS = 10 * 60_000;
 
@@ -89,26 +88,8 @@ const toCacheRow = (row: Record<string, unknown>): EmbeddingCacheRow => ({
   updatedAt: row.updatedAt as string,
 });
 
-const liveGeminiEmbedder = (profile: EmbeddingProfile): Embedder => ({
-  embedMany: async (values) => {
-    const { embeddings } = await embedMany({
-      model: google.embedding(profile.model),
-      values: [...values],
-      providerOptions: {
-        google: {
-          outputDimensionality: profile.dimensions,
-          taskType: profile.task as GoogleEmbeddingModelOptions["taskType"],
-        } satisfies GoogleEmbeddingModelOptions,
-      },
-    });
-    return embeddings;
-  },
-});
-
 const liveEmbedderForProfile = (profile: EmbeddingProfile): Embedder => {
-  if (profile.provider === "gemini") return liveGeminiEmbedder(profile);
-  if (profile.provider === "synthetic") return makeSyntheticEmbedder(profile);
-  return { embedMany: async () => { throw new Error(`Embedding provider ${profile.provider} is not configured in this build`); } };
+  return makeSyntheticEmbedder(profile);
 };
 
 const assertVectorDimensions = (operation: string, profile: EmbeddingProfile, vector: readonly number[]): Effect.Effect<void, EmbeddingError> =>
@@ -192,6 +173,76 @@ const isRetryableEmbeddingCause = (cause: unknown): boolean => {
 const prefixed = (prefix: string | undefined, text: string): string =>
   prefix === undefined || prefix.length === 0 ? text : `${prefix}${text}`;
 
+const readinessProbeText = "quasar readiness probe";
+
+const readinessCacheTtlMs = (): number =>
+  positiveIntEnv("QUASAR_EMBEDDING_READINESS_CACHE_TTL_MS", DEFAULT_EMBEDDING_READINESS_CACHE_TTL_MS);
+
+const probeEmbeddingAvailability = (
+  embedder: Embedder,
+  profile: EmbeddingProfile,
+): Effect.Effect<EmbeddingReadinessStatus, never> =>
+  Effect.suspend(() => {
+    const apiKey = process.env.SYNTHETIC_API_KEY?.trim();
+    if (apiKey === undefined || apiKey.length === 0) {
+      return Effect.succeed({
+        ok: false,
+        checkedAt: nowIso(),
+        reason: "SYNTHETIC_API_KEY is required for Synthetic embeddings",
+      } satisfies EmbeddingReadinessStatus);
+    }
+
+    return Effect.tryPromise({
+      try: async () => {
+        const input = prefixed(profile.queryPrefix, readinessProbeText);
+        const vectors = await embedder.embedMany([input]);
+        const vector = vectors[0];
+        if (vectors.length !== 1 || vector === undefined) {
+          throw new Error("embedder returned no readiness vector");
+        }
+        if (vector.length !== profile.dimensions) {
+          throw new Error(`embedding vector has dimension ${vector.length}; expected ${profile.dimensions}`);
+        }
+        return { ok: true, checkedAt: nowIso() } satisfies EmbeddingReadinessStatus;
+      },
+      catch: (cause) => cause,
+    }).pipe(
+      Effect.catchAll((cause) =>
+        Effect.succeed({
+          ok: false,
+          checkedAt: nowIso(),
+          reason: cause instanceof Error ? cause.message : String(cause),
+        } satisfies EmbeddingReadinessStatus),
+      ),
+    );
+  });
+
+const cachedEmbeddingReadiness = (
+  embedder: Embedder,
+  profile: EmbeddingProfile,
+): Effect.Effect<EmbeddingReadinessStatus, never> => {
+  let cached: { readonly expiresAt: number; readonly status: EmbeddingReadinessStatus } | undefined;
+  let inFlight: Promise<EmbeddingReadinessStatus> | undefined;
+
+  return Effect.promise(async () => {
+    const now = Date.now();
+    if (cached !== undefined && cached.expiresAt > now) return cached.status;
+    if (inFlight !== undefined) return await inFlight;
+
+    inFlight = Effect.runPromise(probeEmbeddingAvailability(embedder, profile)).then((status) => {
+      cached = {
+        expiresAt: Date.now() + readinessCacheTtlMs(),
+        status,
+      };
+      return status;
+    }).finally(() => {
+      inFlight = undefined;
+    });
+
+    return await inFlight;
+  });
+};
+
 export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer.Layer<Embeddings, never, LocalStore | DurableQueue | LanceDb> => {
   const profile = options.profile ?? embeddingProfileFromEnv();
   const embedder = options.embedder ?? liveEmbedderForProfile(profile);
@@ -214,6 +265,7 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
           const store = yield* LocalStore;
           const queue = yield* DurableQueue;
           const search = yield* LanceDb;
+          const readiness = cachedEmbeddingReadiness(embedder, profile);
           const selectCached = db.prepare(
             "SELECT model, content_hash AS contentHash, dimensions, text_bytes AS textBytes, vector_json AS vectorJson, created_at AS createdAt, updated_at AS updatedAt FROM embedding_cache WHERE model = ? AND content_hash = ?",
           );
@@ -492,6 +544,7 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
               const cached = (db.query("SELECT COUNT(*) AS count FROM embedding_cache WHERE model = ?").get(profile.cacheNamespace) as { count: number }).count;
               return { cached, pending: 0, profile };
             }),
+            readiness,
           });
         }),
       ),

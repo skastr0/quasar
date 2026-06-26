@@ -165,8 +165,8 @@ at session creation.
 
 **Why path-independent:** only the uuid directory name enters the hash —
 never the brain root path above it.  A session uuid of
-`aaaaaaaa-0001-0001-0001-000000000001` under `/Users/alice/.gemini/...` and
-the same uuid under `/history/.gemini/...` produce the same
+`aaaaaaaa-0001-0001-0001-000000000001` under `/Users/alice/.antigravity/...`
+and the same uuid under `/history/.antigravity/...` produce the same
 `AntigravitySessionId` and therefore the same `SessionId`.
 
 ---
