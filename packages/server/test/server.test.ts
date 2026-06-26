@@ -288,7 +288,7 @@ describe("HTTP server", () => {
       expect(statusProfile.data.lance.activeVectorTableName).toStartWith("messages_");
       expect(statusProfile.data.lance.defaultTable._tag).toBe("Right");
       expect(statusProfile.data.lance.activeVectorTable._tag).toBe("Right");
-      expect(statusProfile.data.workers.workers).toEqual(["embeddings", "index-repair", "maintenance"]);
+      expect(statusProfile.data.workers.workers).toEqual(["embeddings", "index-repair", "maintenance", "reconcile"]);
       expect(search.data.matches.map((hit: { row: { text: string } }) => hit.row.text)).toEqual(["hello over http"]);
       expect(roleSearch.data.matches.map((hit: { row: { text: string } }) => hit.row.text)).toEqual(["assistant-only http memory"]);
     } finally {
