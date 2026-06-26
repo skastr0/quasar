@@ -2,15 +2,16 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { LanceDb, makeLanceDbLayer } from "../src/lancedb";
+import { DEFAULT_SEARCH_TABLE, LanceDb, LanceDbOperationFailed, MESSAGE_TEXT_INDEX_NAME, makeLanceDbLayer } from "../src/lancedb";
 import { afterEach, describe, expect, test } from "bun:test";
 import { Effect, Layer } from "effect";
 
+import { makeEmbeddingProfile } from "../src/embeddingProfiles";
 import type { MappedSession } from "../src/model";
 import { SearchMaintenance, SearchMaintenanceLive } from "../src/maintenance";
 import { DerivedSearch, DerivedSearchLive } from "../src/search";
 import { SearchReadiness, SearchReadinessLive } from "../src/searchReadiness";
-import { DurableQueue, makeDurableQueueLayer } from "../src/services";
+import { DurableQueue, Embeddings, makeDurableQueueLayer } from "../src/services";
 import { LocalStore, makeLocalStoreLayer } from "../src/store";
 
 const tempDirs: string[] = [];
@@ -54,21 +55,414 @@ const msg = (seq: number, role: "user" | "assistant" = "user"): MappedSession["m
   contentHash: `hash-${seq}`,
 });
 
+const readinessProfile = makeEmbeddingProfile({
+  model: "test-embedding",
+  dimensions: 1536,
+  task: "search_document",
+});
+
+const makeEmbeddingService = (ok: boolean, reason?: string) =>
+  Embeddings.of({
+    model: readinessProfile.model,
+    profile: readinessProfile,
+    embedText: () => Effect.die("embedText not used by readiness"),
+    getCached: () => Effect.succeed(undefined),
+    putCached: () => Effect.die("putCached not used by readiness"),
+    processBatch: () => Effect.die("processBatch not used by readiness"),
+    status: Effect.succeed({ cached: 0, pending: 0, profile: readinessProfile }),
+    readiness: Effect.succeed({
+      ok,
+      checkedAt: "2026-06-18T10:00:00.000Z",
+      reason,
+    }),
+  });
+
 const withReadiness = <A>(
-  run: Effect.Effect<A, unknown, LocalStore | LanceDb | DurableQueue | DerivedSearch | SearchReadiness | SearchMaintenance>,
+  run: Effect.Effect<A, unknown, LocalStore | LanceDb | DurableQueue | DerivedSearch | SearchReadiness | SearchMaintenance | Embeddings>,
+  embeddings = makeEmbeddingService(true),
 ) => {
   const sqlite = join(tempDir(), "quasar.sqlite");
   const lance = join(tempDir(), "search.lance");
   const dataLayer = Layer.mergeAll(makeLocalStoreLayer(sqlite), makeLanceDbLayer({ dataDir: lance }));
   const queueLayer = makeDurableQueueLayer(sqlite);
+  const embeddingsLayer = Layer.succeed(Embeddings, embeddings);
   const searchLayer = DerivedSearchLive.pipe(Layer.provide(dataLayer));
-  const allData = Layer.mergeAll(dataLayer, queueLayer, searchLayer);
+  const allData = Layer.mergeAll(dataLayer, queueLayer, embeddingsLayer, searchLayer);
   const readinessLayer = SearchReadinessLive.pipe(Layer.provide(allData));
   const maintenanceLayer = SearchMaintenanceLive.pipe(Layer.provide(allData));
   return Effect.runPromise(run.pipe(Effect.provide(Layer.mergeAll(allData, readinessLayer, maintenanceLayer))));
 };
 
 describe("SearchReadiness", () => {
+  test("request-time readiness does not call heavy tableStats", async () => {
+    let tableStatsCalls = 0;
+    let storeStatsCalls = 0;
+    const fakeStore = LocalStore.of({
+      dbPath: "/tmp/quasar.sqlite",
+      listProjects: () => Effect.succeed([]),
+      upsertSession: () => Effect.void,
+      hasSessionFingerprint: () => Effect.succeed(false),
+      listSessions: () => Effect.succeed([]),
+      getMessage: () => Effect.succeed(undefined),
+      readMessages: () => Effect.succeed([]),
+      listToolCalls: () => Effect.succeed([]),
+      getToolCall: () => Effect.succeed(undefined),
+      recordIngestRun: () => Effect.void,
+      getIngestRun: () => Effect.succeed(undefined),
+      listIngestRuns: () => Effect.succeed([]),
+      stats: Effect.sync(() => {
+        storeStatsCalls += 1;
+        return { projects: 0, sessions: 0, messages: 99, toolCalls: 0, ingestRuns: 0 };
+      }),
+      markSessionIndexStale: () => Effect.void,
+      markSessionIndexed: () => Effect.void,
+      countStaleIndexSessions: () => Effect.succeed(0),
+      countUnembeddedMessages: () => Effect.succeed(0),
+      countSearchableMessages: () => Effect.succeed(1),
+      close: Effect.void,
+    });
+    const fakeQueue = DurableQueue.of({
+      enqueue: () => Effect.die("enqueue not used"),
+      leaseBatch: () => Effect.succeed([]),
+      ack: () => Effect.void,
+      retry: () => Effect.void,
+      fail: () => Effect.void,
+      recoverStaleLeases: () => Effect.succeed(0),
+      stats: Effect.succeed({ pending: 0, leased: 0, failed: 0 }),
+      statsByKind: Effect.succeed([]),
+    });
+    const fakeLance = LanceDb.make({
+      dataDir: "/tmp/search.lance",
+      connect: Effect.die("connect not used"),
+      openTable: () => Effect.die("openTable not used"),
+      ensureMessageTable: () => Effect.die("ensureMessageTable not used"),
+      createMessageIndexes: () => Effect.void,
+      countRows: ({ tableName }) => {
+        expect(tableName).toBe(DEFAULT_SEARCH_TABLE);
+        return Effect.succeed(1);
+      },
+      tableIndexStats: () =>
+        Effect.succeed([
+          {
+            name: MESSAGE_TEXT_INDEX_NAME,
+            indexType: "FTS",
+            columns: ["text"],
+            numIndexedRows: 1,
+            numUnindexedRows: 0,
+          },
+        ]),
+      tableStats: () => {
+        tableStatsCalls += 1;
+        return Effect.die("tableStats should not be called by readiness");
+      },
+      ensureTable: () => Effect.die("ensureTable not used"),
+      upsertMessageRows: () => Effect.void,
+      upsertRows: () => Effect.void,
+      deleteByKeys: () => Effect.succeed(0),
+      readRows: () => Effect.succeed([]),
+      readMessageRowsBySession: () => Effect.succeed([]),
+      readMessageRowsBySessions: () => Effect.succeed([]),
+      vectorSearch: () => Effect.succeed([]),
+      ftsSearch: () => Effect.succeed([]),
+      hybridSearch: () => Effect.succeed([]),
+      listIndexDirNames: () => Effect.succeed([]),
+      deleteIndexDirsByName: () => Effect.succeed(0),
+    });
+    const layer = SearchReadinessLive.pipe(
+      Layer.provide(Layer.mergeAll(
+        Layer.succeed(LocalStore, fakeStore),
+        Layer.succeed(DurableQueue, fakeQueue),
+        Layer.succeed(LanceDb, fakeLance),
+        Layer.succeed(Embeddings, makeEmbeddingService(true)),
+      )),
+    );
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const readiness = yield* SearchReadiness;
+        return yield* readiness.assertSearchReady("lexical");
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(tableStatsCalls).toBe(0);
+    expect(storeStatsCalls).toBe(0);
+    expect(result.indexStats.sqliteSearchableCount).toBe(1);
+    expect(result.indexStats.sqliteSearchableCount).not.toBe(99);
+  });
+
+  test("table-missing readiness uses cheap SQLite stats only on the missing-table branch", async () => {
+    let tableStatsCalls = 0;
+    let storeStatsCalls = 0;
+    const unused = (name: string) => () => Effect.die(`${name} not used`);
+    const fakeStore = LocalStore.of({
+      dbPath: "/tmp/quasar.sqlite",
+      listProjects: () => Effect.succeed([]),
+      upsertSession: () => Effect.void,
+      hasSessionFingerprint: () => Effect.succeed(false),
+      listSessions: () => Effect.succeed([]),
+      getMessage: () => Effect.succeed(undefined),
+      readMessages: () => Effect.succeed([]),
+      listToolCalls: () => Effect.succeed([]),
+      getToolCall: () => Effect.succeed(undefined),
+      recordIngestRun: () => Effect.void,
+      getIngestRun: () => Effect.succeed(undefined),
+      listIngestRuns: () => Effect.succeed([]),
+      stats: Effect.sync(() => {
+        storeStatsCalls += 1;
+        return { projects: 0, sessions: 1, messages: 99, toolCalls: 0, ingestRuns: 0 };
+      }),
+      markSessionIndexStale: () => Effect.void,
+      markSessionIndexed: () => Effect.void,
+      countStaleIndexSessions: () => Effect.succeed(1),
+      countUnembeddedMessages: () => Effect.succeed(0),
+      countSearchableMessages: () => Effect.succeed(2),
+      close: Effect.void,
+    });
+    const fakeQueue = DurableQueue.of({
+      enqueue: unused("enqueue"),
+      leaseBatch: () => Effect.succeed([]),
+      ack: () => Effect.void,
+      retry: () => Effect.void,
+      fail: () => Effect.void,
+      recoverStaleLeases: () => Effect.succeed(0),
+      stats: Effect.succeed({ pending: 0, leased: 0, failed: 0 }),
+      statsByKind: Effect.succeed([]),
+    });
+    const fakeLance = LanceDb.make({
+      dataDir: "/tmp/search.lance",
+      connect: Effect.die("connect not used"),
+      openTable: unused("openTable"),
+      ensureMessageTable: unused("ensureMessageTable"),
+      createMessageIndexes: () => Effect.void,
+      countRows: () =>
+        Effect.fail(new LanceDbOperationFailed({
+          tableName: DEFAULT_SEARCH_TABLE,
+          operation: "countRows",
+          message: "Table not found: messages",
+        })),
+      tableIndexStats: unused("tableIndexStats"),
+      tableStats: () => {
+        tableStatsCalls += 1;
+        return Effect.die("tableStats should not be called by readiness");
+      },
+      ensureTable: unused("ensureTable"),
+      upsertMessageRows: () => Effect.void,
+      upsertRows: () => Effect.void,
+      deleteByKeys: () => Effect.succeed(0),
+      readRows: () => Effect.succeed([]),
+      readMessageRowsBySession: () => Effect.succeed([]),
+      readMessageRowsBySessions: () => Effect.succeed([]),
+      vectorSearch: () => Effect.succeed([]),
+      ftsSearch: () => Effect.succeed([]),
+      hybridSearch: () => Effect.succeed([]),
+      listIndexDirNames: () => Effect.succeed([]),
+      deleteIndexDirsByName: () => Effect.succeed(0),
+    });
+    const layer = SearchReadinessLive.pipe(
+      Layer.provide(Layer.mergeAll(
+        Layer.succeed(LocalStore, fakeStore),
+        Layer.succeed(DurableQueue, fakeQueue),
+        Layer.succeed(LanceDb, fakeLance),
+        Layer.succeed(Embeddings, makeEmbeddingService(true)),
+      )),
+    );
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const readiness = yield* SearchReadiness;
+        return yield* readiness.assertSearchReady("lexical");
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("LanceDB table not found");
+    expect(result.indexStats.sqliteSearchableCount).toBe(2);
+    expect(storeStatsCalls).toBe(0);
+    expect(tableStatsCalls).toBe(0);
+  });
+
+  test("empty corpus stays ready even with a stale session watermark", async () => {
+    let tableStatsCalls = 0;
+    const fakeStore = LocalStore.of({
+      dbPath: "/tmp/quasar.sqlite",
+      listProjects: () => Effect.succeed([]),
+      upsertSession: () => Effect.void,
+      hasSessionFingerprint: () => Effect.succeed(false),
+      listSessions: () => Effect.succeed([]),
+      getMessage: () => Effect.succeed(undefined),
+      readMessages: () => Effect.succeed([]),
+      listToolCalls: () => Effect.succeed([]),
+      getToolCall: () => Effect.succeed(undefined),
+      recordIngestRun: () => Effect.void,
+      getIngestRun: () => Effect.succeed(undefined),
+      listIngestRuns: () => Effect.succeed([]),
+      stats: Effect.succeed({ projects: 0, sessions: 0, messages: 0, toolCalls: 0, ingestRuns: 0 }),
+      markSessionIndexStale: () => Effect.void,
+      markSessionIndexed: () => Effect.void,
+      countStaleIndexSessions: () => Effect.succeed(1),
+      countUnembeddedMessages: () => Effect.succeed(0),
+      countSearchableMessages: () => Effect.succeed(0),
+      close: Effect.void,
+    });
+    const fakeQueue = DurableQueue.of({
+      enqueue: () => Effect.die("enqueue not used"),
+      leaseBatch: () => Effect.succeed([]),
+      ack: () => Effect.void,
+      retry: () => Effect.void,
+      fail: () => Effect.void,
+      recoverStaleLeases: () => Effect.succeed(0),
+      stats: Effect.succeed({ pending: 0, leased: 0, failed: 0 }),
+      statsByKind: Effect.succeed([]),
+    });
+    const fakeLance = LanceDb.make({
+      dataDir: "/tmp/search.lance",
+      connect: Effect.die("connect not used"),
+      openTable: () => Effect.die("openTable not used"),
+      ensureMessageTable: () => Effect.die("ensureMessageTable not used"),
+      createMessageIndexes: () => Effect.void,
+      countRows: () => Effect.fail(new LanceDbOperationFailed({
+        tableName: DEFAULT_SEARCH_TABLE,
+        operation: "countRows",
+        message: "Table not found: messages",
+      })),
+      tableIndexStats: () => Effect.succeed([]),
+      tableStats: () => {
+        tableStatsCalls += 1;
+        return Effect.die("tableStats should not be called by readiness");
+      },
+      ensureTable: () => Effect.die("ensureTable not used"),
+      upsertMessageRows: () => Effect.void,
+      upsertRows: () => Effect.void,
+      deleteByKeys: () => Effect.succeed(0),
+      readRows: () => Effect.succeed([]),
+      readMessageRowsBySession: () => Effect.succeed([]),
+      readMessageRowsBySessions: () => Effect.succeed([]),
+      vectorSearch: () => Effect.succeed([]),
+      ftsSearch: () => Effect.succeed([]),
+      hybridSearch: () => Effect.succeed([]),
+      listIndexDirNames: () => Effect.succeed([]),
+      deleteIndexDirsByName: () => Effect.succeed(0),
+    });
+    const layer = SearchReadinessLive.pipe(
+      Layer.provide(Layer.mergeAll(
+        Layer.succeed(LocalStore, fakeStore),
+        Layer.succeed(DurableQueue, fakeQueue),
+        Layer.succeed(LanceDb, fakeLance),
+        Layer.succeed(Embeddings, makeEmbeddingService(true)),
+      )),
+    );
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const readiness = yield* SearchReadiness;
+        return yield* readiness.assertSearchReady("lexical");
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.indexStats.staleSessions).toBe(1);
+    expect(tableStatsCalls).toBe(0);
+  });
+
+  test("lexical stays ready while semantic and fusion fail closed when synthetic embeddings are unavailable", async () => {
+    const [lexical, semantic, fusion] = await withReadiness(
+      Effect.gen(function* () {
+        const readiness = yield* SearchReadiness;
+        return yield* Effect.all([
+          readiness.assertSearchReady("lexical"),
+          readiness.assertSearchReady("semantic"),
+          readiness.assertSearchReady("fusion"),
+        ]);
+      }),
+      makeEmbeddingService(false, "Synthetic embeddings are unavailable"),
+    );
+
+    expect(lexical.ok).toBe(true);
+    expect(semantic.ok).toBe(false);
+    expect(fusion.ok).toBe(false);
+    expect(lexical.syntheticEmbeddingReady).toBeUndefined();
+    expect(semantic.syntheticEmbeddingReady).toBe(false);
+    expect(fusion.syntheticEmbeddingReady).toBe(false);
+    expect(semantic.syntheticEmbeddingReason).toContain("Synthetic embeddings are unavailable");
+    expect(fusion.syntheticEmbeddingReason).toContain("Synthetic embeddings are unavailable");
+  });
+
+  test("populated fully indexed corpus keeps lexical ready but fails semantic and fusion closed without Synthetic", async () => {
+    const [lexical, semantic, fusion] = await withReadiness(
+      Effect.gen(function* () {
+        const store = yield* LocalStore;
+        const derived = yield* DerivedSearch;
+        const maintenance = yield* SearchMaintenance;
+        const readiness = yield* SearchReadiness;
+        yield* store.upsertSession(mappedSession("session-a", [msg(1), msg(2, "assistant")]));
+        yield* derived.indexSession("session-a");
+        yield* maintenance.maintain();
+        return yield* Effect.all([
+          readiness.assertSearchReady("lexical"),
+          readiness.assertSearchReady("semantic"),
+          readiness.assertSearchReady("fusion"),
+        ]);
+      }),
+      makeEmbeddingService(false, "Synthetic embeddings are unavailable"),
+    );
+
+    expect(lexical.ok).toBe(true);
+    expect(semantic.ok).toBe(false);
+    expect(fusion.ok).toBe(false);
+    expect(lexical.syntheticEmbeddingReady).toBeUndefined();
+    expect(semantic.syntheticEmbeddingReady).toBe(false);
+    expect(fusion.syntheticEmbeddingReady).toBe(false);
+    expect(semantic.indexStats.sqliteSearchableCount).toBe(2);
+    expect(semantic.indexStats.pendingEmbedJobs).toBe(0);
+  });
+
+  test("stays not ready when LanceDB rows are deleted after indexing", async () => {
+    const result = await withReadiness(
+      Effect.gen(function* () {
+        const store = yield* LocalStore;
+        const search = yield* LanceDb;
+        const readiness = yield* SearchReadiness;
+        yield* store.upsertSession(mappedSession("session-a", [msg(1), msg(2, "assistant")]));
+        yield* search.upsertMessageRows({
+          tableName: DEFAULT_SEARCH_TABLE,
+          rows: [
+            {
+              sessionId: "session-a",
+              seq: 1,
+              role: "user",
+              projectKey: "project-a",
+              provider: "codex",
+              text: "message text 1",
+              contentHash: "hash-1",
+              vector: Array.from({ length: 1536 }, () => 0),
+            },
+            {
+              sessionId: "session-a",
+              seq: 2,
+              role: "assistant",
+              projectKey: "project-a",
+              provider: "codex",
+              text: "message text 2",
+              contentHash: "hash-2",
+              vector: Array.from({ length: 1536 }, () => 0),
+            },
+          ],
+        });
+        yield* search.deleteByKeys({
+          tableName: DEFAULT_SEARCH_TABLE,
+          keys: ["session-a:1:user", "session-a:2:assistant"],
+        });
+        return yield* readiness.assertSearchReady("lexical");
+      }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.indexStats.sqliteSearchableCount).toBe(2);
+    expect(result.indexStats.lanceRowCount).toBe(0);
+    expect(result.reason).toMatch(/row count .*does not match|table not found/i);
+  });
+
   test("empty corpus returns ready for all modes", async () => {
     const [lexical, semantic, fusion] = await withReadiness(
       Effect.gen(function* () {
@@ -151,12 +545,7 @@ describe("SearchReadiness", () => {
     expect(result.indexStats.numUnindexedTextRows).toBe(0);
   });
 
-  test("serves semantic while embeds are pending — incomplete-but-correct, disclosed not blocked (C1)", async () => {
-    // E5 + E3: rows still pending embed are simply ABSENT from vector results
-    // (incomplete-but-correct), surfaced via indexStats.pendingEmbedJobs /
-    // missingVectorCount. Semantic still serves the embedded subset — no 503.
-    // The embed frontier is ~one synthetic round-trip (~400ms measured), not a
-    // gate. This is the difference between "incomplete" and "garbage".
+  test("blocks semantic while embeds are pending", async () => {
     const result = await withReadiness(
       Effect.gen(function* () {
         const store = yield* LocalStore;
@@ -175,8 +564,41 @@ describe("SearchReadiness", () => {
       }),
     );
 
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
     expect(result.indexStats.pendingEmbedJobs).toBeGreaterThan(0);
+    expect(result.missingVectorCount).toBeGreaterThan(0);
+  });
+
+  test("blocks semantic when SQLite still has unembedded searchable rows but the queue is empty", async () => {
+    const result = await withReadiness(
+      Effect.gen(function* () {
+        const store = yield* LocalStore;
+        const search = yield* LanceDb;
+        const readiness = yield* SearchReadiness;
+        yield* store.upsertSession(mappedSession("session-a", [{ ...msg(1), contentHash: "unembedded:hash-1" }]));
+        yield* search.upsertMessageRows({
+          tableName: DEFAULT_SEARCH_TABLE,
+          rows: [
+            {
+              sessionId: "session-a",
+              seq: 1,
+              role: "user",
+              projectKey: "project-a",
+              provider: "codex",
+              text: "message text 1",
+              contentHash: "unembedded:hash-1",
+              vector: Array.from({ length: 1536 }, () => 0),
+            },
+          ],
+        });
+        return yield* readiness.assertSearchReady("semantic");
+      }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.indexStats.unembeddedVectorRows).toBe(1);
+    expect(result.indexStats.pendingEmbedJobs).toBe(0);
+    expect(result.missingVectorCount).toBe(1);
   });
 
   test("semantic ready after all embed jobs complete", async () => {

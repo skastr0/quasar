@@ -6,11 +6,20 @@ import { join } from "node:path";
 
 import { LanceDb, makeLanceDbLayer, makeLanceDbRuntime } from "../src/lancedb";
 import {
-  GEMINI_EMBEDDING_DIMENSIONS,
+  DEFAULT_MESSAGE_VECTOR_DIMENSIONS,
   MESSAGE_SEARCH_COLUMNS,
 } from "../src/lancedb";
 
 const tempDirs: string[] = [];
+const LEXICAL_INDEX_NAMES = [
+  "contentHash_idx",
+  "projectKey_idx",
+  "provider_idx",
+  "role_idx",
+  "sessionId_idx",
+  "text_idx",
+] as const;
+const SEARCH_INDEX_NAMES = [...LEXICAL_INDEX_NAMES, "vector_idx"] as const;
 
 const makeTempDir = async () => {
   const dir = await mkdtemp(join(tmpdir(), "quasar-lancedb-"));
@@ -58,13 +67,13 @@ describe("LanceDb", () => {
   test("bootstraps the message table schema, FTS index, vector index, and hybrid ranking", async () => {
     const dataDir = await makeTempDir();
     const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));
-    const alphaVector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, (_, index) =>
+    const alphaVector = Array.from({ length: DEFAULT_MESSAGE_VECTOR_DIMENSIONS }, (_, index) =>
       index === 0 ? 1 : 0,
     );
-    const betaVector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, (_, index) =>
+    const betaVector = Array.from({ length: DEFAULT_MESSAGE_VECTOR_DIMENSIONS }, (_, index) =>
       index === 1 ? 1 : 0,
     );
-    const gammaVector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, (_, index) =>
+    const gammaVector = Array.from({ length: DEFAULT_MESSAGE_VECTOR_DIMENSIONS }, (_, index) =>
       index === 2 ? 1 : 0,
     );
 
@@ -126,7 +135,7 @@ describe("LanceDb", () => {
         const hits = yield* search.hybridSearch({
           query: "terminal response",
           vector: alphaVector,
-          vectorDimension: GEMINI_EMBEDDING_DIMENSIONS,
+          vectorDimension: DEFAULT_MESSAGE_VECTOR_DIMENSIONS,
           limit: 4,
           select: MESSAGE_SEARCH_COLUMNS,
         });
@@ -134,14 +143,14 @@ describe("LanceDb", () => {
       }),
     );
 
-    expect([...result.indexNames].sort()).toEqual(["sessionId_idx", "text_idx", "vector_idx"]);
+    expect([...result.indexNames].sort()).toEqual([...SEARCH_INDEX_NAMES]);
     expect(result.hits.map((hit) => hit.key)).toContain("session-b:1:assistant");
     expect(result.hits.map((hit) => hit.key)).toContain("session-c:1:assistant");
     expect(result.hits[0]?.key).toBe("session-a:1:user");
     expect(result.hits[0]?.row.text).toBe("alpha terminal response");
   });
 
-  test("enforces Gemini embedding dimensions for message writes", async () => {
+  test("enforces message vector dimensions for message writes", async () => {
     const dataDir = await makeTempDir();
     const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));
 
@@ -171,7 +180,7 @@ describe("LanceDb", () => {
   test("can create a lexical-only message index without training a vector index", async () => {
     const dataDir = await makeTempDir();
     const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));
-    const vector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, () => 0);
+    const vector = Array.from({ length: DEFAULT_MESSAGE_VECTOR_DIMENSIONS }, () => 0);
 
     const indexNames = await runtime.runPromise(
       Effect.gen(function* () {
@@ -200,14 +209,74 @@ describe("LanceDb", () => {
       }),
     );
 
-    expect([...indexNames].sort()).toEqual(["sessionId_idx", "text_idx"]);
+    expect([...indexNames].sort()).toEqual([...LEXICAL_INDEX_NAMES]);
+  });
+
+  test("optimize keeps searchability but does not reclaim leaked _indices dirs", async () => {
+    const dataDir = await makeTempDir();
+    const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));
+    const vector = Array.from({ length: DEFAULT_MESSAGE_VECTOR_DIMENSIONS }, (_, index) =>
+      index === 0 ? 1 : 0,
+    );
+
+    const result = await runtime.runPromise(
+      Effect.gen(function* () {
+        const search = yield* LanceDb;
+        yield* search.ensureMessageTable({
+          rows: [
+            {
+              sessionId: "session-a",
+              seq: 1,
+              role: "user",
+              projectKey: "project-a",
+              provider: "codex",
+              text: "needle before optimize",
+              contentHash: "hash-a",
+              vector,
+            },
+          ],
+          createIndexes: true,
+          includeVectorIndex: false,
+        });
+        for (let cycle = 0; cycle < 3; cycle += 1) yield* search.createMessageIndexes({ replace: true });
+        const before = yield* search.listIndexDirNames({});
+        const beforeHits = yield* search.ftsSearch({ query: "needle", limit: 5 });
+        const optimize = yield* search.optimize({});
+        const after = yield* search.listIndexDirNames({});
+        const afterHits = yield* search.ftsSearch({ query: "needle", limit: 5 });
+        const reclaimed = yield* search.deleteIndexDirsByName({ names: before });
+        const afterDelete = yield* search.listIndexDirNames({});
+        const indexStats = yield* search.tableIndexStats({});
+        return {
+          beforeCount: before.length,
+          afterOptimizeCount: after.length,
+          afterCount: after.length,
+          afterDeleteCount: afterDelete.length,
+          beforeHits: beforeHits.map((hit) => hit.key),
+          afterHits: afterHits.map((hit) => hit.key),
+          indexStats,
+          reclaimed,
+          optimize,
+        };
+      }),
+    );
+
+    expect(result.beforeCount).toBeGreaterThan(0);
+    expect(result.afterOptimizeCount).toBe(result.beforeCount);
+    expect(result.afterCount).toBe(result.beforeCount);
+    expect(result.reclaimed).toBe(result.beforeCount);
+    expect(result.afterDeleteCount).toBeLessThan(result.beforeCount);
+    expect(result.beforeHits).toContain("session-a:1:user");
+    expect(result.afterHits).toContain("session-a:1:user");
+    expect(result.indexStats.every((index) => index.numUnindexedRows === 0)).toBe(true);
+    expect(result.optimize.prune.oldVersionsRemoved).toBeGreaterThanOrEqual(0);
   });
 
   test("semantic search can filter out lexical-only placeholder vectors", async () => {
     const dataDir = await makeTempDir();
     const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));
-    const zeroVector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, () => 0);
-    const readyVector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, (_, index) =>
+    const zeroVector = Array.from({ length: DEFAULT_MESSAGE_VECTOR_DIMENSIONS }, () => 0);
+    const readyVector = Array.from({ length: DEFAULT_MESSAGE_VECTOR_DIMENSIONS }, (_, index) =>
       index === 0 ? 1 : 0,
     );
 
@@ -241,7 +310,7 @@ describe("LanceDb", () => {
         });
         return yield* search.vectorSearch({
           vector: readyVector,
-          vectorDimension: GEMINI_EMBEDDING_DIMENSIONS,
+          vectorDimension: DEFAULT_MESSAGE_VECTOR_DIMENSIONS,
           limit: 10,
           filter: "contentHash NOT LIKE 'unembedded:%'",
           select: ["key", "contentHash"],
@@ -255,7 +324,7 @@ describe("LanceDb", () => {
   test("derives message identity from sessionId, seq, and role", async () => {
     const dataDir = await makeTempDir();
     const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));
-    const vector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, (_, index) =>
+    const vector = Array.from({ length: DEFAULT_MESSAGE_VECTOR_DIMENSIONS }, (_, index) =>
       index === 0 ? 1 : 0,
     );
 
@@ -313,7 +382,7 @@ describe("LanceDb", () => {
   test("lists current message rows by sessionId and deletes returned keys", async () => {
     const dataDir = await makeTempDir();
     const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));
-    const vector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, (_, index) =>
+    const vector = Array.from({ length: DEFAULT_MESSAGE_VECTOR_DIMENSIONS }, (_, index) =>
       index === 0 ? 1 : 0,
     );
 
@@ -401,7 +470,7 @@ describe("LanceDb", () => {
   test("createMessageIndexes is idempotent and skips existing indexes", async () => {
     const dataDir = await makeTempDir();
     const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));
-    const vector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, (_, index) =>
+    const vector = Array.from({ length: DEFAULT_MESSAGE_VECTOR_DIMENSIONS }, (_, index) =>
       index === 0 ? 1 : 0,
     );
 
@@ -435,15 +504,15 @@ describe("LanceDb", () => {
       }),
     );
 
-    expect(firstStats.indices.map((index) => index.name).sort()).toEqual(["sessionId_idx", "text_idx", "vector_idx"]);
-    expect(secondStats.indices.map((index) => index.name).sort()).toEqual(["sessionId_idx", "text_idx", "vector_idx"]);
+    expect(firstStats.indices.map((index) => index.name).sort()).toEqual([...SEARCH_INDEX_NAMES]);
+    expect(secondStats.indices.map((index) => index.name).sort()).toEqual([...SEARCH_INDEX_NAMES]);
     expect(secondStats.disk.totalBytes).toBe(firstStats.disk.totalBytes);
   });
 
   test("upsertMessageRows bootstraps the table without creating indexes", async () => {
     const dataDir = await makeTempDir();
     const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));
-    const vector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, (_, index) =>
+    const vector = Array.from({ length: DEFAULT_MESSAGE_VECTOR_DIMENSIONS }, (_, index) =>
       index === 0 ? 1 : 0,
     );
 
@@ -476,7 +545,7 @@ describe("LanceDb", () => {
   test("tableStats reports row count, indices, and disk sizes", async () => {
     const dataDir = await makeTempDir();
     const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));
-    const vector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, (_, index) =>
+    const vector = Array.from({ length: DEFAULT_MESSAGE_VECTOR_DIMENSIONS }, (_, index) =>
       index === 0 ? 1 : 0,
     );
 
@@ -503,7 +572,7 @@ describe("LanceDb", () => {
     );
 
     expect(stats.rowCount).toBe(1);
-    expect(stats.indices.map((index) => index.name).sort()).toEqual(["sessionId_idx", "text_idx", "vector_idx"]);
+    expect(stats.indices.map((index) => index.name).sort()).toEqual([...SEARCH_INDEX_NAMES]);
     expect(stats.indices[0]?.numIndexedRows).toBe(1);
     expect(stats.disk.totalBytes).toBeGreaterThan(0);
     expect(stats.disk.dataBytes).toBeGreaterThanOrEqual(0);
@@ -520,7 +589,7 @@ describe("LanceDb", () => {
     // rebuilds leak, and snapshot-then-delete bounds to ~the live index count.
     const dataDir = await makeTempDir();
     const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));
-    const vector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, (_, index) =>
+    const vector = Array.from({ length: DEFAULT_MESSAGE_VECTOR_DIMENSIONS }, (_, index) =>
       index === 0 ? 1 : 0,
     );
 
@@ -547,7 +616,7 @@ describe("LanceDb", () => {
     expect(result.beforeCount).toBeGreaterThan(2); // rebuilds leaked dirs beyond the live set
     expect(result.reclaimed).toBe(result.beforeCount); // every snapshot dir deleted
     expect(result.afterCount).toBeLessThan(result.beforeCount); // reclaimed
-    expect(result.afterCount).toBeLessThanOrEqual(2); // ~live index count (text_idx + sessionId_idx; no vector <100 rows)
+    expect(result.afterCount).toBeLessThanOrEqual(6); // ~live index count (text_idx + scalar indexes; no vector <100 rows)
   });
 
   test("rows added after indexing stay searchable before the next rebuild (no ingested-but-invisible)", async () => {
@@ -556,8 +625,8 @@ describe("LanceDb", () => {
     // and require both lexical (FTS tail scan) and semantic (vector) to return it.
     const dataDir = await makeTempDir();
     const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));
-    const seedVector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, (_, i) => (i === 0 ? 1 : 0));
-    const tailVector = Array.from({ length: GEMINI_EMBEDDING_DIMENSIONS }, (_, i) => (i === 7 ? 1 : 0));
+    const seedVector = Array.from({ length: DEFAULT_MESSAGE_VECTOR_DIMENSIONS }, (_, i) => (i === 0 ? 1 : 0));
+    const tailVector = Array.from({ length: DEFAULT_MESSAGE_VECTOR_DIMENSIONS }, (_, i) => (i === 7 ? 1 : 0));
 
     const found = await runtime.runPromise(
       Effect.gen(function* () {
@@ -575,7 +644,7 @@ describe("LanceDb", () => {
           ],
         });
         const lex = yield* search.ftsSearch({ query: "needle", limit: 5 }).pipe(Effect.catchAll(() => Effect.succeed([])));
-        const vec = yield* search.vectorSearch({ vector: tailVector, vectorDimension: GEMINI_EMBEDDING_DIMENSIONS, limit: 5 }).pipe(Effect.catchAll(() => Effect.succeed([])));
+        const vec = yield* search.vectorSearch({ vector: tailVector, vectorDimension: DEFAULT_MESSAGE_VECTOR_DIMENSIONS, limit: 5 }).pipe(Effect.catchAll(() => Effect.succeed([])));
         return { lexKeys: lex.map((hit) => hit.key), vecKeys: vec.map((hit) => hit.key) };
       }),
     );
@@ -592,7 +661,7 @@ describe("LanceDb", () => {
     // (no clobber from the vector-index rebuild).
     const dataDir = await makeTempDir();
     const runtime = ManagedRuntime.make(makeLanceDbLayer({ dataDir }));
-    const dim = GEMINI_EMBEDDING_DIMENSIONS;
+    const dim = DEFAULT_MESSAGE_VECTOR_DIMENSIONS;
     const vecFor = (i: number) => Array.from({ length: dim }, (_, d) => (d === i % dim ? 1 : 0));
     const rows = Array.from({ length: 150 }, (_, i) => ({
       sessionId: `s${i % 5}`,
@@ -645,7 +714,7 @@ describe("LanceDb", () => {
 
     expect(r.beforeCount).toBeGreaterThan(3); // rebuilds leaked dirs
     expect(r.afterCount).toBeLessThan(r.beforeCount); // GC reclaimed
-    expect(r.afterCount).toBeLessThanOrEqual(6); // bounded near live (3 indexes)
+    expect(r.afterCount).toBeLessThanOrEqual(14); // bounded near live (FTS + vector + scalar indexes)
     expect(r.reclaimed).toBe(r.beforeCount);
     expect(r.rowCount).toBe(155); // 150 + 5 churn — zero row loss
     expect(r.lex).toContain("s2:42:user"); // lexical finds it post-GC

@@ -4,7 +4,7 @@ There is exactly **one current direction**:
 
 - **[Quasar — Effect Local Server Plan](quasar-effect-server-plan-2026-06-18.md)** —
   the authoritative migration architecture: Effect-owned local server, SQLite truth
-  store plus durable queue, LanceDB as derived search index, Gemini embedding cache,
+  store plus durable queue, LanceDB as derived search index, Synthetic API embedding cache,
   and Docker/Tailscale deployment.
 - **[Quasar — Data-Reality Plan](quasar-data-reality-plan-2026-06-11.md)** — still live
   as measured corpus evidence and normalized entity-model source: provider reality,

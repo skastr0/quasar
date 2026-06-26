@@ -78,7 +78,7 @@ const usage = () => {
 
 Examples:
   QUASAR_SERVER_URL=https://<quasar-service-tailnet-hostname> bun scripts/compare-local-search.mjs --name active
-  bun scripts/compare-local-search.mjs --profile gemini=http://127.0.0.1:6180 --profile nomic=http://127.0.0.1:6181
+  bun scripts/compare-local-search.mjs --profile primary=http://127.0.0.1:6180 --profile alternate=http://127.0.0.1:6181
 `);
 };
 
@@ -183,9 +183,9 @@ const renderMarkdown = (report, jsonArtifact) => {
   const lines = [
     `# Embedding retrieval comparison proof — ${report.generatedAt.slice(0, 10)}`,
     "",
-    "This proof compares Quasar retrieval behavior on fixed real agent-session queries. It is intentionally HTTP-level: each named profile points at a running server instance, so Gemini and Nomic can be compared without changing the script or mixing vector spaces.",
+    "This proof compares Quasar retrieval behavior on fixed real agent-session queries. It is intentionally HTTP-level: each named profile points at a running server instance, so two server embeddings configurations can be compared without changing the script or mixing vector spaces.",
     "",
-    "Gemini spend is bounded to query embeddings for this fixed query set when a Gemini-profile server is included. Corpus embedding is not triggered by this script; server-side query embedding cache should make repeated runs no-op for already-seen query text.",
+    "Embedding spend is bounded to query embeddings for this fixed query set. Corpus embedding is not triggered by this script; server-side query embedding cache should make repeated runs no-op for already-seen query text.",
     "",
     `JSON artifact: \`${jsonArtifact}\``,
     "",
@@ -221,7 +221,7 @@ const renderMarkdown = (report, jsonArtifact) => {
     }
   }
 
-  lines.push("## Interpretation checklist", "", "- Mark Nomic as acceptable only if it retrieves the same session families or better on project/session, code/debug, JSON-ish transcript, and decision-memory queries.", "- Prefer fusion for operator use when lexical/code snippets matter; semantic-only is a recall aid, not the sole retrieval surface.", "- Re-run this proof with both `gemini=<url>` and `nomic=<url>` profiles before changing the production default for a larger estate.", "");
+  lines.push("## Interpretation checklist", "", "- Mark an alternate profile acceptable only if it retrieves the same session families or better on project/session, code/debug, JSON-ish transcript, and decision-memory queries.", "- Prefer fusion for operator use when lexical/code snippets matter; semantic-only is a recall aid, not the sole retrieval surface.", "- Re-run this proof with both `primary=<url>` and `alternate=<url>` profiles before changing the production default for a larger estate.", "");
   return `${lines.join("\n")}\n`;
 };
 

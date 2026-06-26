@@ -60,7 +60,6 @@ const message = (seq: number, text: string): MappedSession["messages"][number] =
 const longText = () => "oversized message memory\n".repeat(3_000);
 
 const embeddingEnvKeys = [
-  "QUASAR_EMBEDDING_PROVIDER",
   "QUASAR_EMBEDDING_MODEL",
   "QUASAR_EMBEDDING_DIMENSIONS",
   "QUASAR_EMBEDDING_TASK",
@@ -207,7 +206,7 @@ describe("DerivedSearch", () => {
       sessionId: "session-a",
       rowsUpserted: 1,
       semanticRowsUpserted: 1,
-      orphansDeleted: 1,
+      orphansDeleted: 2,
     });
     expect(stats.rowCount).toBe(1);
   });
@@ -293,7 +292,6 @@ describe("DerivedSearch", () => {
         return [profileTable, lexicalRows, profileRows, hits, stats] as const;
       }),
       {
-        QUASAR_EMBEDDING_PROVIDER: "synthetic",
         QUASAR_EMBEDDING_MODEL: "hf:nomic-ai/nomic-embed-text-v1.5",
         QUASAR_EMBEDDING_DIMENSIONS: "768",
       },
@@ -309,50 +307,22 @@ describe("DerivedSearch", () => {
     expect(stats.rowCount).toBe(1);
   });
 
-  test("single-table profiles seed lexical rows with active profile dimensions", async () => {
-    const [profileTable, rows] = await withSearch(
-      Effect.gen(function* () {
-        const profile = embeddingProfileFromEnv();
-        const profileTable = embeddingProfileSearchTable(profile);
-        const store = yield* LocalStore;
-        const derived = yield* DerivedSearch;
-        const search = yield* LanceDb;
-        yield* store.upsertSession(mappedSession([message(1, "gemini short vector memory") ]));
-        yield* derived.indexSession("session-a");
-        const rows = yield* search.readMessageRowsBySession({
-          sessionId: "session-a",
-          tableName: "messages",
-          select: ["key", "vector"],
-        });
-        return [profileTable, rows] as const;
-      }),
-      {
-        QUASAR_EMBEDDING_PROVIDER: "gemini",
-        QUASAR_EMBEDDING_MODEL: "gemini-embedding-001",
-        QUASAR_EMBEDDING_DIMENSIONS: "768",
-      },
-    );
-
-    expect(profileTable).toBe("messages");
-    expect(rows).toHaveLength(1);
-    expect((rows[0]?.vector as readonly number[] | undefined)?.length).toBe(768);
-  });
-
   test("createLexicalIndex builds text_idx after indexSession; subsequent calls are idempotent", async () => {
     const [afterIndex, afterCreate, afterIdempotent] = await withSearch(
       Effect.gen(function* () {
         const store = yield* LocalStore;
         const derived = yield* DerivedSearch;
+        const search = yield* LanceDb;
         yield* store.upsertSession(mappedSession([message(1, "alpha terminal") ]));
         yield* derived.indexSession("session-a");
         // indexSession writes rows but does not optimize inline — text_idx is not present yet.
-        const afterIndex = yield* derived.stats;
+        const afterIndex = yield* search.tableStats({ tableName: "messages" });
         // createLexicalIndex (called by the maintenance worker) folds rows into the FTS index.
         yield* derived.createLexicalIndex;
-        const afterCreate = yield* derived.stats;
+        const afterCreate = yield* search.tableStats({ tableName: "messages" });
         // Calling createLexicalIndex again is idempotent.
         yield* derived.createLexicalIndex;
-        const afterIdempotent = yield* derived.stats;
+        const afterIdempotent = yield* search.tableStats({ tableName: "messages" });
         return [afterIndex, afterCreate, afterIdempotent] as const;
       }),
     );

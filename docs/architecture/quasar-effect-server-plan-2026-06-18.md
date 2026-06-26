@@ -23,8 +23,8 @@ The corpus is small in database terms and large only in workflow pain terms:
 
 This system is local infrastructure for one machine estate. It should be boring:
 read files and local SQLite databases, write a local SQLite truth store, maintain a
-local LanceDB search index, call Gemini for embeddings with a cache, and answer agent
-queries quickly.
+local LanceDB search index, call the Synthetic API for embeddings with a cache, and
+answer agent queries quickly.
 
 ## Canonical ownership
 
@@ -32,7 +32,7 @@ queries quickly.
 | --- | --- | --- |
 | Normalized session truth | SQLite | Authoritative OLTP store: projects, sessions, messages, tool calls, ingest runs, queue state, embedding cache metadata. |
 | Search rows and indexes | LanceDB | Derived from SQLite; disposable and rebuildable. Owns lexical/vector/fusion search indexes. |
-| Embedding calls | Effect worker + Gemini client | Asynchronous, cached by model and normalized content hash, retryable, never required for lexical search. |
+| Embedding calls | Effect worker + Synthetic API client | Asynchronous, cached by model and normalized content hash, retryable, never required for lexical search. |
 | Orchestration | Effect runtime | Services/layers, one ManagedRuntime, bounded worker fibers, structured errors, status visibility. |
 | Deployment | Docker on the Mac mini | Persistent volumes for SQLite/LanceDB/logs, Tailscale-reachable HTTP port, clean start/stop/restart behavior. |
 
@@ -93,7 +93,7 @@ singletons.
                                       │
                                       ▼
                            ╭────────────────────╮
-                           │ Gemini Embeddings  │
+                           │ Synthetic Embeddings│
                            │ cache + backfill   │
                            ╰────────────────────╯
 ```
@@ -110,7 +110,7 @@ Required services:
   downstream jobs.
 - `SearchService`: LanceDB open/create, row upsert, lexical search, vector/fusion
   search, stats, orphan cleanup.
-- `EmbeddingService`: Gemini batching, content-hash cache, vector writes, failure
+- `EmbeddingService`: Synthetic API batching, content-hash cache, vector writes, failure
   diagnostics.
 - `MaintenanceService`: index creation, optimize/cleanup, freshness reconciliation.
 - `WorkerSupervisor`: starts and stops bounded fibers, exposes worker status, and

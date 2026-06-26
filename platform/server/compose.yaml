@@ -27,28 +27,27 @@ services:
       QUASAR_SEARCH_DATA_DIR: /data/quasar/search.lance
       QUASAR_LOCAL_HOST: 0.0.0.0
       QUASAR_LOCAL_PORT: 6180
+      QUASAR_SEARCH_PROFILE: ${QUASAR_SEARCH_PROFILE:-0}
       QUASAR_INGEST_TOKEN: ${QUASAR_INGEST_TOKEN:?set QUASAR_INGEST_TOKEN in platform/server/.env for remote ingest writes}
-      # Workers are always-on (no enable/disable toggles); only the embedding
-      # API client is tunable. The previous worker enable/interval/lease/limit
-      # vars were env theater (zero code references) and were removed.
+      # Workers are always-on (no enable/disable toggles); only the Synthetic
+      # embedding client is tunable. The previous worker enable/interval/lease/
+      # limit vars were env theater (zero code references) and were removed.
       QUASAR_EMBEDDING_API_BATCH_SIZE: ${QUASAR_EMBEDDING_API_BATCH_SIZE:-100}
       QUASAR_EMBEDDING_API_CONCURRENCY: ${QUASAR_EMBEDDING_API_CONCURRENCY:-4}
       QUASAR_EMBEDDING_RETRY_BASE_MS: ${QUASAR_EMBEDDING_RETRY_BASE_MS:-30000}
       QUASAR_EMBEDDING_RETRY_MAX_MS: ${QUASAR_EMBEDDING_RETRY_MAX_MS:-600000}
-      QUASAR_EMBEDDING_PROVIDER: ${QUASAR_EMBEDDING_PROVIDER:-synthetic}
       QUASAR_EMBEDDING_MODEL: ${QUASAR_EMBEDDING_MODEL:-hf:nomic-ai/nomic-embed-text-v1.5}
       QUASAR_EMBEDDING_DIMENSIONS: ${QUASAR_EMBEDDING_DIMENSIONS:-768}
       QUASAR_EMBEDDING_TASK: ${QUASAR_EMBEDDING_TASK:-search_document}
       QUASAR_EMBEDDING_DOCUMENT_PREFIX: "${QUASAR_EMBEDDING_DOCUMENT_PREFIX:-search_document: }"
       QUASAR_EMBEDDING_QUERY_PREFIX: "${QUASAR_EMBEDDING_QUERY_PREFIX:-search_query: }"
       QUASAR_EMBEDDING_CACHE_NAMESPACE: ${QUASAR_EMBEDDING_CACHE_NAMESPACE:-}
-      SYNTHETIC_API_KEY: ${SYNTHETIC_API_KEY:-}
+      SYNTHETIC_API_KEY: ${SYNTHETIC_API_KEY:?set SYNTHETIC_API_KEY in platform/server/.env for Synthetic embeddings}
       SYNTHETIC_OPENAI_BASE_URL: ${SYNTHETIC_OPENAI_BASE_URL:-https://api.synthetic.new/openai/v1}
-      GOOGLE_GENERATIVE_AI_API_KEY: ${GOOGLE_GENERATIVE_AI_API_KEY:-}
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:6180/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:6180/ready"]
       interval: 10s
-      timeout: 3s
+      timeout: 10s
       start_period: 10s
       retries: 6
 

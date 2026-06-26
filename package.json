@@ -29,6 +29,7 @@
     "server:restart": "bun scripts/server-ops.mjs restart",
     "server:ps": "bun scripts/server-ops.mjs ps",
     "server:logs": "bun scripts/server-ops.mjs logs",
+    "server:ready": "bun scripts/server-ops.mjs ready",
     "server:health": "bun scripts/server-ops.mjs health",
     "server:status": "bun scripts/server-ops.mjs status",
     "server:lance": "bun scripts/server-ops.mjs lance",
@@ -49,8 +50,6 @@
     "vitest": "^4.1.5"
   },
   "dependencies": {
-    "@ai-sdk/google": "^3.0.83",
-    "ai": "^6.0.207",
     "effect": "^3.21.2",
     "js-tiktoken": "^1.0.21"
   },

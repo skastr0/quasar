@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { Context, Effect, Layer, Schema } from "effect";
 
-import { makeGeminiEmbeddingProfile, type EmbeddingProfile } from "./embeddingProfiles";
+import { makeEmbeddingProfile, type EmbeddingProfile } from "./embeddingProfiles";
 import type { QueueJobRow } from "./model";
 import { ensureParentDir, sqlitePath } from "./paths";
 
@@ -53,6 +53,12 @@ export interface EmbeddingServiceStatus {
   readonly profile: EmbeddingProfile;
 }
 
+export interface EmbeddingReadinessStatus {
+  readonly ok: boolean;
+  readonly checkedAt: string;
+  readonly reason?: string;
+}
+
 export interface EmbeddingCacheRow {
   readonly model: string;
   readonly contentHash: string;
@@ -91,6 +97,7 @@ export interface EmbeddingService {
     readonly now?: string;
   }) => Effect.Effect<EmbeddingWorkerReport, unknown>;
   readonly status: Effect.Effect<EmbeddingServiceStatus, unknown>;
+  readonly readiness: Effect.Effect<EmbeddingReadinessStatus, unknown>;
 }
 
 export interface IngestServiceStatus {
@@ -299,7 +306,12 @@ export const DurableQueueLive = makeDurableQueueLayer();
 export const EmbeddingsLive = Layer.succeed(
   Embeddings,
   (() => {
-    const profile = makeGeminiEmbeddingProfile({ model: "unconfigured", cacheNamespace: "unconfigured" });
+    const profile = makeEmbeddingProfile({
+      model: "unconfigured",
+      dimensions: 768,
+      task: "search_document",
+      cacheNamespace: "unconfigured",
+    });
     return Embeddings.of({
       model: profile.model,
       profile,
@@ -308,6 +320,7 @@ export const EmbeddingsLive = Layer.succeed(
       putCached: () => Effect.fail(new Error("EmbeddingsLive is not configured")),
       processBatch: () => Effect.fail(new Error("EmbeddingsLive is not configured")),
       status: Effect.succeed({ cached: 0, pending: 0, profile }),
+      readiness: Effect.succeed({ ok: false, checkedAt: nowIso(), reason: "EmbeddingsLive is not configured" }),
     });
   })(),
 );

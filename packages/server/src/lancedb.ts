@@ -9,6 +9,7 @@ import type {
   Connection,
   IndexConfig,
   IndexStatistics,
+  OptimizeStats,
   Table,
   TableStatistics,
 } from "@lancedb/lancedb";
@@ -18,10 +19,14 @@ export const DEFAULT_VECTOR_COLUMN = "vector";
 export const DEFAULT_TEXT_COLUMN = "text";
 export const DEFAULT_KEY_COLUMN = "key";
 export const DEFAULT_FUSION_K = 60;
-export const GEMINI_EMBEDDING_DIMENSIONS = 1536;
+export const DEFAULT_MESSAGE_VECTOR_DIMENSIONS = 1536;
 export const MESSAGE_VECTOR_INDEX_NAME = "vector_idx";
 export const MESSAGE_TEXT_INDEX_NAME = "text_idx";
 export const MESSAGE_SESSION_INDEX_NAME = "sessionId_idx";
+export const MESSAGE_PROJECT_INDEX_NAME = "projectKey_idx";
+export const MESSAGE_ROLE_INDEX_NAME = "role_idx";
+export const MESSAGE_PROVIDER_INDEX_NAME = "provider_idx";
+export const MESSAGE_CONTENT_HASH_INDEX_NAME = "contentHash_idx";
 // Vector ANN tuning (evidence E8). IVF_PQ is built only above the PQ k-means
 // training floor (LanceDB warns below 65536); it is queried with nprobes +
 // refineFactor, which recovers PQ quantization loss to ~98% recall@10 @ ~10ms
@@ -171,6 +176,15 @@ export interface HybridSearchRequest extends TableRequest {
 
 export interface TableStatsRequest extends TableRequest {}
 
+export interface OptimizeTableRequest extends TableRequest {
+  readonly olderThanMs?: number;
+  readonly deleteUnverified?: boolean;
+}
+
+export interface TableIndexStatsRequest extends TableRequest {
+  readonly indexNames?: readonly string[];
+}
+
 export interface IndexInfo {
   readonly name: string;
   readonly indexType: string;
@@ -256,7 +270,7 @@ const defaultSearchDataDir = (): string => join(homedir(), ".config", "quasar", 
 export const messageSearchKey = (row: Pick<MessageSearchRow, "sessionId" | "seq" | "role">): string =>
   `${row.sessionId}:${row.seq}:${row.role}`;
 
-export const createMessageSearchSchema = (dimensions = GEMINI_EMBEDDING_DIMENSIONS): ArrowSchema =>
+export const createMessageSearchSchema = (dimensions = DEFAULT_MESSAGE_VECTOR_DIMENSIONS): ArrowSchema =>
   new ArrowSchema([
     new Field(DEFAULT_KEY_COLUMN, new Utf8(), false),
     new Field("sessionId", new Utf8(), false),
@@ -469,6 +483,14 @@ const indexInfoFromConfig = (
     : {}),
 });
 
+const MESSAGE_SCALAR_INDEXES = [
+  { column: "sessionId", name: MESSAGE_SESSION_INDEX_NAME },
+  { column: "projectKey", name: MESSAGE_PROJECT_INDEX_NAME },
+  { column: "role", name: MESSAGE_ROLE_INDEX_NAME },
+  { column: "provider", name: MESSAGE_PROVIDER_INDEX_NAME },
+  { column: "contentHash", name: MESSAGE_CONTENT_HASH_INDEX_NAME },
+] as const;
+
 const connect = (dataDir: string): Effect.Effect<Connection, ConnectionFailed> =>
   Effect.tryPromise({
     try: () => lancedb.connect(dataDir),
@@ -525,7 +547,7 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
         // inverted-index builder (lance#1987) and aborts the process; a clean
         // drop+create builds fresh and avoids it. Drops are best-effort.
         if (replace) {
-          for (const name of [MESSAGE_TEXT_INDEX_NAME, MESSAGE_SESSION_INDEX_NAME, MESSAGE_VECTOR_INDEX_NAME]) {
+          for (const name of [MESSAGE_TEXT_INDEX_NAME, MESSAGE_VECTOR_INDEX_NAME, ...MESSAGE_SCALAR_INDEXES.map((index) => index.name)]) {
             if (!existingIndexNames.has(name)) continue;
             yield* Effect.tryPromise({
               try: () => table.dropIndex(name),
@@ -547,20 +569,20 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
           });
         }
 
-        // Scalar BTREE on sessionId — the per-session deleteOrphans / no-clobber
-        // reads filter by sessionId; without this they are O(table) per call
-        // (evidence E2). BTREE build is trivial (E7: 0.1s @ 1M) and works at any
-        // size, so it is unconditional. [docs.lancedb.com scalar-index]
-        if (replace || !existingIndexNames.has(MESSAGE_SESSION_INDEX_NAME)) {
+        // Scalar BTREE indexes cover the filter columns used by read paths and
+        // search routes. Without them LanceDB prefiltering can add avoidable latency
+        // before vector/hybrid ranking. [docs.lancedb.com scalar-index]
+        for (const index of MESSAGE_SCALAR_INDEXES) {
+          if (!replace && existingIndexNames.has(index.name)) continue;
           yield* Effect.tryPromise({
             try: () =>
-              table.createIndex("sessionId", {
+              table.createIndex(index.column, {
                 config: lancedb.Index.btree(),
-                name: MESSAGE_SESSION_INDEX_NAME,
+                name: index.name,
                 replace,
                 waitTimeoutSeconds: 60,
               }),
-            catch: (cause) => detectIndexNotReady(tableName, MESSAGE_SESSION_INDEX_NAME, "createSessionIndex", cause),
+            catch: (cause) => detectIndexNotReady(tableName, index.name, `createScalarIndex(${index.column})`, cause),
           });
         }
 
@@ -632,6 +654,49 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
         });
       });
 
+    const tableIndexStats = (request: TableIndexStatsRequest = {}): Effect.Effect<readonly IndexInfo[], LanceDbError> =>
+      Effect.gen(function* () {
+        const tableName = tableNameOrDefault(request.tableName);
+        const table = yield* openTable({ tableName });
+        const indexConfigs = yield* Effect.tryPromise({
+          try: () => table.listIndices(),
+          catch: (cause) => makeOperationError(tableName, "listIndices", cause),
+        });
+        const names = new Set(request.indexNames ?? []);
+        const selected = names.size === 0
+          ? indexConfigs
+          : indexConfigs.filter((config) => names.has(config.name));
+        return yield* Effect.forEach(
+          selected,
+          (config) =>
+            Effect.tryPromise({
+              try: () => table.indexStats(config.name),
+              catch: (cause) => makeOperationError(tableName, `indexStats(${config.name})`, cause),
+            }).pipe(Effect.map((stats) => indexInfoFromConfig(config, stats))),
+          { concurrency: 1 },
+        );
+      });
+
+    const optimize = (request: OptimizeTableRequest = {}): Effect.Effect<OptimizeStats, LanceDbError> =>
+      Effect.gen(function* () {
+        const tableName = tableNameOrDefault(request.tableName);
+        const table = yield* openTable({ tableName });
+        const options: {
+          cleanupOlderThan?: Date;
+          deleteUnverified?: boolean;
+        } = {};
+        if (request.olderThanMs !== undefined) {
+          options.cleanupOlderThan = new Date(Date.now() - request.olderThanMs);
+        }
+        if (request.deleteUnverified !== undefined) {
+          options.deleteUnverified = request.deleteUnverified;
+        }
+        return yield* Effect.tryPromise({
+          try: () => table.optimize(options),
+          catch: (cause) => makeOperationError(tableName, "optimize", cause),
+        });
+      });
+
     const tableStats = (request: TableStatsRequest = {}): Effect.Effect<TableStatsReport, LanceDbError> =>
       Effect.gen(function* () {
         const tableName = tableNameOrDefault(request.tableName);
@@ -689,7 +754,7 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
       Effect.gen(function* () {
         const tableName = tableNameOrDefault(request.tableName);
         const rows = request.rows ?? [];
-        const vectorDimension = request.vectorDimension ?? GEMINI_EMBEDDING_DIMENSIONS;
+        const vectorDimension = request.vectorDimension ?? DEFAULT_MESSAGE_VECTOR_DIMENSIONS;
         yield* assertRowsVectorDimension(rows, DEFAULT_VECTOR_COLUMN, vectorDimension);
         const existing = yield* tableNames(connection, tableName);
         const tableExists = existing.includes(tableName);
@@ -764,7 +829,7 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
           return;
         }
         const tableName = tableNameOrDefault(request.tableName);
-        yield* assertRowsVectorDimension(request.rows, DEFAULT_VECTOR_COLUMN, request.vectorDimension ?? GEMINI_EMBEDDING_DIMENSIONS);
+        yield* assertRowsVectorDimension(request.rows, DEFAULT_VECTOR_COLUMN, request.vectorDimension ?? DEFAULT_MESSAGE_VECTOR_DIMENSIONS);
         const records = messageRowsForLance(request.rows);
         const existing = yield* tableNames(connection, tableName);
         if (!existing.includes(tableName)) {
@@ -973,7 +1038,8 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
           .refineFactor(VECTOR_SEARCH_REFINE_FACTOR)
           .fullTextSearch(request.query, { columns: textColumn })
           .rerank(reranker)
-          .limit(limit);
+          .limit(limit)
+          .select(selectOrDefault(request.select));
         if (request.filter !== undefined) {
           query = query.where(request.filter);
         }
@@ -1036,6 +1102,8 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
       ensureMessageTable,
       createMessageIndexes,
       countRows,
+      tableIndexStats,
+      optimize,
       tableStats,
       ensureTable,
       upsertMessageRows,

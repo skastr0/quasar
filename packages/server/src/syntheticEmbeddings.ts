@@ -4,6 +4,7 @@ import type { EmbeddingProfile } from "./embeddingProfiles";
 import type { Embedder } from "./embeddings";
 
 const DEFAULT_SYNTHETIC_BASE_URL = "https://api.synthetic.new/openai/v1";
+const DEFAULT_SYNTHETIC_REQUEST_TIMEOUT_MS = 5_000;
 
 export class SyntheticEmbeddingError extends Schema.TaggedError<SyntheticEmbeddingError>()(
   "SyntheticEmbeddingError",
@@ -31,7 +32,29 @@ interface SyntheticEmbeddingResponse {
 }
 
 const syntheticApiKeyFromEnv = (): string | undefined =>
-  process.env.SYNTHETIC_API_KEY?.trim() || process.env.SYNTHETIC_NEW_API_KEY?.trim() || undefined;
+  process.env.SYNTHETIC_API_KEY?.trim() || undefined;
+
+const syntheticRequestTimeoutMs = (): number => {
+  const raw = process.env.SYNTHETIC_EMBEDDING_TIMEOUT_MS?.trim();
+  if (raw === undefined || raw.length === 0) return DEFAULT_SYNTHETIC_REQUEST_TIMEOUT_MS;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_SYNTHETIC_REQUEST_TIMEOUT_MS;
+};
+
+const fetchWithTimeout = async (
+  fetcher: typeof fetch,
+  input: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetcher(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+};
 
 const vectorFromUnknown = (value: unknown): readonly number[] | undefined =>
   Array.isArray(value) && value.every((item) => typeof item === "number") ? value : undefined;
@@ -75,7 +98,7 @@ export const makeSyntheticEmbedder = (profile: EmbeddingProfile, options: Synthe
     }
 
     const baseUrl = options.baseUrl ?? process.env.SYNTHETIC_OPENAI_BASE_URL?.trim() ?? DEFAULT_SYNTHETIC_BASE_URL;
-    const response = await (options.fetch ?? fetch)(`${baseUrl.replace(/\/$/, "")}/embeddings`, {
+    const response = await fetchWithTimeout(options.fetch ?? fetch, `${baseUrl.replace(/\/$/, "")}/embeddings`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${apiKey}`,
@@ -86,7 +109,7 @@ export const makeSyntheticEmbedder = (profile: EmbeddingProfile, options: Synthe
         input: [...values],
         dimensions: profile.dimensions,
       }),
-    });
+    }, syntheticRequestTimeoutMs());
 
     let body: unknown;
     try {

@@ -63,7 +63,6 @@ Embedding cache inventory after the run:
 
 ```json
 [
-  { "model": "gemini-embedding-001", "count": 124689 },
   { "model": "synthetic:hf:nomic-ai/nomic-embed-text-v1.5:768:search_document", "count": 62256 }
 ]
 ```

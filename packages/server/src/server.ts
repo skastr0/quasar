@@ -1,6 +1,6 @@
 import { HttpMiddleware, HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "@effect/platform";
 import { BunHttpServer, BunRuntime } from "@effect/platform-bun";
-import { LanceDb, MESSAGE_SEARCH_COLUMNS } from "./lancedb";
+import { DEFAULT_SEARCH_TABLE, LanceDb, MESSAGE_SEARCH_COLUMNS } from "./lancedb";
 import { Effect, Layer, Schema } from "effect";
 
 import { LocalServerConfig } from "./config";
@@ -215,25 +215,32 @@ const status = Effect.gen(function* () {
     IngestCoordinator,
     WorkerSupervisor,
   ]);
-  const [sqlite, lance, queueStats, queueByKind, embeddingStatus, ingestStatus, workerStatus] = yield* Effect.all([
+  const [sqlite, queueStats, queueByKind, embeddingStatus, ingestStatus, workerStatus] = yield* Effect.all([
     store.stats.pipe(Effect.either),
-    includeLanceStats ? search.tableStats({}).pipe(Effect.either) : Effect.succeed({ _tag: "Right" as const, right: "skipped; pass ?lance=true for LanceDB table stats" }),
     queue.stats,
     queue.statsByKind,
     embeddings.status,
     ingest.status,
     workers.status,
   ]);
-  return json(
-    ok("status", {
-      sqlite,
-      lance,
-      queue: { ...queueStats, byKind: queueByKind },
-      embeddings: embeddingStatus,
-      ingest: ingestStatus,
-      workers: workerStatus,
-    }),
-  );
+  const activeVectorTableName = embeddingProfileSearchTable(embeddings.profile);
+  const lance = includeLanceStats
+    ? {
+        defaultTable: yield* search.tableStats({ tableName: DEFAULT_SEARCH_TABLE }).pipe(Effect.either),
+        activeVectorTableName,
+        activeVectorTable: activeVectorTableName === DEFAULT_SEARCH_TABLE
+          ? yield* search.tableStats({ tableName: DEFAULT_SEARCH_TABLE }).pipe(Effect.either)
+          : yield* search.tableStats({ tableName: activeVectorTableName }).pipe(Effect.either),
+      }
+    : { _tag: "Right" as const, right: "skipped; pass ?lance=true for LanceDB table stats" };
+  return json(ok("status", {
+    sqlite,
+    lance,
+    queue: { ...queueStats, byKind: queueByKind },
+    embeddings: embeddingStatus,
+    ingest: ingestStatus,
+    workers: workerStatus,
+  }));
 });
 
 const projects = Effect.gen(function* () {
@@ -394,8 +401,37 @@ const requireSearchReady = (route: string, mode: SearchMode) =>
     return null;
   });
 
+interface SearchReceipt {
+  readonly route: string;
+  readonly mode: SearchMode;
+  readonly query: string;
+  readonly limit: number;
+  readonly statusCode: number;
+  readonly startedAt: string;
+  readonly completedAt: string;
+  readonly readinessMs: number;
+  readonly searchMs: number;
+  readonly totalMs: number;
+  readonly residualMs: number;
+  readonly matches: number;
+  readonly tableName?: string;
+  readonly embedMs?: number;
+}
+
+const searchProfileEnabled = (): boolean => process.env.QUASAR_SEARCH_PROFILE === "1";
+
+const emitSearchProfile = (profile: SearchReceipt) =>
+  Effect.sync(() => {
+    if (!searchProfileEnabled()) return;
+    console.log(JSON.stringify({ event: "search.profile", at: new Date().toISOString(), ...profile }));
+  });
+
 const lexicalSearch = Effect.gen(function* () {
+  const routeStarted = performance.now();
+  const startedAt = new Date().toISOString();
+  const readinessStarted = performance.now();
   const notReadyResponse = yield* requireSearchReady("search/lexical", "lexical");
+  const readinessMs = Math.round(performance.now() - readinessStarted);
   if (notReadyResponse !== null) return notReadyResponse;
   const search = yield* DerivedSearch;
   const params = yield* query;
@@ -403,6 +439,7 @@ const lexicalSearch = Effect.gen(function* () {
   if (text === null || text.trim() === "") {
     return badRequest("search/lexical", "q is required");
   }
+  const searchStarted = performance.now();
   const matches = yield* search.lexicalSearch({
     query: text,
     projectKey: params.get("projectKey") ?? undefined,
@@ -410,7 +447,24 @@ const lexicalSearch = Effect.gen(function* () {
     providers: parseProviders(params),
     limit: positiveInt(params, "limit", 10),
   });
-  return json(ok("search/lexical", { matches }));
+  const searchMs = Math.round(performance.now() - searchStarted);
+  const totalMs = Math.round(performance.now() - routeStarted);
+  const receipt: SearchReceipt = {
+    route: "search/lexical",
+    mode: "lexical",
+    query: text,
+    limit: positiveInt(params, "limit", 10),
+    statusCode: 200,
+    startedAt,
+    completedAt: new Date().toISOString(),
+    readinessMs,
+    searchMs,
+    totalMs,
+    residualMs: Math.max(0, totalMs - readinessMs - searchMs),
+    matches: matches.length,
+  };
+  yield* emitSearchProfile(receipt);
+  return json(ok("search/lexical", { matches, receipt: searchProfileEnabled() ? receipt : undefined }));
 });
 
 const parseProviders = (params: URLSearchParams): readonly string[] | undefined => {
@@ -434,7 +488,11 @@ const vectorReadyFilter = (params: URLSearchParams): string | undefined => {
 };
 
 const semanticSearch = Effect.gen(function* () {
+  const routeStarted = performance.now();
+  const startedAt = new Date().toISOString();
+  const readinessStarted = performance.now();
   const notReadyResponse = yield* requireSearchReady("search/semantic", "semantic");
+  const readinessMs = Math.round(performance.now() - readinessStarted);
   if (notReadyResponse !== null) return notReadyResponse;
   const search = yield* LanceDb;
   const embeddings = yield* Embeddings;
@@ -443,8 +501,11 @@ const semanticSearch = Effect.gen(function* () {
   if (text === null || text.trim() === "") {
     return badRequest("search/semantic", "q is required");
   }
+  const embedStarted = performance.now();
   const vector = yield* embeddings.embedText(text);
+  const embedMs = Math.round(performance.now() - embedStarted);
   const tableName = embeddingProfileSearchTable(embeddings.profile);
+  const searchStarted = performance.now();
   const matches = yield* search.vectorSearch({
     tableName,
     vector,
@@ -453,11 +514,34 @@ const semanticSearch = Effect.gen(function* () {
     filter: vectorReadyFilter(params),
     select: MESSAGE_SEARCH_COLUMNS,
   });
-  return json(ok("search/semantic", { matches }));
+  const searchMs = Math.round(performance.now() - searchStarted);
+  const totalMs = Math.round(performance.now() - routeStarted);
+  const receipt: SearchReceipt = {
+    route: "search/semantic",
+    mode: "semantic",
+    query: text,
+    limit: positiveInt(params, "limit", 10),
+    statusCode: 200,
+    startedAt,
+    completedAt: new Date().toISOString(),
+    tableName,
+    readinessMs,
+    embedMs,
+    searchMs,
+    totalMs,
+    residualMs: Math.max(0, totalMs - readinessMs - embedMs - searchMs),
+    matches: matches.length,
+  };
+  yield* emitSearchProfile(receipt);
+  return json(ok("search/semantic", { matches, receipt: searchProfileEnabled() ? receipt : undefined }));
 });
 
 const fusionSearch = Effect.gen(function* () {
+  const routeStarted = performance.now();
+  const startedAt = new Date().toISOString();
+  const readinessStarted = performance.now();
   const notReadyResponse = yield* requireSearchReady("search/fusion", "fusion");
+  const readinessMs = Math.round(performance.now() - readinessStarted);
   if (notReadyResponse !== null) return notReadyResponse;
   const search = yield* LanceDb;
   const embeddings = yield* Embeddings;
@@ -466,8 +550,11 @@ const fusionSearch = Effect.gen(function* () {
   if (text === null || text.trim() === "") {
     return badRequest("search/fusion", "q is required");
   }
+  const embedStarted = performance.now();
   const vector = yield* embeddings.embedText(text);
+  const embedMs = Math.round(performance.now() - embedStarted);
   const tableName = embeddingProfileSearchTable(embeddings.profile);
+  const searchStarted = performance.now();
   const matches = yield* search.hybridSearch({
     tableName,
     query: text,
@@ -477,7 +564,26 @@ const fusionSearch = Effect.gen(function* () {
     filter: vectorReadyFilter(params),
     select: MESSAGE_SEARCH_COLUMNS,
   });
-  return json(ok("search/fusion", { matches }));
+  const searchMs = Math.round(performance.now() - searchStarted);
+  const totalMs = Math.round(performance.now() - routeStarted);
+  const receipt: SearchReceipt = {
+    route: "search/fusion",
+    mode: "fusion",
+    query: text,
+    limit: positiveInt(params, "limit", 10),
+    statusCode: 200,
+    startedAt,
+    completedAt: new Date().toISOString(),
+    tableName,
+    readinessMs,
+    embedMs,
+    searchMs,
+    totalMs,
+    residualMs: Math.max(0, totalMs - readinessMs - embedMs - searchMs),
+    matches: matches.length,
+  };
+  yield* emitSearchProfile(receipt);
+  return json(ok("search/fusion", { matches, receipt: searchProfileEnabled() ? receipt : undefined }));
 });
 
 const booleanParam = (params: URLSearchParams, name: string, fallback: boolean): boolean => {

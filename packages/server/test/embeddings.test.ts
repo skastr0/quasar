@@ -7,7 +7,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { Effect, Layer } from "effect";
 import { createHash } from "node:crypto";
 
-import { embeddingProfileSearchTable, makeEmbeddingProfile, makeGeminiEmbeddingProfile, type EmbeddingProfile } from "../src/embeddingProfiles";
+import { embeddingProfileSearchTable, makeEmbeddingProfile, type EmbeddingProfile } from "../src/embeddingProfiles";
 import { makeEmbeddingsLayer, type Embedder } from "../src/embeddings";
 import type { MappedSession } from "../src/model";
 import { Embeddings, DurableQueue, makeDurableQueueLayer } from "../src/services";
@@ -60,7 +60,13 @@ const mappedSession = (text = "alpha terminal"): MappedSession => ({
   toolCalls: [],
 });
 
-const enqueueEmbeddingJob = (queue: DurableQueueService, maxAttempts = 2, embeddingProfile = "test-embedding") =>
+const defaultEmbeddingProfile = makeEmbeddingProfile({
+  model: "test-embedding",
+  dimensions: 1536,
+  task: "search_document",
+});
+
+const enqueueEmbeddingJob = (queue: DurableQueueService, maxAttempts = 2, embeddingProfile = defaultEmbeddingProfile.cacheNamespace) =>
   queue.enqueue({
     kind: "embed-message",
     payload: { sessionId: "session-a", seq: 1, contentHash: "hash-a", embeddingProfile },
@@ -87,7 +93,7 @@ const withEmbeddings = <A>(embedder: Embedder, run: Effect.Effect<A, unknown, Lo
   withEmbeddingsAt(
     { sqlite: join(tempDir(), "quasar.sqlite"), lance: join(tempDir(), "search.lance") },
     embedder,
-    makeGeminiEmbeddingProfile({ model: "test-embedding" }),
+    defaultEmbeddingProfile,
     run,
   );
 
@@ -139,7 +145,7 @@ describe("Embeddings", () => {
         yield* enqueueEmbeddingJob(queue);
         const report = yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
         const cached = yield* embeddings.getCached("hash-a");
-        const rows = yield* search.readMessageRowsBySession({ sessionId: "session-a", select: ["contentHash"] });
+        const rows = yield* search.readMessageRowsBySession({ sessionId: "session-a", tableName: embeddingProfileSearchTable(defaultEmbeddingProfile), select: ["contentHash"] });
         const queueStats = yield* queue.stats;
         return [report, cached, rows, queueStats] as const;
       }),
@@ -172,7 +178,7 @@ describe("Embeddings", () => {
         yield* embeddings.putCached({ contentHash: "hash-a", text: "alpha terminal", vector: vector(0), now: "2026-06-18T09:00:00.000Z" });
         yield* enqueueEmbeddingJob(queue);
         const report = yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
-        const rows = yield* search.readMessageRowsBySession({ sessionId: "session-a", select: ["contentHash"] });
+        const rows = yield* search.readMessageRowsBySession({ sessionId: "session-a", tableName: embeddingProfileSearchTable(defaultEmbeddingProfile), select: ["contentHash"] });
         return [report, rows] as const;
       }),
     );
@@ -182,8 +188,69 @@ describe("Embeddings", () => {
     expect(rows[0]?.contentHash).toBe("hash-a");
   });
 
+  test("synthetic readiness caches the external probe", async () => {
+    const previousKey = process.env.SYNTHETIC_API_KEY;
+    process.env.SYNTHETIC_API_KEY = "test-key";
+    let calls = 0;
+    const embedder: Embedder = {
+      embedMany: async () => {
+        calls += 1;
+        return [vector(2)];
+      },
+    };
+
+    try {
+      const [first, second] = await withEmbeddings(
+        embedder,
+        Effect.gen(function* () {
+          const embeddings = yield* Embeddings;
+          const first = yield* embeddings.readiness;
+          const second = yield* embeddings.readiness;
+          return [first, second] as const;
+        }),
+      );
+
+      expect(calls).toBe(1);
+      expect(first.ok).toBe(true);
+      expect(second.ok).toBe(true);
+      expect(first.checkedAt).toBe(second.checkedAt);
+    } finally {
+      if (previousKey === undefined) delete process.env.SYNTHETIC_API_KEY;
+      else process.env.SYNTHETIC_API_KEY = previousKey;
+    }
+  });
+
+  test("synthetic readiness fails closed without an API key before probing", async () => {
+    const previousKey = process.env.SYNTHETIC_API_KEY;
+    delete process.env.SYNTHETIC_API_KEY;
+    let calls = 0;
+    const embedder: Embedder = {
+      embedMany: async () => {
+        calls += 1;
+        return [vector(2)];
+      },
+    };
+
+    try {
+      const result = await withEmbeddings(
+        embedder,
+        Effect.gen(function* () {
+          const embeddings = yield* Embeddings;
+          return yield* embeddings.readiness;
+        }),
+      );
+
+      expect(calls).toBe(0);
+      expect(result.ok).toBe(false);
+      expect(result.reason).toContain("SYNTHETIC_API_KEY is required");
+    } finally {
+      if (previousKey === undefined) delete process.env.SYNTHETIC_API_KEY;
+      else process.env.SYNTHETIC_API_KEY = previousKey;
+    }
+  });
+
   test("provider failures retry then fail after max attempts", async () => {
-    const embedder: Embedder = { embedMany: async () => { throw new Error("gemini unavailable"); } };
+    const embedder: Embedder = { embedMany: async () => { throw new Error("embedding provider unavailable"); } };
 
     const [first, second, queueStats] = await withEmbeddings(
       embedder,
@@ -348,14 +415,14 @@ describe("Embeddings", () => {
         });
         yield* queue.enqueue({
           kind: "embed-message",
-          payload: { sessionId: "session-a", seq: 1, contentHash: "hash-a", embeddingProfile: "test-embedding" },
-          idempotencyKey: "embed-message:test-embedding:hash-a",
+          payload: { sessionId: "session-a", seq: 1, contentHash: "hash-a", embeddingProfile: defaultEmbeddingProfile.cacheNamespace },
+          idempotencyKey: `embed-message:${defaultEmbeddingProfile.cacheNamespace}:hash-a`,
           maxAttempts: 2,
         });
         yield* queue.enqueue({
           kind: "embed-message",
-          payload: { sessionId: "session-a", seq: 2, contentHash: "hash-b", embeddingProfile: "test-embedding" },
-          idempotencyKey: "embed-message:test-embedding:hash-b",
+          payload: { sessionId: "session-a", seq: 2, contentHash: "hash-b", embeddingProfile: defaultEmbeddingProfile.cacheNamespace },
+          idempotencyKey: `embed-message:${defaultEmbeddingProfile.cacheNamespace}:hash-b`,
           maxAttempts: 2,
         });
         const report = yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
@@ -392,7 +459,7 @@ describe("Embeddings", () => {
           yield* enqueueEmbeddingJob(queue);
           const report = yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
           const cached = yield* embeddings.getCached("hash-a");
-          const rows = yield* search.readMessageRowsBySession({ sessionId: "session-a", select: ["contentHash", "vector"] });
+          const rows = yield* search.readMessageRowsBySession({ sessionId: "session-a", tableName: embeddingProfileSearchTable(defaultEmbeddingProfile), select: ["contentHash", "vector"] });
           return [report, cached, rows] as const;
         }),
       );
@@ -414,7 +481,6 @@ describe("Embeddings", () => {
     const previousChunkSize = process.env.QUASAR_EMBEDDING_DOCUMENT_CHUNK_CHARS;
     process.env.QUASAR_EMBEDDING_DOCUMENT_CHUNK_CHARS = "5";
     const profile = makeEmbeddingProfile({
-      provider: "synthetic",
       model: "hf:nomic-ai/nomic-embed-text-v1.5",
       dimensions: 1536,
       task: "search_document",
@@ -584,13 +650,22 @@ describe("Embeddings", () => {
     const sqlite = join(tempDir(), "quasar.sqlite");
     const lance = join(tempDir(), "search.lance");
     const embedder: Embedder = { embedMany: async () => [vector(0)] };
-    const gemini = makeGeminiEmbeddingProfile({ model: "gemini-profile" });
-    const alternate = makeGeminiEmbeddingProfile({ model: "gemini-profile", cacheNamespace: "alternate-profile" });
+    const profile = makeEmbeddingProfile({
+      model: "profile-a",
+      dimensions: 1536,
+      task: "search_document",
+    });
+    const alternate = makeEmbeddingProfile({
+      model: "profile-a",
+      dimensions: 1536,
+      task: "search_document",
+      cacheNamespace: "alternate-profile",
+    });
 
-    const cachedInGemini = await withEmbeddingsAt(
+    const cachedInProfile = await withEmbeddingsAt(
       { sqlite, lance },
       embedder,
-      gemini,
+      profile,
       Effect.gen(function* () {
         const embeddings = yield* Embeddings;
         yield* embeddings.putCached({ contentHash: "hash-a", text: "alpha terminal", vector: vector(0) });
@@ -608,7 +683,7 @@ describe("Embeddings", () => {
       }),
     );
 
-    expect(cachedInGemini?.model).toBe("gemini-profile");
+    expect(cachedInProfile?.model).toBe("synthetic:profile-a:1536:search_document");
     expect(cachedInAlternate).toBeUndefined();
   });
 
@@ -627,11 +702,20 @@ describe("Embeddings", () => {
   });
 
   test("non-default profiles use separate LanceDB message tables", () => {
-    const defaultGemini = makeGeminiEmbeddingProfile({ model: "gemini-profile" });
-    const alternate = makeGeminiEmbeddingProfile({ model: "gemini-profile", cacheNamespace: "alternate-profile" });
+    const profile = makeEmbeddingProfile({
+      model: "profile-a",
+      dimensions: 1536,
+      task: "search_document",
+    });
+    const alternate = makeEmbeddingProfile({
+      model: "profile-a",
+      dimensions: 1536,
+      task: "search_document",
+      cacheNamespace: "alternate-profile",
+    });
 
-    expect(embeddingProfileSearchTable(defaultGemini)).toBe("messages");
-    expect(embeddingProfileSearchTable(alternate)).not.toBe("messages");
+    expect(embeddingProfileSearchTable(profile)).toStartWith("messages_");
+    expect(embeddingProfileSearchTable(alternate)).not.toBe(embeddingProfileSearchTable(profile));
     expect(embeddingProfileSearchTable(alternate)).toStartWith("messages_");
   });
 
@@ -644,7 +728,6 @@ describe("Embeddings", () => {
       },
     };
     const profile = makeEmbeddingProfile({
-      provider: "synthetic",
       model: "hf:nomic-ai/nomic-embed-text-v1.5",
       dimensions: 1536,
       task: "search_document",
@@ -672,7 +755,6 @@ describe("Embeddings", () => {
 
   test("split-profile embeddings update only the profile vector table", async () => {
     const profile = makeEmbeddingProfile({
-      provider: "synthetic",
       model: "hf:nomic-ai/nomic-embed-text-v1.5",
       dimensions: 768,
       task: "search_document",
@@ -736,7 +818,6 @@ describe("Embeddings", () => {
 
   test("synthetic embedder preserves response order by index", async () => {
     const profile = makeEmbeddingProfile({
-      provider: "synthetic",
       model: "hf:nomic-ai/nomic-embed-text-v1.5",
       dimensions: 3,
       task: "search_document",
@@ -770,9 +851,25 @@ describe("Embeddings", () => {
     expect(calls[0]?.body).toEqual({ model: profile.model, input: ["a", "b"], dimensions: 3 });
   });
 
+  test("synthetic embedder rejects missing API key before fetching", async () => {
+    const profile = makeEmbeddingProfile({
+      model: "hf:nomic-ai/nomic-embed-text-v1.5",
+      dimensions: 3,
+      task: "search_document",
+    });
+    let calls = 0;
+    const fakeFetch: typeof fetch = async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ data: [] }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+
+    await expect(makeSyntheticEmbedder(profile, { apiKey: "", fetch: fakeFetch }).embedMany(["a"]))
+      .rejects.toThrow("SYNTHETIC_API_KEY is required for Synthetic embeddings");
+    expect(calls).toBe(0);
+  });
+
   test("synthetic embedder rejects invalid response indexes", async () => {
     const profile = makeEmbeddingProfile({
-      provider: "synthetic",
       model: "hf:nomic-ai/nomic-embed-text-v1.5",
       dimensions: 3,
       task: "search_document",

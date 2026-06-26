@@ -6,7 +6,7 @@ import { LanceDb, makeLanceDbLayer } from "../src/lancedb";
 import { afterEach, describe, expect, test } from "bun:test";
 import { Effect, Layer } from "effect";
 
-import { makeGeminiEmbeddingProfile } from "../src/embeddingProfiles";
+import { embeddingProfileSearchTable, makeEmbeddingProfile } from "../src/embeddingProfiles";
 import { makeEmbeddingsLayer, type Embedder } from "../src/embeddings";
 import { SearchMaintenance, SearchMaintenanceLive } from "../src/maintenance";
 import type { MappedSession } from "../src/model";
@@ -30,6 +30,12 @@ afterEach(() => {
 });
 
 const vector = () => Array.from({ length: 1536 }, (_, index) => (index === 0 ? 1 : 0));
+
+const workerEmbeddingProfile = makeEmbeddingProfile({
+  model: "test-worker",
+  dimensions: 1536,
+  task: "search_document",
+});
 
 const mappedSession = (): MappedSession => ({
   project: { projectKey: "project-a", displayName: "Project A" },
@@ -56,7 +62,11 @@ const withWorkers = <A>(run: Effect.Effect<A, unknown, LocalStore | LanceDb | Du
   const dataLayer = Layer.mergeAll(makeLocalStoreLayer(sqlite), makeLanceDbLayer({ dataDir: lance }));
   const queueLayer = makeDurableQueueLayer(sqlite);
   const searchLayer = DerivedSearchLive.pipe(Layer.provide(dataLayer));
-  const embeddingsLayer = makeEmbeddingsLayer({ sqlite, profile: makeGeminiEmbeddingProfile({ model: "test-worker" }), embedder }).pipe(Layer.provide(Layer.merge(dataLayer, queueLayer)));
+  const embeddingsLayer = makeEmbeddingsLayer({
+    sqlite,
+    profile: workerEmbeddingProfile,
+    embedder,
+  }).pipe(Layer.provide(Layer.merge(dataLayer, queueLayer)));
   const maintenanceLayer = SearchMaintenanceLive.pipe(Layer.provide(Layer.mergeAll(dataLayer, queueLayer, searchLayer)));
   const workersLayer = WorkerSupervisorLive.pipe(Layer.provide(Layer.mergeAll(embeddingsLayer, maintenanceLayer)));
   return Effect.runPromise(run.pipe(Effect.provide(Layer.mergeAll(dataLayer, queueLayer, searchLayer, embeddingsLayer, maintenanceLayer, workersLayer))));
@@ -73,12 +83,12 @@ describe("WorkerSupervisor", () => {
         yield* store.upsertSession(mappedSession());
         yield* queue.enqueue({
           kind: "embed-message",
-          payload: { sessionId: "session-a", seq: 1, contentHash: "hash-a", embeddingProfile: "test-worker" },
-          idempotencyKey: "embed-message:test-worker:hash-a",
+          payload: { sessionId: "session-a", seq: 1, contentHash: "hash-a", embeddingProfile: workerEmbeddingProfile.cacheNamespace },
+          idempotencyKey: `embed-message:${workerEmbeddingProfile.cacheNamespace}:hash-a`,
         });
         const status = yield* workers.tickOnce;
         const queueStats = yield* queue.statsByKind;
-        const rows = yield* search.readMessageRowsBySession({ sessionId: "session-a", select: ["contentHash"] });
+        const rows = yield* search.readMessageRowsBySession({ sessionId: "session-a", tableName: embeddingProfileSearchTable(workerEmbeddingProfile), select: ["contentHash"] });
         return [status, queueStats, rows] as const;
       }),
     );

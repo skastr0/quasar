@@ -1,35 +1,33 @@
 /**
  * Search readiness gate — QSR-223.
  *
- * assertSearchReady checks whether the LanceDB index is consistent with the
- * SQLite truth store before any search request is served. If the index is not
- * ready the gate returns a typed ReadinessResult with ok:false; callers convert
- * this to HTTP 503 — never 200 with stale/partial results.
+ * assertSearchReady is a cheap request-admission gate. It verifies that the
+ * LanceDB search table exists when corpus data exists, discloses lightweight
+ * catch-up counters, and keeps expensive consistency audits out of search.
  *
  * Readiness definitions
  * ─────────────────────
- * lexical-ready  :: LanceDB messages-table rowCount === SQLite searchable message count
- *                   AND text_idx numUnindexedRows === 0
- *                   AND zero stale-index sessions in SQLite (indexed_at IS NULL or behind updated_at)
+ * lexical-ready  :: empty corpus OR LanceDB messages table matches SQLite searchable count and is readable
  *
  * semantic-ready :: lexical-ready
- *                   AND zero unembedded searchable messages (contentHash LIKE 'unembedded:%' in SQLite)
- *                   AND zero pending/leased embed-message jobs in the queue
+ *                   and Synthetic embeddings are available
+ *                   and the active vector table matches SQLite searchable count
+ *                   with pending/leased embed-message jobs or unembedded rows absent
  *
  * fusion-ready   :: semantic-ready (fusion requires both FTS and vectors)
  *
- * Any LanceDB read / indexStats error → NOT ready. Never catch-all → empty results.
+ * Any LanceDB row-count read error → NOT ready unless SQLite has no messages.
+ * Never catch-all → empty results.
  *
- * Empty-corpus special case: if both LanceDB rowCount===0 AND SQLite searchable===0
- * the corpus is genuinely empty — all modes are ready (returns 200 with empty matches).
- * "Building" (rows present, numIndexedRows < rowCount) vs "consistent+empty" is
- * discriminated by the row-count-parity check.
+ * Exact SQLite searchable counts, unembedded counts, LanceDB versions, and disk
+ * sizes are diagnostic work. They do not belong in request-time readiness.
  */
 
-import { DEFAULT_SEARCH_TABLE, LanceDb, MESSAGE_TEXT_INDEX_NAME } from "./lancedb";
-import { Context, Effect, Layer } from "effect";
+import { DEFAULT_SEARCH_TABLE, LanceDb, MESSAGE_TEXT_INDEX_NAME, MESSAGE_VECTOR_INDEX_NAME } from "./lancedb";
+import { Cause, Context, Effect, Layer } from "effect";
 
-import { DurableQueue } from "./services";
+import { embeddingProfileFromEnv, embeddingProfileSearchTable } from "./embeddingProfiles";
+import { DurableQueue, Embeddings } from "./services";
 import { LocalStore } from "./store";
 
 export type SearchMode = "lexical" | "semantic" | "fusion";
@@ -38,13 +36,19 @@ export type SearchMode = "lexical" | "semantic" | "fusion";
 export interface IndexStats {
   /** Number of rows currently in the LanceDB messages table. */
   readonly lanceRowCount: number;
-  /** Number of searchable messages in SQLite (role IN user/assistant/reasoning). */
+  /** Cheap corpus count from SQLite stats. Exact searchable counts are diagnostics. */
   readonly sqliteSearchableCount: number;
   /** Rows written to LanceDB but not yet folded into the FTS index. */
   readonly numUnindexedTextRows: number;
+  /** Rows written to the active vector table but not yet folded into the vector index. */
+  readonly numUnindexedVectorRows: number;
+  /** Rows currently in the active vector search table. */
+  readonly vectorRowCount: number;
+  /** Whether the active vector index is caught up enough for semantic/fusion. */
+  readonly vectorIndexReady: boolean;
   /** Sessions whose indexed_at watermark is NULL or behind updated_at. */
   readonly staleSessions: number;
-  /** SQLite messages with contentHash LIKE 'unembedded:%' — placeholder vectors. */
+  /** Cheap semantic frontier proxy: pending + leased embed-message jobs. */
   readonly unembeddedVectorRows: number;
   /** Pending + leased embed-message jobs in the durable queue. */
   readonly pendingEmbedJobs: number;
@@ -58,6 +62,10 @@ export interface ReadinessResult {
   /** Messages with placeholder vectors (unembedded:* contentHash). */
   readonly missingVectorCount: number;
   readonly indexStats: IndexStats;
+  /** Synthetic embedding availability for semantic/fusion readiness checks. */
+  readonly syntheticEmbeddingReady?: boolean;
+  /** Synthetic embedding failure reason when readiness fails closed. */
+  readonly syntheticEmbeddingReason?: string;
   readonly reason?: string;
 }
 
@@ -76,11 +84,33 @@ export const SearchReadinessLive = Layer.effect(
     const store = yield* LocalStore;
     const lance = yield* LanceDb;
     const queue = yield* DurableQueue;
+    const vectorTableName = embeddingProfileSearchTable(embeddingProfileFromEnv());
+    const nowIso = () => new Date().toISOString();
+    const syntheticFailure = (
+      mode: SearchMode,
+      staleCount: number,
+      missingVectorCount: number,
+      indexStats: IndexStats,
+      reason?: string,
+      syntheticReason?: string,
+    ): ReadinessResult => ({
+      ok: false,
+      mode,
+      staleCount,
+      missingVectorCount: Math.max(missingVectorCount, 1),
+      indexStats,
+      syntheticEmbeddingReady: false,
+      syntheticEmbeddingReason: syntheticReason,
+      reason: reason ?? syntheticReason ?? "Synthetic embeddings are unavailable",
+    });
 
     const emptyStats: IndexStats = {
       lanceRowCount: 0,
       sqliteSearchableCount: 0,
       numUnindexedTextRows: 0,
+      numUnindexedVectorRows: 0,
+      vectorRowCount: 0,
+      vectorIndexReady: false,
       staleSessions: 0,
       unembeddedVectorRows: 0,
       pendingEmbedJobs: 0,
@@ -89,42 +119,87 @@ export const SearchReadinessLive = Layer.effect(
     return SearchReadiness.of({
       assertSearchReady: (mode) =>
         Effect.gen(function* () {
-          // 1. LanceDB messages-table stats — fail closed on read errors, except
-          // when the table doesn't exist yet (empty corpus fast path).
-          const lanceStatsResult = yield* lance.tableStats({ tableName: DEFAULT_SEARCH_TABLE }).pipe(Effect.either);
+          const needsEmbeddings = mode === "semantic" || mode === "fusion";
+          const sqliteSearchableCount = yield* store.countSearchableMessages();
+          const staleSessions = yield* store.countStaleIndexSessions().pipe(
+            Effect.catchAll(() => Effect.succeed(1)),
+          );
+          const unembeddedVectorRows = yield* store.countUnembeddedMessages().pipe(
+            Effect.catchAll(() => Effect.succeed(0)),
+          );
+          const pendingEmbedJobs = yield* queue.statsByKind.pipe(
+            Effect.map((byKind) => {
+              const embedKind = byKind.find((k) => k.kind === "embed-message");
+              return (embedKind?.pending ?? 0) + (embedKind?.leased ?? 0);
+            }),
+            Effect.catchAll(() => Effect.succeed(0)),
+          );
+          const embeddingsService = yield* Effect.serviceOption(Embeddings);
+          const syntheticEmbeddingResult = needsEmbeddings
+            ? embeddingsService._tag === "None"
+              ? {
+                  ok: false as const,
+                  checkedAt: nowIso(),
+                  reason: "Synthetic embeddings service is unavailable",
+                }
+              : yield* embeddingsService.value.readiness.pipe(
+                  Effect.catchAllCause((cause) =>
+                    Effect.succeed({
+                      ok: false,
+                      checkedAt: nowIso(),
+                      reason: Cause.pretty(cause),
+                    }),
+                  ),
+                )
+            : { ok: true as const, checkedAt: nowIso() };
+          const syntheticReady = !needsEmbeddings || syntheticEmbeddingResult.ok;
+
+          const lanceRowCountResult = yield* lance.countRows({ tableName: DEFAULT_SEARCH_TABLE }).pipe(Effect.either);
 
           // "Table not found" means LanceDB has never been seeded — cross-check
-          // against SQLite. If SQLite also has zero searchable messages → truly empty
-          // corpus, all modes are ready. If SQLite has messages → ingest happened but
-          // indexSession hasn't run yet → not ready.
-          if (lanceStatsResult._tag === "Left") {
-            const errorMessage = lanceStatsResult.left instanceof Error
-              ? lanceStatsResult.left.message
-              : String((lanceStatsResult.left as { message?: string }).message ?? lanceStatsResult.left);
+          // against cheap SQLite state. If SQLite has no messages and no stale
+          // sessions, this is a genuine empty corpus. Otherwise ingest has data
+          // but no search table yet.
+          if (lanceRowCountResult._tag === "Left") {
+            const errorMessage = lanceRowCountResult.left instanceof Error
+              ? lanceRowCountResult.left.message
+              : String((lanceRowCountResult.left as { message?: string }).message ?? lanceRowCountResult.left);
             const isTableNotFound = /not found|does not exist/i.test(errorMessage);
+            const stats: IndexStats = {
+              ...emptyStats,
+              sqliteSearchableCount,
+              staleSessions,
+              unembeddedVectorRows,
+              pendingEmbedJobs,
+            };
 
-            const sqliteSearchableForNotFound = yield* store.countSearchableMessages().pipe(
-              Effect.catchAll(() => Effect.succeed(0)),
-            );
-
-            if (isTableNotFound && sqliteSearchableForNotFound === 0) {
-              // Genuinely empty corpus — all modes ready.
-              return { ok: true, mode, staleCount: 0, missingVectorCount: 0, indexStats: emptyStats } satisfies ReadinessResult;
+            if (isTableNotFound && sqliteSearchableCount === 0) {
+              if (!syntheticReady) {
+                return syntheticFailure(mode, 0, Math.max(unembeddedVectorRows, pendingEmbedJobs, 1), stats, undefined, syntheticEmbeddingResult.reason);
+              }
+              // Genuinely empty corpus — ready once the Synthetic gate passes.
+              return {
+                ok: true,
+                mode,
+                staleCount: 0,
+                missingVectorCount: 0,
+                indexStats: stats,
+                syntheticEmbeddingReady: needsEmbeddings ? syntheticEmbeddingResult.ok : undefined,
+                syntheticEmbeddingReason: needsEmbeddings ? syntheticEmbeddingResult.reason : undefined,
+              } satisfies ReadinessResult;
             }
 
-            if (isTableNotFound && sqliteSearchableForNotFound > 0) {
+            if (isTableNotFound) {
               // Sessions exist in SQLite but LanceDB table never created → not ready.
-              const stats: IndexStats = {
-                ...emptyStats,
-                sqliteSearchableCount: sqliteSearchableForNotFound,
-              };
               return {
                 ok: false,
                 mode,
-                staleCount: sqliteSearchableForNotFound,
-                missingVectorCount: 0,
+                staleCount: Math.max(staleSessions, sqliteSearchableCount),
+                missingVectorCount: Math.max(unembeddedVectorRows, pendingEmbedJobs, needsEmbeddings && !syntheticEmbeddingResult.ok ? 1 : 0),
                 indexStats: stats,
-                reason: `LanceDB table not found but SQLite has ${sqliteSearchableForNotFound} searchable messages`,
+                syntheticEmbeddingReady: needsEmbeddings ? syntheticEmbeddingResult.ok : undefined,
+                syntheticEmbeddingReason: needsEmbeddings ? syntheticEmbeddingResult.reason : undefined,
+                reason: `LanceDB table not found but SQLite has ${sqliteSearchableCount} messages`,
               } satisfies ReadinessResult;
             }
 
@@ -133,84 +208,140 @@ export const SearchReadinessLive = Layer.effect(
               ok: false,
               mode,
               staleCount: 0,
-              missingVectorCount: 0,
-              indexStats: emptyStats,
+              missingVectorCount: Math.max(unembeddedVectorRows, pendingEmbedJobs, needsEmbeddings && !syntheticEmbeddingResult.ok ? 1 : 0),
+              indexStats: stats,
+              syntheticEmbeddingReady: needsEmbeddings ? syntheticEmbeddingResult.ok : undefined,
+              syntheticEmbeddingReason: needsEmbeddings ? syntheticEmbeddingResult.reason : undefined,
               reason: `LanceDB read error: ${errorMessage}`,
             } satisfies ReadinessResult;
           }
 
-          const lanceStats = lanceStatsResult.right;
-          const lanceRowCount = lanceStats.rowCount;
+          const lanceRowCount = lanceRowCountResult.right;
 
-          // text_idx numUnindexedRows: 0 means FTS is fully caught up.
-          // If the index doesn't exist yet, every row is "unindexed".
-          const textIndex = lanceStats.indices.find((idx) => idx.name === MESSAGE_TEXT_INDEX_NAME);
-          const numUnindexedTextRows = textIndex !== undefined
-            ? (textIndex.numUnindexedRows ?? 0)
-            : lanceRowCount; // no index at all → all rows unindexed
-
-          // 2. SQLite truth counts — fail closed (default to "stale") on error.
-          const sqliteSearchableCount = yield* store.countSearchableMessages().pipe(
-            Effect.catchAll(() => Effect.succeed(-1)),
+          const textIndexResult = yield* lance.tableIndexStats({
+            tableName: DEFAULT_SEARCH_TABLE,
+            indexNames: [MESSAGE_TEXT_INDEX_NAME],
+          }).pipe(
+            Effect.map((indices) => indices.find((idx) => idx.name === MESSAGE_TEXT_INDEX_NAME)),
+            Effect.either,
           );
-          const staleSessions = yield* store.countStaleIndexSessions().pipe(
-            Effect.catchAll(() => Effect.succeed(1)),
-          );
-          // unembedded = SQLite messages where contentHash LIKE 'unembedded:%'
-          // (set by indexedContentHash() for every searchable-role message before embedding).
-          const unembeddedVectorRows = yield* store.countUnembeddedMessages().pipe(
-            Effect.catchAll(() => Effect.succeed(0)),
-          );
-
-          // 3. Pending embed jobs in the durable queue.
-          const pendingEmbedJobs = yield* queue.statsByKind.pipe(
-            Effect.map((byKind) => {
-              const embedKind = byKind.find((k) => k.kind === "embed-message");
-              return (embedKind?.pending ?? 0) + (embedKind?.leased ?? 0);
-            }),
-            Effect.catchAll(() => Effect.succeed(0)),
-          );
+          const textIndex = textIndexResult._tag === "Right" ? textIndexResult.right : undefined;
+          const numUnindexedTextRows = textIndex?.numUnindexedRows ?? lanceRowCount;
+          const needsVectorIndex = mode === "semantic" || mode === "fusion";
+          const vectorRowCountResult = needsVectorIndex
+            ? yield* lance.countRows({ tableName: vectorTableName }).pipe(Effect.either)
+            : { _tag: "Right" as const, right: 0 };
+          const vectorIndexResult = needsVectorIndex && vectorRowCountResult._tag === "Right"
+            ? yield* lance.tableIndexStats({
+              tableName: vectorTableName,
+              indexNames: [MESSAGE_VECTOR_INDEX_NAME],
+            }).pipe(
+              Effect.map((indices) => indices.find((idx) => idx.name === MESSAGE_VECTOR_INDEX_NAME)),
+              Effect.either,
+            )
+            : { _tag: "Right" as const, right: undefined };
+          const vectorIndex = vectorIndexResult._tag === "Right" ? vectorIndexResult.right : undefined;
+          const vectorRowCount = vectorRowCountResult._tag === "Right" ? vectorRowCountResult.right : 0;
+          const numUnindexedVectorRows = vectorIndex?.numUnindexedRows ?? vectorRowCount;
+          const vectorIndexReady = !needsVectorIndex || (vectorRowCount === sqliteSearchableCount && vectorIndex !== undefined && numUnindexedVectorRows === 0);
+          const vectorCoverageGap = needsVectorIndex && vectorRowCount < sqliteSearchableCount
+            ? sqliteSearchableCount - vectorRowCount
+            : 0;
+          const missingVectorCount = Math.max(unembeddedVectorRows, pendingEmbedJobs, vectorCoverageGap, needsVectorIndex && !syntheticEmbeddingResult.ok ? 1 : 0);
 
           const indexStats: IndexStats = {
             lanceRowCount,
             sqliteSearchableCount,
             numUnindexedTextRows,
+            numUnindexedVectorRows,
+            vectorRowCount,
+            vectorIndexReady,
             staleSessions,
             unembeddedVectorRows,
             pendingEmbedJobs,
           };
 
           // ── Empty-corpus fast path ──────────────────────────────────────────
-          // Both sides agree there is nothing yet: all modes are ready.
+          // Lexical can serve with no rows; semantic/fusion still require
+          // Synthetic embeddings to be available.
           if (lanceRowCount === 0 && sqliteSearchableCount === 0) {
-            return { ok: true, mode, staleCount: 0, missingVectorCount: 0, indexStats } satisfies ReadinessResult;
+            if (!syntheticReady) {
+              return syntheticFailure(mode, 0, Math.max(missingVectorCount, 1), indexStats, undefined, syntheticEmbeddingResult.reason);
+            }
+            return {
+              ok: true,
+              mode,
+              staleCount: 0,
+              missingVectorCount: 0,
+              indexStats,
+              syntheticEmbeddingReady: needsVectorIndex ? syntheticEmbeddingResult.ok : undefined,
+              syntheticEmbeddingReason: needsVectorIndex ? syntheticEmbeddingResult.reason : undefined,
+            } satisfies ReadinessResult;
+          }
+
+          const rowCountMismatch = lanceRowCount !== sqliteSearchableCount;
+          const disclosedStale = numUnindexedTextRows + staleSessions + (rowCountMismatch ? Math.abs(lanceRowCount - sqliteSearchableCount) : 0);
+
+          if (needsVectorIndex && vectorRowCountResult._tag === "Left") {
+            const errorMessage = vectorRowCountResult.left instanceof Error
+              ? vectorRowCountResult.left.message
+              : String((vectorRowCountResult.left as { message?: string }).message ?? vectorRowCountResult.left);
+            return {
+              ok: false,
+              mode,
+              staleCount: disclosedStale,
+              missingVectorCount,
+              indexStats,
+              syntheticEmbeddingReady: needsVectorIndex ? syntheticEmbeddingResult.ok : undefined,
+              syntheticEmbeddingReason: needsVectorIndex ? syntheticEmbeddingResult.reason : undefined,
+              reason: `Vector search table not ready: ${errorMessage}`,
+            } satisfies ReadinessResult;
+          }
+
+          if (rowCountMismatch) {
+            return {
+              ok: false,
+              mode,
+              staleCount: disclosedStale,
+              missingVectorCount,
+              indexStats,
+              syntheticEmbeddingReady: needsVectorIndex ? syntheticEmbeddingResult.ok : undefined,
+              syntheticEmbeddingReason: needsVectorIndex ? syntheticEmbeddingResult.reason : undefined,
+              reason: `LanceDB row count ${lanceRowCount} does not match SQLite searchable count ${sqliteSearchableCount}`,
+            } satisfies ReadinessResult;
+          }
+
+          if (needsVectorIndex && (vectorRowCount !== sqliteSearchableCount || pendingEmbedJobs > 0 || unembeddedVectorRows > 0)) {
+            return {
+              ok: false,
+              mode,
+              staleCount: disclosedStale,
+              missingVectorCount,
+              indexStats,
+              syntheticEmbeddingReady: needsVectorIndex ? syntheticEmbeddingResult.ok : undefined,
+              syntheticEmbeddingReason: needsVectorIndex ? syntheticEmbeddingResult.reason : undefined,
+              reason: vectorRowCount !== sqliteSearchableCount
+                ? `Vector search table row count ${vectorRowCount} does not match SQLite searchable count ${sqliteSearchableCount}`
+                : `Vector search frontier is still moving: pending=${pendingEmbedJobs}, unembedded=${unembeddedVectorRows}`,
+            } satisfies ReadinessResult;
           }
 
           // ── Serve unless we genuinely cannot ────────────────────────────────
-          // Evidence E3 (docs.lancedb.com/indexing/fts-index, confirmed by a 30k-row
-          // measurement): LanceDB FTS AND vector search BOTH include newly-added,
-          // un-optimized rows — FTS via a flat scan on the unindexed portion, vector
-          // via flat scan. So a catching-up index returns COMPLETE-or-CURRENT results,
-          // never WRONG ones. An unindexed/stale tail is therefore a latency property,
-          // not a correctness one, and is DISCLOSED via indexStats — never a 503.
-          //
-          // "Rather crash than serve garbage" is preserved: the hard failures above
-          // (LanceDB read error, or table-missing while SQLite has rows) and the
-          // catch-all below still fail closed, and the garbage SOURCES (raw-JSON
-          // message text, vector clobber, stale table handle) are fixed. A
-          // catching-up index is not garbage.
-          //
-          // Semantic frontier: rows still pending embed are simply ABSENT from vector
-          // results (incomplete-but-correct), surfaced as missingVectorCount so the
-          // caller can see how far behind the embed frontier is. Lexical has no such
-          // frontier (FTS needs no embedding).
-          const disclosedStale = numUnindexedTextRows + (lanceRowCount !== sqliteSearchableCount ? Math.abs(lanceRowCount - sqliteSearchableCount) : 0);
+          // Lexical can serve while FTS catches up: LanceDB includes the unindexed
+          // tail via flat scan, so the text tail is a disclosed latency property.
+          // Semantic/fusion require the active vector table to cover the searchable
+          // corpus, and they fail closed if Synthetic embeddings are unavailable.
+          if (!syntheticReady) {
+            return syntheticFailure(mode, disclosedStale, missingVectorCount, indexStats, undefined, syntheticEmbeddingResult.reason);
+          }
           return {
             ok: true,
             mode,
             staleCount: disclosedStale,
-            missingVectorCount: unembeddedVectorRows,
+            missingVectorCount: 0,
             indexStats,
+            syntheticEmbeddingReady: needsVectorIndex ? syntheticEmbeddingResult.ok : undefined,
+            syntheticEmbeddingReason: needsVectorIndex ? syntheticEmbeddingResult.reason : undefined,
           } satisfies ReadinessResult;
         }).pipe(
           // Absolute catch-all: any unexpected exception → fail closed.
