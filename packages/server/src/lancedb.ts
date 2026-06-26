@@ -218,6 +218,31 @@ export interface SearchHit {
   readonly row: Record<string, unknown>;
 }
 
+/**
+ * Evidence of a write, not a claim about one. Built from the real LanceDB
+ * `MergeResult` so a caller can never discard how many rows actually moved.
+ * `complete` is the cheap negative tripwire: a short write (applied < requested)
+ * or an unexpected delete short-circuits to Divergent BEFORE any read-back. It
+ * never mints proof — only a witnessed read-back does that.
+ */
+export class WriteReceipt extends Schema.Class<WriteReceipt>("WriteReceipt")({
+  table: Schema.String,
+  requested: Schema.Int,
+  inserted: Schema.Int,
+  updated: Schema.Int,
+  deleted: Schema.Int,
+}) {
+  get applied(): number {
+    return this.inserted + this.updated;
+  }
+  get shortfall(): number {
+    return this.requested - this.applied;
+  }
+  get complete(): boolean {
+    return this.shortfall === 0 && this.deleted === 0;
+  }
+}
+
 export class ConnectionFailed extends Schema.TaggedError<ConnectionFailed>()(
   "ConnectionFailed",
   {
@@ -823,26 +848,28 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
         });
       });
 
-    const upsertMessageRows = (request: UpsertMessageRowsRequest): Effect.Effect<void, LanceDbError> =>
+    const upsertMessageRows = (request: UpsertMessageRowsRequest): Effect.Effect<WriteReceipt, LanceDbError> =>
       Effect.gen(function* () {
-        if (request.rows.length === 0) {
-          return;
-        }
         const tableName = tableNameOrDefault(request.tableName);
+        if (request.rows.length === 0) {
+          return new WriteReceipt({ table: tableName, requested: 0, inserted: 0, updated: 0, deleted: 0 });
+        }
         yield* assertRowsVectorDimension(request.rows, DEFAULT_VECTOR_COLUMN, request.vectorDimension ?? DEFAULT_MESSAGE_VECTOR_DIMENSIONS);
         const records = messageRowsForLance(request.rows);
         const existing = yield* tableNames(connection, tableName);
         if (!existing.includes(tableName)) {
+          // Fresh table: ensureMessageTable creates it and inserts every row (no
+          // pre-existing key can match), so applied === requested by construction.
           yield* ensureMessageTable({
             tableName,
             rows: request.rows,
             createIndexes: false,
             vectorDimension: request.vectorDimension,
           });
-          return;
+          return new WriteReceipt({ table: tableName, requested: records.length, inserted: records.length, updated: 0, deleted: 0 });
         }
         const table = yield* openTable({ tableName });
-        yield* Effect.tryPromise({
+        const result = yield* Effect.tryPromise({
           try: () =>
             table
               .mergeInsert(DEFAULT_KEY_COLUMN)
@@ -850,6 +877,14 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
               .whenNotMatchedInsertAll()
               .execute(records),
           catch: (cause) => makeOperationError(tableName, "mergeInsertMessages", cause),
+        });
+        // The disproving number, no longer discarded: requested vs applied is a typed value.
+        return new WriteReceipt({
+          table: tableName,
+          requested: records.length,
+          inserted: result.numInsertedRows,
+          updated: result.numUpdatedRows,
+          deleted: result.numDeletedRows,
         });
       });
 

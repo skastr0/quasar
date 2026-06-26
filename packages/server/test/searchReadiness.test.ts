@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { DEFAULT_SEARCH_TABLE, LanceDb, LanceDbOperationFailed, MESSAGE_TEXT_INDEX_NAME, makeLanceDbLayer } from "../src/lancedb";
+import { DEFAULT_SEARCH_TABLE, LanceDb, LanceDbOperationFailed, MESSAGE_TEXT_INDEX_NAME, WriteReceipt, makeLanceDbLayer } from "../src/lancedb";
 import { afterEach, describe, expect, test } from "bun:test";
 import { Effect, Layer } from "effect";
 
@@ -156,7 +156,7 @@ describe("SearchReadiness", () => {
         return Effect.die("tableStats should not be called by readiness");
       },
       ensureTable: () => Effect.die("ensureTable not used"),
-      upsertMessageRows: () => Effect.void,
+      upsertMessageRows: () => Effect.succeed(new WriteReceipt({ table: DEFAULT_SEARCH_TABLE, requested: 0, inserted: 0, updated: 0, deleted: 0 })),
       upsertRows: () => Effect.void,
       deleteByKeys: () => Effect.succeed(0),
       readRows: () => Effect.succeed([]),
@@ -247,7 +247,7 @@ describe("SearchReadiness", () => {
         return Effect.die("tableStats should not be called by readiness");
       },
       ensureTable: unused("ensureTable"),
-      upsertMessageRows: () => Effect.void,
+      upsertMessageRows: () => Effect.succeed(new WriteReceipt({ table: DEFAULT_SEARCH_TABLE, requested: 0, inserted: 0, updated: 0, deleted: 0 })),
       upsertRows: () => Effect.void,
       deleteByKeys: () => Effect.succeed(0),
       readRows: () => Effect.succeed([]),
@@ -332,7 +332,7 @@ describe("SearchReadiness", () => {
         return Effect.die("tableStats should not be called by readiness");
       },
       ensureTable: () => Effect.die("ensureTable not used"),
-      upsertMessageRows: () => Effect.void,
+      upsertMessageRows: () => Effect.succeed(new WriteReceipt({ table: DEFAULT_SEARCH_TABLE, requested: 0, inserted: 0, updated: 0, deleted: 0 })),
       upsertRows: () => Effect.void,
       deleteByKeys: () => Effect.succeed(0),
       readRows: () => Effect.succeed([]),
