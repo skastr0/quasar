@@ -45,7 +45,7 @@ services:
       SYNTHETIC_API_KEY: ${SYNTHETIC_API_KEY:?set SYNTHETIC_API_KEY in platform/server/.env for Synthetic embeddings}
       SYNTHETIC_OPENAI_BASE_URL: ${SYNTHETIC_OPENAI_BASE_URL:-https://api.synthetic.new/openai/v1}
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:6180/ready"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:6180/health"]
       interval: 10s
       timeout: 10s
       start_period: 10s
