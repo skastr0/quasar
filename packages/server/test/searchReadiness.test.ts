@@ -116,6 +116,12 @@ describe("SearchReadiness", () => {
       }),
       markSessionIndexStale: () => Effect.void,
       markSessionIndexed: () => Effect.void,
+      intendedPairs: () => Effect.succeed(new Map<string, string>()),
+      sessionVersion: () => Effect.succeed({ updatedAt: null, messageCount: 0 }),
+      putDivergence: () => Effect.void,
+      clearDivergence: () => Effect.void,
+      divergenceAggregate: Effect.succeed({ sessions: 0, missing: 0, stale: 0, extra: 0 }),
+      divergentSessions: () => Effect.succeed([]),
       countStaleIndexSessions: () => Effect.succeed(0),
       countUnembeddedMessages: () => Effect.succeed(0),
       countSearchableMessages: () => Effect.succeed(1),
@@ -214,6 +220,12 @@ describe("SearchReadiness", () => {
       }),
       markSessionIndexStale: () => Effect.void,
       markSessionIndexed: () => Effect.void,
+      intendedPairs: () => Effect.succeed(new Map<string, string>()),
+      sessionVersion: () => Effect.succeed({ updatedAt: null, messageCount: 0 }),
+      putDivergence: () => Effect.void,
+      clearDivergence: () => Effect.void,
+      divergenceAggregate: Effect.succeed({ sessions: 0, missing: 0, stale: 0, extra: 0 }),
+      divergentSessions: () => Effect.succeed([]),
       countStaleIndexSessions: () => Effect.succeed(1),
       countUnembeddedMessages: () => Effect.succeed(0),
       countSearchableMessages: () => Effect.succeed(2),
@@ -300,6 +312,12 @@ describe("SearchReadiness", () => {
       stats: Effect.succeed({ projects: 0, sessions: 0, messages: 0, toolCalls: 0, ingestRuns: 0 }),
       markSessionIndexStale: () => Effect.void,
       markSessionIndexed: () => Effect.void,
+      intendedPairs: () => Effect.succeed(new Map<string, string>()),
+      sessionVersion: () => Effect.succeed({ updatedAt: null, messageCount: 0 }),
+      putDivergence: () => Effect.void,
+      clearDivergence: () => Effect.void,
+      divergenceAggregate: Effect.succeed({ sessions: 0, missing: 0, stale: 0, extra: 0 }),
+      divergentSessions: () => Effect.succeed([]),
       countStaleIndexSessions: () => Effect.succeed(1),
       countUnembeddedMessages: () => Effect.succeed(0),
       countSearchableMessages: () => Effect.succeed(0),
@@ -460,7 +478,8 @@ describe("SearchReadiness", () => {
     expect(result.ok).toBe(false);
     expect(result.indexStats.sqliteSearchableCount).toBe(2);
     expect(result.indexStats.lanceRowCount).toBe(0);
-    expect(result.reason).toMatch(/row count .*does not match|table not found/i);
+    // 2 of 2 missing = ratio 1.0, far above tolerance → fails closed on shortfall.
+    expect(result.reason).toMatch(/shortfall|does not match|table not found/i);
   });
 
   test("empty corpus returns ready for all modes", async () => {
@@ -717,5 +736,112 @@ describe("SearchReadiness", () => {
     expect(result.missingVectorCount).toBe(0);
     expect(result.indexStats).toBeDefined();
     expect(typeof result.reason).toBe("string");
+  });
+
+  // ── classify-then-gate: degraded serve vs structural close (kills the exact cliff) ──
+  const classifyLayer = (opts: {
+    searchable: number;
+    lanceRows: number;
+    divergence?: { sessions: number; missing: number; stale: number; extra: number };
+  }) => {
+    const fakeStore = LocalStore.of({
+      dbPath: "/tmp/q.sqlite",
+      listProjects: () => Effect.succeed([]),
+      upsertSession: () => Effect.void,
+      hasSessionFingerprint: () => Effect.succeed(false),
+      listSessions: () => Effect.succeed([]),
+      getMessage: () => Effect.succeed(undefined),
+      readMessages: () => Effect.succeed([]),
+      listToolCalls: () => Effect.succeed([]),
+      getToolCall: () => Effect.succeed(undefined),
+      recordIngestRun: () => Effect.void,
+      getIngestRun: () => Effect.succeed(undefined),
+      listIngestRuns: () => Effect.succeed([]),
+      stats: Effect.succeed({ projects: 0, sessions: 1, messages: opts.searchable, toolCalls: 0, ingestRuns: 0 }),
+      markSessionIndexStale: () => Effect.void,
+      markSessionIndexed: () => Effect.void,
+      intendedPairs: () => Effect.succeed(new Map<string, string>()),
+      sessionVersion: () => Effect.succeed({ updatedAt: null, messageCount: 0 }),
+      putDivergence: () => Effect.void,
+      clearDivergence: () => Effect.void,
+      divergenceAggregate: Effect.succeed(opts.divergence ?? { sessions: 0, missing: 0, stale: 0, extra: 0 }),
+      divergentSessions: () => Effect.succeed([]),
+      countStaleIndexSessions: () => Effect.succeed(0),
+      countUnembeddedMessages: () => Effect.succeed(0),
+      countSearchableMessages: () => Effect.succeed(opts.searchable),
+      close: Effect.void,
+    });
+    const fakeQueue = DurableQueue.of({
+      enqueue: () => Effect.void,
+      leaseBatch: () => Effect.succeed([]),
+      ack: () => Effect.void,
+      retry: () => Effect.void,
+      fail: () => Effect.void,
+      recoverStaleLeases: () => Effect.succeed(0),
+      stats: Effect.succeed({ pending: 0, leased: 0, failed: 0 }),
+      statsByKind: Effect.succeed([]),
+    });
+    const fakeLance = LanceDb.make({
+      dataDir: "/tmp/s.lance",
+      connect: Effect.die("connect not used"),
+      openTable: () => Effect.die("openTable not used"),
+      ensureMessageTable: () => Effect.die("ensureMessageTable not used"),
+      createMessageIndexes: () => Effect.void,
+      countRows: () => Effect.succeed(opts.lanceRows),
+      tableIndexStats: () =>
+        Effect.succeed([
+          { name: MESSAGE_TEXT_INDEX_NAME, indexType: "FTS", columns: ["text"], numIndexedRows: opts.lanceRows, numUnindexedRows: 0 },
+        ]),
+      tableStats: () => Effect.die("tableStats not used"),
+      ensureTable: () => Effect.die("ensureTable not used"),
+      upsertMessageRows: () => Effect.succeed(new WriteReceipt({ table: DEFAULT_SEARCH_TABLE, requested: 0, inserted: 0, updated: 0, deleted: 0 })),
+      upsertRows: () => Effect.void,
+      deleteByKeys: () => Effect.succeed(0),
+      readRows: () => Effect.succeed([]),
+      readMessageRowsBySession: () => Effect.succeed([]),
+      readMessageRowsBySessions: () => Effect.succeed([]),
+      vectorSearch: () => Effect.succeed([]),
+      ftsSearch: () => Effect.succeed([]),
+      hybridSearch: () => Effect.succeed([]),
+      listIndexDirNames: () => Effect.succeed([]),
+      deleteIndexDirsByName: () => Effect.succeed(0),
+    });
+    return SearchReadinessLive.pipe(
+      Layer.provide(Layer.mergeAll(
+        Layer.succeed(LocalStore, fakeStore),
+        Layer.succeed(DurableQueue, fakeQueue),
+        Layer.succeed(LanceDb, fakeLance),
+        Layer.succeed(Embeddings, makeEmbeddingService(true)),
+      )),
+    );
+  };
+  const assertLexical = (layer: Layer.Layer<SearchReadiness>) =>
+    Effect.runPromise(Effect.flatMap(SearchReadiness, (r) => r.assertSearchReady("lexical")).pipe(Effect.provide(layer)));
+
+  test("a sub-tolerance missing shortfall serves DEGRADED with disclosed completeness — no 503 cliff", async () => {
+    const result = await assertLexical(classifyLayer({ searchable: 100_000, lanceRows: 99_998 }));
+    expect(result.ok).toBe(true); // 2 of 100k missing was a total outage before; now it serves
+    expect(result.completeness).toBeGreaterThan(0.9999);
+    expect(result.completeness).toBeLessThan(1);
+  });
+
+  test("a missing shortfall ABOVE tolerance fails closed", async () => {
+    const result = await assertLexical(classifyLayer({ searchable: 100, lanceRows: 50 }));
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/shortfall/i);
+  });
+
+  test("structural divergence (extra rows) fails closed regardless of ratio", async () => {
+    const result = await assertLexical(classifyLayer({ searchable: 100_000, lanceRows: 100_002 }));
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/structural/i);
+  });
+
+  test("ledger-reported stale content fails closed even when counts match", async () => {
+    const result = await assertLexical(
+      classifyLayer({ searchable: 100, lanceRows: 100, divergence: { sessions: 1, missing: 0, stale: 3, extra: 0 } }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/structural/i);
   });
 });
