@@ -43,6 +43,14 @@ export interface DurableQueueService {
   readonly retry: (jobId: string, options: { readonly error: string; readonly delayMs: number; readonly now?: string }) => Effect.Effect<void, DurableQueueError>;
   readonly fail: (jobId: string, error: string, now?: string) => Effect.Effect<void, DurableQueueError>;
   readonly recoverStaleLeases: (now?: string) => Effect.Effect<number, DurableQueueError>;
+  /**
+   * Delete completed jobs whose updated_at is at or before olderThanIso; returns rows
+   * deleted. Touches ONLY status='completed' rows — never pending/leased/failed — so an
+   * in-flight job can never be pruned. Completed jobs are not load-bearing: enqueue
+   * dedup deletes-then-reinserts by idempotency_key, and pending dedup uses the UNIQUE
+   * constraint, so removing old completed rows cannot resurrect or duplicate work.
+   */
+  readonly pruneCompleted: (olderThanIso: string) => Effect.Effect<number, DurableQueueError>;
   readonly stats: Effect.Effect<QueueStats, DurableQueueError>;
   readonly statsByKind: Effect.Effect<readonly QueueKindStats[], DurableQueueError>;
 }
@@ -277,6 +285,11 @@ export const makeDurableQueueLayer = (path = sqlitePath()): Layer.Layer<DurableQ
           recoverStaleLeases: (now = nowIso()) =>
             queueTry("recoverStaleLeases", () => {
               const result = db.prepare("UPDATE queue_jobs SET status = 'pending', leased_by = NULL, lease_until = NULL, updated_at = ? WHERE status = 'leased' AND lease_until <= ?").run(now, now);
+              return result.changes;
+            }),
+          pruneCompleted: (olderThanIso) =>
+            queueTry("pruneCompleted", () => {
+              const result = db.prepare("DELETE FROM queue_jobs WHERE status = 'completed' AND updated_at <= ?").run(olderThanIso);
               return result.changes;
             }),
           stats: queueTry("stats", () => {

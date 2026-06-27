@@ -165,4 +165,31 @@ describe("DurableQueue", () => {
 
     expect(stats).toEqual({ pending: 0, leased: 0, failed: 1 });
   });
+
+  test("pruneCompleted deletes only old completed jobs, never active or recent ones", async () => {
+    const path = sqlitePath();
+    const [pruned, stats] = await withQueue(
+      path,
+      (queue) =>
+        Effect.gen(function* () {
+          const a = yield* queue.enqueue({ kind: "embed-message", payload: { id: "a" } }); // -> completed (old)
+          yield* queue.enqueue({ kind: "embed-message", payload: { id: "b" } });            // -> stays pending
+          yield* queue.enqueue({ kind: "index-session", payload: { id: "c" } });            // -> leased
+          const d = yield* queue.enqueue({ kind: "index-session", payload: { id: "d" } });  // -> failed
+          const e = yield* queue.enqueue({ kind: "embed-message", payload: { id: "e" } });  // -> completed (recent)
+          yield* queue.ack(a.jobId, "2099-06-18T10:00:00.000Z");
+          yield* queue.leaseBatch({ workerId: "w", kind: "index-session", limit: 1, leaseMs: 600_000, now: "2099-06-18T10:00:00.000Z" });
+          yield* queue.fail(d.jobId, "boom", "2099-06-18T10:00:00.000Z");
+          yield* queue.ack(e.jobId, "2099-06-18T10:00:30.000Z");
+          const pruned = yield* queue.pruneCompleted("2099-06-18T10:00:10.000Z");
+          const stats = yield* queue.stats;
+          return [pruned, stats] as const;
+        }),
+    );
+
+    // Only the OLD completed job (a) is pruned; the recent completed (e, updated_at after the
+    // cutoff) survives, and every ACTIVE job is untouched.
+    expect(pruned).toBe(1);
+    expect(stats).toEqual({ pending: 1, leased: 1, failed: 1 });
+  });
 });
