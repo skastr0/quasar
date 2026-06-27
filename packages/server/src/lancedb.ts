@@ -101,8 +101,6 @@ export interface EnsureMessageTableRequest extends TableRequest {
 
 export interface CreateMessageIndexesRequest extends TableRequest {
   readonly includeVector?: boolean;
-  /** If true, replace existing indexes instead of skipping them. Defaults to false (create missing only). */
-  readonly replace?: boolean;
   /** Minimum vector-ready rows required before training the vector index. Defaults to 100. */
   readonly minVectorRows?: number;
   /** Optional SQL filter identifying rows that contain real vectors rather than placeholders. */
@@ -559,35 +557,31 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
       Effect.gen(function* () {
         const tableName = tableNameOrDefault(request.tableName);
         const table = yield* openTable({ tableName });
-        const replace = request.replace === true;
         const existingIndexes = yield* Effect.tryPromise({
           try: () => table.listIndices(),
           catch: (cause) => makeOperationError(tableName, "listIndices", cause),
         });
         const existingIndexNames = new Set(existingIndexes.map((index) => index.name));
 
-        // On replace, DROP each existing index before recreating, rather than relying
-        // on createIndex({replace:true}). createIndex(replace) on an existing FTS index
-        // takes a "load legacy FTS index" merge path that panics in the Rust
-        // inverted-index builder (lance#1987) and aborts the process; a clean
-        // drop+create builds fresh and avoids it. Drops are best-effort.
-        if (replace) {
-          for (const name of [MESSAGE_TEXT_INDEX_NAME, MESSAGE_VECTOR_INDEX_NAME, ...MESSAGE_SCALAR_INDEXES.map((index) => index.name)]) {
-            if (!existingIndexNames.has(name)) continue;
-            yield* Effect.tryPromise({
-              try: () => table.dropIndex(name),
-              catch: (cause) => makeOperationError(tableName, `dropIndex(${name})`, cause),
-            }).pipe(Effect.catchAll(() => Effect.void));
-          }
-        }
+        // This path NEVER drops a present serving index. Canonical maintenance is
+        // incremental optimize() (maintenance.ts), which folds newly-appended rows into
+        // the live FTS/scalar/vector indexes without tearing them down — drop-then-
+        // reindex is the documented anti-pattern [docs.lancedb.com/indexing/reindexing].
+        // The drop loop that once lived here (an FTS-only lance#1987 workaround wrongly
+        // applied to the vector index too) left vector_idx absent ~8 min per cycle with
+        // no lock against overlap, and was the 22s brute-force outage. createIndex below
+        // is reached only for a MISSING index (first build / self-heal) or a one-time
+        // vector type migration, both of which LanceDB applies without an absent window.
 
-        if (replace || !existingIndexNames.has(MESSAGE_TEXT_INDEX_NAME)) {
+        // FTS (text) index: create only when missing. The legacy-merge panic that once
+        // forced a drop+recreate (lance#1987) is fixed and optimize() maintains FTS
+        // incrementally, so it is never dropped here.
+        if (!existingIndexNames.has(MESSAGE_TEXT_INDEX_NAME)) {
           yield* Effect.tryPromise({
             try: () =>
               table.createIndex(DEFAULT_TEXT_COLUMN, {
                 config: lancedb.Index.fts(),
                 name: MESSAGE_TEXT_INDEX_NAME,
-                replace,
                 waitTimeoutSeconds: 60,
               }),
             catch: (cause) => detectIndexNotReady(tableName, MESSAGE_TEXT_INDEX_NAME, "createFtsIndex", cause),
@@ -598,13 +592,12 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
         // search routes. Without them LanceDB prefiltering can add avoidable latency
         // before vector/hybrid ranking. [docs.lancedb.com scalar-index]
         for (const index of MESSAGE_SCALAR_INDEXES) {
-          if (!replace && existingIndexNames.has(index.name)) continue;
+          if (existingIndexNames.has(index.name)) continue;
           yield* Effect.tryPromise({
             try: () =>
               table.createIndex(index.column, {
                 config: lancedb.Index.btree(),
                 name: index.name,
-                replace,
                 waitTimeoutSeconds: 60,
               }),
             catch: (cause) => detectIndexNotReady(tableName, index.name, `createScalarIndex(${index.column})`, cause),
@@ -638,16 +631,19 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
           catch: () => undefined,
         }).pipe(Effect.catchAll(() => Effect.succeed(undefined as number | undefined)));
         const useIvfPq = vectorRows >= IVF_PQ_MIN_ROWS && vectorDim !== undefined && vectorDim % 8 === 0;
-        // Migrate the existing index when its type no longer matches the desired
-        // one as the corpus crosses the PQ floor (review finding A: the index must
-        // not stay frozen as the corpus grows). ivfFlat -> IVF_PQ is forced via
-        // replace; a matching type is left in place (optimize() folds new rows in).
         const existingVec = existingIndexes.find((index) => index.name === MESSAGE_VECTOR_INDEX_NAME);
         const existingIsPq = existingVec !== undefined && /pq/i.test((existingVec as { indexType?: string }).indexType ?? "");
-        if (existingVec !== undefined && existingIsPq === useIvfPq && !replace) {
-          return; // correct index type already present
+        // Present AND already the desired type: leave it serving untouched. optimize()
+        // folds newly-appended rows into it incrementally; it is never dropped or
+        // rebuilt on a routine refresh (that drop+rebuild was the 22s outage).
+        if (existingVec !== undefined && existingIsPq === useIvfPq) {
+          return;
         }
-        const mustReplace = replace || existingVec !== undefined;
+        // Reached only when the vector index is ABSENT (first build / self-heal) or its
+        // TYPE is stale (ivfFlat -> IVF_PQ as the corpus crosses the PQ floor). A type
+        // migration passes replace:true on the vector column ALONE — LanceDB applies it
+        // as an atomic swap with no absent window; replace has no effect when absent.
+        const isMigration = existingVec !== undefined;
         const vectorConfig = useIvfPq
           ? lancedb.Index.ivfPq({
               distanceType: "cosine",
@@ -660,7 +656,7 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
             table.createIndex(DEFAULT_VECTOR_COLUMN, {
               config: vectorConfig,
               name: MESSAGE_VECTOR_INDEX_NAME,
-              replace: mustReplace,
+              replace: isMigration,
               waitTimeoutSeconds: VECTOR_INDEX_BUILD_TIMEOUT_SECONDS,
             }),
           catch: (cause) => detectIndexNotReady(tableName, MESSAGE_VECTOR_INDEX_NAME, "createVectorIndex", cause),
