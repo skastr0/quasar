@@ -31,8 +31,10 @@ const positiveInt = (raw: string | undefined, fallback: number): number => {
 };
 
 const rawCommand = process.argv[2];
+const isInteractiveTty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
 const command =
-  rawCommand === undefined || rawCommand === "--help" || rawCommand === "-h" ? "help"
+  rawCommand === undefined && isInteractiveTty ? "tui"
+  : rawCommand === undefined || rawCommand === "--help" || rawCommand === "-h" ? "help"
   : rawCommand === "--version" || rawCommand === "-v" ? "version"
   : rawCommand;
 const cliPackage = {
@@ -499,6 +501,16 @@ switch (command) {
     await fetchServer("search", `/search/${mode}`, { q: query, limit: arg("--limit"), projectKey: arg("--project-key"), role: arg("--role") });
     break;
   }
+  case "tui": {
+    const { launchTui } = await import("./tui/entry");
+    const exit = await launchTui({ smoke: flag("--smoke"), smokeQuery: arg("--smoke-query"), server: server() });
+    if (exit?.editorFile !== undefined) {
+      // $EDITOR may carry args, e.g. "code --wait" or "subl --wait".
+      const parts = (exit.editor ?? "vi").trim().split(/\s+/);
+      spawnSync(parts[0]!, [...parts.slice(1), exit.editorFile], { stdio: "inherit" });
+    }
+    break;
+  }
   case "version": {
     writeJson(ok("version", cliPackage));
     break;
@@ -523,6 +535,7 @@ switch (command) {
           "workers [--server url]",
           "search --query text [--mode lexical|semantic|fusion] [--project-key key] [--role user|assistant] [--limit n] [--server url]",
           "stats",
+          "tui [--server url] (interactive terminal UI; default when run in a terminal)",
           "version",
         ],
         env: {
