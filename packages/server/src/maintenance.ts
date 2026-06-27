@@ -119,25 +119,19 @@ export const SearchMaintenanceLive = Layer.effect(
               ),
             ),
           );
-        // Throttle the O(delta) optimize per-table, advanced only on success, and skip
-        // when the row count is unchanged since the last successful run.
-        const now = Date.now();
-        const sinceRun = now - ((yield* Ref.get(lastHeavyAt)).get(tableName) ?? 0);
-        if (sinceRun < MAINTAIN_INTERVAL_MS) return { tableName, rebuilt: false, reclaimed: 0 };
-        const last = (yield* Ref.get(lastRefreshedRows)).get(tableName);
-        if (last === rows) return { tableName, rebuilt: false, reclaimed: 0 }; // unchanged since last run
-        const optimized = yield* Effect.either(search.optimize({ tableName, olderThanMs: VERSION_RETENTION_MS }));
-        if (optimized._tag === "Left") {
-          // optimize() commit-conflicts are retryable and harmless; leave the throttle
-          // un-advanced so the next tick retries promptly.
-          yield* Effect.logError(
-            `quasar.index.optimize_failed table=${tableName} :: ${optimized.left instanceof Error ? optimized.left.message : String(optimized.left)}`,
-          );
-          return { tableName, rebuilt: false, reclaimed: 0 };
-        }
-        yield* Ref.update(lastHeavyAt, (map) => new Map(map).set(tableName, now));
-        yield* Ref.update(lastRefreshedRows, (map) => new Map(map).set(tableName, rows));
-        return { tableName, rebuilt: true, reclaimed: 0 };
+        // optimize() is DISABLED (emergency, 2026-06-27). At this corpus size optimize()
+        // REWRITES the full FTS/vector index (~16-20GB) on each run, and LanceDB never GCs
+        // the superseded _indices generation dirs (lance#7207) — so it minted ~3GB/min of
+        // orphaned index files and filled the host disk (search.lance 8GB -> 106GB in
+        // ~30 min). `ensure` above builds each index ONCE; newly-appended rows are served
+        // from the small flat-scanned unindexed delta until a SAFE _indices GC is shipped
+        // and optimize is re-enabled together with it. Re-enabling optimize WITHOUT a
+        // working _indices GC is exactly what caused the outage — do not.
+        void MAINTAIN_INTERVAL_MS;
+        void VERSION_RETENTION_MS;
+        void lastHeavyAt;
+        void lastRefreshedRows;
+        return { tableName, rebuilt: false, reclaimed: 0 };
       });
 
     return SearchMaintenance.of({

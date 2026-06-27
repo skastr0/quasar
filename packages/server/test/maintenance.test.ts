@@ -182,20 +182,25 @@ describe("SearchMaintenance", () => {
     expect(fresh).toEqual({ sessionsChecked: 1, freshSessions: 1, repairsEnqueued: 0, staleSessions: [] });
   });
 
-  test("maintain rebuilds changed tables, reclaims old dirs, and returns proof stats", async () => {
-    const report = await withMaintenance(
+  test("maintain ensures indexes exist and returns proof stats (optimize disabled)", async () => {
+    const [report, indices] = await withMaintenance(
       Effect.gen(function* () {
         const store = yield* LocalStore;
         const search = yield* DerivedSearch;
+        const lance = yield* LanceDb;
         const maintenance = yield* SearchMaintenance;
         yield* store.upsertSession(mappedSession());
         yield* search.indexSession("session-a");
-        return yield* maintenance.maintain();
+        const report = yield* maintenance.maintain();
+        const indices = (yield* lance.tableIndexStats({ tableName: "messages" })).map((index) => index.name);
+        return [report, indices] as const;
       }),
     );
 
-    const lexical = report.rebuilt.find((entry) => entry.tableName === "messages");
-    expect(lexical?.rebuilt).toBe(true);
+    // `ensure` built the lexical FTS index. optimize() is disabled, so `rebuilt` stays
+    // false (no per-tick optimize that minted unbounded _indices generations).
+    expect(indices).toContain("text_idx");
+    expect(report.rebuilt.every((entry) => entry.rebuilt === false)).toBe(true);
     expect((report.stats as { rowCount: number }).rowCount).toBe(1);
   });
 
