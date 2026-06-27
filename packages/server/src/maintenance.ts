@@ -8,18 +8,18 @@ import { DurableQueue } from "./services";
 import { LocalStore } from "./store";
 import { mergeDivergence, verifyIndexed } from "./verify";
 
-// How the index stays both bounded AND fresh, minimally: on a throttled tick, when a
-// table's data has changed since its last refresh, first try optimize on the table,
-// then refresh its indexes from scratch (drop-then-create) and delete the previous
-// index dirs. optimize handles compaction / prune / folding new data into existing
-// index state, but current JS/OSS LanceDB still leaves old `_indices` dirs behind
-// after a refresh, so the snapshot delete remains the narrow GC exception. If
-// optimize fails, the refresh still runs so index catch-up and cleanup are not
-// suppressed. No per-tick optimize, no dir budget, no grace window.
-//
-// A full refresh is O(rows) (~10-20s at this scale), so it is throttled to this
-// interval, which must stay well above the refresh duration so refreshes never dominate.
+// Index maintenance follows LanceDB's documented canonical path: build each index
+// ONCE, then keep it fresh with incremental optimize() — which folds newly-appended
+// rows into the LIVE FTS/scalar/vector indexes and prunes superseded versions WITHOUT
+// dropping anything [docs.lancedb.com/indexing/reindexing]. The serving index is never
+// torn down on a routine tick (the drop-then-rebuild that did so was the 22s outage).
+// optimize() is O(delta) and throttled per-table; it runs only under maintain()'s
+// writer-idle guard so it never races an in-flight upsert (LanceDB commit-conflict).
 const MAINTAIN_INTERVAL_MS = 120_000;
+// Version retention for optimize()'s prune/cleanup (the sole GC). LanceDB's documented
+// default is 7 days; superseded data files + index generations older than this are
+// reclaimed. Single-writer embedded => the orphaned-dir race (lance#7207) cannot occur.
+const VERSION_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface IndexRebuildReport {
   readonly tableName: string;
@@ -79,60 +79,63 @@ export const SearchMaintenanceLive = Layer.effect(
     const lastHeavyAt = yield* Ref.make(new Map<string, number>());
     const lastRefreshedRows = yield* Ref.make(new Map<string, number>());
 
-    // Refresh a table only if its row count changed since the last refresh (idle
-    // quiescence — an unchanged table would repeat the work for nothing). Snapshot
-    // BEFORE the refresh: the replace path writes fresh dirs under new uuids and
-    // repoints the manifest, so every snapshot name is then superseded and safe to
-    // delete. optimize runs first to compact/prune before the refresh, and the
-    // snapshot delete is allowed only after a successful refresh. Runs only under
-    // maintain()'s writer-idle guard, so no reader/writer races the delete.
-    const maybeRefresh = (
+    // Per-table incremental maintenance. Two steps, both of which leave a present
+    // serving index untouched:
+    //   1. ensure (every tick, cheap when present): build any MISSING index and migrate
+    //      a stale vector type — first build / self-heal. NEVER drops a present index.
+    //   2. optimize (throttled, skip-if-unchanged): fold newly-appended rows into the
+    //      live FTS/scalar/vector indexes and prune superseded versions (the sole GC).
+    // Calling ensure every tick is the self-heal: an index absent for any reason heals
+    // to present on the next maintained tick by BUILDING (not dropping), so a stale
+    // throttle Ref (reset on restart) can never strand the table index-less.
+    const maintainTable = (
       tableName: string,
-      refresh: Effect.Effect<unknown, unknown>,
+      options: { readonly includeVector: boolean; readonly vectorRowsFilter?: string },
     ): Effect.Effect<IndexRebuildReport> =>
       Effect.gen(function* () {
-        // Per-table throttle: a full refresh is O(rows), so it runs at most once per
-        // interval PER TABLE (advanced only on an actual refresh, so an idle table is
-        // re-checked cheaply each tick and refreshes promptly the moment data changes,
-        // independent of the other table's cadence).
-        const now = Date.now();
-        const sinceRebuild = now - ((yield* Ref.get(lastHeavyAt)).get(tableName) ?? 0);
-        if (sinceRebuild < MAINTAIN_INTERVAL_MS) return { tableName, rebuilt: false, reclaimed: 0 };
         const rows = yield* search.countRows({ tableName }).pipe(Effect.catchAll(() => Effect.succeed(-1)));
         if (rows < 0) return { tableName, rebuilt: false, reclaimed: 0 }; // table not created yet
+        // Self-heal: ensure every index exists every tick (cheap when present; builds a
+        // MISSING index / migrates a stale vector type — NEVER drops a present index).
+        yield* search
+          .createMessageIndexes({ tableName, includeVector: options.includeVector, vectorRowsFilter: options.vectorRowsFilter })
+          .pipe(
+            Effect.catchAll((error) =>
+              Effect.logError(
+                `quasar.index.ensure_failed table=${tableName} :: ${error instanceof Error ? error.message : String(error)}`,
+              ),
+            ),
+          );
+        // Throttle the O(delta) optimize per-table, advanced only on success, and skip
+        // when the row count is unchanged since the last successful run.
+        const now = Date.now();
+        const sinceRun = now - ((yield* Ref.get(lastHeavyAt)).get(tableName) ?? 0);
+        if (sinceRun < MAINTAIN_INTERVAL_MS) return { tableName, rebuilt: false, reclaimed: 0 };
         const last = (yield* Ref.get(lastRefreshedRows)).get(tableName);
-        if (last === rows) return { tableName, rebuilt: false, reclaimed: 0 }; // unchanged since last refresh
-        const optimized = yield* Effect.either(search.optimize({ tableName }));
+        if (last === rows) return { tableName, rebuilt: false, reclaimed: 0 }; // unchanged since last run
+        const optimized = yield* Effect.either(search.optimize({ tableName, olderThanMs: VERSION_RETENTION_MS }));
         if (optimized._tag === "Left") {
+          // optimize() commit-conflicts are retryable and harmless; leave the throttle
+          // un-advanced so the next tick retries promptly.
           yield* Effect.logError(
             `quasar.index.optimize_failed table=${tableName} :: ${optimized.left instanceof Error ? optimized.left.message : String(optimized.left)}`,
           );
-        }
-        const snapshot = yield* search.listIndexDirNames({ tableName });
-        const refreshed = yield* Effect.either(refresh);
-        if (refreshed._tag === "Left") {
-          yield* Effect.logError(
-            `quasar.index.refresh_failed table=${tableName} :: ${refreshed.left instanceof Error ? refreshed.left.message : String(refreshed.left)}`,
-          );
           return { tableName, rebuilt: false, reclaimed: 0 };
         }
-        const reclaimed = yield* search.deleteIndexDirsByName({ tableName, names: snapshot });
         yield* Ref.update(lastHeavyAt, (map) => new Map(map).set(tableName, now));
         yield* Ref.update(lastRefreshedRows, (map) => new Map(map).set(tableName, rows));
-        return { tableName, rebuilt: true, reclaimed };
+        return { tableName, rebuilt: true, reclaimed: 0 };
       });
 
     return SearchMaintenance.of({
       maintain: () =>
         Effect.gen(function* () {
-          // The refresh runs HERE (not per indexSession) and ONLY when the table's
-          // writers are idle, so it never races an upsert (LanceDB commit-conflict).
-          // The FTS (lexical) table is written only by index-session; the vector table
-          // by index-session AND embed-message, so it needs both idle. lastHeavyAt
-          // throttles the O(rows) refresh so it can't run on every worker tick, and is
-          // only advanced when work actually ran, so a long busy stretch never starves
-          // maintenance once writers go idle. Search stays correct meanwhile: queries
-          // flat-scan the unindexed tail and the readiness gate fails closed.
+          // optimize()/build run ONLY when the table's writers are idle, so they never
+          // race an in-flight upsert (LanceDB commit-conflict). The FTS (lexical) table
+          // is written only by index-session; the vector/profile table by index-session
+          // AND embed-message, so it additionally needs embed idle. Search stays correct
+          // meanwhile: the existing index serves and the unindexed tail is flat-scanned
+          // as a small delta, with the readiness gate failing closed if it grows.
           const byKind = yield* queue.statsByKind.pipe(Effect.catchAll(() => Effect.succeed([] as const)));
           const inflight = (kind: string): number => {
             const s = byKind.find((k) => k.kind === kind);
@@ -142,23 +145,11 @@ export const SearchMaintenanceLive = Layer.effect(
           const embBusy = inflight("embed-message") > 0;
           const rebuilt: IndexRebuildReport[] = [];
 
-          // Each table self-throttles and skips when unchanged (see maybeRefresh); here
-          // we only gate on writer-idle so a refresh never races an in-flight write.
-          // The lexical table is written by index-session; the vector table also by
-          // embed-message, so it additionally needs embed idle.
           if (!idxBusy) {
-            rebuilt.push(
-              yield* maybeRefresh(
-                DEFAULT_SEARCH_TABLE,
-                search.createMessageIndexes({ tableName: DEFAULT_SEARCH_TABLE, includeVector: false, replace: true }),
-              ),
-            );
+            rebuilt.push(yield* maintainTable(DEFAULT_SEARCH_TABLE, { includeVector: false }));
             if (profileTable !== DEFAULT_SEARCH_TABLE && !embBusy) {
               rebuilt.push(
-                yield* maybeRefresh(
-                  profileTable,
-                  search.createMessageIndexes({ tableName: profileTable, includeVector: true, vectorRowsFilter: VECTOR_READY_FILTER, replace: true }),
-                ),
+                yield* maintainTable(profileTable, { includeVector: true, vectorRowsFilter: VECTOR_READY_FILTER }),
               );
             }
           }
