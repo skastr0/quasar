@@ -16,10 +16,22 @@ import { mergeDivergence, verifyIndexed } from "./verify";
 // optimize() is O(delta) and throttled per-table; it runs only under maintain()'s
 // writer-idle guard so it never races an in-flight upsert (LanceDB commit-conflict).
 const MAINTAIN_INTERVAL_MS = 120_000;
-// Version retention for optimize()'s prune/cleanup (the sole GC). LanceDB's documented
-// default is 7 days; superseded data files + index generations older than this are
-// reclaimed. Single-writer embedded => the orphaned-dir race (lance#7207) cannot occur.
-const VERSION_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+// Version retention for optimize()'s prune/cleanup. optimize() runs every
+// MAINTAIN_INTERVAL_MS (~2 min), so a wide window lets superseded version manifests +
+// data fragments pile up between prunes (measured: a 7-day window let 265/327 versions
+// accumulate and the volume regrow to 31GB). A 10-minute window bounds it to ~5 versions
+// per table; LanceDB never removes the CURRENT version regardless of the window
+// [@lancedb/lancedb table.d.ts: "The current version will never be removed"], and
+// deleteUnverified stays false so in-flight upsert files are never touched. NOTE: this
+// reclaims the VERSION/data side only — optimize does NOT GC the _indices generation
+// dirs (lance#7207); that needs a separate, grounded GC (see [[lancedb-index-dir-gc]]).
+const VERSION_RETENTION_MS = 10 * 60 * 1000;
+// Bound the durable queue: prune COMPLETED jobs older than the retention window on the
+// interval below. Only status='completed' rows are deleted (never pending/leased/failed),
+// and completed rows are not load-bearing (enqueue dedup deletes-then-reinserts by
+// idempotency_key) — measured 800,957 completed >24h of 805,166 total, 0 active.
+const QUEUE_COMPLETED_RETENTION_MS = 24 * 60 * 60 * 1000;
+const QUEUE_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 
 export interface IndexRebuildReport {
   readonly tableName: string;
@@ -78,6 +90,7 @@ export const SearchMaintenanceLive = Layer.effect(
     const profileTable = embeddingProfileSearchTable(embeddingProfileFromEnv());
     const lastHeavyAt = yield* Ref.make(new Map<string, number>());
     const lastRefreshedRows = yield* Ref.make(new Map<string, number>());
+    const lastQueuePruneAt = yield* Ref.make(0);
 
     // Per-table incremental maintenance. Two steps, both of which leave a present
     // serving index untouched:
@@ -152,6 +165,16 @@ export const SearchMaintenanceLive = Layer.effect(
                 yield* maintainTable(profileTable, { includeVector: true, vectorRowsFilter: VECTOR_READY_FILTER }),
               );
             }
+          }
+          // Bound the queue_jobs table: hourly, delete completed jobs older than the
+          // retention window. Throttled independently of the maintenance tick cadence;
+          // pruneCompleted touches only status='completed' rows, never in-flight work.
+          const nowMs = Date.now();
+          if (nowMs - (yield* Ref.get(lastQueuePruneAt)) >= QUEUE_PRUNE_INTERVAL_MS) {
+            yield* Ref.set(lastQueuePruneAt, nowMs);
+            yield* queue
+              .pruneCompleted(new Date(nowMs - QUEUE_COMPLETED_RETENTION_MS).toISOString())
+              .pipe(Effect.catchAll(() => Effect.succeed(0)));
           }
           const stats = yield* derived.stats.pipe(Effect.catchAll(() => Effect.succeed({ skipped: idxBusy || embBusy } as unknown)));
           return { rebuilt, stats };
