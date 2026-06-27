@@ -478,8 +478,8 @@ describe("SearchReadiness", () => {
     expect(result.ok).toBe(false);
     expect(result.indexStats.sqliteSearchableCount).toBe(2);
     expect(result.indexStats.lanceRowCount).toBe(0);
-    // 2 of 2 missing = ratio 1.0, far above tolerance → fails closed on shortfall.
-    expect(result.reason).toMatch(/shortfall|does not match|table not found/i);
+    // 2 of 2 missing = ratio 1.0, far above tolerance → fails closed on divergence.
+    expect(result.reason).toMatch(/divergence|shortfall|does not match|table not found/i);
   });
 
   test("empty corpus returns ready for all modes", async () => {
@@ -828,20 +828,33 @@ describe("SearchReadiness", () => {
   test("a missing shortfall ABOVE tolerance fails closed", async () => {
     const result = await assertLexical(classifyLayer({ searchable: 100, lanceRows: 50 }));
     expect(result.ok).toBe(false);
-    expect(result.reason).toMatch(/shortfall/i);
+    expect(result.reason).toMatch(/divergence|shortfall/i);
   });
 
-  test("structural divergence (extra rows) fails closed regardless of ratio", async () => {
+  test("a small structural divergence (orphan tail) serves DEGRADED — not a 100% outage", async () => {
+    // 2 orphan rows of 100k = 0.002%: a normal ingest tail, not corruption. Before, ANY
+    // extra row failed ALL search closed; a measured 0.25% tail was a total outage.
     const result = await assertLexical(classifyLayer({ searchable: 100_000, lanceRows: 100_002 }));
-    expect(result.ok).toBe(false);
-    expect(result.reason).toMatch(/structural/i);
+    expect(result.ok).toBe(true);
+    expect(result.completeness).toBeGreaterThan(0.999);
+    expect(result.completeness).toBeLessThan(1);
   });
 
-  test("ledger-reported stale content fails closed even when counts match", async () => {
-    const result = await assertLexical(
-      classifyLayer({ searchable: 100, lanceRows: 100, divergence: { sessions: 1, missing: 0, stale: 3, extra: 0 } }),
-    );
+  test("a large structural divergence (gross corruption) fails closed", async () => {
+    const result = await assertLexical(classifyLayer({ searchable: 100, lanceRows: 200 }));
     expect(result.ok).toBe(false);
-    expect(result.reason).toMatch(/structural/i);
+    expect(result.reason).toMatch(/divergence|tolerance/i);
+  });
+
+  test("a small ledger-reported stale tail serves degraded; a large one fails closed", async () => {
+    const small = await assertLexical(
+      classifyLayer({ searchable: 100_000, lanceRows: 100_000, divergence: { sessions: 1, missing: 0, stale: 3, extra: 0 } }),
+    );
+    expect(small.ok).toBe(true);
+    const large = await assertLexical(
+      classifyLayer({ searchable: 100, lanceRows: 100, divergence: { sessions: 1, missing: 0, stale: 10, extra: 0 } }),
+    );
+    expect(large.ok).toBe(false);
+    expect(large.reason).toMatch(/divergence|tolerance/i);
   });
 });

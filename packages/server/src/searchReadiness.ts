@@ -32,11 +32,15 @@ import { LocalStore } from "./store";
 
 export type SearchMode = "lexical" | "semantic" | "fusion";
 
-/** How incomplete the index may be before search fails closed, as a fraction of the
- * searchable corpus. A product decision; default conservative. Env-overridable. */
+/** How far the derived index may diverge from truth before search fails closed, as a
+ * fraction of the searchable corpus (missing + extra + stale rows combined). A
+ * continuously-ingested index is ALWAYS slightly behind: the default 0.05 serves through
+ * that normal lag (a measured 0.25% orphan tail was producing a 100% outage) and fails
+ * closed only on gross corruption (the historical index failures were ~100% divergence).
+ * Env-overridable via QUASAR_SEARCH_SHORTFALL_TOLERANCE. */
 const shortfallTolerance = (): number => {
   const raw = Number(process.env.QUASAR_SEARCH_SHORTFALL_TOLERANCE);
-  return Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : 0.0001;
+  return Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : 0.05;
 };
 
 interface CoverageVerdict {
@@ -47,11 +51,15 @@ interface CoverageVerdict {
 }
 
 /**
- * Classify a coverage gap (replaces the exact-equality cliff). Structural divergence
- * — extra rows (present-but-unexpected) or stale rows (present-but-wrong-content),
- * either of which can surface deleted or wrong results — fails closed regardless of
- * magnitude. A pure missing-only shortfall serves degraded with disclosed coverage
- * while under tolerance, and fails closed above it.
+ * Classify a coverage gap. A continuously-ingested derived index is ALWAYS a little
+ * behind truth: a small tail of missing (not-yet-folded), extra (orphan), or stale
+ * (rekeyed) rows is the NORMAL steady state, not corruption. Gate on TOTAL divergence
+ * as a fraction of the corpus and serve degraded (with disclosed completeness) under
+ * tolerance; fail closed only when divergence is large enough to mean the index is
+ * genuinely broken rather than merely lagging. The `structural` flag is still disclosed
+ * (extra/stale can surface a deleted or wrong result) but no longer forces a 100% outage
+ * for a sub-tolerance tail — which is what turned a measured 1,624-of-660k (0.25%) orphan
+ * tail into a total semantic blackout on a system that ingests every minute.
  */
 const classifyCoverage = (params: {
   readonly expected: number;
@@ -59,26 +67,20 @@ const classifyCoverage = (params: {
   readonly extra: number;
   readonly stale: number;
 }): CoverageVerdict => {
-  if (params.extra > 0 || params.stale > 0) {
-    return {
-      serve: false,
-      completeness: 0,
-      structural: true,
-      reason: `structural index divergence (extra=${params.extra}, stale=${params.stale})`,
-    };
-  }
   if (params.expected === 0) return { serve: true, completeness: 1, structural: false };
-  const ratio = params.missing / params.expected;
+  const divergent = params.missing + params.extra + params.stale;
+  const ratio = divergent / params.expected;
   const completeness = Math.max(0, 1 - ratio);
+  const structural = params.extra > 0 || params.stale > 0;
   if (ratio > shortfallTolerance()) {
     return {
       serve: false,
       completeness,
-      structural: false,
-      reason: `index shortfall ${ratio.toFixed(6)} exceeds tolerance ${shortfallTolerance()} (missing ${params.missing} of ${params.expected})`,
+      structural,
+      reason: `index divergence ${ratio.toFixed(6)} exceeds tolerance ${shortfallTolerance()} (missing ${params.missing}, extra ${params.extra}, stale ${params.stale} of ${params.expected})`,
     };
   }
-  return { serve: true, completeness, structural: false };
+  return { serve: true, completeness, structural };
 };
 
 /** Raw diagnostic counters included in every ReadinessResult. */
