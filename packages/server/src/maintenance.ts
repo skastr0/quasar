@@ -204,6 +204,19 @@ export const SearchMaintenanceLive = Layer.effect(
               yield* store.clearDivergence(state.sessionId);
               freshSessions += 1;
             } else if (state._tag === "Divergent") {
+              // Remove the proven EXTRA rows first: keys present in the Lance table but
+              // NOT in the session's intended (key, contentHash) set — the orphan/
+              // duplicate rows left by re-keying that inflate vectorRowCount and trip the
+              // fail-closed structural-divergence gate (503 on semantic/fusion). Only keys
+              // the read-back proved extra are deleted, per their own table; the repair
+              // then re-adds any genuinely missing rows and the next reconcile converges.
+              for (const delta of state.deltas) {
+                if (delta.extraKeys.length > 0) {
+                  yield* search
+                    .deleteByKeys({ tableName: delta.table, keys: [...delta.extraKeys] })
+                    .pipe(Effect.catchAll(() => Effect.succeed(0)));
+                }
+              }
               yield* store.putDivergence(mergeDivergence(state.sessionId, state.deltas));
               yield* queue.enqueue({
                 kind: "index-session",
