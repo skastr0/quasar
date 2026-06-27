@@ -122,22 +122,22 @@ export default defineWorkflow({
       const tasks = [
         lensTask(
           "lance-retention",
-          "grok",
-          "grok-build",
+          "codex-cli",
+          "gpt-5.4-mini",
           "LanceDB version/index retention + reclaim",
           "Validate that VERSION_RETENTION_MS=7d is the primary live regrowth driver. Design the correct optimize(cleanupOlderThan) retention window for a table optimized every ~2 min under continuous ingest — small enough to bound _indices generation dirs, large enough not to delete a version an in-flight reader/query needs. Specify the one-time reclaim to undo the current 29GB and the experiment that proves _indices/disk stays bounded over N optimize cycles. Cite LanceDB docs on cleanupOlderThan semantics + what a too-small window can break (concurrent readers).",
         ),
         lensTask(
           "embedding-cache-blob",
-          "kimi-code",
-          "kimi-code/kimi-for-coding",
+          "codex-cli",
+          "gpt-5.4-mini",
           "embedding_cache JSON TEXT -> binary BLOB migration",
           "Design the safe migration of embedding_cache.vector_json TEXT (298,676 rows) to a binary Float32 BLOB. Cover: the store.ts schema migration (new column or table, backfill, drop old), the embeddings.ts read/write path, idempotency, zero-data-loss during a live-running server, and how to verify byte-for-byte vector equality post-migration. Quantify expected savings in absolute MB. State whether a one-shot backfill vs lazy re-cache is safer. The embeddings themselves dedup by content hash — confirm that holds.",
         ),
         lensTask(
           "queue-and-wal",
-          "opencode",
-          "synthetic/hf:moonshotai/Kimi-K2.6",
+          "codex-cli",
+          "gpt-5.4-mini",
           "queue_jobs retention + SQLite WAL/VACUUM (adversarial re-check of AGY's analysis)",
           "Adversarially re-validate AGY's original amplification claims against the live numbers (805,035 completed jobs, 800,957 completed >24h, 0 active; 10.69GB sqlite; 2.9GB WAL). Design: (a) a safe completed-job retention prune (delete completed jobs older than a lifecycle window) that CANNOT delete a pending/leased/in-flight job and respects idempotency-key dedup; (b) a WAL checkpoint(TRUNCATE) cadence + whether a one-time VACUUM is needed and its lock/downtime cost on a 10GB live db. Correct any AGY number the live data refutes (the 17,035-versions figure is stale; actual is 414).",
         ),
