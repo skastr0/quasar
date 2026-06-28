@@ -15,17 +15,28 @@ import { mergeDivergence, verifyIndexed } from "./verify";
 // torn down on a routine tick (the drop-then-rebuild that did so was the 22s outage).
 // optimize() is O(delta) and throttled per-table; it runs only under maintain()'s
 // writer-idle guard so it never races an in-flight upsert (LanceDB commit-conflict).
+//
+// gcSupersededIndexDirs runs AFTER optimize(), strictly yield*-sequenced, so the new
+// generation is committed into the manifest before GC reads manifests and deletes only
+// provably-unreferenced dirs (never the serving generation). See lancedb.ts for the
+// full proof that detection is type-agnostic (FTS, BTree, AND IVF_PQ).
 const MAINTAIN_INTERVAL_MS = 120_000;
-// Version retention for optimize()'s prune/cleanup. optimize() runs every
-// MAINTAIN_INTERVAL_MS (~2 min), so a wide window lets superseded version manifests +
-// data fragments pile up between prunes (measured: a 7-day window let 265/327 versions
-// accumulate and the volume regrow to 31GB). A 10-minute window bounds it to ~5 versions
-// per table; LanceDB never removes the CURRENT version regardless of the window
-// [@lancedb/lancedb table.d.ts: "The current version will never be removed"], and
-// deleteUnverified stays false so in-flight upsert files are never touched. NOTE: this
-// reclaims the VERSION/data side only — optimize does NOT GC the _indices generation
-// dirs (lance#7207); that needs a separate, grounded GC (see [[lancedb-index-dir-gc]]).
+// Version retention for optimize()'s cleanupOlderThan. With daily optimize, this
+// prunes all but the current version each run; LanceDB never removes the CURRENT
+// version regardless of the window [@lancedb/lancedb table.d.ts:88 "The current
+// version will never be removed"]. deleteUnverified stays false so in-flight upsert
+// files are never touched. This reclaims the VERSION/data side; gcSupersededIndexDirs
+// handles the _indices generation dirs (lance#7207).
 const VERSION_RETENTION_MS = 10 * 60 * 1000;
+// Optimize+GC throttle (row-count delta OR wall-clock — grounded values):
+// OPTIMIZE_ROW_DELTA: a 10k-row unindexed tail costs ~17ms at query time (proven:
+// 1.1s for full ~660k-row brute-scan → 1.1s × 10000/660000 ≈ 17ms), within the
+// "instant" bar; so 10k bounds the flat-scanned tail to sub-20ms before the next fold.
+// Source: [[quasar-22s-latency-rootcause]] measured 1.1s/660k brute-scan.
+// OPTIMIZE_MIN_INTERVAL_MS: daily floor ensures low-write tables still fold and prune
+// their _versions so manifests/data do not accrete indefinitely.
+const OPTIMIZE_ROW_DELTA = 10_000;
+const OPTIMIZE_MIN_INTERVAL_MS = 24 * 60 * 60 * 1000;
 // Bound the durable queue: prune COMPLETED jobs older than the retention window on the
 // interval below. Only status='completed' rows are deleted (never pending/leased/failed),
 // and completed rows are not load-bearing (enqueue dedup deletes-then-reinserts by
@@ -119,19 +130,33 @@ export const SearchMaintenanceLive = Layer.effect(
               ),
             ),
           );
-        // optimize() is DISABLED (emergency, 2026-06-27). At this corpus size optimize()
-        // REWRITES the full FTS/vector index (~16-20GB) on each run, and LanceDB never GCs
-        // the superseded _indices generation dirs (lance#7207) — so it minted ~3GB/min of
-        // orphaned index files and filled the host disk (search.lance 8GB -> 106GB in
-        // ~30 min). `ensure` above builds each index ONCE; newly-appended rows are served
-        // from the small flat-scanned unindexed delta until a SAFE _indices GC is shipped
-        // and optimize is re-enabled together with it. Re-enabling optimize WITHOUT a
-        // working _indices GC is exactly what caused the outage — do not.
-        void MAINTAIN_INTERVAL_MS;
-        void VERSION_RETENTION_MS;
-        void lastHeavyAt;
-        void lastRefreshedRows;
-        return { tableName, rebuilt: false, reclaimed: 0 };
+        // optimize+GC: throttled by row-count delta AND wall-clock, writer-idle-gated
+        // (inherited from maintain()'s !idxBusy/!embBusy branches above this call).
+        // ORDER is load-bearing: optimize() FIRST (commits the new generation into the
+        // manifest AND prunes superseded version manifests), THEN gcSupersededIndexDirs
+        // (reads SURVIVING manifests, deletes only generation dirs no manifest references).
+        // yield* sequencing guarantees GC runs strictly after optimize commits.
+        void MAINTAIN_INTERVAL_MS; // used by outer maintain() tick, not here
+        const now = Date.now();
+        const lastAt = (yield* Ref.get(lastHeavyAt)).get(tableName) ?? 0;
+        const lastRows = (yield* Ref.get(lastRefreshedRows)).get(tableName) ?? -1;
+        const due = lastRows < 0 || now - lastAt >= OPTIMIZE_MIN_INTERVAL_MS || rows - lastRows >= OPTIMIZE_ROW_DELTA;
+        if (!due) return { tableName, rebuilt: false, reclaimed: 0 };
+        yield* search
+          .optimize({ tableName, olderThanMs: VERSION_RETENTION_MS, deleteUnverified: false })
+          .pipe(
+            Effect.catchAll((e) =>
+              Effect.logError(
+                `quasar.index.optimize_failed table=${tableName} :: ${e instanceof Error ? e.message : String(e)}`,
+              ),
+            ),
+          );
+        const gc = yield* search
+          .gcSupersededIndexDirs({ tableName })
+          .pipe(Effect.catchAll(() => Effect.succeed({ scanned: 0, referenced: 0, deleted: 0 })));
+        yield* Ref.update(lastHeavyAt, (m) => new Map(m).set(tableName, now));
+        yield* Ref.update(lastRefreshedRows, (m) => new Map(m).set(tableName, rows));
+        return { tableName, rebuilt: true, reclaimed: gc.deleted };
       });
 
     return SearchMaintenance.of({
