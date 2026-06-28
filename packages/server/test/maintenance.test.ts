@@ -182,8 +182,12 @@ describe("SearchMaintenance", () => {
     expect(fresh).toEqual({ sessionsChecked: 1, freshSessions: 1, repairsEnqueued: 0, staleSessions: [] });
   });
 
-  test("maintain ensures indexes exist and returns proof stats (optimize disabled)", async () => {
-    const [report, indices] = await withMaintenance(
+  test("maintain ensures indexes exist and fires optimize+GC on first tick", async () => {
+    // First tick is always due: lastRows starts at -1 (< 0), so the due condition fires
+    // immediately. optimize() folds any unindexed rows and prunes old manifests; GC then
+    // runs strictly after optimize commits. rebuilt=true on the first tick; the second
+    // tick is skipped (lastAt just set, lastRows just set, no new rows → !due).
+    const [firstReport, secondReport, indices] = await withMaintenance(
       Effect.gen(function* () {
         const store = yield* LocalStore;
         const search = yield* DerivedSearch;
@@ -191,17 +195,21 @@ describe("SearchMaintenance", () => {
         const maintenance = yield* SearchMaintenance;
         yield* store.upsertSession(mappedSession());
         yield* search.indexSession("session-a");
-        const report = yield* maintenance.maintain();
+        const firstReport = yield* maintenance.maintain();
+        // Second tick: no new rows, wall-clock delta is ~0 (< 24 h) → !due → rebuilt=false.
+        const secondReport = yield* maintenance.maintain();
         const indices = (yield* lance.tableIndexStats({ tableName: "messages" })).map((index) => index.name);
-        return [report, indices] as const;
+        return [firstReport, secondReport, indices] as const;
       }),
     );
 
-    // `ensure` built the lexical FTS index. optimize() is disabled, so `rebuilt` stays
-    // false (no per-tick optimize that minted unbounded _indices generations).
+    // `ensure` + optimize ran on first tick.
     expect(indices).toContain("text_idx");
-    expect(report.rebuilt.every((entry) => entry.rebuilt === false)).toBe(true);
-    expect((report.stats as { rowCount: number }).rowCount).toBe(1);
+    // First tick: due (lastRows=-1 < 0) → rebuilt=true for at least one table.
+    expect(firstReport.rebuilt.some((entry) => entry.rebuilt === true)).toBe(true);
+    // Second tick: !due (no row delta, no wall-clock delta) → all rebuilt=false.
+    expect(secondReport.rebuilt.every((entry) => entry.rebuilt === false)).toBe(true);
+    expect((firstReport.stats as { rowCount: number }).rowCount).toBe(1);
   });
 
   test("freshness checks both lexical and active profile tables", async () => {

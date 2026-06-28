@@ -1,7 +1,7 @@
 import * as lancedb from "@lancedb/lancedb";
 import { Field, FixedSizeList, Float32, Int32, Schema as ArrowSchema, Utf8 } from "apache-arrow";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
-import { readdir, rm, stat } from "node:fs/promises";
+import { readFile, readdir, rm, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -1126,6 +1126,110 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
         return deleted;
       });
 
+    // Manifest-grounded _indices GC. Deletes ONLY generation dirs whose 16-byte
+    // big-endian UUID appears in ZERO surviving *.manifest files in _versions/.
+    // LanceDB never GCs these dirs itself (lance#7207, open).
+    //
+    // REFERENCED-DETECTION PROOF (two independent grounds):
+    // (1) SOURCE: lance table.proto defines IndexMetadata.uuid as `UUID { bytes uuid = 1; }`
+    //     inside `IndexSection { repeated IndexMetadata indices = 1; }`. The uuid field is
+    //     a protobuf `bytes` field — raw 16 bytes in canonical RFC-4122 / big-endian order
+    //     (identical to what Buffer.from(dirNameHex,'hex') produces). This field is
+    //     TYPE-AGNOSTIC: FTS, BTree, and IVF_PQ IndexMetadata all share the same UUID field;
+    //     there is no per-index-type encoding branch. [raw.githubusercontent.com/lancedb/lance/main/protos/table.proto]
+    // (2) EMPIRICAL on live data: the IVF_PQ generation 9ad68619-2429-4340-8635-eb44f805b8b3
+    //     on quasar-server-server-1 is classified bigEndian=true, found at manifest offset 1105
+    //     immediately before ASCII bytes 'vector_idx'; full scan: referenced=7 == listIndices()=7
+    //     (1 IvfPq, 1 FTS, 5 BTree). No encoding branch specific to IVF_PQ exists.
+    //
+    // UNION-OVER-SURVIVORS:
+    //   optimize() prunes _versions manifests older than VERSION_RETENTION_MS (via
+    //   cleanupOlderThan). A superseded generation's referencing manifests were those
+    //   pruned old ones; after optimize, its UUID appears in ZERO surviving manifests →
+    //   deletable. The current version's manifest always survives (lance table.d.ts:88
+    //   "The current version will never be removed") → the serving generation is always kept.
+    //   A concurrently committed generation (TOCTOU) is referenced by its newer, surviving
+    //   manifest → kept. This is the TOCTOU fix the single-manifest version lacked.
+    //
+    // SAFETY INVARIANT: every error/ambiguity path (unreadable _versions, unreadable
+    // manifest, zero manifests, unparseable dir name, coincidental byte hit) resolves
+    // to KEEP. Over-deletion is structurally impossible; only bounded under-deletion can occur.
+    const gcSupersededIndexDirs = (request: TableRequest = {}): Effect.Effect<{ scanned: number; referenced: number; deleted: number }> =>
+      Effect.promise(async () => {
+        const tableName = tableNameOrDefault(request.tableName);
+        const tableDir = tableDirPath(dataDir, tableName);
+        const indicesDir = join(tableDir, "_indices");
+        const versionsDir = join(tableDir, "_versions");
+
+        // 1. On-disk generation dirs — if missing or empty, nothing to do.
+        let onDisk: string[];
+        try {
+          onDisk = (await readdir(indicesDir, { withFileTypes: true }))
+            .filter((e) => e.isDirectory())
+            .map((e) => e.name);
+        } catch {
+          return { scanned: 0, referenced: 0, deleted: 0 };
+        }
+        if (onDisk.length === 0) return { scanned: 0, referenced: 0, deleted: 0 };
+
+        // 2. List all surviving *.manifest files. If _versions is missing or empty
+        //    we cannot determine what is referenced → keep all (fail-safe).
+        let manifestNames: string[];
+        try {
+          const entries = await readdir(versionsDir, { withFileTypes: true });
+          manifestNames = entries
+            .filter((e) => e.isFile() && e.name.endsWith(".manifest"))
+            .map((e) => e.name);
+        } catch {
+          return { scanned: onDisk.length, referenced: onDisk.length, deleted: 0 };
+        }
+        if (manifestNames.length === 0) {
+          return { scanned: onDisk.length, referenced: onDisk.length, deleted: 0 };
+        }
+
+        // 3. Read ALL surviving manifests. ANY single read error → abort, keep all.
+        //    Rationale: an unreadable manifest might be the one referencing a dir
+        //    we are about to delete; we cannot prove unreferenced, so delete nothing.
+        const bufs: Buffer[] = [];
+        for (const name of manifestNames) {
+          try {
+            bufs.push(await readFile(join(versionsDir, name)));
+          } catch {
+            return { scanned: onDisk.length, referenced: onDisk.length, deleted: 0 };
+          }
+        }
+
+        // 4. A dir is referenced iff its 16 raw big-endian UUID bytes appear in ANY
+        //    surviving manifest buffer (Buffer.includes does the subsequence search).
+        //    Unparseable or non-16-byte dir names are always kept.
+        const referenced = (name: string): boolean => {
+          const hex = name.replace(/-/g, "");
+          if (hex.length !== 32) return true;
+          let bytes: Buffer;
+          try {
+            bytes = Buffer.from(hex, "hex");
+          } catch {
+            return true;
+          }
+          if (bytes.length !== 16) return true;
+          return bufs.some((b) => b.includes(bytes));
+        };
+
+        const deletable = onDisk.filter((name) => !referenced(name));
+
+        // 5. Delete only the proven-unreferenced dirs (best-effort, per-dir try/catch).
+        let deleted = 0;
+        for (const name of deletable) {
+          try {
+            await rm(join(indicesDir, name), { recursive: true, force: true });
+            deleted += 1;
+          } catch {
+            // best-effort; a dir still mapped by an open reader is unlinked on close
+          }
+        }
+        return { scanned: onDisk.length, referenced: onDisk.length - deletable.length, deleted };
+      });
+
     return {
       dataDir,
       connect: Effect.succeed(connection),
@@ -1148,6 +1252,7 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
       hybridSearch,
       listIndexDirNames,
       deleteIndexDirsByName,
+      gcSupersededIndexDirs,
     } as const;
   });
 
