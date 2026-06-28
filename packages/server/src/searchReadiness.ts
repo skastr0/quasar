@@ -1,12 +1,20 @@
 /**
- * Search readiness gate — QSR-223.
+ * Search readiness — DIAGNOSTIC-ONLY surface consumed by /ready and /status.
  *
- * assertSearchReady is a cheap request-admission gate. It verifies that the
- * LanceDB search table exists when corpus data exists, discloses lightweight
- * catch-up counters, and keeps expensive consistency audits out of search.
+ * assertSearchReady is NO LONGER a per-request search gate. Search routes
+ * (lexicalSearch, semanticSearch, fusionSearch) run immediately without any
+ * readiness check; a genuinely absent table returns an honest empty 200 via
+ * their own Effect.catchAll. This module is called only by:
+ *   • /ready  — operator diagnostic; returns 503 when not ready but gates nothing
+ *               on the request path (Docker HEALTHCHECK uses /health, not /ready)
+ *   • /status — extended status reporting
  *
- * Readiness definitions
- * ─────────────────────
+ * The embedder-health probe (`embeddingsService.value.readiness`) is now a
+ * non-blocking Ref read (background fiber in embeddings.ts) so even /ready
+ * never issues a per-call network probe.
+ *
+ * Readiness definitions (diagnostic only)
+ * ────────────────────────────────────────
  * lexical-ready  :: empty corpus OR LanceDB messages table matches SQLite searchable count and is readable
  *
  * semantic-ready :: lexical-ready
@@ -17,10 +25,6 @@
  * fusion-ready   :: semantic-ready (fusion requires both FTS and vectors)
  *
  * Any LanceDB row-count read error → NOT ready unless SQLite has no messages.
- * Never catch-all → empty results.
- *
- * Exact SQLite searchable counts, unembedded counts, LanceDB versions, and disk
- * sizes are diagnostic work. They do not belong in request-time readiness.
  */
 
 import { DEFAULT_SEARCH_TABLE, LanceDb, MESSAGE_TEXT_INDEX_NAME, MESSAGE_VECTOR_INDEX_NAME } from "./lancedb";
