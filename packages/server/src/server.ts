@@ -29,29 +29,6 @@ const unauthorized = (route: string, message: string) =>
 const serviceUnavailable = (route: string, message: string) =>
   json({ ok: false, route, error: { type: "ServiceUnavailable", message } }, { status: 503 });
 
-const searchIndexNotReady = (
-  route: string,
-  message: string,
-  staleCount: number,
-  missingVectorCount: number,
-  indexStats: unknown,
-) =>
-  json(
-    {
-      ok: false,
-      route,
-      error: {
-        type: "ServiceUnavailable",
-        code: "SearchIndexNotReady",
-        message,
-        staleCount,
-        missingVectorCount,
-        indexStats,
-      },
-    },
-    { status: 503 },
-  );
-
 const notFound = (route: string, message: string) =>
   json({ ok: false, route, error: { type: "NotFound", message } }, { status: 404 });
 
@@ -383,24 +360,6 @@ const ingestSession = Effect.gen(function* () {
   return json(ok("ingest/session", { outcome }), { status });
 });
 
-const requireSearchReady = (route: string, mode: SearchMode) =>
-  Effect.gen(function* () {
-    const readiness = yield* SearchReadiness;
-    const result = yield* readiness.assertSearchReady(mode);
-    if (!result.ok) {
-      return searchIndexNotReady(
-        route,
-        result.reason ?? "search index not ready",
-        result.staleCount,
-        result.missingVectorCount,
-        result.indexStats,
-      );
-    }
-    // Empty corpus (rowCount === 0, sqliteSearchableCount === 0) is legitimate — return null
-    // to signal "proceed with the search" to callers.
-    return null;
-  });
-
 interface SearchReceipt {
   readonly route: string;
   readonly mode: SearchMode;
@@ -426,13 +385,16 @@ const emitSearchProfile = (profile: SearchReceipt) =>
     console.log(JSON.stringify({ event: "search.profile", at: new Date().toISOString(), ...profile }));
   });
 
+const isTableNotFoundError = (error: unknown): boolean => {
+  const msg = error instanceof Error
+    ? error.message
+    : String((error as { message?: string }).message ?? error);
+  return /not found|does not exist/i.test(msg);
+};
+
 const lexicalSearch = Effect.gen(function* () {
   const routeStarted = performance.now();
   const startedAt = new Date().toISOString();
-  const readinessStarted = performance.now();
-  const notReadyResponse = yield* requireSearchReady("search/lexical", "lexical");
-  const readinessMs = Math.round(performance.now() - readinessStarted);
-  if (notReadyResponse !== null) return notReadyResponse;
   const search = yield* DerivedSearch;
   const params = yield* query;
   const text = params.get("q") ?? params.get("query");
@@ -446,7 +408,13 @@ const lexicalSearch = Effect.gen(function* () {
     role: params.get("role") ?? undefined,
     providers: parseProviders(params),
     limit: positiveInt(params, "limit", 10),
-  });
+  }).pipe(
+    Effect.catchAll((error) =>
+      isTableNotFoundError(error)
+        ? Effect.succeed([] as readonly import("./lancedb").SearchHit[])
+        : Effect.fail(error),
+    ),
+  );
   const searchMs = Math.round(performance.now() - searchStarted);
   const totalMs = Math.round(performance.now() - routeStarted);
   const receipt: SearchReceipt = {
@@ -457,10 +425,10 @@ const lexicalSearch = Effect.gen(function* () {
     statusCode: 200,
     startedAt,
     completedAt: new Date().toISOString(),
-    readinessMs,
+    readinessMs: 0,
     searchMs,
     totalMs,
-    residualMs: Math.max(0, totalMs - readinessMs - searchMs),
+    residualMs: Math.max(0, totalMs - searchMs),
     matches: matches.length,
   };
   yield* emitSearchProfile(receipt);
@@ -490,10 +458,6 @@ const vectorReadyFilter = (params: URLSearchParams): string | undefined => {
 const semanticSearch = Effect.gen(function* () {
   const routeStarted = performance.now();
   const startedAt = new Date().toISOString();
-  const readinessStarted = performance.now();
-  const notReadyResponse = yield* requireSearchReady("search/semantic", "semantic");
-  const readinessMs = Math.round(performance.now() - readinessStarted);
-  if (notReadyResponse !== null) return notReadyResponse;
   const search = yield* LanceDb;
   const embeddings = yield* Embeddings;
   const params = yield* query;
@@ -513,7 +477,13 @@ const semanticSearch = Effect.gen(function* () {
     limit: positiveInt(params, "limit", 10),
     filter: vectorReadyFilter(params),
     select: MESSAGE_SEARCH_COLUMNS,
-  });
+  }).pipe(
+    Effect.catchAll((error) =>
+      isTableNotFoundError(error)
+        ? Effect.succeed([] as readonly import("./lancedb").SearchHit[])
+        : Effect.fail(error),
+    ),
+  );
   const searchMs = Math.round(performance.now() - searchStarted);
   const totalMs = Math.round(performance.now() - routeStarted);
   const receipt: SearchReceipt = {
@@ -525,11 +495,11 @@ const semanticSearch = Effect.gen(function* () {
     startedAt,
     completedAt: new Date().toISOString(),
     tableName,
-    readinessMs,
+    readinessMs: 0,
     embedMs,
     searchMs,
     totalMs,
-    residualMs: Math.max(0, totalMs - readinessMs - embedMs - searchMs),
+    residualMs: Math.max(0, totalMs - embedMs - searchMs),
     matches: matches.length,
   };
   yield* emitSearchProfile(receipt);
@@ -539,10 +509,6 @@ const semanticSearch = Effect.gen(function* () {
 const fusionSearch = Effect.gen(function* () {
   const routeStarted = performance.now();
   const startedAt = new Date().toISOString();
-  const readinessStarted = performance.now();
-  const notReadyResponse = yield* requireSearchReady("search/fusion", "fusion");
-  const readinessMs = Math.round(performance.now() - readinessStarted);
-  if (notReadyResponse !== null) return notReadyResponse;
   const search = yield* LanceDb;
   const embeddings = yield* Embeddings;
   const params = yield* query;
@@ -563,7 +529,13 @@ const fusionSearch = Effect.gen(function* () {
     limit: positiveInt(params, "limit", 10),
     filter: vectorReadyFilter(params),
     select: MESSAGE_SEARCH_COLUMNS,
-  });
+  }).pipe(
+    Effect.catchAll((error) =>
+      isTableNotFoundError(error)
+        ? Effect.succeed([] as readonly import("./lancedb").SearchHit[])
+        : Effect.fail(error),
+    ),
+  );
   const searchMs = Math.round(performance.now() - searchStarted);
   const totalMs = Math.round(performance.now() - routeStarted);
   const receipt: SearchReceipt = {
@@ -575,11 +547,11 @@ const fusionSearch = Effect.gen(function* () {
     startedAt,
     completedAt: new Date().toISOString(),
     tableName,
-    readinessMs,
+    readinessMs: 0,
     embedMs,
     searchMs,
     totalMs,
-    residualMs: Math.max(0, totalMs - readinessMs - embedMs - searchMs),
+    residualMs: Math.max(0, totalMs - embedMs - searchMs),
     matches: matches.length,
   };
   yield* emitSearchProfile(receipt);

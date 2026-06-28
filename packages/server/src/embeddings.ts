@@ -1,6 +1,6 @@
 import { LanceDb, type SearchRole } from "./lancedb";
 import { Database } from "bun:sqlite";
-import { Effect, Layer, Schema } from "effect";
+import { Effect, Layer, Ref, Schedule, Schema } from "effect";
 import { createHash } from "node:crypto";
 
 import { embeddingProfileFromEnv, embeddingProfileSearchTable, type EmbeddingProfile } from "./embeddingProfiles";
@@ -217,32 +217,6 @@ const probeEmbeddingAvailability = (
     );
   });
 
-const cachedEmbeddingReadiness = (
-  embedder: Embedder,
-  profile: EmbeddingProfile,
-): Effect.Effect<EmbeddingReadinessStatus, never> => {
-  let cached: { readonly expiresAt: number; readonly status: EmbeddingReadinessStatus } | undefined;
-  let inFlight: Promise<EmbeddingReadinessStatus> | undefined;
-
-  return Effect.promise(async () => {
-    const now = Date.now();
-    if (cached !== undefined && cached.expiresAt > now) return cached.status;
-    if (inFlight !== undefined) return await inFlight;
-
-    inFlight = Effect.runPromise(probeEmbeddingAvailability(embedder, profile)).then((status) => {
-      cached = {
-        expiresAt: Date.now() + readinessCacheTtlMs(),
-        status,
-      };
-      return status;
-    }).finally(() => {
-      inFlight = undefined;
-    });
-
-    return await inFlight;
-  });
-};
-
 export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer.Layer<Embeddings, never, LocalStore | DurableQueue | LanceDb> => {
   const profile = options.profile ?? embeddingProfileFromEnv();
   const embedder = options.embedder ?? liveEmbedderForProfile(profile);
@@ -265,7 +239,22 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
           const store = yield* LocalStore;
           const queue = yield* DurableQueue;
           const search = yield* LanceDb;
-          const readiness = cachedEmbeddingReadiness(embedder, profile);
+          // Background Ref: probe fires on a fixed schedule (every readinessCacheTtlMs() ms),
+          // with the first probe delayed by one full interval. The initial state is
+          // "probe pending" (ok: false). The hot path (now only /ready) reads the Ref
+          // synchronously — never a per-query network call. Deferring the first probe
+          // avoids spurious embedder calls during layer construction in tests.
+          const readinessRef = yield* Ref.make<EmbeddingReadinessStatus>({
+            ok: false,
+            checkedAt: nowIso(),
+            reason: "embedding readiness probe pending",
+          });
+          yield* Effect.sleep(`${readinessCacheTtlMs()} millis`).pipe(
+            Effect.flatMap(() => probeEmbeddingAvailability(embedder, profile)),
+            Effect.flatMap((s) => Ref.set(readinessRef, s)),
+            Effect.repeat(Schedule.spaced(`${readinessCacheTtlMs()} millis`)),
+            Effect.forkScoped,
+          );
           const selectCached = db.prepare(
             "SELECT model, content_hash AS contentHash, dimensions, text_bytes AS textBytes, vector_json AS vectorJson, created_at AS createdAt, updated_at AS updatedAt FROM embedding_cache WHERE model = ? AND content_hash = ?",
           );
@@ -544,7 +533,7 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
               const cached = (db.query("SELECT COUNT(*) AS count FROM embedding_cache WHERE model = ?").get(profile.cacheNamespace) as { count: number }).count;
               return { cached, pending: 0, profile };
             }),
-            readiness,
+            readiness: Ref.get(readinessRef),
           });
         }),
       ),

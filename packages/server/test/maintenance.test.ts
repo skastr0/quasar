@@ -182,8 +182,8 @@ describe("SearchMaintenance", () => {
     expect(fresh).toEqual({ sessionsChecked: 1, freshSessions: 1, repairsEnqueued: 0, staleSessions: [] });
   });
 
-  test("maintain ensures indexes exist and returns proof stats (optimize disabled)", async () => {
-    const [report, indices] = await withMaintenance(
+  test("maintain ensures indexes exist, runs optimize+GC on first tick, and returns proof stats", async () => {
+    const [report, indices, report2] = await withMaintenance(
       Effect.gen(function* () {
         const store = yield* LocalStore;
         const search = yield* DerivedSearch;
@@ -191,17 +191,22 @@ describe("SearchMaintenance", () => {
         const maintenance = yield* SearchMaintenance;
         yield* store.upsertSession(mappedSession());
         yield* search.indexSession("session-a");
+        // First tick: lastRows < 0 → due → optimize+GC fires
         const report = yield* maintenance.maintain();
         const indices = (yield* lance.tableIndexStats({ tableName: "messages" })).map((index) => index.name);
-        return [report, indices] as const;
+        // Second tick immediately after: row delta < OPTIMIZE_ROW_DELTA and elapsed < OPTIMIZE_MIN_INTERVAL_MS → not due
+        const report2 = yield* maintenance.maintain();
+        return [report, indices, report2] as const;
       }),
     );
 
-    // `ensure` built the lexical FTS index. optimize() is disabled, so `rebuilt` stays
-    // false (no per-tick optimize that minted unbounded _indices generations).
+    // `ensure` built the lexical FTS index; optimize ran on the first tick (first run).
     expect(indices).toContain("text_idx");
-    expect(report.rebuilt.every((entry) => entry.rebuilt === false)).toBe(true);
+    // First tick fires optimize+GC for the lexical table (lastRows was -1 → due)
+    expect(report.rebuilt.some((entry) => entry.rebuilt === true)).toBe(true);
     expect((report.stats as { rowCount: number }).rowCount).toBe(1);
+    // Second tick: row count unchanged and interval not elapsed → rebuilt stays false
+    expect(report2.rebuilt.every((entry) => entry.rebuilt === false)).toBe(true);
   });
 
   test("freshness checks both lexical and active profile tables", async () => {

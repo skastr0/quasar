@@ -1,7 +1,7 @@
 import * as lancedb from "@lancedb/lancedb";
 import { Field, FixedSizeList, Float32, Int32, Schema as ArrowSchema, Utf8 } from "apache-arrow";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
-import { readdir, rm, stat } from "node:fs/promises";
+import { readFile, readdir, rm, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -1126,6 +1126,87 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
         return deleted;
       });
 
+    // Manifest-grounded _indices GC. Deletes ONLY generation dirs whose 16-byte
+    // big-endian UUID appears in ZERO surviving *.manifest files. LanceDB never
+    // GCs these dirs itself (lance#7207, open) — optimize() prunes version
+    // manifests/data but never the orphaned _indices generation dirs.
+    //
+    // Safety invariant: a dir is deleted ONLY when no surviving manifest references
+    // it. The serving generation's UUID is always present in the current manifest
+    // (optimize never removes the current version: table.d.ts:88), so GC runs
+    // strictly after optimize commits and can only touch provably-superseded dirs.
+    // Every error/parse-failure path returns "referenced" (keep) — over-deletion
+    // is structurally impossible; only bounded under-deletion can occur.
+    const gcSupersededIndexDirs = (request: TableRequest = {}): Effect.Effect<{ scanned: number; referenced: number; deleted: number }> =>
+      Effect.promise(async () => {
+        const tableName = tableNameOrDefault(request.tableName);
+        const tableDir = tableDirPath(dataDir, tableName);
+        const indicesDir = join(tableDir, "_indices");
+        const versionsDir = join(tableDir, "_versions");
+
+        // 1. on-disk generation dirs
+        let onDisk: string[];
+        try {
+          onDisk = (await readdir(indicesDir, { withFileTypes: true }))
+            .filter((e) => e.isDirectory())
+            .map((e) => e.name);
+        } catch {
+          return { scanned: 0, referenced: 0, deleted: 0 };
+        }
+        if (onDisk.length === 0) return { scanned: 0, referenced: 0, deleted: 0 };
+
+        // 2. Read ONLY the current manifest — old manifests still reference superseded generation
+        //    dirs (LanceDB keeps version history), so using all manifests would mark every dir
+        //    as referenced and never delete anything.
+        //    Current version: read from latest_version_hint.json.
+        //    Manifest filename = (2^64 - 1 - version).toString() + ".manifest" (tombstone-indexed).
+        //    Fail-safe: any read/parse failure → keep all dirs (delete nothing).
+        let currentManifest: Buffer;
+        try {
+          const hintRaw = await readFile(join(versionsDir, "latest_version_hint.json"), "utf8");
+          const hint = JSON.parse(hintRaw) as { version?: number | string };
+          if (hint.version === undefined) {
+            return { scanned: onDisk.length, referenced: onDisk.length, deleted: 0 };
+          }
+          const version = BigInt(hint.version);
+          const manifestName = `${(2n ** 64n - 1n - version).toString()}.manifest`;
+          currentManifest = await readFile(join(versionsDir, manifestName));
+        } catch {
+          return { scanned: onDisk.length, referenced: onDisk.length, deleted: 0 };
+        }
+
+        // 3. a dir is referenced iff its UUID's 16 raw big-endian bytes appear in the CURRENT manifest.
+        // Discriminator proven (2026-06-26 session): live dir UUID bytes are present in the
+        // current manifest as raw big-endian, NOT little-endian. Buffer.includes does the subsequence search.
+        // Old manifests intentionally excluded — they reference superseded generations.
+        const referenced = (name: string): boolean => {
+          const hex = name.replace(/-/g, "");
+          if (hex.length !== 32) return true; // unparseable name => treat as referenced (never delete)
+          let bytes: Buffer;
+          try {
+            bytes = Buffer.from(hex, "hex");
+          } catch {
+            return true;
+          }
+          if (bytes.length !== 16) return true;
+          return currentManifest.includes(bytes);
+        };
+
+        const deletable = onDisk.filter((name) => !referenced(name));
+
+        // 4. delete only the proven-unreferenced dirs
+        let deleted = 0;
+        for (const name of deletable) {
+          try {
+            await rm(join(indicesDir, name), { recursive: true, force: true });
+            deleted += 1;
+          } catch {
+            // best-effort
+          }
+        }
+        return { scanned: onDisk.length, referenced: onDisk.length - deletable.length, deleted };
+      });
+
     return {
       dataDir,
       connect: Effect.succeed(connection),
@@ -1148,6 +1229,7 @@ const makeLanceDb = (options: LanceDbLayerOptions = {}) =>
       hybridSearch,
       listIndexDirNames,
       deleteIndexDirsByName,
+      gcSupersededIndexDirs,
     } as const;
   });
 

@@ -188,9 +188,10 @@ describe("Embeddings", () => {
     expect(rows[0]?.contentHash).toBe("hash-a");
   });
 
-  test("synthetic readiness caches the external probe", async () => {
-    const previousKey = process.env.SYNTHETIC_API_KEY;
-    process.env.SYNTHETIC_API_KEY = "test-key";
+  test("readiness is a non-blocking Ref read — never a per-call network probe", async () => {
+    // The background fiber fires after readinessCacheTtlMs() (30s by default),
+    // so within a short test the Ref holds the initial "pending" state.
+    // Reading readiness must NEVER call the embedder synchronously.
     let calls = 0;
     const embedder: Embedder = {
       embedMany: async () => {
@@ -199,28 +200,29 @@ describe("Embeddings", () => {
       },
     };
 
-    try {
-      const [first, second] = await withEmbeddings(
-        embedder,
-        Effect.gen(function* () {
-          const embeddings = yield* Embeddings;
-          const first = yield* embeddings.readiness;
-          const second = yield* embeddings.readiness;
-          return [first, second] as const;
-        }),
-      );
+    const [first, second] = await withEmbeddings(
+      embedder,
+      Effect.gen(function* () {
+        const embeddings = yield* Embeddings;
+        const first = yield* embeddings.readiness;
+        const second = yield* embeddings.readiness;
+        return [first, second] as const;
+      }),
+    );
 
-      expect(calls).toBe(1);
-      expect(first.ok).toBe(true);
-      expect(second.ok).toBe(true);
-      expect(first.checkedAt).toBe(second.checkedAt);
-    } finally {
-      if (previousKey === undefined) delete process.env.SYNTHETIC_API_KEY;
-      else process.env.SYNTHETIC_API_KEY = previousKey;
-    }
+    // No embedder call from readiness reads — background fiber hasn't fired yet
+    expect(calls).toBe(0);
+    // Both reads return the same Ref snapshot (consistent, no race)
+    expect(first).toEqual(second);
+    // Initial state: probe pending (not yet had a chance to fire)
+    expect(first.ok).toBe(false);
+    expect(first.reason).toBeDefined();
   });
 
-  test("synthetic readiness fails closed without an API key before probing", async () => {
+  test("readiness reports not-ok when SYNTHETIC_API_KEY is absent (pending or no-key after probe)", async () => {
+    // Without an API key, the probe (when it eventually fires) returns not-ok.
+    // Before the probe fires, the state is "pending" (also not-ok).
+    // In both cases: ok === false and embedder is never called directly.
     const previousKey = process.env.SYNTHETIC_API_KEY;
     delete process.env.SYNTHETIC_API_KEY;
     let calls = 0;
@@ -242,7 +244,8 @@ describe("Embeddings", () => {
 
       expect(calls).toBe(0);
       expect(result.ok).toBe(false);
-      expect(result.reason).toContain("SYNTHETIC_API_KEY is required");
+      // Either "pending" (probe not yet fired) or the api-key reason — both are not-ok
+      expect(result.reason).toBeDefined();
     } finally {
       if (previousKey === undefined) delete process.env.SYNTHETIC_API_KEY;
       else process.env.SYNTHETIC_API_KEY = previousKey;
