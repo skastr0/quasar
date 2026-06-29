@@ -10,6 +10,7 @@ import { type Focus, type Intent, type Key, routeKey } from "./keymap";
 import { palette } from "./palette";
 import {
   type MessageRow,
+  type QuasarClientLike,
   type SearchMatch,
   type SearchMode,
   SEARCH_MODES,
@@ -281,11 +282,25 @@ const HelpOverlay = () => (
 
 // ───────────────────────────────────────────────────────────────────── app
 
-export const App = ({ options, onExit }: { readonly options: TuiOptions; readonly onExit: (exit?: TuiExit) => void }) => {
+export const App = ({
+  options,
+  onExit,
+  client: clientProp,
+}: {
+  readonly options: TuiOptions;
+  readonly onExit: (exit?: TuiExit) => void;
+  /** Injectable for tests; when omitted, resolves from the CLI's config. */
+  readonly client?: QuasarClientLike | null;
+}) => {
   const dims = useTerminalDimensions();
   const client = useMemo(
-    () => (options.server ? new QuasarClient(options.server) : QuasarClient.fromConfig()),
-    [options.server],
+    () =>
+      clientProp !== undefined
+        ? clientProp
+        : options.server
+          ? new QuasarClient(options.server)
+          : QuasarClient.fromConfig(),
+    [clientProp, options.server],
   );
 
   const [query, setQuery] = useState(options.smokeQuery ?? "");
