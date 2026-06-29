@@ -83,6 +83,24 @@ export type Outcome<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly code: string; readonly message: string };
 
+/** The slice of the client the TUI depends on — injectable so tests use a fake. */
+export interface QuasarClientLike {
+  search(
+    query: string,
+    mode: SearchMode,
+    opts?: { limit?: number; projectKey?: string; provider?: string; role?: string; signal?: AbortSignal },
+  ): Promise<Outcome<readonly SearchMatch[]>>;
+  messages(sessionId: string, opts?: { limit?: number; signal?: AbortSignal }): Promise<Outcome<readonly MessageRow[]>>;
+  toolCalls(opts?: {
+    sessionId?: string;
+    projectKey?: string;
+    provider?: string;
+    toolName?: string;
+    limit?: number;
+    signal?: AbortSignal;
+  }): Promise<Outcome<readonly ToolCallRow[]>>;
+}
+
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   v !== null && typeof v === "object";
 
@@ -221,7 +239,7 @@ const QueryParams = (params: Record<string, string | number | undefined>): strin
   return s ? `?${s}` : "";
 };
 
-export class QuasarClient {
+export class QuasarClient implements QuasarClientLike {
   constructor(
     private readonly serverUrl: string,
     private readonly timeoutSec = 30,
