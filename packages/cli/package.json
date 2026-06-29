@@ -32,7 +32,8 @@
     "build:npm-packages": "bun scripts/build-npm-packages.mjs",
     "pack:dry-run": "npm pack --dry-run",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "tui:snapshot": "bun scripts/tui-snapshot.tsx"
   },
   "optionalDependencies": {
     "@skastr0/quasar-cli-darwin-arm64": "0.2.3",
