@@ -182,11 +182,13 @@ describe("SearchMaintenance", () => {
     expect(fresh).toEqual({ sessionsChecked: 1, freshSessions: 1, repairsEnqueued: 0, staleSessions: [] });
   });
 
-  test("maintain ensures indexes exist and fires optimize+GC on first tick", async () => {
-    // First tick is always due: lastRows starts at -1 (< 0), so the due condition fires
-    // immediately. optimize() folds any unindexed rows and prunes old manifests; GC then
-    // runs strictly after optimize commits. rebuilt=true on the first tick; the second
-    // tick is skipped (lastAt just set, lastRows just set, no new rows → !due).
+  test("maintain ensures indexes exist every tick (optimize disabled, manual reclaim)", async () => {
+    // optimize() is DISABLED (4aa0ca0): at this corpus size it rewrites the full
+    // FTS/vector index and LanceDB never GCs the superseded _indices dirs, so it
+    // filled the host disk. `ensure` still runs every tick — it builds a MISSING
+    // index (self-heal, never drops a present one) — but `rebuilt` is now always
+    // false because the optimize step that would set it is short-circuited. Disk
+    // hygiene is a manual one-shot until the SQLite+HNSW rebuild lands.
     const [firstReport, secondReport, indices] = await withMaintenance(
       Effect.gen(function* () {
         const store = yield* LocalStore;
@@ -196,18 +198,18 @@ describe("SearchMaintenance", () => {
         yield* store.upsertSession(mappedSession());
         yield* search.indexSession("session-a");
         const firstReport = yield* maintenance.maintain();
-        // Second tick: no new rows, wall-clock delta is ~0 (< 24 h) → !due → rebuilt=false.
+        // Second tick: ensure runs again (idempotent, cheap when present); rebuilt
+        // stays false because optimize is disabled.
         const secondReport = yield* maintenance.maintain();
         const indices = (yield* lance.tableIndexStats({ tableName: "messages" })).map((index) => index.name);
         return [firstReport, secondReport, indices] as const;
       }),
     );
 
-    // `ensure` + optimize ran on first tick.
+    // `ensure` ran and built the lexical index on the first tick.
     expect(indices).toContain("text_idx");
-    // First tick: due (lastRows=-1 < 0) → rebuilt=true for at least one table.
-    expect(firstReport.rebuilt.some((entry) => entry.rebuilt === true)).toBe(true);
-    // Second tick: !due (no row delta, no wall-clock delta) → all rebuilt=false.
+    // optimize disabled → rebuilt is always false on every tick.
+    expect(firstReport.rebuilt.every((entry) => entry.rebuilt === false)).toBe(true);
     expect(secondReport.rebuilt.every((entry) => entry.rebuilt === false)).toBe(true);
     expect((firstReport.stats as { rowCount: number }).rowCount).toBe(1);
   });
