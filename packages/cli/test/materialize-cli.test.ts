@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { decideMaterializeLoop, parseMaterializeBatch } from "../src/materialize-receipt";
+import { decideMaterializeLoop, parseMaterializeBatch, requireMaterializeProvider } from "../src/materialize-receipt";
 
 const tempDirs: string[] = [];
 
@@ -13,6 +13,8 @@ const tempDir = () => {
   tempDirs.push(dir);
   return dir;
 };
+
+const repoRoot = join(import.meta.dir, "../../..");
 
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
@@ -45,6 +47,10 @@ const materializeBatch = () => ({
       activeEmbedMessage: { kind: "embed-message", pending: 0, leased: 0, failed: 0 },
       activeEmbeddingProfile: "local:test",
       byKind: [],
+    },
+    embedding: {
+      provider: "local",
+      profile: { cacheNamespace: "local:test", model: "test", dimensions: 768, task: "search_document" },
     },
     lance: {
       activeVectorTableName: "messages_active",
@@ -119,6 +125,23 @@ describe("materialize-embedding-vectors CLI", () => {
     expect(decision.error.message).toContain("active-profile");
   });
 
+  test("receipt provider requirement rejects the wrong active provider", () => {
+    const parsed = parseMaterializeBatch({
+      ...materializeBatch(),
+      data: {
+        ...materializeBatch().data,
+        embedding: {
+          provider: "synthetic",
+          profile: { cacheNamespace: "synthetic:test", model: "test", dimensions: 768, task: "search_document" },
+        },
+      },
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const error = requireMaterializeProvider(parsed.receipt, "local");
+    expect(error?.message).toContain("wrong embedding provider");
+  });
+
   test("until-empty writes an explicit durable closure receipt", async () => {
     const dir = tempDir();
     const outPath = join(dir, "receipt.json");
@@ -140,6 +163,8 @@ describe("materialize-embedding-vectors CLI", () => {
         "--server",
         `http://127.0.0.1:${server.port}`,
         "--until-empty",
+        "--require-provider",
+        "local",
         "--out",
         outPath,
       ], {
@@ -160,6 +185,7 @@ describe("materialize-embedding-vectors CLI", () => {
       const fromFile = JSON.parse(readFileSync(outPath, "utf8"));
       expect(fromFile).toEqual(fromStdout);
       expect(fromStdout.data.closure).toEqual({
+        embedding: { provider: "local", activeEmbeddingProfile: "local:test" },
         coverage: { vectorlessMessages: 0, vectorRows: 3 },
         queue: {
           activeEmbeddingProfile: "local:test",
@@ -181,6 +207,62 @@ describe("materialize-embedding-vectors CLI", () => {
           lanceRowCountMatches: true,
           lanceRepairScanComplete: true,
         },
+      });
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("server materialize wrapper rejects synthetic receipts when local is required", async () => {
+    const dir = tempDir();
+    const outPath = join(dir, "receipt.json");
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url);
+        expect(url.pathname).toBe("/maintenance/embeddings/materialize");
+        return Response.json({
+          ...materializeBatch(),
+          data: {
+            ...materializeBatch().data,
+            embedding: {
+              provider: "synthetic",
+              profile: { cacheNamespace: "synthetic:test", model: "test", dimensions: 768, task: "search_document" },
+            },
+          },
+        });
+      },
+    });
+
+    try {
+      const proc = Bun.spawn([
+        "bun",
+        "scripts/server-ops.mjs",
+        "materialize",
+        "--server",
+        `http://127.0.0.1:${server.port}`,
+        "--out",
+        outPath,
+      ], {
+        cwd: repoRoot,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      expect(exitCode).toBe(1);
+      expect(stderr).toBe("");
+      expect(existsSync(outPath)).toBe(false);
+
+      const failure = JSON.parse(stdout);
+      expect(failure.ok).toBe(false);
+      expect(failure.error.message).toContain("wrong embedding provider");
+      expect(failure.error.details).toMatchObject({
+        expected: "embedding.provider = local",
+        received: "synthetic",
       });
     } finally {
       server.stop(true);

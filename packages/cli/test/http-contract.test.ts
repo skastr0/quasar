@@ -351,6 +351,7 @@ describe("CLI HTTP client <-> server contract", () => {
             lanceScan: { scanned: 2, missingOrStale: 1, complete: true },
           },
           coverage: { searchableMessages: 2, vectorRows: 2, vectorlessMessages: 0, staleVectorRows: 0 },
+          embedding: { provider: "synthetic" },
           queue: { embedMessage: { kind: "embed-message", failed: 0 } },
           lance: { divergence: { rowCountMatches: true, rowCountDelta: 0 } },
         },

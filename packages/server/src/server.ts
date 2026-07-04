@@ -4,7 +4,7 @@ import { DEFAULT_SEARCH_TABLE, LanceDb, MESSAGE_SEARCH_COLUMNS } from "./lancedb
 import { Effect, Layer, Schema } from "effect";
 
 import { LocalServerConfig } from "./config";
-import { embeddingProfileSearchTable } from "./embeddingProfiles";
+import { embeddingProfileSearchTable, embeddingProviderFromEnv } from "./embeddingProfiles";
 import { ingestMappedSession } from "./ingest";
 import { ok } from "./json";
 import { SearchMaintenance } from "./maintenance";
@@ -651,6 +651,7 @@ const maintenanceMaterializeEmbeddingVectors = Effect.gen(function* () {
       activeEmbeddingProfile: embeddings.profile.cacheNamespace,
       byKind: queueByKind,
     },
+    embedding: { provider: embeddingProviderFromEnv(), profile: embeddings.profile },
     lance: { activeVectorTableName, activeVectorTable, divergence },
   }));
 });
