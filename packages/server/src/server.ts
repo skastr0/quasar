@@ -596,6 +596,17 @@ const maintenanceRepair = Effect.gen(function* () {
   return json(ok("maintenance/repair", report));
 });
 
+const maintenanceReplayEmbeddingCache = Effect.gen(function* () {
+  const embeddings = yield* Embeddings;
+  const store = yield* LocalStore;
+  const params = yield* query;
+  const report = yield* embeddings.materializeCachedVectors({
+    limit: positiveInt(params, "limit", 1_000),
+  });
+  const coverage = yield* store.messageVectorCoverage(embeddings.profile.cacheNamespace);
+  return json(ok("maintenance/embeddings/replay-cache", { report, coverage }));
+});
+
 // Minimal self-contained dashboard served at the canonical root URL. No external
 // assets or egress: it calls the same-origin /status and /search/{mode} endpoints.
 const DASHBOARD_HTML = `<!doctype html>
@@ -681,15 +692,19 @@ const routes = HttpRouter.empty.pipe(
   HttpRouter.get("/search/lexical", lexicalSearch),
   HttpRouter.get("/search/semantic", semanticSearch),
   HttpRouter.get("/search/fusion", fusionSearch),
+);
+
+const routesWithMaintenance = routes.pipe(
   HttpRouter.get("/maintenance/run", maintenanceRun),
   HttpRouter.get("/maintenance/freshness", maintenanceFreshness),
   HttpRouter.get("/maintenance/repair", maintenanceRepair),
+  HttpRouter.get("/maintenance/embeddings/replay-cache", maintenanceReplayEmbeddingCache),
   HttpRouter.get("/", dashboard),
   HttpRouter.get("*", json({ ok: false, error: { type: "NotFound", message: "No route" } }, { status: 404 })),
 );
 
 export const makeHttpLayer = (options: { readonly port: number; readonly hostname?: string }) =>
-  routes.pipe(
+  routesWithMaintenance.pipe(
     HttpServer.serve(HttpMiddleware.logger),
     HttpServer.withLogAddress,
     Layer.provide(AppLayer),

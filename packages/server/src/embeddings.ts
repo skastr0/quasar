@@ -3,12 +3,13 @@ import { Database } from "bun:sqlite";
 import { Effect, Layer, Ref, Schedule, Schema } from "effect";
 import { createHash } from "node:crypto";
 
-import { embeddingProfileFromEnv, embeddingProfileSearchTable, type EmbeddingProfile } from "./embeddingProfiles";
+import { embeddingProfileFromEnv, embeddingProfileSearchTable, embeddingProviderFromEnv, type EmbeddingProfile } from "./embeddingProfiles";
 import type { MessageRow, QueueJobRow } from "./model";
 import { ensureParentDir, sqlitePath } from "./paths";
 import { isSemanticSearchDocument } from "./searchPolicy";
 import { DurableQueue, Embeddings, type EmbeddingCacheRow, type EmbeddingReadinessStatus } from "./services";
 import { LocalStore } from "./store";
+import { makeLocalOnnxEmbedder } from "./localOnnxEmbeddings";
 import { makeSyntheticEmbedder, SyntheticEmbeddingError } from "./syntheticEmbeddings";
 
 // Provider prefix of a sessionId (matches search.providerFromSessionId); kept
@@ -88,9 +89,12 @@ const toCacheRow = (row: Record<string, unknown>): EmbeddingCacheRow => ({
   updatedAt: row.updatedAt as string,
 });
 
-const liveEmbedderForProfile = (profile: EmbeddingProfile): Embedder => {
-  return makeSyntheticEmbedder(profile);
-};
+const liveEmbedderForProfile = (profile: EmbeddingProfile): Embedder =>
+  embeddingProviderFromEnv() === "synthetic"
+    ? makeSyntheticEmbedder(profile)
+    : makeLocalOnnxEmbedder(profile, {
+        cacheDir: process.env.QUASAR_EMBEDDING_MODEL_CACHE_DIR?.trim() || undefined,
+      });
 
 const assertVectorDimensions = (operation: string, profile: EmbeddingProfile, vector: readonly number[]): Effect.Effect<void, EmbeddingError> =>
   vector.length === profile.dimensions
@@ -182,17 +186,8 @@ const probeEmbeddingAvailability = (
   embedder: Embedder,
   profile: EmbeddingProfile,
 ): Effect.Effect<EmbeddingReadinessStatus, never> =>
-  Effect.suspend(() => {
-    const apiKey = process.env.SYNTHETIC_API_KEY?.trim();
-    if (apiKey === undefined || apiKey.length === 0) {
-      return Effect.succeed({
-        ok: false,
-        checkedAt: nowIso(),
-        reason: "SYNTHETIC_API_KEY is required for Synthetic embeddings",
-      } satisfies EmbeddingReadinessStatus);
-    }
-
-    return Effect.tryPromise({
+  Effect.suspend(() =>
+    Effect.tryPromise({
       try: async () => {
         const input = prefixed(profile.queryPrefix, readinessProbeText);
         const vectors = await embedder.embedMany([input]);
@@ -214,8 +209,7 @@ const probeEmbeddingAvailability = (
           reason: cause instanceof Error ? cause.message : String(cause),
         } satisfies EmbeddingReadinessStatus),
       ),
-    );
-  });
+    ));
 
 export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer.Layer<Embeddings, never, LocalStore | DurableQueue | LanceDb> => {
   const profile = options.profile ?? embeddingProfileFromEnv();
@@ -302,9 +296,28 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
             vector,
           });
 
+          const toSqliteVectorRow = (message: MessageRow, vector: readonly number[], now?: string) => ({
+            model: profile.cacheNamespace,
+            modality: "text" as const,
+            sessionId: message.sessionId,
+            seq: message.seq,
+            role: message.role,
+            projectKey: message.projectKey,
+            contentHash: message.contentHash,
+            documentHash: documentCacheHash(message),
+            provider: providerForSessionId(message.sessionId),
+            vector,
+            now,
+          });
+
           const documentInputs = (text: string) =>
             chunkText(text, positiveIntEnv("QUASAR_EMBEDDING_DOCUMENT_CHUNK_CHARS", DEFAULT_EMBEDDING_DOCUMENT_CHUNK_CHARS))
               .map((chunk) => prefixed(profile.documentPrefix, chunk));
+
+          const documentCacheHash = (message: Pick<MessageRow, "contentHash" | "text">): string => {
+            const input = prefixed(profile.documentPrefix, message.text);
+            return profile.documentPrefix === undefined ? message.contentHash : contentHashForText(input);
+          };
 
           const embedInputsAdaptive: (inputs: readonly string[]) => Effect.Effect<readonly (readonly number[])[], unknown> = (inputs) =>
             Effect.gen(function* () {
@@ -334,6 +347,35 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                 return yield* Effect.fail(new Error("embedder returned fewer vectors than requested"));
               }
               return averageVectors(vectors);
+            });
+
+          const upsertAllSqliteVectors = (operation: string, rows: readonly ReturnType<typeof toSqliteVectorRow>[]) =>
+            Effect.gen(function* () {
+              if (rows.length === 0) return 0;
+              const accepted = yield* store.upsertMessageVectors(rows);
+              if (accepted !== rows.length) {
+                return yield* Effect.fail(
+                  new EmbeddingError({
+                    operation,
+                    message: `SQLite accepted ${accepted} of ${rows.length} message vector rows; source messages changed during embedding`,
+                  }),
+                );
+              }
+              return accepted;
+            });
+
+          const upsertAllLanceVectors = (operation: string, rows: readonly ReturnType<typeof toVectorRow>[]) =>
+            Effect.gen(function* () {
+              if (rows.length === 0) return;
+              const receipt = yield* search.upsertMessageRows({ rows, tableName, vectorDimension: profile.dimensions });
+              if (!receipt.complete) {
+                return yield* Effect.fail(
+                  new EmbeddingError({
+                    operation,
+                    message: `LanceDB applied ${receipt.applied} of ${receipt.requested} message vector rows in ${receipt.table}; deleted=${receipt.deleted}`,
+                  }),
+                );
+              }
             });
 
           return Embeddings.of({
@@ -373,8 +415,10 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                 let skipped = 0;
                 let retried = 0;
                 let failed = 0;
+                let sqliteVectorsUpserted = 0;
                 const misses: Array<{ job: QueueJobRow; message: MessageRow }> = [];
                 const cachedVectorRows: Array<ReturnType<typeof toVectorRow>> = [];
+                const cachedSqliteRows: Array<ReturnType<typeof toSqliteVectorRow>> = [];
                 const cachedJobIds: string[] = [];
                 const retryOrFail = (job: QueueJobRow, error: string, retryable: boolean) =>
                   job.attempts >= job.maxAttempts
@@ -411,11 +455,10 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                     skipped += 1;
                     continue;
                   }
-                  const input = prefixed(profile.documentPrefix, message.text);
-                  const cacheHash = profile.documentPrefix === undefined ? message.contentHash : contentHashForText(input);
-                  const cached = yield* getCached(cacheHash);
+                  const cached = yield* getCached(documentCacheHash(message));
                   if (cached !== undefined) {
                     cachedVectorRows.push(toVectorRow(message, cached.vector));
+                    cachedSqliteRows.push(toSqliteVectorRow(message, cached.vector, now));
                     cachedJobIds.push(job.jobId);
                     cacheHits += 1;
                     continue;
@@ -425,7 +468,8 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                 }
 
                 if (cachedVectorRows.length > 0) {
-                  yield* search.upsertMessageRows({ rows: cachedVectorRows, tableName, vectorDimension: profile.dimensions });
+                  sqliteVectorsUpserted += yield* upsertAllSqliteVectors("processBatch.cacheHit.upsertMessageVectors", cachedSqliteRows);
+                  yield* upsertAllLanceVectors("processBatch.cacheHit.upsertSearchRows", cachedVectorRows);
                   for (const jobId of cachedJobIds) {
                     yield* queue.ack(jobId, now);
                   }
@@ -484,6 +528,7 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                       }
 
                       const vectorRows = [];
+                      const sqliteRows = [];
                       const ackJobIds = [];
                       for (let index = 0; index < chunk.length; index += 1) {
                         const miss = chunk[index];
@@ -497,16 +542,18 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                         }
                         const input = prefixed(profile.documentPrefix, miss.message.text);
                         const cached = yield* putCached({
-                          contentHash: profile.documentPrefix === undefined ? miss.message.contentHash : contentHashForText(input),
+                          contentHash: documentCacheHash(miss.message),
                           text: input,
                           vector,
                           now,
                         });
                         vectorRows.push(toVectorRow(miss.message, cached.vector));
+                        sqliteRows.push(toSqliteVectorRow(miss.message, cached.vector, now));
                         ackJobIds.push(miss.job.jobId);
                       }
                       if (vectorRows.length > 0) {
-                        yield* search.upsertMessageRows({ rows: vectorRows, tableName, vectorDimension: profile.dimensions });
+                        sqliteVectorsUpserted += yield* upsertAllSqliteVectors("processBatch.cacheMiss.upsertMessageVectors", sqliteRows);
+                        yield* upsertAllLanceVectors("processBatch.cacheMiss.upsertSearchRows", vectorRows);
                       }
                       for (const jobId of ackJobIds) {
                         yield* queue.ack(jobId, now);
@@ -527,7 +574,31 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                   }
                 }
 
-                return { leased: jobs.length, cacheHits, cacheMisses, embedded, skipped, retried, failed };
+                return { leased: jobs.length, cacheHits, cacheMisses, embedded, skipped, retried, failed, sqliteVectorsUpserted };
+              }),
+            materializeCachedVectors: ({ limit = 1_000, now = nowIso() } = {}) =>
+              Effect.gen(function* () {
+                const messages = yield* store.listMessagesMissingVector({ model: profile.cacheNamespace, limit });
+                let cacheHits = 0;
+                let missingCache = 0;
+                const rows = [];
+                for (const message of messages) {
+                  if (!isSemanticSearchDocument(message)) continue;
+                  const cached = yield* getCached(documentCacheHash(message));
+                  if (cached === undefined) {
+                    missingCache += 1;
+                    continue;
+                  }
+                  cacheHits += 1;
+                  rows.push(toSqliteVectorRow(message, cached.vector, now));
+                }
+                const sqliteVectorsUpserted = yield* upsertAllSqliteVectors("materializeCachedVectors.upsertMessageVectors", rows);
+                return {
+                  scanned: messages.length,
+                  cacheHits,
+                  missingCache,
+                  sqliteVectorsUpserted,
+                };
               }),
             status: tryEmbedding("status", () => {
               const cached = (db.query("SELECT COUNT(*) AS count FROM embedding_cache WHERE model = ?").get(profile.cacheNamespace) as { count: number }).count;

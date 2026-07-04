@@ -85,6 +85,14 @@ export interface EmbeddingWorkerReport {
   readonly skipped: number;
   readonly retried: number;
   readonly failed: number;
+  readonly sqliteVectorsUpserted: number;
+}
+
+export interface EmbeddingCacheReplayReport {
+  readonly scanned: number;
+  readonly cacheHits: number;
+  readonly missingCache: number;
+  readonly sqliteVectorsUpserted: number;
 }
 
 export interface EmbeddingService {
@@ -104,6 +112,10 @@ export interface EmbeddingService {
     readonly leaseMs: number;
     readonly now?: string;
   }) => Effect.Effect<EmbeddingWorkerReport, unknown>;
+  readonly materializeCachedVectors: (options?: {
+    readonly limit?: number;
+    readonly now?: string;
+  }) => Effect.Effect<EmbeddingCacheReplayReport, unknown>;
   readonly status: Effect.Effect<EmbeddingServiceStatus, unknown>;
   readonly readiness: Effect.Effect<EmbeddingReadinessStatus, unknown>;
 }
@@ -332,6 +344,7 @@ export const EmbeddingsLive = Layer.succeed(
       getCached: () => Effect.succeed(undefined),
       putCached: () => Effect.fail(new Error("EmbeddingsLive is not configured")),
       processBatch: () => Effect.fail(new Error("EmbeddingsLive is not configured")),
+      materializeCachedVectors: () => Effect.fail(new Error("EmbeddingsLive is not configured")),
       status: Effect.succeed({ cached: 0, pending: 0, profile }),
       readiness: Effect.succeed({ ok: false, checkedAt: nowIso(), reason: "EmbeddingsLive is not configured" }),
     });

@@ -13,6 +13,9 @@ describe("server ops config", () => {
     expect(compose).toContain("QUASAR_HOME: /data/quasar");
     expect(compose).toContain("QUASAR_LOCAL_SQLITE: /data/quasar/quasar.sqlite");
     expect(compose).toContain("QUASAR_SEARCH_DATA_DIR: /data/quasar/search.lance");
+    expect(compose).toContain("QUASAR_EMBEDDING_PROVIDER: ${QUASAR_EMBEDDING_PROVIDER:-local}");
+    expect(compose).toContain("QUASAR_EMBEDDING_MODEL_CACHE_DIR: ${QUASAR_EMBEDDING_MODEL_CACHE_DIR:-/data/quasar/models}");
+    expect(compose).toContain("SYNTHETIC_API_KEY: ${SYNTHETIC_API_KEY:-}");
     expect(dockerfile).toContain('CMD ["bun", "packages/server/src/main.ts"');
     expect(dockerfile).toContain("/health");
     expect(dockerfile).not.toContain("packages/server/src/cli.ts");
