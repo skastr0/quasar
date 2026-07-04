@@ -135,6 +135,7 @@ let report: SqliteFirstProofReport = runSqliteFirstProof({
 });
 
 if (paritySample !== undefined && parityThreshold !== undefined) {
+  Bun.gc(true);
   const localProfile = {
     ...profile,
     cacheNamespace: valueFor(

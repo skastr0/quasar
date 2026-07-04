@@ -1,0 +1,41 @@
+{
+  "generatedAt": "2026-07-04T12:06:11.780Z",
+  "workDb": "/tmp/quasar-sqlite-first-proof-full-20260704082453/sqlite-first-work.sqlite",
+  "input": {
+    "table": "proof_message_vectors",
+    "limit": "all",
+    "samples": 60,
+    "kernel": "usearch",
+    "threads": 1
+  },
+  "exactScan": {
+    "implementation": "usearch-exact-cosine",
+    "kernel": {
+      "package": "usearch",
+      "version": "2.25.3",
+      "metric": "cosine-similarity",
+      "threads": 1
+    },
+    "samples": 60,
+    "rowsScanned": 678249,
+    "elapsedMs": 15638.05,
+    "minMs": 393.4,
+    "medianMs": 1368.09,
+    "p95Ms": 3594.97,
+    "p99Ms": 15638.05,
+    "maxMs": 15638.05,
+    "best": {
+      "score": 0.9999882386418903
+    }
+  },
+  "memoryUsage": {
+    "rss": 2118402048,
+    "heapTotal": 149230592,
+    "heapUsed": 3310027401,
+    "external": 6276715961,
+    "arrayBuffers": 4177432640
+  },
+  "redaction": {
+    "sessionIdentifiers": "omitted from committed proof receipt"
+  }
+}
