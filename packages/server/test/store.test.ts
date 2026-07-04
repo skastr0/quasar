@@ -6,7 +6,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { Effect } from "effect";
 
-import { fts5QueryForText } from "../src/fts5";
+import { fts5QueryForText, ftsProjectScopeToken, ftsProviderScopeToken, ftsRoleScopeToken } from "../src/fts5";
 import type { IngestRunRow, MappedSession } from "../src/model";
 import { LocalStore, makeLocalStoreLayer } from "../src/store";
 import type { LocalStoreService } from "../src/store";
@@ -180,10 +180,18 @@ describe("LocalStore", () => {
 
   test("keeps SQLite FTS lexical rows coherent across insert, update, and delete triggers", async () => {
     const path = sqlitePath();
-    await withStore(path, (store) => store.upsertSession(mappedSession()));
+    // A colon-bearing session id — the real shape every provider adapter
+    // produces via sessionIdFor(provider, native) — so the provider scope
+    // token derives deterministically via the trigger's substr/instr formula.
+    const sessionId = "codex:session-a";
+    await withStore(path, (store) => store.upsertSession(mappedSession({ sessionId })));
+
+    const projectToken = ftsProjectScopeToken("project-a");
+    const userToken = ftsRoleScopeToken("user");
+    const providerToken = ftsProviderScopeToken("codex");
 
     const inserted = await withStore(path, (store) => store.lexicalSearch({ query: "First", limit: 10 }));
-    expect(inserted.map((hit) => hit.row.text)).toEqual(["First message"]);
+    expect(inserted.map((hit) => hit.row.text)).toEqual([`${projectToken} ${userToken} ${providerToken} First message`]);
     expect(inserted.map((hit) => hit.row.contentHash)).toEqual(["unembedded:hash-1"]);
 
     const hostile = await withStore(path, (store) =>
@@ -193,7 +201,7 @@ describe("LocalStore", () => {
 
     const rowidSkewDb = new Database(path);
     try {
-      rowidSkewDb.prepare("UPDATE messages_fts SET rowid = rowid + 1000 WHERE key = ?").run("session-a:1:user");
+      rowidSkewDb.prepare("UPDATE messages_fts SET rowid = rowid + 1000 WHERE key = ?").run(`${sessionId}:1:user`);
     } finally {
       rowidSkewDb.close();
     }
@@ -203,7 +211,7 @@ describe("LocalStore", () => {
       db.prepare("UPDATE messages SET text = ?, content_hash = ? WHERE session_id = ? AND seq = ?").run(
         "Updated trigger keyword",
         "hash-updated",
-        "session-a",
+        sessionId,
         1,
       );
     } finally {
@@ -218,19 +226,183 @@ describe("LocalStore", () => {
           store.lexicalSearch({ query: "First", limit: 10 }),
         ]),
     );
-    expect(afterUpdate.map((hit) => hit.row.text)).toEqual(["Updated trigger keyword"]);
+    expect(afterUpdate.map((hit) => hit.row.text)).toEqual([`${projectToken} ${userToken} ${providerToken} Updated trigger keyword`]);
     expect(afterUpdate.map((hit) => hit.row.contentHash)).toEqual(["unembedded:hash-updated"]);
     expect(oldText).toEqual([]);
 
     const deleteDb = new Database(path);
     try {
-      deleteDb.prepare("DELETE FROM messages WHERE session_id = ? AND seq = ?").run("session-a", 1);
+      deleteDb.prepare("DELETE FROM messages WHERE session_id = ? AND seq = ?").run(sessionId, 1);
     } finally {
       deleteDb.close();
     }
 
     const afterDelete = await withStore(path, (store) => store.lexicalSearch({ query: "Updated", limit: 10 }));
     expect(afterDelete).toEqual([]);
+  });
+
+  test("QSR: fresh DB migration lands PRAGMA user_version 1 with scope-token-prefixed FTS text", async () => {
+    const path = sqlitePath();
+    const sessionId = "codex:session-scope";
+
+    await withStore(path, (store) =>
+      store.upsertSession(mappedSession({ sessionId, projectKey: "project-scope" })),
+    );
+
+    const db = new Database(path);
+    try {
+      const { user_version: userVersion } = db.query("PRAGMA user_version").get() as { user_version: number };
+      expect(userVersion).toBe(1);
+
+      const messageRow = db
+        .query("SELECT project_scope_token AS token FROM messages WHERE session_id = ? AND seq = 1")
+        .get(sessionId) as { token: string } | null;
+      expect(messageRow?.token).toBe(ftsProjectScopeToken("project-scope"));
+
+      const ftsRow = db
+        .query("SELECT text FROM messages_fts WHERE key = ?")
+        .get(`${sessionId}:1:user`) as { text: string } | null;
+      expect(ftsRow?.text).toBe(
+        `${ftsProjectScopeToken("project-scope")} ${ftsRoleScopeToken("user")} ${ftsProviderScopeToken("codex")} First message`,
+      );
+    } finally {
+      db.close();
+    }
+  });
+
+  test("QSR: migrates an old-shape (pre-scope-token) DB — backfills every row and rebuilds FTS with row-count parity", async () => {
+    const path = sqlitePath();
+    const sessionId = "codex:session-old";
+
+    // Reproduce the pre-migration on-disk shape directly: base tables as
+    // before, messages_fts seeded with OLD-style (un-tokenized) content, and
+    // no project_scope_token column — i.e. PRAGMA user_version defaults to 0.
+    const seedDb = new Database(path, { create: true });
+    try {
+      seedDb.exec(`
+        PRAGMA journal_mode = WAL;
+        CREATE TABLE projects (project_key TEXT PRIMARY KEY, display_name TEXT NOT NULL, raw_path TEXT);
+        CREATE TABLE sessions (
+          session_id TEXT PRIMARY KEY, project_key TEXT NOT NULL, provider TEXT NOT NULL, agent_name TEXT NOT NULL,
+          title TEXT, started_at TEXT, updated_at TEXT, source_path TEXT NOT NULL, source_fingerprint TEXT NOT NULL,
+          host TEXT NOT NULL DEFAULT '', identity_scheme_version INTEGER NOT NULL DEFAULT 0, parent_session_id TEXT,
+          message_count INTEGER NOT NULL, tool_call_count INTEGER NOT NULL
+        );
+        CREATE TABLE messages (
+          session_id TEXT NOT NULL, seq INTEGER NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL, ts TEXT,
+          project_key TEXT NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY (session_id, seq)
+        );
+        CREATE VIRTUAL TABLE messages_fts USING fts5(
+          text, key UNINDEXED, session_id UNINDEXED, seq UNINDEXED, role UNINDEXED,
+          project_key UNINDEXED, provider UNINDEXED, content_hash UNINDEXED, tokenize = 'unicode61'
+        );
+      `);
+      seedDb.prepare("INSERT INTO projects(project_key, display_name, raw_path) VALUES (?, ?, ?)").run(
+        "project-old",
+        "Project Old",
+        null,
+      );
+      seedDb
+        .prepare(
+          `INSERT INTO sessions(session_id, project_key, provider, agent_name, title, started_at, updated_at, source_path, source_fingerprint, message_count, tool_call_count)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          sessionId,
+          "project-old",
+          "codex",
+          "codex",
+          "Old session",
+          "2026-01-01T00:00:00.000Z",
+          "2026-01-01T00:01:00.000Z",
+          "/hist/old.jsonl",
+          "fp-old",
+          2,
+          0,
+        );
+      const insertOldMessage = seedDb.prepare(
+        "INSERT INTO messages(session_id, seq, role, text, ts, project_key, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      );
+      insertOldMessage.run(sessionId, 1, "user", "Old first message", "2026-01-01T00:00:30.000Z", "project-old", "hash-old-1");
+      insertOldMessage.run(sessionId, 2, "assistant", "Old second message", "2026-01-01T00:00:45.000Z", "project-old", "hash-old-2");
+      const insertOldFts = seedDb.prepare(
+        "INSERT INTO messages_fts(text, key, session_id, seq, role, project_key, provider, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      );
+      insertOldFts.run("Old first message", `${sessionId}:1:user`, sessionId, 1, "user", "project-old", "codex", "unembedded:hash-old-1");
+      insertOldFts.run("Old second message", `${sessionId}:2:assistant`, sessionId, 2, "assistant", "project-old", "codex", "unembedded:hash-old-2");
+    } finally {
+      seedDb.close();
+    }
+
+    // Opening the store runs migrate(), which must carry the old-shape DB
+    // through the full one-time migration.
+    await withStore(path, (store) => store.stats);
+
+    const db = new Database(path);
+    try {
+      const { user_version: userVersion } = db.query("PRAGMA user_version").get() as { user_version: number };
+      expect(userVersion).toBe(1);
+
+      const messageTokens = db
+        .query("SELECT project_scope_token AS token FROM messages ORDER BY seq ASC")
+        .all() as Array<{ token: string | null }>;
+      expect(messageTokens).toHaveLength(2);
+      expect(messageTokens.every((row) => row.token === ftsProjectScopeToken("project-old"))).toBe(true);
+
+      const searchableMessageCount = (
+        db
+          .query("SELECT COUNT(*) AS count FROM messages WHERE role IN ('user', 'assistant', 'reasoning')")
+          .get() as { count: number }
+      ).count;
+      const ftsRowCount = (db.query("SELECT COUNT(*) AS count FROM messages_fts").get() as { count: number }).count;
+      expect(ftsRowCount).toBe(searchableMessageCount);
+
+      const ftsRows = db.query("SELECT text FROM messages_fts ORDER BY seq ASC").all() as Array<{ text: string }>;
+      const projectToken = ftsProjectScopeToken("project-old");
+      const providerToken = ftsProviderScopeToken("codex");
+      expect(ftsRows.map((row) => row.text)).toEqual([
+        `${projectToken} ${ftsRoleScopeToken("user")} ${providerToken} Old first message`,
+        `${projectToken} ${ftsRoleScopeToken("assistant")} ${providerToken} Old second message`,
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("QSR: a hostile projectKey round-trips into a clean scope token without corrupting FTS text", async () => {
+    const path = sqlitePath();
+    const hostileProjectKey = `weird "project"; DROP TABLE messages;-- éè 'quote'`;
+    const sessionId = "codex:session-hostile";
+
+    await withStore(path, (store) =>
+      store.upsertSession(mappedSession({ sessionId, projectKey: hostileProjectKey })),
+    );
+
+    const expectedToken = ftsProjectScopeToken(hostileProjectKey);
+    expect(expectedToken).toMatch(/^p[0-9a-f]{40}$/);
+
+    const db = new Database(path);
+    try {
+      const messageRows = db
+        .query("SELECT project_scope_token AS token FROM messages WHERE session_id = ?")
+        .all(sessionId) as Array<{ token: string }>;
+      expect(messageRows.length).toBeGreaterThan(0);
+      expect(messageRows.every((row) => row.token === expectedToken)).toBe(true);
+
+      const ftsRow = db
+        .query("SELECT text FROM messages_fts WHERE key = ?")
+        .get(`${sessionId}:1:user`) as { text: string } | null;
+      expect(ftsRow?.text).toBe(`${expectedToken} ${ftsRoleScopeToken("user")} ${ftsProviderScopeToken("codex")} First message`);
+    } finally {
+      db.close();
+    }
+
+    const hits = await withStore(path, (store) =>
+      store.lexicalSearch({ query: "First", limit: 10, projectKey: hostileProjectKey }),
+    );
+    expect(hits.map((hit) => hit.row.text)).toEqual([
+      `${expectedToken} ${ftsRoleScopeToken("user")} ${ftsProviderScopeToken("codex")} First message`,
+    ]);
   });
 
   test("round-trips host and identity scheme version provenance on read", async () => {
