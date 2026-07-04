@@ -117,6 +117,18 @@ export interface EmbeddingMaterializationReport {
   readonly elapsedMs: number;
 }
 
+export interface EmbeddingSqliteMaterializationReport {
+  readonly scanned: number;
+  readonly cacheHits: number;
+  readonly cacheMisses: number;
+  readonly embedded: number;
+  readonly skipped: number;
+  readonly sqliteVectorsUpserted: number;
+  readonly startedAt: string;
+  readonly finishedAt: string;
+  readonly elapsedMs: number;
+}
+
 export interface EmbeddingService {
   readonly model: string;
   readonly profile: EmbeddingProfile;
@@ -143,6 +155,10 @@ export interface EmbeddingService {
     readonly lanceOffset?: number;
     readonly now?: string;
   }) => Effect.Effect<EmbeddingMaterializationReport, unknown>;
+  readonly materializeMissingVectorsToSqlite: (options?: {
+    readonly limit?: number;
+    readonly now?: string;
+  }) => Effect.Effect<EmbeddingSqliteMaterializationReport, unknown>;
   readonly status: Effect.Effect<EmbeddingServiceStatus, unknown>;
   readonly readiness: Effect.Effect<EmbeddingReadinessStatus, unknown>;
 }
@@ -397,6 +413,7 @@ export const EmbeddingsLive = Layer.succeed(
       processBatch: () => Effect.fail(new Error("EmbeddingsLive is not configured")),
       materializeCachedVectors: () => Effect.fail(new Error("EmbeddingsLive is not configured")),
       materializeMissingVectors: () => Effect.fail(new Error("EmbeddingsLive is not configured")),
+      materializeMissingVectorsToSqlite: () => Effect.fail(new Error("EmbeddingsLive is not configured")),
       status: Effect.succeed({ cached: 0, pending: 0, profile }),
       readiness: Effect.succeed({ ok: false, checkedAt: nowIso(), reason: "EmbeddingsLive is not configured" }),
     });

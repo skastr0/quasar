@@ -213,6 +213,61 @@ describe("materialize-embedding-vectors CLI", () => {
     }
   });
 
+  test("sqlite-only materialization command calls the SQLite-only endpoint", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url);
+        expect(url.pathname).toBe("/maintenance/embeddings/materialize-sqlite");
+        expect(url.searchParams.get("limit")).toBe("25");
+        return Response.json({
+          ok: true,
+          command: "maintenance/embeddings/materialize-sqlite",
+          data: {
+            report: {
+              scanned: 2,
+              cacheHits: 1,
+              cacheMisses: 1,
+              embedded: 1,
+              skipped: 0,
+              sqliteVectorsUpserted: 2,
+            },
+            coverage: { vectorlessMessages: 0, vectorRows: 2 },
+          },
+        });
+      },
+    });
+
+    try {
+      const proc = Bun.spawn([
+        "bun",
+        "run",
+        "src/cli.ts",
+        "materialize-sqlite-embedding-vectors",
+        "--server",
+        `http://127.0.0.1:${server.port}`,
+        "--limit",
+        "25",
+      ], {
+        cwd: join(import.meta.dir, ".."),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      expect(exitCode).toBe(0);
+      expect(stderr).toBe("");
+      const body = JSON.parse(stdout);
+      expect(body.command).toBe("maintenance/embeddings/materialize-sqlite");
+      expect(body.data.report.sqliteVectorsUpserted).toBe(2);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("server materialize wrapper rejects synthetic receipts when local is required", async () => {
     const dir = tempDir();
     const outPath = join(dir, "receipt.json");
