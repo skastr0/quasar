@@ -272,6 +272,26 @@ baseline. Accept the native scan only when the target-container report records
 `exactScan.kernel.package == "usearch"` and the import/exact-search smoke for the
 same image succeeds.
 
+## Staged Local Materialization Proof
+
+Before running materialization against the live server, run the same closure loop
+against a SQLite snapshot and a temporary LanceDB directory:
+
+```bash
+bun run proof:materialize-staging --source-db /path/to/quasar.sqlite \
+  --out docs/proofs/materialize-staging-proof.json \
+  --limit 1000 \
+  --max-batches 100000
+```
+
+This command requires an explicit `--source-db`. It snapshots that database with
+`VACUUM INTO`, starts the real Effect server on the copied SQLite file with
+`QUASAR_EMBEDDING_PROVIDER=local`, runs
+`materialize-embedding-vectors --until-empty --require-provider local`, and writes
+a wrapped receipt that includes the normal materialization closure gates plus the
+staging `workDb` and `searchDir`. The source database is opened read-only and is
+never used as the running server database.
+
 ## Ingesting from another Tailscale machine
 
 Install the released CLI on the other machine, point it at the `svc:quasar`
