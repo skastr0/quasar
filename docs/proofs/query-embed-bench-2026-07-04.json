@@ -1,0 +1,26 @@
+{
+  "generatedAt": "2026-07-04T23:05:40.124Z",
+  "script": "scripts/query-embed-bench.ts",
+  "model": "hf:nomic-ai/nomic-embed-text-v1.5",
+  "dimensions": 768,
+  "dtype": "fp32",
+  "cacheDir": null,
+  "gates": {
+    "pipelineLoad": {
+      "limitMs": 120000,
+      "loadMs": 31907,
+      "pass": true
+    },
+    "embedLatency": {
+      "limitP50Ms": 150,
+      "limitP95Ms": 300,
+      "samples": 20,
+      "minMs": 33.65,
+      "p50Ms": 37.47,
+      "p95Ms": 47.77,
+      "maxMs": 59.32,
+      "pass": true
+    }
+  },
+  "pass": true
+}
