@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, test } from "bun:test";
@@ -50,10 +51,16 @@ describe("server ops config", () => {
     expect(ops).toContain("quasar-server_quasar-data");
     expect(ops).toContain("type=volume,source=");
     expect(ops).toContain("target=/source,readonly");
+    expect(ops).toContain('optionValue("--staging-dir")');
+    expect(ops).toContain("target=/staging");
+    expect(ops).toContain("TMPDIR=/staging");
+    expect(ops).toContain("validateExternalStagingParent");
     expect(ops).toContain("mkdtempSync(join(tmpdir(), \"quasar-materialize-staging-proof-out-\")");
     expect(ops).toContain("copyFileSync(join(proofDir, outFile), outPath)");
+    expect(ops).toContain("copiedReceipt");
+    expect(ops).toContain("dockerResult(dockerRunArgs");
     expect(ops).not.toContain('optionValue("--image"');
-    expect(ops).toContain('if (command !== "materialize")');
+    expect(ops).toContain('if (command !== "materialize" && command !== "materialize-staging")');
     expect(ops).toContain('optionValue("--require-provider", "local")');
     expect(ops).toContain("--require-provider");
     expect(ops).toContain("materialization-closure-");
@@ -69,7 +76,82 @@ describe("server ops config", () => {
     expect(runbook).toContain("proof:materialize-staging --source-db");
     expect(runbook).toContain("server:materialize-staging --out");
     expect(runbook).toContain("quasar-server_quasar-data");
+    expect(runbook).toContain("--staging-dir /Volumes/large/quasar-staging");
+    expect(runbook).toContain("TMPDIR=/staging");
     expect(runbook).toContain("QUASAR_EMBEDDING_PROVIDER=local");
+  });
+
+  test("materialize staging rejects missing external staging directories before docker", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "quasar-server-ops-staging-dir-"));
+    try {
+      const missing = join(dir, "missing");
+      const proc = Bun.spawn([
+        "bun",
+        "scripts/server-ops.mjs",
+        "materialize-staging",
+        "--staging-dir",
+        missing,
+        "--out",
+        join(dir, "proof.json"),
+      ], {
+        cwd: repoRoot,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+
+      expect(exitCode).toBe(2);
+      expect(stderr).toBe("");
+      expect(JSON.parse(stdout)).toMatchObject({
+        ok: false,
+        error: `--staging-dir does not exist: ${missing}`,
+      });
+      expect(existsSync(join(dir, "proof.json"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("materialize staging rejects non-directory staging paths before docker", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "quasar-server-ops-staging-file-"));
+    try {
+      const filePath = join(dir, "staging-file");
+      writeFileSync(filePath, "not a directory");
+      const proc = Bun.spawn([
+        "bun",
+        "scripts/server-ops.mjs",
+        "materialize-staging",
+        "--staging-dir",
+        filePath,
+        "--out",
+        join(dir, "proof.json"),
+      ], {
+        cwd: repoRoot,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+
+      expect(exitCode).toBe(2);
+      expect(stderr).toBe("");
+      expect(JSON.parse(stdout)).toMatchObject({
+        ok: false,
+        error: `--staging-dir is not a directory: ${filePath}`,
+      });
+      expect(existsSync(join(dir, "proof.json"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("server-side history ingestion paths are removed", () => {

@@ -307,6 +307,23 @@ Docker volume read-only at `/source`, runs the same staging proof against
 to the host. It does not recreate the live service and does not use the live
 SQLite file as the running server database.
 
+If Docker's writable layer does not have enough free space for the staged SQLite
+copy plus derived LanceDB output, provide an existing directory on a larger
+volume:
+
+```bash
+mkdir -p /Volumes/large/quasar-staging
+bun run server:materialize-staging --out docs/proofs/materialize-staging-docker.json \
+  --staging-dir /Volumes/large/quasar-staging \
+  --limit 1000 \
+  --max-batches 100000
+```
+
+The wrapper creates a fresh child directory under `--staging-dir`, bind-mounts
+only that child at `/staging`, sets `TMPDIR=/staging` for the proof process, and
+removes the staging child on successful closure. If the proof fails, the staging
+child remains for inspection.
+
 ## Ingesting from another Tailscale machine
 
 Install the released CLI on the other machine, point it at the `svc:quasar`
