@@ -67,6 +67,28 @@ export interface MessageVectorCoverage {
   readonly staleVectorRows: number;
 }
 
+/** Raw f16 vector blob row for the resident-matrix boot loader (no decode). */
+export interface MessageVectorBlobRow {
+  readonly sessionId: string;
+  readonly seq: number;
+  readonly dimensions: number;
+  readonly encoding: string;
+  readonly vectorBlob: Uint8Array;
+}
+
+export interface MessageVectorKey {
+  readonly sessionId: string;
+  readonly seq: number;
+}
+
+/** Fired after every successful message-vector write transaction with the
+ * rows sqlite actually accepted, plus a fresh per-model row count so the
+ * resident matrix can check watermark parity without owning SQL. */
+export interface MessageVectorWriteEvent {
+  readonly rows: readonly MessageVectorUpsert[];
+  readonly sqliteRowsByModel: Readonly<Record<string, number>>;
+}
+
 export interface SearchHit {
   readonly key: string;
   readonly score: number;
@@ -126,6 +148,27 @@ export interface LocalStoreService {
     readonly offset?: number;
   }) => Effect.Effect<readonly MessageVectorSearchRow[], SqliteStoreError>;
   readonly messageVectorCoverage: (model: string) => Effect.Effect<MessageVectorCoverage, SqliteStoreError>;
+  readonly countMessageVectors: (model: string) => Effect.Effect<number, SqliteStoreError>;
+  readonly listMessageVectorBlobsPage: (options: {
+    readonly model: string;
+    readonly afterSessionId?: string;
+    readonly afterSeq?: number;
+    readonly limit: number;
+  }) => Effect.Effect<readonly MessageVectorBlobRow[], SqliteStoreError>;
+  readonly listMessageVectorKeys: (options: {
+    readonly model: string;
+    readonly projectKey?: string;
+    readonly providers?: readonly string[];
+    readonly role?: string;
+  }) => Effect.Effect<readonly MessageVectorKey[], SqliteStoreError>;
+  readonly getMessagesBySessionSeq: (
+    pairs: readonly MessageVectorKey[],
+  ) => Effect.Effect<readonly MessageRow[], SqliteStoreError>;
+  /** Register THE (single, canonical) vector-write listener. Listener failures
+   * are contained: they log a named diagnostic and never fail the write. */
+  readonly registerMessageVectorWriteListener: (
+    listener: (event: MessageVectorWriteEvent) => void,
+  ) => void;
   readonly lexicalSearch: (request: {
     readonly query: string;
     readonly projectKey?: string;
@@ -624,7 +667,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
            ON CONFLICT(model, session_id, seq) DO UPDATE SET modality = excluded.modality, role = excluded.role, project_key = excluded.project_key, provider = excluded.provider, content_hash = excluded.content_hash, document_hash = excluded.document_hash, dimensions = excluded.dimensions, encoding = excluded.encoding, vector_blob = excluded.vector_blob, updated_at = excluded.updated_at`,
         );
         const replaceMessageVectors = db.transaction((rows: readonly MessageVectorUpsert[]) => {
-          let accepted = 0;
+          const acceptedRows: MessageVectorUpsert[] = [];
           for (const row of rows) {
             const at = row.now ?? new Date().toISOString();
             const existing = selectMessageVectorCreated.get(row.model, row.sessionId, row.seq) as { createdAt: string } | null;
@@ -644,10 +687,32 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               $createdAt: existing?.createdAt ?? at,
               $updatedAt: at,
             });
-            accepted += result.changes > 0 ? 1 : 0;
+            if (result.changes > 0) acceptedRows.push(row);
           }
-          return accepted;
+          return acceptedRows;
         });
+        const countMessageVectorsForModel = db.prepare(
+          "SELECT COUNT(*) AS count FROM message_vectors WHERE model = ?",
+        );
+        let messageVectorWriteListener: ((event: MessageVectorWriteEvent) => void) | undefined;
+        const notifyMessageVectorWrite = (acceptedRows: readonly MessageVectorUpsert[]): void => {
+          if (messageVectorWriteListener === undefined || acceptedRows.length === 0) return;
+          const sqliteRowsByModel: Record<string, number> = {};
+          for (const row of acceptedRows) {
+            if (sqliteRowsByModel[row.model] === undefined) {
+              sqliteRowsByModel[row.model] = (countMessageVectorsForModel.get(row.model) as { count: number }).count;
+            }
+          }
+          try {
+            messageVectorWriteListener({ rows: acceptedRows, sqliteRowsByModel });
+          } catch (cause) {
+            console.error(JSON.stringify({
+              event: "store.message_vector_write_listener_failed",
+              at: new Date().toISOString(),
+              diagnostic: cause instanceof Error ? cause.message : String(cause),
+            }));
+          }
+        };
         const replaceSession = db.transaction((mapped: MappedSession) => {
           upsertProject.run({
             $projectKey: mapped.project.projectKey,
@@ -822,7 +887,11 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
             ingestRuns: count(db, "ingest_runs"),
           })),
           upsertMessageVectors: (rows) =>
-            trySqlite("upsertMessageVectors", () => replaceMessageVectors(rows)),
+            trySqlite("upsertMessageVectors", () => {
+              const acceptedRows = replaceMessageVectors(rows);
+              notifyMessageVectorWrite(acceptedRows);
+              return acceptedRows.length;
+            }),
           listMessagesMissingVector: ({ model, limit }) =>
             trySqlite("listMessagesMissingVector", () =>
               db
@@ -1029,6 +1098,76 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                 staleVectorRows: stale.count,
               };
             }),
+          countMessageVectors: (model) =>
+            trySqlite("countMessageVectors", () =>
+              (countMessageVectorsForModel.get(model) as { count: number }).count,
+            ),
+          listMessageVectorBlobsPage: ({ model, afterSessionId, afterSeq, limit }) =>
+            trySqlite("listMessageVectorBlobsPage", () => {
+              // Keyset pagination over the (model, session_id, seq) primary key:
+              // the resident-matrix loader streams the whole model partition in
+              // stable (session_id, seq) order without OFFSET rescans.
+              const pageLimit = positiveInt(limit, 8_192);
+              const rows = afterSessionId === undefined
+                ? db
+                  .query(
+                    `SELECT session_id AS sessionId, seq, dimensions, encoding, vector_blob AS vectorBlob
+                     FROM message_vectors
+                     WHERE model = ?
+                     ORDER BY session_id ASC, seq ASC
+                     LIMIT ?`,
+                  )
+                  .all(model, pageLimit)
+                : db
+                  .query(
+                    `SELECT session_id AS sessionId, seq, dimensions, encoding, vector_blob AS vectorBlob
+                     FROM message_vectors
+                     WHERE model = ? AND (session_id, seq) > (?, ?)
+                     ORDER BY session_id ASC, seq ASC
+                     LIMIT ?`,
+                  )
+                  .all(model, afterSessionId, afterSeq ?? -1, pageLimit);
+              return rows as MessageVectorBlobRow[];
+            }),
+          listMessageVectorKeys: ({ model, projectKey, providers, role }) =>
+            trySqlite("listMessageVectorKeys", () => {
+              const filters = ["model = ?"];
+              const args: Array<string | number> = [model];
+              if (projectKey !== undefined) {
+                filters.push("project_key = ?");
+                args.push(projectKey);
+              }
+              if (providers !== undefined && providers.length > 0) {
+                filters.push(`provider IN (${providers.map(() => "?").join(", ")})`);
+                args.push(...providers);
+              }
+              if (role !== undefined) {
+                filters.push("role = ?");
+                args.push(role);
+              }
+              return db
+                .query(
+                  `SELECT session_id AS sessionId, seq FROM message_vectors
+                   WHERE ${filters.join(" AND ")}
+                   ORDER BY session_id ASC, seq ASC`,
+                )
+                .all(...args) as MessageVectorKey[];
+            }),
+          getMessagesBySessionSeq: (pairs) =>
+            trySqlite("getMessagesBySessionSeq", () => {
+              const selectMessage = db.prepare(
+                "SELECT session_id AS sessionId, seq, role, text, ts, project_key AS projectKey, content_hash AS contentHash FROM messages WHERE session_id = ? AND seq = ?",
+              );
+              const rows: MessageRow[] = [];
+              for (const pair of pairs) {
+                const row = selectMessage.get(pair.sessionId, pair.seq) as MessageRow | null;
+                if (row !== null) rows.push(row);
+              }
+              return rows;
+            }),
+          registerMessageVectorWriteListener: (listener) => {
+            messageVectorWriteListener = listener;
+          },
           lexicalSearch: ({ query, projectKey, role, providers, limit }) =>
             trySqlite("lexicalSearch", () => {
               // The single-provider case narrows the MATCH itself via the
