@@ -388,6 +388,9 @@ interface SearchReceipt {
   readonly matches: number;
   readonly tableName?: string;
   readonly embedMs?: number;
+  /** True only for search/fusion when the semantic leg failed and the route
+   * degraded to lexical-only rather than 503ing the whole request. */
+  readonly degraded?: boolean;
 }
 
 const searchProfileEnabled = (): boolean => process.env.QUASAR_SEARCH_PROFILE === "1";
@@ -616,31 +619,45 @@ const fusionSearch = Effect.gen(function* () {
   const providers = parseProviders(params);
   const search = yield* DerivedSearch;
   const searchStarted = performance.now();
-  const lexicalHits = yield* search.lexicalSearch({ query: text, projectKey, role, providers, limit: pool });
-  const semanticOutcome = yield* runSemanticQuery({
-    text,
-    limit: pool,
-    model: matrixStatus.model,
-    projectKey,
-    role,
-    providers,
-  }).pipe(Effect.either);
+  // Both legs run concurrently: the semantic leg (embed + matrix scan) is the
+  // slow one, and lexical never needs to wait on it. The semantic leg is
+  // wrapped in Effect.either so a fully-unavailable embedder degrades this
+  // route to lexical-only rather than discarding lexical work already done.
+  const [lexicalHits, semanticOutcome] = yield* Effect.all(
+    [
+      search.lexicalSearch({ query: text, projectKey, role, providers, limit: pool }),
+      runSemanticQuery({
+        text,
+        limit: pool,
+        model: matrixStatus.model,
+        projectKey,
+        role,
+        providers,
+      }).pipe(Effect.either),
+    ],
+    { concurrency: "unbounded" },
+  );
+  let semanticMatches: readonly SearchHit[] = [];
+  let embedMs: number | undefined;
+  let degradedReason: string | undefined;
   if (semanticOutcome._tag === "Left") {
     const failure = semanticOutcome.left;
-    if (typeof failure === "object" && failure !== null && (failure as { _tag?: string })._tag === "VectorMatrixDisabledError") {
-      return semanticDisabled("search/fusion");
-    }
     if (typeof failure === "object" && failure !== null && (failure as { _tag?: string })._tag === "VectorMatrixError") {
       return yield* Effect.fail(failure);
     }
-    return embeddingUnavailable(
-      "search/fusion",
-      failure instanceof Error ? failure.message : String(failure),
-    );
+    // Embedder unavailable (or the matrix went disabled mid-request, which
+    // never happens once enabled): fusion never 503s for this — it degrades
+    // to the lexical hits already computed. /search/semantic keeps its own
+    // 503 for the same failure; fusion has a lexical leg to fall back to.
+    degradedReason = failure instanceof Error ? failure.message : String(failure);
+  } else {
+    semanticMatches = semanticOutcome.right.matches;
+    embedMs = semanticOutcome.right.embedMs;
   }
-  const matches = fuseByReciprocalRank(lexicalHits, semanticOutcome.right.matches, limit);
+  const matches = fuseByReciprocalRank(lexicalHits, semanticMatches, limit);
   const searchMs = Math.round(performance.now() - searchStarted);
   const totalMs = Math.round(performance.now() - routeStarted);
+  const degraded = degradedReason !== undefined;
   const receipt: SearchReceipt = {
     route: "search/fusion",
     mode: "fusion",
@@ -654,10 +671,18 @@ const fusionSearch = Effect.gen(function* () {
     totalMs,
     residualMs: Math.max(0, totalMs - searchMs),
     matches: matches.length,
-    embedMs: semanticOutcome.right.embedMs,
+    embedMs,
+    degraded: degraded || undefined,
   };
   yield* emitSearchProfile(receipt);
-  return json(ok("search/fusion", { matches, receipt: searchProfileEnabled() ? receipt : undefined }));
+  return json(
+    ok("search/fusion", {
+      matches,
+      degraded: degraded || undefined,
+      degradedReason,
+      receipt: searchProfileEnabled() ? receipt : undefined,
+    }),
+  );
 });
 
 const booleanParam = (params: URLSearchParams, name: string, fallback: boolean): boolean => {
