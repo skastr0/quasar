@@ -31,6 +31,7 @@ describe("server ops config", () => {
     expect(pkg).toContain("server:lance");
     expect(pkg).toContain("server:backup");
     expect(pkg).toContain("server:materialize");
+    expect(pkg).toContain("proof:materialize-staging");
     expect(pkg).toContain("server:ready");
     expect(pkg).toContain("server:health");
     expect(ops).toContain("case \"maintain\"");
@@ -55,6 +56,9 @@ describe("server ops config", () => {
     expect(runbook).toContain("bun run server:lance");
     expect(runbook).toContain("does **not** archive `search.lance` by default");
     expect(runbook).toContain("embedding.provider = local");
+    expect(runbook).toContain("Staged Local Materialization Proof");
+    expect(runbook).toContain("proof:materialize-staging --source-db");
+    expect(runbook).toContain("QUASAR_EMBEDDING_PROVIDER=local");
   });
 
   test("server-side history ingestion paths are removed", () => {
