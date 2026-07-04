@@ -244,11 +244,12 @@ describe("CLI HTTP client <-> server contract", () => {
     const port = randomPort();
     const token = "contract-ingest-token";
     const base = `http://127.0.0.1:${port}`;
-    const proc = spawnServer(sqlite, port, token, {
+    const searchEnv = {
       QUASAR_SEARCH_PROFILE: "1",
       QUASAR_EMBEDDING_PROVIDER: "synthetic",
       SYNTHETIC_API_KEY: "",
-    });
+    };
+    let proc = spawnServer(sqlite, port, token, searchEnv);
 
     try {
       await waitFor(`${base}/health`);
@@ -401,6 +402,9 @@ describe("CLI HTTP client <-> server contract", () => {
         error: { type: "BadRequest", message: "q is required" },
       });
 
+      // Empty-boot degrade mode: this process booted with ZERO vector rows, and
+      // appends/materialization never resurrect an empty-boot matrix
+      // mid-process, so semantic surfaces stay an honest fast 503 until reboot.
       const ready = await fetchJson(`${base}/ready`);
       expect(ready.status).toBe(200);
       expect(ready.body).toMatchObject({
@@ -412,7 +416,6 @@ describe("CLI HTTP client <-> server contract", () => {
         },
       });
 
-      // Semantic surfaces are honestly disabled: fast 503, no probing, no gate.
       const semantic = await fetchJson(`${base}/search/semantic?q=${encodeURIComponent("handshake")}&limit=5`);
       expect(semantic.status).toBe(503);
       expect(semantic.body).toEqual({
@@ -433,9 +436,115 @@ describe("CLI HTTP client <-> server contract", () => {
           message: "semantic search disabled pending vector materialization (QSR-232)",
         },
       });
+
+      // --- RE-ENABLED contract (QSR-232 cutover): vectors exist in
+      // message_vectors, so the next boot loads the resident matrix and
+      // semantic/fusion serve 200 + matches. Seed the QUERY vector in the
+      // embedding cache first: embedText is cache-first over
+      // sha256(queryPrefix + text), so no external embedder is touched.
+      const queryDocumentText = "search_query: handshake";
+      const queryDb = new Database(sqlite);
+      try {
+        queryDb.prepare(
+          `INSERT INTO embedding_cache(model, content_hash, dimensions, text_bytes, vector_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          cacheNamespace,
+          sha256(queryDocumentText),
+          768,
+          new TextEncoder().encode(queryDocumentText).byteLength,
+          // Same direction as the first document vector: cosine 1.0 against
+          // "contract handshake over http", 0.0 against the assistant reply.
+          JSON.stringify(Array.from({ length: 768 }, (_, index) => index === 0 ? 1 : 0)),
+          "2026-06-18T10:00:00.000Z",
+          "2026-06-18T10:00:00.000Z",
+        );
+      } finally {
+        queryDb.close();
+      }
+
+      proc.kill();
+      await proc.exited;
+      const rebootPort = randomPort();
+      const rebootBase = `http://127.0.0.1:${rebootPort}`;
+      proc = spawnServer(sqlite, rebootPort, token, searchEnv);
+      await waitFor(`${rebootBase}/health`);
+
+      // The matrix boot load is forked; poll /ready until semantic flips true.
+      const deadline = Date.now() + 10_000;
+      let readyOn = await fetchJson(`${rebootBase}/ready`);
+      while (readyOn.body?.data?.modes?.semantic !== true && Date.now() < deadline) {
+        await Bun.sleep(100);
+        readyOn = await fetchJson(`${rebootBase}/ready`);
+      }
+      expect(readyOn.status).toBe(200);
+      expect(readyOn.body).toMatchObject({
+        ok: true,
+        command: "ready",
+        data: {
+          modes: { lexical: true, semantic: true, fusion: true },
+          matrix: {
+            model: cacheNamespace,
+            rows: 2,
+            dimensions: 768,
+            watermark: { matrixRows: 2, sqliteRows: 2 },
+          },
+        },
+      });
+      expect(readyOn.body.data.reason).toBeUndefined();
+
+      const semanticOn = await fetchJson(`${rebootBase}/search/semantic?q=${encodeURIComponent("handshake")}&limit=5`);
+      expect(semanticOn.status).toBe(200);
+      expect(semanticOn.body).toMatchObject({
+        ok: true,
+        command: "search/semantic",
+        data: {
+          receipt: {
+            route: "search/semantic",
+            mode: "semantic",
+            query: "handshake",
+            limit: 5,
+            statusCode: 200,
+          },
+        },
+      });
+      expect(semanticOn.body.data.matches.map((hit: { row: { text: string } }) => hit.row.text)).toEqual([
+        "contract handshake over http",
+        "assistant contract reply",
+      ]);
+      expect(semanticOn.body.data.matches[0].score).toBeGreaterThan(0.99);
+
+      // Filtered semantic: SQL candidate-id set -> mask on the exact scan.
+      const semanticFiltered = await fetchJson(
+        `${rebootBase}/search/semantic?q=${encodeURIComponent("handshake")}&limit=5&projectKey=contract-project&role=assistant`,
+      );
+      expect(semanticFiltered.status).toBe(200);
+      expect(semanticFiltered.body.data.matches.map((hit: { row: { role: string; text: string } }) => hit.row)).toEqual([
+        expect.objectContaining({ role: "assistant", text: "assistant contract reply" }),
+      ]);
+
+      // Fusion: RRF over lexical + semantic lists; both rank the handshake
+      // message first here, so it must fuse to the top.
+      const fusionOn = await fetchJson(`${rebootBase}/search/fusion?q=${encodeURIComponent("handshake")}&limit=5`);
+      expect(fusionOn.status).toBe(200);
+      expect(fusionOn.body).toMatchObject({
+        ok: true,
+        command: "search/fusion",
+        data: {
+          receipt: {
+            route: "search/fusion",
+            mode: "fusion",
+            query: "handshake",
+            limit: 5,
+            statusCode: 200,
+          },
+        },
+      });
+      expect(fusionOn.body.data.matches.length).toBeGreaterThanOrEqual(2);
+      expect(fusionOn.body.data.matches[0].row.text).toBe("contract handshake over http");
     } finally {
       proc.kill();
       await proc.exited;
     }
-  }, 25_000);
+  }, 40_000);
 });
