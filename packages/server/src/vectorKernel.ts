@@ -13,11 +13,19 @@
 // NaN/Inf query components are a contract breach rejected at the boundary
 // (encodeQueryVectorF16); stored rows are validated at encode time by
 // vectorBlob's encodeFloat16Vector.
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { dlopen, FFIType, ptr, type Pointer } from "bun:ffi";
+import { CFunction, dlopen, FFIType, ptr, type Pointer } from "bun:ffi";
 
 import { float16BitsToFloat32, float32ToFloat16Bits } from "./vectorBlob";
+
+// simsimd ABI constants (include/simsimd/simsimd.h, pinned 6.5.5).
+const SIMSIMD_METRIC_COS = 99; // simsimd_metric_cos_k = 'c'
+const SIMSIMD_DATATYPE_F16 = 1 << 12;
+const SIMSIMD_CAP_SERIAL = 1;
+const SIMSIMD_CAP_ANY = 0x7fffffff;
+const SIMSIMD_CAP_NEON = 1 << 20;
+const SIMSIMD_CAP_NEON_F16 = 1 << 21;
 
 export class VectorKernelError extends Error {
   constructor(message: string) {
@@ -76,9 +84,27 @@ export const encodeQueryVectorF16 = (vector: readonly number[], dimensions: numb
 export interface NativeSimsimd {
   readonly libraryPath: string;
   readonly capabilities: { readonly neon: boolean; readonly neonF16: boolean };
-  /** simsimd_cos_f16(a, b, n, out): writes cosine DISTANCE (1 - similarity) to out. */
+  /** Resolved f16 cosine kernel (a, b, n, out): writes cosine DISTANCE
+   * (1 - similarity) to out. This is the raw per-ISA kernel pointer resolved
+   * through simsimd_find_kernel_punned, not the lazy dispatch wrapper. */
   readonly cosineDistanceF16: (a: Pointer, b: Pointer, n: number, out: Pointer) => void;
 }
+
+/** OS-attested fp16 SIMD support, used to repair simsimd's runtime probe
+ * where `mrs` system-register reads trap inside VMs (observed under the
+ * linux/arm64 container on Apple silicon: /proc/cpuinfo advertises
+ * fphp+asimdhp but simsimd_capabilities() reports NEON-only, silently
+ * dropping to the serial f16 kernel). */
+const osAttestsNeonF16 = (): boolean => {
+  if (process.arch !== "arm64" || process.platform !== "linux") return false;
+  try {
+    const cpuinfo = readFileSync("/proc/cpuinfo", "utf8");
+    const features = cpuinfo.split("\n").find((line) => line.startsWith("Features"));
+    return features !== undefined && features.includes("fphp") && features.includes("asimdhp");
+  } catch {
+    return false;
+  }
+};
 
 const packageRootFrom = (startDir: string): string | undefined => {
   let dir = startDir;
@@ -92,14 +118,33 @@ const packageRootFrom = (startDir: string): string | undefined => {
   return undefined;
 };
 
-/** Locate a dlopen-able simsimd shared library for this platform:
- * the npm package's prebuild (linux) or the local darwin build produced by
- * scripts/ensure-simsimd-native.mjs. */
+/** ELF e_machine matches the running architecture. Guards against simsimd
+ * 6.5.5's mislabeled prebuild: its linux-arm64 folder ships an x86_64 binary
+ * (verified against the upstream tarball, 2026-07-04). Non-ELF files (mach-o)
+ * are never prebuilds we trust — darwin always builds locally. */
+const elfMachineMatchesArch = (path: string): boolean => {
+  const header = Buffer.alloc(20);
+  const fd = openSync(path, "r");
+  try {
+    readSync(fd, header, 0, 20, 0);
+  } finally {
+    closeSync(fd);
+  }
+  if (header.readUInt32BE(0) !== 0x7f454c46) return false;
+  const machine = header.readUInt16LE(18);
+  return (process.arch === "arm64" && machine === 0xb7) || (process.arch === "x64" && machine === 0x3e);
+};
+
+/** Locate a dlopen-able simsimd shared library for this platform: the npm
+ * package's prebuild when its architecture checks out (linux), else the
+ * local build produced by scripts/ensure-simsimd-native.mjs. */
 export const resolveSimsimdLibraryPath = (): string | undefined => {
   const packageRoot = packageRootFrom(import.meta.dir);
   if (packageRoot === undefined) return undefined;
   const prebuild = join(packageRoot, "prebuilds", `${process.platform}-${process.arch}`, "simsimd.node");
-  if (existsSync(prebuild)) return prebuild;
+  if (process.platform === "linux" && existsSync(prebuild) && elfMachineMatchesArch(prebuild)) {
+    return prebuild;
+  }
   const version = (JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8")) as { version: string }).version;
   const extension = process.platform === "darwin" ? "dylib" : "so";
   const local = join(
@@ -124,14 +169,35 @@ export const loadNativeSimsimd = (libraryPath = resolveSimsimdLibraryPath()): Na
   }
   try {
     const library = dlopen(libraryPath, {
-      simsimd_cos_f16: {
-        args: [FFIType.ptr, FFIType.ptr, FFIType.u64_fast, FFIType.ptr],
+      simsimd_capabilities: { args: [], returns: FFIType.u32 },
+      simsimd_find_kernel_punned: {
+        args: [FFIType.i32, FFIType.i32, FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.ptr],
         returns: FFIType.void,
       },
-      simsimd_uses_neon: { args: [], returns: FFIType.i32 },
-      simsimd_uses_neon_f16: { args: [], returns: FFIType.i32 },
     });
-    const cosineDistanceF16 = library.symbols.simsimd_cos_f16 as NativeSimsimd["cosineDistanceF16"];
+    let capabilities = library.symbols.simsimd_capabilities() | SIMSIMD_CAP_SERIAL;
+    if ((capabilities & SIMSIMD_CAP_NEON_F16) === 0 && osAttestsNeonF16()) {
+      capabilities |= SIMSIMD_CAP_NEON | SIMSIMD_CAP_NEON_F16;
+    }
+    const kernelOut = new BigUint64Array(1);
+    const capabilityOut = new Uint32Array(1);
+    library.symbols.simsimd_find_kernel_punned(
+      SIMSIMD_METRIC_COS,
+      SIMSIMD_DATATYPE_F16,
+      capabilities,
+      SIMSIMD_CAP_ANY,
+      ptr(kernelOut),
+      ptr(capabilityOut),
+    );
+    const kernelPointer = kernelOut[0] ?? 0n;
+    if (kernelPointer === 0n) {
+      throw new VectorKernelError("simsimd resolved no f16 cosine kernel");
+    }
+    const cosineDistanceF16 = CFunction({
+      ptr: Number(kernelPointer) as Pointer,
+      args: [FFIType.ptr, FFIType.ptr, FFIType.u64_fast, FFIType.ptr],
+      returns: FFIType.void,
+    }) as unknown as NativeSimsimd["cosineDistanceF16"];
     const probeA = encodeQueryVectorF16([0.25, -0.5, 0.75, 1], 4);
     const probeB = encodeQueryVectorF16([0.5, -1, 1.5, 2], 4);
     const out = new Float64Array(1);
@@ -144,8 +210,8 @@ export const loadNativeSimsimd = (libraryPath = resolveSimsimdLibraryPath()): Na
     return {
       libraryPath,
       capabilities: {
-        neon: library.symbols.simsimd_uses_neon() === 1,
-        neonF16: library.symbols.simsimd_uses_neon_f16() === 1,
+        neon: (capabilities & SIMSIMD_CAP_NEON) !== 0,
+        neonF16: (capabilities & SIMSIMD_CAP_NEON_F16) !== 0,
       },
       cosineDistanceF16,
     };
