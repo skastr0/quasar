@@ -1,0 +1,197 @@
+{
+  "proof": "instant-query-live",
+  "date": "2026-07-04",
+  "glyphContext": "Deploy + honest receipts for the baked-fp32-model / in-matrix-scope-filter cutover (commits e89fe53, 973e344, e8c2516, 8c362bc, 872e455)",
+  "image": {
+    "previousRunningTag": "quasar-server:latest sha256:8132fded4ea851a8afaffbea5f69df8711f18b43ba243a21d30782273899c0e3 (1.3GB, built before 8c362bc; no baked-model layer present in its history)",
+    "newBuild": {
+      "tag": "quasar-server:latest",
+      "sha256": "923d9c7e76ae80787f6b7e6931bcd6bc5263794d21c935bdd30ed93f5c14028a",
+      "size": "1.85GB",
+      "growthVsPrevious": "+550MB, matches the ~530MB fp32 ONNX model bake (nomic-embed-text-v1.5)",
+      "buildCommand": "docker build -f platform/server/Dockerfile -t quasar-server:latest .",
+      "buildWallClock": "55.055s total (simsimd native compile 15.5s + bake-onnx-model 35.8s + rest cached/fast)",
+      "buildLogEvidence": {
+        "simsimd": "{\"ok\":true,\"script\":\"ensure-simsimd-native\",\"version\":\"6.5.5\",\"library\":\"/app/packages/server/.native/libsimsimd-v6.5.5-linux-arm64.so\",\"source\":\"fresh-build\"}",
+        "bakeOnnx": "{\"event\":\"bake_onnx_model.start\",...} ... {\"event\":\"bake_onnx_model.done\",\"at\":\"2026-07-04T23:11:16.735Z\",\"elapsedMs\":32792}"
+      }
+    },
+    "rollbackTag": "quasar-server:rollback-pre-semantic sha256:1992c139b442de605e6c3bef185fefab55f67fc1af32af4f4f78286b5ab300ac (1.07GB, unchanged, still available)"
+  },
+  "deploy": {
+    "command": "docker compose up -d (platform/server/compose.yaml)",
+    "containerRecreated": true,
+    "containerStartedAt": "2026-07-04T23:11:55.285329729Z"
+  },
+  "boot": {
+    "migration": {
+      "noOp": true,
+      "evidence": "no store.migrate.fts_scoped_tokens event in boot logs; live PRAGMA user_version read from the mounted DB = 1, matching FTS_SCOPED_TOKENS_SCHEMA_VERSION=1 (store.ts:209,376) so the migration guard's early-return fired silently as designed"
+    },
+    "vectorMatrixLoad": {
+      "event": "vector_matrix.loaded",
+      "at": "2026-07-04T23:12:13.548Z",
+      "loadMs": 16277.67,
+      "rows": 691454,
+      "skippedRows": 0,
+      "kernel": "simsimd-ffi",
+      "workers": 8
+    },
+    "queryEmbedderLocalActive": {
+      "event": "query_embedder.local_active",
+      "at": "2026-07-04T23:12:24.188Z",
+      "dtype": "fp32",
+      "loadMs": 27450,
+      "note": "SURPRISE vs task framing: this is NOT the ~1s the task described as 'prior verified run'. 27.45s one-time pipeline-warmup cost is consistent with this repo's own docs/proofs/query-embed-bench-2026-07-04.json (pipelineLoad loadMs=31907, gate limitMs=120000, pass=true) generated 5 minutes earlier outside Docker. The '~1s' expectation in the task prompt does not match any grounded receipt found in this repo and is treated as an unverified claim, not a regression. Boot and lexical are never gated on this load (queries fall back to bounded-synthetic during the window per e89fe53/973e344)."
+    }
+  },
+  "embeddingModelCacheDir": {
+    "envInContainer": "/app/.model-cache",
+    "composeDefaultResolved": true,
+    "note": "compose.yaml's QUASAR_EMBEDDING_MODEL_CACHE_DIR:-/app/.model-cache default was NOT overridden by platform/server/.env (checked: no such key present) or by shell env, so it resolves to the baked path, not a volume-shadowed path",
+    "cacheDirListing": {
+      "path": "/app/.model-cache",
+      "sizeOnDisk": "523M",
+      "sampleFiles": [
+        "/app/.model-cache/nomic-ai/nomic-embed-text-v1.5/config.json",
+        "/app/.model-cache/nomic-ai/nomic-embed-text-v1.5/tokenizer_config.json",
+        "/app/.model-cache/nomic-ai/nomic-embed-text-v1.5/tokenizer.json",
+        "/app/.model-cache/nomic-ai/nomic-embed-text-v1.5/onnx/model.onnx"
+      ]
+    }
+  },
+  "readyAfterCutover": {
+    "modes": { "lexical": true, "semantic": true, "fusion": true },
+    "matrix": {
+      "model": "synthetic:hf:nomic-ai/nomic-embed-text-v1.5:768:search_document",
+      "rows": 691465,
+      "dimensions": 768,
+      "kernel": "simsimd-ffi",
+      "watermark": { "matrixRows": 691465, "sqliteRows": 691465 }
+    },
+    "clientTiming10Samples": { "p50Ms": 0.35, "p95Ms": 2.39, "p99Ms": 2.39, "note": "first call in the deployment's life hit 13.05s (cold connection/JIT); subsequent 9 calls all sub-3ms. Stats here are the 10-sample post-deploy check, not that single cold call." }
+  },
+  "latency": {
+    "method": "60 samples/group via a fresh bun fetch client hitting http://localhost:7180 directly (no CLI overhead); novel groups use 60 one-time crypto.randomUUID()-suffixed query strings (never embedded before, guaranteed cache miss by content-hash); warm groups run 5 discarded warmups then 60 measured calls against one fixed repeated query. Client wall-clock measured with performance.now() around fetch(); server-side searchMs/embedMs read from each response's receipt (QUASAR_SEARCH_PROFILE=1).",
+    "novelUnfilteredSemantic": {
+      "run1_contaminated": {
+        "note": "this run overlapped a concurrent live ingest daemon burst (POST /ingest/session spans of 36504ms and 24236ms in the same window) which head-of-line-blocked one search request to 24789ms server-side / 33518ms client-side. Reported honestly, not discarded.",
+        "clientMs": { "n": 60, "min": 144.87, "p50": 216.2, "p95": 402.01, "p99": 33518.35, "max": 33518.35, "mean": 792.18 },
+        "serverSearchMs": { "n": 60, "min": 59, "p50": 80, "p95": 150, "p99": 24426, "max": 24426, "mean": 493.75 },
+        "serverEmbedMs": { "n": 60, "min": 84, "p50": 130, "p95": 218, "p99": 359, "max": 359 }
+      },
+      "run2_clean_rerun": {
+        "note": "re-run ~2 minutes later once the ingest burst settled; sample index 0 (clientMs 3550.37, searchMs 899, embedMs 230) is a first-request cold-connection artifact consistent with the /ready first-call also costing 13.05s earlier in this same session -- reported below both with and without it.",
+        "allSamples": {
+          "clientMs": { "n": 60, "min": 122.68, "p50": 162.58, "p95": 228.1, "p99": 3550.37, "max": 3550.37, "mean": 223.94 },
+          "serverSearchMs": { "n": 60, "min": 51, "p50": 63, "p95": 101, "p99": 899, "max": 899 }
+        },
+        "excludingFirstColdSample": {
+          "n": 59,
+          "clientMs": { "p50": 162.58, "p95": 228.1, "p99": 243.82, "max": 243.82 },
+          "serverSearchMs": { "p50": 63, "p95": 101, "p99": 112, "max": 112 }
+        }
+      }
+    },
+    "novelFilteredProjectRoleSemantic": {
+      "filter": "projectKey=git:github.com/skastr0/quasar&role=assistant",
+      "clientMs": { "n": 60, "min": 112.44, "p50": 158.15, "p95": 246.41, "p99": 288.07, "max": 288.07, "mean": 164.95 },
+      "serverSearchMs": { "n": 60, "min": 15, "p50": 22, "p95": 37, "p99": 102, "max": 102, "mean": 24.98 },
+      "serverEmbedMs": { "n": 60, "min": 94, "p50": 133, "p95": 212, "p99": 250, "max": 250 },
+      "scopeArrayMaskingConfirmed": "yes -- vectorMatrix.ts:87-94,155-171 implements projectKeyCodes/roleCodes/providerCodes as per-slot dictionary-encoded Uint8/Uint32 arrays resident in the matrix, masked in-process ('no SQL, no store round trip'); measured serverSearchMs (p95 37ms) is materially lower than the unfiltered semantic serverSearchMs (p95 101-150ms) because filtering shrinks the candidate/assembly set, not because it adds a SQL WHERE cost -- consistent with e8c2516 and inconsistent with the deleted SQL-prefilter design"
+    },
+    "novelFilteredProviderSemantic": {
+      "filter": "provider=claude",
+      "clientMs": { "n": 60, "min": 98.37, "p50": 128.66, "p95": 210.09, "p99": 262.86, "max": 262.86, "mean": 141.48 },
+      "serverSearchMs": { "n": 60, "min": 11, "p50": 13, "p95": 20, "p99": 37, "max": 37, "mean": 14.68 },
+      "serverEmbedMs": { "n": 60, "min": 85, "p50": 113, "p95": 178, "p99": 244, "max": 244 }
+    },
+    "warmSemantic": {
+      "query": "how did we fix the resident matrix readiness gate",
+      "clientMs": { "n": 60, "min": 52.64, "p50": 61.45, "p95": 84.53, "p99": 96.16, "max": 96.16, "mean": 64.54 },
+      "serverSearchMs": { "n": 60, "min": 51, "p50": 60, "p95": 82, "p99": 91, "max": 91 },
+      "serverEmbedMs": { "n": 60, "min": 0, "p50": 0, "p95": 0, "p99": 0, "max": 0, "note": "0ms confirms query-embed-cache hit on the repeated fixed string" }
+    },
+    "warmFusion": {
+      "query": "how did we fix the resident matrix readiness gate",
+      "clientMs": { "n": 60, "min": 53.61, "p50": 64.68, "p95": 96.8, "p99": 105.29, "max": 105.29, "mean": 70.59 },
+      "serverSearchMs": { "n": 60, "min": 53, "p50": 63, "p95": 94, "p99": 102, "max": 102 },
+      "serverEmbedMs": { "n": 60, "min": 0, "p50": 0, "p95": 0, "p99": 0, "max": 0 },
+      "anyDegraded": false
+    },
+    "warmLexical": {
+      "query": "how did we fix the resident matrix readiness gate",
+      "clientMs": { "n": 60, "min": 1.54, "p50": 2.79, "p95": 6.01, "p99": 12.28, "max": 12.28, "mean": 3.24 },
+      "serverSearchMs": { "n": 60, "min": 1, "p50": 1, "p95": 2, "p99": 4, "max": 4 },
+      "vsLastLiveReceipt": {
+        "source": "docs/proofs/semantic-cutover-live-2026-07-04.json .latency.routes[lexical]",
+        "previous": { "clientP50": 40.89, "clientP95": 61.61, "clientP99": 66.58, "serverP50": 34, "serverP95": 54, "serverMax": 62 },
+        "current": { "clientP50": 2.79, "clientP95": 6.01, "clientP99": 12.28, "serverP50": 1, "serverP95": 2, "serverMax": 4 },
+        "verdict": "no regression -- markedly faster on every percentile"
+      }
+    },
+    "degradeCheck": {
+      "route": "search/fusion",
+      "queryWasNovel": true,
+      "receipt": {
+        "statusCode": 200,
+        "searchMs": 194,
+        "embedMs": 74,
+        "totalMs": 194,
+        "matches": 10
+      },
+      "degradedFieldPresent": false,
+      "verdict": "confirmed: embedder healthy, degraded key is omitted entirely (server.ts:673,679 only sets it when true), equivalent to false/absent as expected -- no artificial embedder breakage performed"
+    }
+  },
+  "resourceUsage": {
+    "dockerStatsRss": "2.879GiB / 7.818GiB limit",
+    "rssGateUnder4GB": true,
+    "cpuPercentAtRest": "1.44%"
+  },
+  "cliSmoke": {
+    "binary": "bun packages/cli/src/cli.ts search --query <novel string> --mode <semantic|fusion> --server http://localhost:7180",
+    "novelQuery": "cli smoke check on the resident matrix scope filter 75C2480A-9B97-4882-8BB6-CC4E4AA55025",
+    "semantic": {
+      "endToEndMs": 704,
+      "note": "includes bun cold-process-start overhead (~300-400ms typical for this repo's CLI entry), not pure network/server latency",
+      "top3TextClean": true,
+      "top3": [
+        "codex assistant: \"All six Matrix rooms now have successful smoke evidence. I'm doing the final cleanup/audit pass now: remove any heartbeat placeholder files created during the smoke tests, re-check Tailscale, channels, config, cron, and active artifact scans.\"",
+        "codex assistant: (same session, next seq) identical text",
+        "claude assistant: \"Off-repo smoke still passes post-chunk-2; review concerns filed (`sig_019a8b2b`). Locking in a shippable CLI state next — chunk 3 regenerates the stale ref files (WX-005) and rebuilds + installs the binary so the **installed** `prism workflow` command finally exists (WX-007)\""
+      ]
+    },
+    "fusion": {
+      "endToEndMs": 355,
+      "top3TextClean": true,
+      "top3": [
+        "codex assistant: \"All six Matrix rooms now have successful smoke evidence...\"",
+        "codex assistant: (same session, next seq) identical text",
+        "claude assistant: \"Off-repo smoke still passes post-chunk-2...\""
+      ]
+    }
+  },
+  "gates": {
+    "novelSemanticP95Under150ms": {
+      "serverSearchMsOnly": { "value": 101, "pass": true, "note": "clean re-run, cold-sample excluded; also grazed exactly 150 in the contaminated run" },
+      "clientEndToEnd": { "value": 228.1, "pass": false, "note": "dominated by the required per-query embed cost (~130ms mean, unavoidable for a genuinely novel query), not by the vector-scan itself" }
+    },
+    "novelSemanticP95Under100msReported": { "serverSearchMs": 101, "clientEndToEnd": 228.1, "pass": false },
+    "novelFilteredP95Under150ms": {
+      "projectKeyRole": { "serverSearchMs": 37, "clientEndToEnd": 246.41, "serverPass": true, "clientPass": false },
+      "provider": { "serverSearchMs": 20, "clientEndToEnd": 210.09, "serverPass": true, "clientPass": false }
+    },
+    "warmSemanticFusionLexicalP95Under100ms": {
+      "semantic": { "clientMs": 84.53, "serverSearchMs": 82, "pass": true },
+      "fusion": { "clientMs": 96.8, "serverSearchMs": 94, "pass": true },
+      "lexical": { "clientMs": 6.01, "serverSearchMs": 2, "pass": true }
+    },
+    "lexicalNoRegressionVsLastLiveReceipt": { "pass": true },
+    "rssUnder4GB": { "value": "2.879GiB", "pass": true },
+    "crashLoopOrNovelP95Over1s": { "observed": false, "maxP95Seen": "246.41ms (client, novel filtered projectKey+role)", "revertTriggered": false }
+  },
+  "gatePassed": false,
+  "gateFailureSummary": "No crash-loop, no p95>1s, RSS and warm-mode gates all pass, and the in-matrix scope-array masking (e8c2516) is confirmed working with server-side searchMs comfortably under gate on every novel variant (max p95 101-150ms). The failing gates are all the SAME root cause: end-to-end client latency for a genuinely novel query is dominated by the ~85-250ms (mean ~130ms) local fp32 ONNX per-query embed cost on this contended host (8 vectorMatrix worker threads + a continuously-running live ingest daemon sharing the container's CPU), pushing client p95 to 210-246ms against a 150ms/100ms bar. This is not a crash-loop and is well under the 1s revert threshold, so no revert was performed; reported as a genuine, unfixed gate miss rather than rounded up.",
+  "rollbackTriggered": false
+}
