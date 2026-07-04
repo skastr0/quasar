@@ -42,6 +42,8 @@ const materializeBatch = () => ({
     },
     queue: {
       embedMessage: { kind: "embed-message", pending: 0, leased: 0, failed: 0 },
+      activeEmbedMessage: { kind: "embed-message", pending: 0, leased: 0, failed: 0 },
+      activeEmbeddingProfile: "local:test",
       byKind: [],
     },
     lance: {
@@ -74,6 +76,47 @@ describe("materialize-embedding-vectors CLI", () => {
     expect(decision.kind).toBe("failure");
     if (decision.kind !== "failure") return;
     expect(decision.error.message).toContain("dead letters remain");
+  });
+
+  test("receipt decisions ignore legacy global dead letters when the active profile is clean", () => {
+    const parsed = parseMaterializeBatch({
+      ...materializeBatch(),
+      data: {
+        ...materializeBatch().data,
+        queue: {
+          embedMessage: { kind: "embed-message", pending: 0, leased: 0, failed: 7 },
+          activeEmbedMessage: { kind: "embed-message", pending: 0, leased: 0, failed: 0 },
+          activeEmbeddingProfile: "local:test",
+          byKind: [],
+        },
+      },
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.receipt.globalFailedEmbedMessages).toBe(7);
+    expect(parsed.receipt.failedEmbedMessages).toBe(0);
+    expect(decideMaterializeLoop(parsed.receipt)).toEqual({ kind: "success" });
+  });
+
+  test("receipt decisions fail when active-profile dead letters remain", () => {
+    const parsed = parseMaterializeBatch({
+      ...materializeBatch(),
+      data: {
+        ...materializeBatch().data,
+        queue: {
+          embedMessage: { kind: "embed-message", pending: 0, leased: 0, failed: 0 },
+          activeEmbedMessage: { kind: "embed-message", pending: 0, leased: 0, failed: 1 },
+          activeEmbeddingProfile: "local:test",
+          byKind: [],
+        },
+      },
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const decision = decideMaterializeLoop(parsed.receipt);
+    expect(decision.kind).toBe("failure");
+    if (decision.kind !== "failure") return;
+    expect(decision.error.message).toContain("active-profile");
   });
 
   test("until-empty writes an explicit durable closure receipt", async () => {
@@ -118,7 +161,11 @@ describe("materialize-embedding-vectors CLI", () => {
       expect(fromFile).toEqual(fromStdout);
       expect(fromStdout.data.closure).toEqual({
         coverage: { vectorlessMessages: 0, vectorRows: 3 },
-        queue: { embedMessage: { pending: 0, failed: 0 } },
+        queue: {
+          activeEmbeddingProfile: "local:test",
+          embedMessage: { pending: 0, failed: 0 },
+          globalEmbedMessage: { pending: 0, failed: 0 },
+        },
         lance: {
           activeVectorTableName: "messages_active",
           sqliteVectorRows: 3,
@@ -130,7 +177,7 @@ describe("materialize-embedding-vectors CLI", () => {
         },
         gates: {
           zeroVectorlessMessages: true,
-          zeroEmbedMessageDeadLetters: true,
+          zeroActiveEmbedMessageDeadLetters: true,
           lanceRowCountMatches: true,
           lanceRepairScanComplete: true,
         },

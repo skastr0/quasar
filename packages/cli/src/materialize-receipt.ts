@@ -75,6 +75,9 @@ export interface MaterializeBatchReceipt {
   readonly lanceRowCount?: number;
   readonly failedEmbedMessages: number;
   readonly pendingEmbedMessages: number;
+  readonly globalFailedEmbedMessages: number;
+  readonly globalPendingEmbedMessages: number;
+  readonly activeEmbeddingProfile?: string;
   readonly activeVectorTableName?: string;
   readonly lanceScanComplete: boolean;
   readonly nextLanceOffset: number;
@@ -131,11 +134,22 @@ export const parseMaterializeBatch = (body: unknown):
   const lanceRowCount = optionalNumberField(divergence, "lanceRowCount");
   if (!lanceRowCount.ok) return lanceRowCount;
 
-  const queueEmbedMessage = recordValue(recordValue(data, "queue"), "embedMessage");
-  const failedEmbedMessages = numberField(queueEmbedMessage, "failed");
+  const queue = recordValue(data, "queue");
+  const queueEmbedMessage = recordValue(queue, "embedMessage");
+  const activeQueueEmbedMessage = recordValue(queue, "activeEmbedMessage") ?? queueEmbedMessage;
+  const failedEmbedMessages = numberField(activeQueueEmbedMessage, "failed");
   if (!failedEmbedMessages.ok) return failedEmbedMessages;
-  const pendingEmbedMessages = numberField(queueEmbedMessage, "pending");
+  const pendingEmbedMessages = numberField(activeQueueEmbedMessage, "pending");
   if (!pendingEmbedMessages.ok) return pendingEmbedMessages;
+  const globalFailedEmbedMessages = numberField(queueEmbedMessage ?? activeQueueEmbedMessage, "failed");
+  if (!globalFailedEmbedMessages.ok) return globalFailedEmbedMessages;
+  const globalPendingEmbedMessages = numberField(queueEmbedMessage ?? activeQueueEmbedMessage, "pending");
+  if (!globalPendingEmbedMessages.ok) return globalPendingEmbedMessages;
+
+  const activeEmbeddingProfile = recordValue(queue, "activeEmbeddingProfile");
+  if (activeEmbeddingProfile !== undefined && typeof activeEmbeddingProfile !== "string") {
+    return { ok: false, error: fieldFailure("activeEmbeddingProfile", "string", activeEmbeddingProfile) };
+  }
 
   const activeVectorTableName = recordValue(lance, "activeVectorTableName");
   if (activeVectorTableName !== undefined && typeof activeVectorTableName !== "string") {
@@ -155,6 +169,9 @@ export const parseMaterializeBatch = (body: unknown):
       lanceRowCount: lanceRowCount.value,
       failedEmbedMessages: failedEmbedMessages.value,
       pendingEmbedMessages: pendingEmbedMessages.value,
+      globalFailedEmbedMessages: globalFailedEmbedMessages.value,
+      globalPendingEmbedMessages: globalPendingEmbedMessages.value,
+      activeEmbeddingProfile,
       activeVectorTableName,
       lanceScanComplete: lanceScanComplete.value,
       nextLanceOffset: nextLanceOffset.value,
@@ -187,10 +204,13 @@ export const decideMaterializeLoop = (receipt: MaterializeBatchReceipt): Materia
   if (receipt.vectorlessMessages === 0 && receipt.rowCountMatches && receipt.lanceScanComplete && receipt.failedEmbedMessages > 0) {
     return {
       kind: "failure",
-      error: new MaterializeReceiptError("embed-message dead letters remain after vector materialization", {
-        expected: "queue.embedMessage.failed = 0",
-        received: receipt.failedEmbedMessages,
-        hint: "Drain or inspect failed embed-message jobs before accepting the coverage receipt.",
+      error: new MaterializeReceiptError("active-profile embed-message dead letters remain after vector materialization", {
+        expected: "queue.activeEmbedMessage.failed = 0",
+        received: {
+          activeEmbeddingProfile: receipt.activeEmbeddingProfile,
+          failed: receipt.failedEmbedMessages,
+        },
+        hint: "Drain or inspect failed embed-message jobs for the active embedding profile before accepting the coverage receipt.",
       }),
     };
   }
@@ -216,9 +236,14 @@ export const materializeClosureReceipt = (receipt: MaterializeBatchReceipt) => (
     vectorRows: receipt.vectorRows,
   },
   queue: {
+    activeEmbeddingProfile: receipt.activeEmbeddingProfile,
     embedMessage: {
       pending: receipt.pendingEmbedMessages,
       failed: receipt.failedEmbedMessages,
+    },
+    globalEmbedMessage: {
+      pending: receipt.globalPendingEmbedMessages,
+      failed: receipt.globalFailedEmbedMessages,
     },
   },
   lance: {
@@ -232,7 +257,7 @@ export const materializeClosureReceipt = (receipt: MaterializeBatchReceipt) => (
   },
   gates: {
     zeroVectorlessMessages: receipt.vectorlessMessages === 0,
-    zeroEmbedMessageDeadLetters: receipt.failedEmbedMessages === 0,
+    zeroActiveEmbedMessageDeadLetters: receipt.failedEmbedMessages === 0,
     lanceRowCountMatches: receipt.rowCountMatches,
     lanceRepairScanComplete: receipt.lanceScanComplete,
   },

@@ -136,6 +136,7 @@ describe("SearchReadiness", () => {
       recoverStaleLeases: () => Effect.succeed(0),
       stats: Effect.succeed({ pending: 0, leased: 0, failed: 0 }),
       statsByKind: Effect.succeed([]),
+      embedMessageStatsByProfile: () => Effect.succeed({ kind: "embed-message", pending: 0, leased: 0, failed: 0 }),
     });
     const fakeLance = LanceDb.make({
       dataDir: "/tmp/search.lance",
@@ -240,6 +241,7 @@ describe("SearchReadiness", () => {
       recoverStaleLeases: () => Effect.succeed(0),
       stats: Effect.succeed({ pending: 0, leased: 0, failed: 0 }),
       statsByKind: Effect.succeed([]),
+      embedMessageStatsByProfile: () => Effect.succeed({ kind: "embed-message", pending: 0, leased: 0, failed: 0 }),
     });
     const fakeLance = LanceDb.make({
       dataDir: "/tmp/search.lance",
@@ -332,6 +334,7 @@ describe("SearchReadiness", () => {
       recoverStaleLeases: () => Effect.succeed(0),
       stats: Effect.succeed({ pending: 0, leased: 0, failed: 0 }),
       statsByKind: Effect.succeed([]),
+      embedMessageStatsByProfile: () => Effect.succeed({ kind: "embed-message", pending: 0, leased: 0, failed: 0 }),
     });
     const fakeLance = LanceDb.make({
       dataDir: "/tmp/search.lance",
@@ -780,6 +783,7 @@ describe("SearchReadiness", () => {
       recoverStaleLeases: () => Effect.succeed(0),
       stats: Effect.succeed({ pending: 0, leased: 0, failed: 0 }),
       statsByKind: Effect.succeed([]),
+      embedMessageStatsByProfile: () => Effect.succeed({ kind: "embed-message", pending: 0, leased: 0, failed: 0 }),
     });
     const fakeLance = LanceDb.make({
       dataDir: "/tmp/s.lance",
