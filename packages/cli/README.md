@@ -4,8 +4,8 @@ The Quasar CLI discovers, parses, ingests, and queries local AI-agent session
 histories.
 
 The production control surface is the Effect local server with SQLite truth,
-durable worker queues, and LanceDB search. The npm package ships that production
-CLI as a prebuilt Bun standalone binary behind a small Node launcher.
+durable worker queues, and SQLite FTS search. The npm package ships that
+production CLI as a prebuilt Bun standalone binary behind a small Node launcher.
 
 ## Install
 

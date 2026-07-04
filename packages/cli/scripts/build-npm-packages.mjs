@@ -13,44 +13,30 @@ const cliPackage = JSON.parse(
   readFileSync(resolve(packageDir, "package.json"), "utf8"),
 );
 
-const lancedbNativePackages = [
-  "@lancedb/lancedb-darwin-arm64",
-  "@lancedb/lancedb-linux-arm64-gnu",
-  "@lancedb/lancedb-linux-arm64-musl",
-  "@lancedb/lancedb-linux-x64-gnu",
-  "@lancedb/lancedb-linux-x64-musl",
-  "@lancedb/lancedb-win32-arm64-msvc",
-  "@lancedb/lancedb-win32-x64-msvc",
-];
-
 const targets = [
   {
     platform: "darwin-arm64",
     target: "bun-darwin-arm64",
     os: ["darwin"],
     cpu: ["arm64"],
-    nativePackages: ["@lancedb/lancedb-darwin-arm64"],
   },
   {
     platform: "darwin-x64",
     target: "bun-darwin-x64",
     os: ["darwin"],
     cpu: ["x64"],
-    nativePackages: [],
   },
   {
     platform: "linux-arm64",
     target: "bun-linux-arm64",
     os: ["linux"],
     cpu: ["arm64"],
-    nativePackages: ["@lancedb/lancedb-linux-arm64-gnu"],
   },
   {
     platform: "linux-x64",
     target: "bun-linux-x64",
     os: ["linux"],
     cpu: ["x64"],
-    nativePackages: ["@lancedb/lancedb-linux-x64-gnu"],
   },
 ];
 
@@ -79,7 +65,6 @@ async function main() {
         "build",
         "--compile",
         `--target=${item.target}`,
-        ...externalNativePackageArgs(item),
         productionCliEntrypoint,
         "--outfile",
         binPath,
@@ -102,13 +87,6 @@ async function main() {
   }
 
   console.log(`Prepared npm platform packages under ${releaseRoot}`);
-}
-
-function externalNativePackageArgs(item) {
-  const bundled = new Set(item.nativePackages);
-  return lancedbNativePackages
-    .filter((packageName) => !bundled.has(packageName))
-    .map((packageName) => `--external=${packageName}`);
 }
 
 function platformPackageJson(packageName, item) {
