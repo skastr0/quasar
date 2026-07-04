@@ -1,0 +1,63 @@
+{
+  "ok": true,
+  "command": "materialize-embedding-vectors",
+  "data": {
+    "mode": "until-empty",
+    "startedAt": "2026-07-04T21:12:29.642Z",
+    "finishedAt": "2026-07-04T21:12:55.851Z",
+    "elapsedMs": 26208.67,
+    "batches": 8,
+    "totals": {
+      "scanned": 7112,
+      "cacheHits": 7103,
+      "cacheMisses": 9,
+      "embedded": 9,
+      "skipped": 0,
+      "sqliteVectorsUpserted": 7112
+    },
+    "closure": {
+      "embedding": {
+        "provider": "synthetic",
+        "activeEmbeddingProfile": "synthetic:hf:nomic-ai/nomic-embed-text-v1.5:768:search_document"
+      },
+      "coverage": {
+        "vectorlessMessages": 0,
+        "vectorRows": 691303
+      },
+      "gates": {
+        "zeroVectorlessMessages": true
+      }
+    },
+    "last": {
+      "report": {
+        "scanned": 112,
+        "cacheHits": 112,
+        "cacheMisses": 0,
+        "embedded": 0,
+        "skipped": 0,
+        "sqliteVectorsUpserted": 112,
+        "startedAt": "2026-07-04T21:12:53.028Z",
+        "finishedAt": "2026-07-04T21:12:54.125Z",
+        "elapsedMs": 1097.28
+      },
+      "coverage": {
+        "model": "synthetic:hf:nomic-ai/nomic-embed-text-v1.5:768:search_document",
+        "searchableMessages": 691303,
+        "vectorRows": 691303,
+        "vectorlessMessages": 0,
+        "staleVectorRows": 0
+      },
+      "embedding": {
+        "provider": "synthetic",
+        "profile": {
+          "model": "hf:nomic-ai/nomic-embed-text-v1.5",
+          "dimensions": 768,
+          "task": "search_document",
+          "documentPrefix": "search_document: ",
+          "queryPrefix": "search_query: ",
+          "cacheNamespace": "synthetic:hf:nomic-ai/nomic-embed-text-v1.5:768:search_document"
+        }
+      }
+    }
+  }
+}
