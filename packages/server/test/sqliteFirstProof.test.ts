@@ -150,6 +150,9 @@ describe("sqlite-first proof helpers", () => {
       workDb,
       profile,
       queries: ["sqlite proof", "vector cache"],
+      ftsBenchmarkSamples: 3,
+      ftsFilterProjectKey: "project-a",
+      ftsFilterRole: "assistant",
       vectorLimit: 10,
       exactScanLimit: 10,
     });
@@ -157,6 +160,11 @@ describe("sqlite-first proof helpers", () => {
     expect(report.embeddingCoverage.cachedDocumentHashes).toBe(2);
     expect(report.fts.rowsIndexed).toBe(3);
     expect(report.fts.queryTimings.every((timing) => timing.hits > 0)).toBe(true);
+    expect(report.fts.filteredBenchmarks).toHaveLength(2);
+    expect(report.fts.filteredBenchmarks.every((benchmark) => benchmark.samples === 3)).toBe(true);
+    expect(report.fts.filteredBenchmarks.every((benchmark) => benchmark.filters.projectKey === "project-a")).toBe(true);
+    expect(report.fts.filteredBenchmarks.every((benchmark) => benchmark.filters.role === "assistant")).toBe(true);
+    expect(report.fts.filteredBenchmarks.find((benchmark) => benchmark.query === "vector cache")?.hits).toBe(1);
     expect(report.vectors.rowsScanned).toBe(3);
     expect(report.vectors.rowsInserted).toBe(2);
     expect(report.vectors.rowsMissingCache).toBe(1);

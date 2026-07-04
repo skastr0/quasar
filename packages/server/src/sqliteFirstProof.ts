@@ -22,6 +22,23 @@ export interface ProofQueryTiming {
   readonly hits: number;
 }
 
+export interface ProofQueryBenchmark {
+  readonly query: string;
+  readonly ftsQuery: string;
+  readonly filters: {
+    readonly projectKey?: string;
+    readonly role?: string;
+  };
+  readonly samples: number;
+  readonly limit: number;
+  readonly minMs: number;
+  readonly medianMs: number;
+  readonly p95Ms: number;
+  readonly p99Ms: number;
+  readonly maxMs: number;
+  readonly hits: number;
+}
+
 export interface EmbeddingCoverageReport {
   readonly semanticRows: number;
   readonly distinctDocumentHashes: number;
@@ -40,6 +57,7 @@ export interface FtsProofReport {
   readonly rowsIndexed: number;
   readonly buildElapsedMs: number;
   readonly queryTimings: readonly ProofQueryTiming[];
+  readonly filteredBenchmarks: readonly ProofQueryBenchmark[];
 }
 
 export interface VectorMaterializationReport {
@@ -107,6 +125,9 @@ export interface SqliteFirstProofOptions {
   readonly profile?: EmbeddingProfile;
   readonly queries?: readonly string[];
   readonly ftsLimit?: number;
+  readonly ftsBenchmarkSamples?: number;
+  readonly ftsFilterProjectKey?: string;
+  readonly ftsFilterRole?: string;
   readonly vectorLimit?: number;
   readonly exactScanLimit?: number;
 }
@@ -143,6 +164,23 @@ const elapsed = <A>(run: () => A): { readonly value: A; readonly elapsedMs: numb
   const startedAt = performance.now();
   const value = run();
   return { value, elapsedMs: Math.round((performance.now() - startedAt) * 100) / 100 };
+};
+
+function quantile(sortedValues: readonly number[], q: number): number {
+  if (sortedValues.length === 0) return 0;
+  const index = Math.min(sortedValues.length - 1, Math.max(0, Math.ceil(q * sortedValues.length) - 1));
+  return sortedValues[index] ?? 0;
+}
+
+const timingStats = (values: readonly number[]) => {
+  const sorted = [...values].sort((a, b) => a - b);
+  return {
+    minMs: sorted[0] ?? 0,
+    medianMs: quantile(sorted, 0.5),
+    p95Ms: quantile(sorted, 0.95),
+    p99Ms: quantile(sorted, 0.99),
+    maxMs: sorted[sorted.length - 1] ?? 0,
+  };
 };
 
 export const snapshotSqliteDatabase = (sourceDb: string, workDb: string): void => {
@@ -217,10 +255,17 @@ export const inspectEmbeddingCoverage = (
 
 export const buildFtsProof = (
   db: Database,
-  options: { readonly queries?: readonly string[]; readonly limit?: number } = {},
+  options: {
+    readonly queries?: readonly string[];
+    readonly limit?: number;
+    readonly benchmarkSamples?: number;
+    readonly filterProjectKey?: string;
+    readonly filterRole?: string;
+  } = {},
 ): FtsProofReport => {
   const queries = options.queries ?? DEFAULT_QUERIES;
   const limit = positiveInt(options.limit, 10);
+  const benchmarkSamples = positiveInt(options.benchmarkSamples, 1);
   const build = elapsed(() => {
     db.exec("DROP TABLE IF EXISTS proof_messages_fts");
     db.exec(`
@@ -263,7 +308,56 @@ export const buildFtsProof = (
     });
   }
 
-  return { rowsIndexed, buildElapsedMs: build.elapsedMs, queryTimings };
+  const defaultFilter = db.query(`
+    SELECT project_key AS projectKey
+    FROM proof_messages_fts
+    GROUP BY project_key
+    ORDER BY COUNT(*) DESC, project_key
+    LIMIT 1
+  `).get() as { projectKey: string } | null;
+  const filters = {
+    projectKey: options.filterProjectKey ?? defaultFilter?.projectKey,
+    role: options.filterRole ?? "assistant",
+  };
+  const benchmarkStatement = db.query(`
+    SELECT session_id AS sessionId, seq, bm25(proof_messages_fts) AS score
+    FROM proof_messages_fts
+    WHERE proof_messages_fts MATCH $query
+      AND ($projectKey IS NULL OR project_key = $projectKey)
+      AND ($role IS NULL OR role = $role)
+    ORDER BY score
+    LIMIT $limit
+  `);
+  const filteredBenchmarks: ProofQueryBenchmark[] = [];
+  for (const query of queries) {
+    const ftsQuery = fts5QueryForText(query);
+    if (ftsQuery === undefined) continue;
+    const timings: number[] = [];
+    let hits = 0;
+    for (let sample = 0; sample < benchmarkSamples; sample += 1) {
+      const timing = elapsed(() =>
+        benchmarkStatement.all({
+          $query: ftsQuery,
+          $projectKey: filters.projectKey ?? null,
+          $role: filters.role ?? null,
+          $limit: limit,
+        }),
+      );
+      timings.push(timing.elapsedMs);
+      if (sample === 0) hits = timing.value.length;
+    }
+    filteredBenchmarks.push({
+      query,
+      ftsQuery,
+      filters,
+      samples: benchmarkSamples,
+      limit,
+      ...timingStats(timings),
+      hits,
+    });
+  }
+
+  return { rowsIndexed, buildElapsedMs: build.elapsedMs, queryTimings, filteredBenchmarks };
 };
 
 const vectorToBlob = (vector: readonly number[]): Buffer => {
@@ -281,12 +375,6 @@ const vectorMagnitude = (vector: readonly number[]): number => {
   let sum = 0;
   for (const value of vector) sum += value * value;
   return Math.sqrt(sum);
-};
-
-const quantile = (sortedValues: readonly number[], q: number): number => {
-  if (sortedValues.length === 0) return 0;
-  const index = Math.min(sortedValues.length - 1, Math.max(0, Math.ceil(q * sortedValues.length) - 1));
-  return sortedValues[index] ?? 0;
 };
 
 const cosineNumbers = (a: readonly number[], b: readonly number[]): number => {
@@ -564,7 +652,13 @@ export const runSqliteFirstProof = (options: SqliteFirstProofOptions): SqliteFir
   const db = new Database(options.workDb);
   try {
     const embeddingCoverage = inspectEmbeddingCoverage(db, profile);
-    const fts = buildFtsProof(db, { queries: options.queries, limit: options.ftsLimit });
+    const fts = buildFtsProof(db, {
+      queries: options.queries,
+      limit: options.ftsLimit,
+      benchmarkSamples: options.ftsBenchmarkSamples,
+      filterProjectKey: options.ftsFilterProjectKey,
+      filterRole: options.ftsFilterRole,
+    });
     const vectors = materializeProofVectors(db, profile, { limit: options.vectorLimit });
     const exactScan = runExactScanBaseline(db, { limit: options.exactScanLimit ?? options.vectorLimit });
     return {

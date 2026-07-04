@@ -55,6 +55,9 @@ Options:
   --work-db         Optional. Destination proof DB. Must not already exist.
   --out             Optional JSON report path. Defaults under docs/proofs/.
   --query           Repeatable FTS query. Defaults to a small built-in set.
+  --fts-samples     Repeated filtered FTS samples per query. Use 60 for the p95/p99 gate. Default 1.
+  --filter-project-key Optional project_key filter for filtered FTS timing. Defaults to the most common project.
+  --filter-role     Optional role filter for filtered FTS timing. Defaults to assistant.
   --cache-namespace Override the embedding cache namespace inspected for saved vectors.
   --vector-limit    Rows to materialize into proof_message_vectors. Default 20000; use "all" for all rows.
   --scan-limit      Rows to pure-JS exact-scan. Defaults to vector-limit.
@@ -84,6 +87,9 @@ const generatedAt = new Date().toISOString().replaceAll(":", "-");
 const workDb = valueFor("--work-db", join(tmpdir(), `quasar-sqlite-first-proof-${generatedAt}.sqlite`));
 const outPath = valueFor("--out", `docs/proofs/sqlite-first-proof-${generatedAt}.json`)!;
 const queries = args.flatMap((arg, index) => (arg === "--query" && args[index + 1] !== undefined ? [args[index + 1]!] : []));
+const ftsBenchmarkSamples = numberFor("--fts-samples", 1);
+const ftsFilterProjectKey = valueFor("--filter-project-key");
+const ftsFilterRole = valueFor("--filter-role");
 const vectorLimit = numberFor("--vector-limit", 20_000);
 const exactScanLimit = numberFor("--scan-limit", vectorLimit);
 const paritySample = optionalPositiveIntFor("--parity-sample");
@@ -106,6 +112,9 @@ let report: SqliteFirstProofReport = runSqliteFirstProof({
   workDb: resolve(workDb!),
   profile,
   queries: queries.length > 0 ? queries : undefined,
+  ftsBenchmarkSamples,
+  ftsFilterProjectKey,
+  ftsFilterRole,
   vectorLimit,
   exactScanLimit,
 });
