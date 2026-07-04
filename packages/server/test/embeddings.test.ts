@@ -513,7 +513,7 @@ describe("Embeddings", () => {
     expect(accepted).toBe(0);
   });
 
-  test("environment profile namespaces include provider and vector-affecting settings", () => {
+  test("environment profile keeps synthetic cache compatible and fingerprints local vector settings", () => {
     const previous = {
       provider: process.env.QUASAR_EMBEDDING_PROVIDER,
       namespace: process.env.QUASAR_EMBEDDING_CACHE_NAMESPACE,
@@ -532,11 +532,14 @@ describe("Embeddings", () => {
       process.env.QUASAR_EMBEDDING_PROVIDER = "local";
       process.env.QUASAR_EMBEDDING_DOCUMENT_PREFIX = "passage: ";
       const localWithDifferentPrefix = embeddingProfileFromEnv();
+      process.env.QUASAR_EMBEDDING_CACHE_NAMESPACE = "operator-selected-cache";
+      const explicit = embeddingProfileFromEnv();
 
       expect(local.cacheNamespace).toStartWith("local:hf:nomic-ai/nomic-embed-text-v1.5:768:search_document:");
-      expect(synthetic.cacheNamespace).toStartWith("synthetic:hf:nomic-ai/nomic-embed-text-v1.5:768:search_document:");
+      expect(synthetic.cacheNamespace).toBe("synthetic:hf:nomic-ai/nomic-embed-text-v1.5:768:search_document");
       expect(local.cacheNamespace).not.toBe(synthetic.cacheNamespace);
       expect(local.cacheNamespace).not.toBe(localWithDifferentPrefix.cacheNamespace);
+      expect(explicit.cacheNamespace).toBe("operator-selected-cache");
     } finally {
       if (previous.provider === undefined) delete process.env.QUASAR_EMBEDDING_PROVIDER;
       else process.env.QUASAR_EMBEDDING_PROVIDER = previous.provider;
@@ -546,6 +549,34 @@ describe("Embeddings", () => {
       else process.env.QUASAR_EMBEDDING_ONNX_DTYPE = previous.dtype;
       if (previous.documentPrefix === undefined) delete process.env.QUASAR_EMBEDDING_DOCUMENT_PREFIX;
       else process.env.QUASAR_EMBEDDING_DOCUMENT_PREFIX = previous.documentPrefix;
+    }
+  });
+
+  test("synthetic prefix overrides require an explicit cache namespace", () => {
+    const previous = {
+      provider: process.env.QUASAR_EMBEDDING_PROVIDER,
+      namespace: process.env.QUASAR_EMBEDDING_CACHE_NAMESPACE,
+      documentPrefix: process.env.QUASAR_EMBEDDING_DOCUMENT_PREFIX,
+      queryPrefix: process.env.QUASAR_EMBEDDING_QUERY_PREFIX,
+    };
+
+    try {
+      delete process.env.QUASAR_EMBEDDING_CACHE_NAMESPACE;
+      process.env.QUASAR_EMBEDDING_PROVIDER = "synthetic";
+      process.env.QUASAR_EMBEDDING_DOCUMENT_PREFIX = "passage: ";
+      expect(() => embeddingProfileFromEnv()).toThrow("QUASAR_EMBEDDING_CACHE_NAMESPACE must be one of: set explicitly when overriding Synthetic embedding prefixes");
+
+      process.env.QUASAR_EMBEDDING_CACHE_NAMESPACE = "synthetic-custom-prefix";
+      expect(embeddingProfileFromEnv().cacheNamespace).toBe("synthetic-custom-prefix");
+    } finally {
+      if (previous.provider === undefined) delete process.env.QUASAR_EMBEDDING_PROVIDER;
+      else process.env.QUASAR_EMBEDDING_PROVIDER = previous.provider;
+      if (previous.namespace === undefined) delete process.env.QUASAR_EMBEDDING_CACHE_NAMESPACE;
+      else process.env.QUASAR_EMBEDDING_CACHE_NAMESPACE = previous.namespace;
+      if (previous.documentPrefix === undefined) delete process.env.QUASAR_EMBEDDING_DOCUMENT_PREFIX;
+      else process.env.QUASAR_EMBEDDING_DOCUMENT_PREFIX = previous.documentPrefix;
+      if (previous.queryPrefix === undefined) delete process.env.QUASAR_EMBEDDING_QUERY_PREFIX;
+      else process.env.QUASAR_EMBEDDING_QUERY_PREFIX = previous.queryPrefix;
     }
   });
 

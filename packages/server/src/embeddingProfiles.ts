@@ -64,6 +64,18 @@ export const embeddingProviderFromEnv = (): EmbeddingProvider => {
 
 const defaultCacheNamespaceFromEnv = (profile: Omit<EmbeddingProfile, "cacheNamespace">): string => {
   const provider = embeddingProviderFromEnv();
+  if (provider === "synthetic") {
+    const legacyDocumentPrefix = "search_document: ";
+    const legacyQueryPrefix = "search_query: ";
+    if (profile.documentPrefix !== legacyDocumentPrefix || profile.queryPrefix !== legacyQueryPrefix) {
+      throw new EmbeddingConfigurationError({
+        variable: "QUASAR_EMBEDDING_CACHE_NAMESPACE",
+        expected: ["set explicitly when overriding Synthetic embedding prefixes"],
+        received: `documentPrefix=${JSON.stringify(profile.documentPrefix ?? "")}, queryPrefix=${JSON.stringify(profile.queryPrefix ?? "")}`,
+      });
+    }
+    return profileCacheNamespace(profile);
+  }
   const onnxDtype = process.env.QUASAR_EMBEDDING_ONNX_DTYPE?.trim() || "q8";
   const fingerprint = sha256Short(JSON.stringify({
     version: 2,
