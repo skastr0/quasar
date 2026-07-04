@@ -3,9 +3,10 @@ import { Context, Effect, Layer, Schema } from "effect";
 
 import type { DivergenceAggregate, DivergenceRow, IngestRunRow, MappedSession, MessageRow, ProjectRow, SessionRow, SessionVersion, ToolCallRow } from "./model";
 import type { IndexProof } from "./verify";
-import { messageSearchKey } from "./lancedb";
+import { messageSearchKey, type SearchHit } from "./lancedb";
 import { isSearchableRole, normalizeIndexedContentHash } from "./searchPolicy";
 import { ensureParentDir, sqlitePath } from "./paths";
+import { fts5QueryForText, positiveInt } from "./fts5";
 
 export class SqliteStoreError extends Schema.TaggedError<SqliteStoreError>()(
   "SqliteStoreError",
@@ -85,6 +86,13 @@ export interface LocalStoreService {
   readonly countUnembeddedMessages: () => Effect.Effect<number, SqliteStoreError>;
   /** Count searchable messages total. */
   readonly countSearchableMessages: () => Effect.Effect<number, SqliteStoreError>;
+  readonly lexicalSearch: (request: {
+    readonly query: string;
+    readonly projectKey?: string;
+    readonly role?: string;
+    readonly providers?: readonly string[];
+    readonly limit?: number;
+  }) => Effect.Effect<readonly SearchHit[], SqliteStoreError>;
   readonly close: Effect.Effect<void>;
 }
 
@@ -98,6 +106,82 @@ const trySqlite = <A>(operation: string, run: () => A): Effect.Effect<A, SqliteS
         cause,
       }),
   });
+
+const MESSAGES_FTS_MIGRATION_SQL = `
+  CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    text,
+    key UNINDEXED,
+    session_id UNINDEXED,
+    seq UNINDEXED,
+    role UNINDEXED,
+    project_key UNINDEXED,
+    provider UNINDEXED,
+    content_hash UNINDEXED,
+    tokenize = 'unicode61'
+  );
+  DROP TRIGGER IF EXISTS messages_fts_ai;
+  DROP TRIGGER IF EXISTS messages_fts_ad;
+  DROP TRIGGER IF EXISTS messages_fts_au;
+  CREATE TRIGGER IF NOT EXISTS messages_fts_ai
+  AFTER INSERT ON messages
+  WHEN NEW.role IN ('user', 'assistant', 'reasoning')
+  BEGIN
+    INSERT INTO messages_fts(text, key, session_id, seq, role, project_key, provider, content_hash)
+    VALUES (
+      NEW.text,
+      NEW.session_id || ':' || NEW.seq || ':' || NEW.role,
+      NEW.session_id,
+      NEW.seq,
+      NEW.role,
+      NEW.project_key,
+      CASE
+        WHEN instr(NEW.session_id, ':') > 0 THEN substr(NEW.session_id, 1, instr(NEW.session_id, ':') - 1)
+        ELSE NEW.session_id
+      END,
+      'unembedded:' || NEW.content_hash
+    );
+  END;
+  CREATE TRIGGER IF NOT EXISTS messages_fts_ad
+  AFTER DELETE ON messages
+  BEGIN
+    DELETE FROM messages_fts WHERE key = OLD.session_id || ':' || OLD.seq || ':' || OLD.role;
+  END;
+  CREATE TRIGGER IF NOT EXISTS messages_fts_au
+  AFTER UPDATE ON messages
+  BEGIN
+    DELETE FROM messages_fts WHERE key = OLD.session_id || ':' || OLD.seq || ':' || OLD.role;
+    INSERT INTO messages_fts(text, key, session_id, seq, role, project_key, provider, content_hash)
+    SELECT
+      NEW.text,
+      NEW.session_id || ':' || NEW.seq || ':' || NEW.role,
+      NEW.session_id,
+      NEW.seq,
+      NEW.role,
+      NEW.project_key,
+      CASE
+        WHEN instr(NEW.session_id, ':') > 0 THEN substr(NEW.session_id, 1, instr(NEW.session_id, ':') - 1)
+        ELSE NEW.session_id
+      END,
+      'unembedded:' || NEW.content_hash
+    WHERE NEW.role IN ('user', 'assistant', 'reasoning');
+  END;
+  INSERT INTO messages_fts(text, key, session_id, seq, role, project_key, provider, content_hash)
+  SELECT
+    m.text,
+    m.session_id || ':' || m.seq || ':' || m.role,
+    m.session_id,
+    m.seq,
+    m.role,
+    m.project_key,
+    CASE
+      WHEN instr(m.session_id, ':') > 0 THEN substr(m.session_id, 1, instr(m.session_id, ':') - 1)
+      ELSE m.session_id
+    END,
+    'unembedded:' || m.content_hash
+  FROM messages AS m
+  WHERE m.role IN ('user', 'assistant', 'reasoning')
+    AND NOT EXISTS (SELECT 1 FROM messages_fts AS f WHERE f.key = m.session_id || ':' || m.seq || ':' || m.role);
+`;
 
 const migrate = (db: Database): void => {
   db.exec(`
@@ -218,10 +302,14 @@ const migrate = (db: Database): void => {
     db.exec("ALTER TABLE sessions ADD COLUMN indexed_at TEXT");
     db.exec("CREATE INDEX IF NOT EXISTS sessions_stale_index ON sessions(indexed_at, updated_at)");
   }
+  db.exec(MESSAGES_FTS_MIGRATION_SQL);
 };
 
 const count = (db: Database, table: string): number =>
   (db.query(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count;
+
+const lexicalRankScore = (index: number): number =>
+  1 / (index + 1);
 
 export class LocalStore extends Context.Tag("@quasar/LocalStore")<
   LocalStore,
@@ -536,6 +624,67 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                 "SELECT COUNT(*) AS count FROM messages WHERE role IN ('user', 'assistant', 'reasoning')",
               ).get() as { count: number };
               return row.count;
+            }),
+          lexicalSearch: ({ query, projectKey, role, providers, limit }) =>
+            trySqlite("lexicalSearch", () => {
+              const ftsQuery = fts5QueryForText(query);
+              if (ftsQuery === undefined) return [];
+              const filters = ["messages_fts MATCH ?"];
+              const args: Array<string | number> = [ftsQuery];
+              if (projectKey !== undefined) {
+                filters.push("project_key = ?");
+                args.push(projectKey);
+              }
+              if (role !== undefined) {
+                filters.push("role = ?");
+                args.push(role);
+              }
+              if (providers !== undefined && providers.length > 0) {
+                filters.push(`provider IN (${providers.map(() => "?").join(", ")})`);
+                args.push(...providers);
+              }
+              const rows = db
+                .query(
+                  `SELECT
+                    key,
+                    bm25(messages_fts) AS rank,
+                    session_id AS sessionId,
+                    seq,
+                    role,
+                    project_key AS projectKey,
+                    provider,
+                    text,
+                    content_hash AS contentHash
+                  FROM messages_fts
+                  WHERE ${filters.join(" AND ")}
+                  ORDER BY rank ASC, key ASC
+                  LIMIT ?`,
+                )
+                .all(...args, positiveInt(limit, 10)) as Array<{
+                  key: string;
+                  rank: number;
+                  sessionId: string;
+                  seq: number;
+                  role: string;
+                  projectKey: string;
+                  provider: string;
+                  text: string;
+                  contentHash: string;
+                }>;
+              return rows.map((row, index) => ({
+                key: row.key,
+                score: lexicalRankScore(index),
+                row: {
+                  key: row.key,
+                  sessionId: row.sessionId,
+                  seq: row.seq,
+                  role: row.role,
+                  projectKey: row.projectKey,
+                  provider: row.provider,
+                  text: row.text,
+                  contentHash: row.contentHash,
+                },
+              }));
             }),
           close: Effect.sync(() => db.close()),
         } satisfies LocalStoreService;

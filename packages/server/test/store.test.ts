@@ -2,9 +2,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { Effect } from "effect";
 
+import { fts5QueryForText } from "../src/fts5";
 import type { IngestRunRow, MappedSession } from "../src/model";
 import { LocalStore, makeLocalStoreLayer } from "../src/store";
 import type { LocalStoreService } from "../src/store";
@@ -135,6 +137,67 @@ describe("LocalStore", () => {
     );
 
     expect(stats).toEqual({ projects: 1, sessions: 1, messages: 2, toolCalls: 2, ingestRuns: 0 });
+  });
+
+  test("builds hostile-input-safe SQLite FTS5 query strings", () => {
+    expect(fts5QueryForText("sqlite: proof - vector")).toBe('"sqlite" AND "proof" AND "vector"');
+    expect(fts5QueryForText('" OR foo:bar - ()')).toBe('"OR" AND "foo" AND "bar"');
+    expect(fts5QueryForText(" ::: ")).toBeUndefined();
+  });
+
+  test("keeps SQLite FTS lexical rows coherent across insert, update, and delete triggers", async () => {
+    const path = sqlitePath();
+    await withStore(path, (store) => store.upsertSession(mappedSession()));
+
+    const inserted = await withStore(path, (store) => store.lexicalSearch({ query: "First", limit: 10 }));
+    expect(inserted.map((hit) => hit.row.text)).toEqual(["First message"]);
+    expect(inserted.map((hit) => hit.row.contentHash)).toEqual(["unembedded:hash-1"]);
+
+    const hostile = await withStore(path, (store) =>
+      store.lexicalSearch({ query: '" OR First:message - ()', limit: 10 }),
+    );
+    expect(hostile).toEqual([]);
+
+    const rowidSkewDb = new Database(path);
+    try {
+      rowidSkewDb.prepare("UPDATE messages_fts SET rowid = rowid + 1000 WHERE key = ?").run("session-a:1:user");
+    } finally {
+      rowidSkewDb.close();
+    }
+
+    const db = new Database(path);
+    try {
+      db.prepare("UPDATE messages SET text = ?, content_hash = ? WHERE session_id = ? AND seq = ?").run(
+        "Updated trigger keyword",
+        "hash-updated",
+        "session-a",
+        1,
+      );
+    } finally {
+      db.close();
+    }
+
+    const [afterUpdate, oldText] = await withStore(
+      path,
+      (store) =>
+        Effect.all([
+          store.lexicalSearch({ query: "Updated", limit: 10 }),
+          store.lexicalSearch({ query: "First", limit: 10 }),
+        ]),
+    );
+    expect(afterUpdate.map((hit) => hit.row.text)).toEqual(["Updated trigger keyword"]);
+    expect(afterUpdate.map((hit) => hit.row.contentHash)).toEqual(["unembedded:hash-updated"]);
+    expect(oldText).toEqual([]);
+
+    const deleteDb = new Database(path);
+    try {
+      deleteDb.prepare("DELETE FROM messages WHERE session_id = ? AND seq = ?").run("session-a", 1);
+    } finally {
+      deleteDb.close();
+    }
+
+    const afterDelete = await withStore(path, (store) => store.lexicalSearch({ query: "Updated", limit: 10 }));
+    expect(afterDelete).toEqual([]);
   });
 
   test("round-trips host and identity scheme version provenance on read", async () => {

@@ -1,0 +1,50 @@
+{
+  "generatedAt": "2026-07-04T08:26:00.000Z",
+  "purpose": "SQLite FTS5 lexical HTTP p95 proof on a production-volume snapshot",
+  "method": {
+    "runtime": "quasar-server:latest one-off Docker container",
+    "sourceVolume": "quasar-server_quasar-data mounted read-only",
+    "sourceDb": "/data/quasar/quasar.sqlite",
+    "snapshot": "SQLite VACUUM INTO a temporary container-local database",
+    "server": "patched packages/server/src/store.ts, search.ts, and fts5.ts mounted read-only over the image source",
+    "environment": {
+      "QUASAR_LOCAL_SQLITE": "temporary snapshot path",
+      "QUASAR_LOCAL_HOME": "temporary directory",
+      "QUASAR_SEARCH_DATA_DIR": "temporary search.lance directory",
+      "QUASAR_SEARCH_PROFILE": "0",
+      "SYNTHETIC_API_KEY": ""
+    }
+  },
+  "snapshot": {
+    "sessions": 13749,
+    "messages": 679940,
+    "ftsRows": 679940,
+    "snapshotMs": 158475.34,
+    "startupAndFtsBackfillMs": 31116.93
+  },
+  "queries": [
+    "sqlite lancedb readiness",
+    "embedding profile vector dimension",
+    "tool payloads session search",
+    "search readiness",
+    "project key"
+  ],
+  "httpLexical": {
+    "samples": 60,
+    "limit": 10,
+    "minMs": 3.48,
+    "medianMs": 28.47,
+    "p95Ms": 58.81,
+    "maxMs": 62.75,
+    "firstReceipts": [
+      { "matches": 10, "firstScore": 1 },
+      { "matches": 10, "firstScore": 1 },
+      { "matches": 10, "firstScore": 1 },
+      { "matches": 10, "firstScore": 1 },
+      { "matches": 10, "firstScore": 1 }
+    ]
+  },
+  "result": {
+    "p95Under100ms": true
+  }
+}

@@ -222,12 +222,12 @@ export const DerivedSearchLive = Layer.effect(
       }),
       stats: search.tableStats({ tableName: profileTable }),
       lexicalSearch: ({ query, projectKey, role, providers, limit }) =>
-        search.ftsSearch({
-          tableName: LEXICAL_TABLE,
+        store.lexicalSearch({
           query,
+          projectKey,
+          role,
+          providers,
           limit,
-          filter: messageSearchFilter({ projectKey, role, providers }),
-          select: MESSAGE_SEARCH_COLUMNS,
         }),
     });
   }),
