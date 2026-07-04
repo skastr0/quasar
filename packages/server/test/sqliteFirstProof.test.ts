@@ -10,6 +10,7 @@ import { fts5QueryForText } from "../src/fts5";
 import {
   documentCacheKey,
   inspectEmbeddingCoverage,
+  measureEmbeddingParity,
   runSqliteFirstProof,
 } from "../src/sqliteFirstProof";
 
@@ -168,6 +169,38 @@ describe("sqlite-first proof helpers", () => {
       expect(() => source.query("SELECT COUNT(*) FROM proof_messages_fts").get()).toThrow();
     } finally {
       source.close();
+    }
+  });
+
+  test("measures local-vs-cached embedding parity with an explicit cosine threshold", async () => {
+    const dir = tempDir();
+    const path = join(dir, "source.sqlite");
+    makeFixtureDb(path);
+    const db = new Database(path, { readonly: true });
+    try {
+      const report = await measureEmbeddingParity(
+        db,
+        profile,
+        profile,
+        {
+          embedMany: async (values) =>
+            values.map((value) => {
+              if (value.includes("alpha")) return [1, 0, 0];
+              if (value.includes("beta")) return [0, 1, 0];
+              return [0, 0, 1];
+            }),
+        },
+        { sampleSize: 2, threshold: 0.999 },
+      );
+
+      expect(report.eligibleCachedMessages).toBe(2);
+      expect(report.sampleSize).toBe(2);
+      expect(report.threshold).toBe(0.999);
+      expect(report.passed).toBe(true);
+      expect(report.scores.min).toBe(1);
+      expect(report.belowThreshold).toHaveLength(0);
+    } finally {
+      db.close();
     }
   });
 });
