@@ -15,7 +15,12 @@ describe("server ops config", () => {
     expect(compose).not.toContain("QUASAR_SEARCH_DATA_DIR");
     // Provider is pinned — a flip is an explicit receipted cutover, never a deploy side-effect.
     expect(compose).toContain("QUASAR_EMBEDDING_PROVIDER: synthetic");
-    expect(compose).toContain("QUASAR_EMBEDDING_MODEL_CACHE_DIR: ${QUASAR_EMBEDDING_MODEL_CACHE_DIR:-/data/quasar/models}");
+    // Defaults to the Dockerfile-baked path (image's own writable layer), NOT
+    // under /data/quasar: that path is the quasar-data VOLUME, and an empty
+    // named volume mounted there would shadow the baked fp32 model.
+    expect(compose).toContain("QUASAR_EMBEDDING_MODEL_CACHE_DIR: ${QUASAR_EMBEDDING_MODEL_CACHE_DIR:-/app/.model-cache}");
+    expect(dockerfile).toContain("ENV QUASAR_EMBEDDING_MODEL_CACHE_DIR=/app/.model-cache");
+    expect(dockerfile).toContain("bake-onnx-model");
     expect(compose).toContain("SYNTHETIC_API_KEY: ${SYNTHETIC_API_KEY:-}");
     expect(dockerfile).not.toContain("QUASAR_SEARCH_DATA_DIR");
     expect(dockerfile).toContain("COPY scripts ./scripts");

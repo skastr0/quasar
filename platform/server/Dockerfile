@@ -25,6 +25,15 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/* \
   && bun scripts/ensure-simsimd-native.mjs
 
+# Bake the fp32 query-embedding ONNX model (~530MB) into the image at build
+# time, so a fresh container never reaches Hugging Face's CDN before it can
+# serve its first semantic query. The cache dir lives under /app (the image's
+# own writable layer), NOT under /data/quasar: that path is a VOLUME, and an
+# empty named volume mounted there on first run would shadow anything baked
+# into the image at that path.
+ENV QUASAR_EMBEDDING_MODEL_CACHE_DIR=/app/.model-cache
+RUN bun scripts/bake-onnx-model.ts
+
 ENV NODE_ENV=production \
   QUASAR_LOCAL_HOME=/data/quasar \
   QUASAR_LOCAL_SQLITE=/data/quasar/quasar.sqlite \

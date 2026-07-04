@@ -52,8 +52,10 @@ export interface EmbeddingsLayerOptions {
  * parity against the synthetic-embedded matrix (overlap@10 0.77 < 0.8 gate),
  * and fp16 needs graph optimizations disabled to dodge an onnxruntime
  * LayerNormFusion bug. Receipts: docs/proofs/query-embed-parity-2026-07-04.json
- * and query-embed-parity-fp32-2026-07-04.json. Never make this configurable. */
-const QUERY_EMBEDDING_ONNX_DTYPE = "fp32";
+ * and query-embed-parity-fp32-2026-07-04.json. Never make this configurable.
+ * Exported so the Docker build's model-baking step (scripts/bake-onnx-model.ts)
+ * warms the exact dtype this layer will load at runtime — one pin, not two. */
+export const QUERY_EMBEDDING_ONNX_DTYPE = "fp32";
 
 const nowIso = () => new Date().toISOString();
 
