@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -27,7 +27,7 @@ const usage = {
     exec: "run a command inside the container after --",
     maintain: "run LanceDB maintenance inside the container, not through HTTP",
     materialize: "run embedding vector materialization through HTTP and write a proof receipt",
-    "materialize-staging": "run non-live materialization proof in a one-off Docker container with the data volume mounted read-only",
+    "materialize-staging": "run non-live materialization proof in a one-off Docker container with the data volume mounted read-only; pass --staging-dir for a larger work disk",
     backup: "write ./quasar-truth-backup.tar with SQLite truth and machine identity",
   },
   examples: [
@@ -36,7 +36,7 @@ const usage = {
     "bun scripts/server-ops.mjs lance",
     "bun scripts/server-ops.mjs maintain",
     "bun scripts/server-ops.mjs materialize --out docs/proofs/materialization-closure.json",
-    "bun scripts/server-ops.mjs materialize-staging --out docs/proofs/materialize-staging-docker.json",
+    "bun scripts/server-ops.mjs materialize-staging --out docs/proofs/materialize-staging-docker.json --staging-dir /Volumes/large/quasar-staging",
     "bun scripts/server-ops.mjs exec -- sh -lc 'ls -lah /data/quasar'",
   ],
 };
@@ -46,7 +46,7 @@ if (command === "help" || command === "--help" || command === "-h") {
   process.exit(0);
 }
 
-if (command !== "materialize") {
+if (command !== "materialize" && command !== "materialize-staging") {
   requireFile(envFile, "copy platform/server/.env.example to platform/server/.env first");
   requireFile(composeFile, "missing server compose file");
 }
@@ -166,10 +166,13 @@ function materializeStaging() {
   const outFile = basename(outPath);
   const image = "quasar-server:staging-proof";
   const volume = optionValue("--volume", "quasar-server_quasar-data");
+  const stagingDir = optionValue("--staging-dir");
+  const stagingParent = stagingDir === undefined ? undefined : validateExternalStagingParent(stagingDir);
   const modelCacheDir = optionValue("--onnx-cache-dir", "/tmp/quasar-models");
   mkdirSync(outDir, { recursive: true });
 
   docker(["build", "-f", "platform/server/Dockerfile", "-t", image, "."], { rawCompose: false });
+  const stagingRoot = stagingParent === undefined ? undefined : mkdtempSync(join(stagingParent, "quasar-materialize-staging-work-"));
   const proofDir = mkdtempSync(join(tmpdir(), "quasar-materialize-staging-proof-out-"));
 
   const runnerArgs = [
@@ -180,36 +183,66 @@ function materializeStaging() {
     `/proof/${outFile}`,
     "--onnx-cache-dir",
     modelCacheDir,
+    "--cleanup",
   ];
   for (const flag of ["--limit", "--max-batches", "--timeout-ms", "--port", "--cache-namespace", "--embedding-model", "--embedding-dimensions", "--embedding-task"]) {
     const value = optionValue(flag);
     if (value !== undefined) runnerArgs.push(flag, value);
   }
 
+  const dockerRunArgs = [
+    "run",
+    "--rm",
+    "--name",
+    `quasar-materialize-staging-${Date.now()}`,
+    "--mount",
+    `type=volume,source=${volume},target=/source,readonly`,
+    "--mount",
+    `type=bind,source=${proofDir},target=/proof`,
+  ];
+  if (stagingRoot !== undefined) {
+    dockerRunArgs.push(
+      "--mount",
+      `type=bind,source=${stagingRoot},target=/staging`,
+      "-e",
+      "TMPDIR=/staging",
+    );
+  }
+  dockerRunArgs.push(
+    "--workdir",
+    "/app",
+    "-e",
+    "NODE_ENV=production",
+    "-e",
+    "QUASAR_EMBEDDING_PROVIDER=local",
+    image,
+    "bun",
+    ...runnerArgs,
+  );
+
+  let status = 0;
+  let copiedReceipt = false;
   try {
-    docker([
-      "run",
-      "--rm",
-      "--name",
-      `quasar-materialize-staging-${Date.now()}`,
-      "--mount",
-      `type=volume,source=${volume},target=/source,readonly`,
-      "--mount",
-      `type=bind,source=${proofDir},target=/proof`,
-      "--workdir",
-      "/app",
-      "-e",
-      "NODE_ENV=production",
-      "-e",
-      "QUASAR_EMBEDDING_PROVIDER=local",
-      image,
-      "bun",
-      ...runnerArgs,
-    ], { rawCompose: false });
-    copyFileSync(join(proofDir, outFile), outPath);
+    const result = dockerResult(dockerRunArgs, { rawCompose: false });
+    status = result.status ?? 1;
+    if (status === 0) {
+      copyFileSync(join(proofDir, outFile), outPath);
+      copiedReceipt = true;
+    }
   } finally {
     rmSync(proofDir, { recursive: true, force: true });
+    if (copiedReceipt && stagingRoot !== undefined) {
+      rmSync(stagingRoot, { recursive: true, force: true });
+    }
   }
+  if (status !== 0) process.exit(status);
+}
+
+function validateExternalStagingParent(path) {
+  const root = resolve(path);
+  if (!existsSync(root)) fail(`--staging-dir does not exist: ${root}`);
+  if (!statSync(root).isDirectory()) fail(`--staging-dir is not a directory: ${root}`);
+  return root;
 }
 
 function exec(args) {
@@ -217,11 +250,15 @@ function exec(args) {
 }
 
 function docker(args, options = {}) {
+  const result = dockerResult(args, options);
+  if (result.status !== 0) process.exit(result.status ?? 1);
+}
+
+function dockerResult(args, options = {}) {
   const rawCompose = options.rawCompose ?? true;
   const dockerArgs = rawCompose ? [...compose, ...args] : args;
   const env = options.injectShellSecrets ? withShellSecrets(process.env) : process.env;
-  const result = spawnSync("docker", dockerArgs, { cwd: repoRoot, stdio: "inherit", env });
-  if (result.status !== 0) process.exit(result.status ?? 1);
+  return spawnSync("docker", dockerArgs, { cwd: repoRoot, stdio: "inherit", env });
 }
 
 async function getJson(path) {
