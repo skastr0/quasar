@@ -254,6 +254,16 @@ describe("semantic serving from the resident matrix", () => {
       const lexical = await fetchJson(`${base}/search/lexical?q=handshake&limit=3`);
       expect(lexical.status).toBe(200);
       expect(lexical.body.data.matches.length).toBe(1);
+
+      // Fusion never 503s for the same embedder loss: it degrades to the
+      // lexical leg alone (a fresh, uncached query text forces a real embed
+      // call against the dead stub instead of a cache hit).
+      const fusionDegraded = await fetchJson(`${base}/search/fusion?q=handshake&limit=3`);
+      expect(fusionDegraded.status).toBe(200);
+      expect(fusionDegraded.body.ok).toBe(true);
+      expect(fusionDegraded.body.data.degraded).toBe(true);
+      expect(fusionDegraded.body.data.matches.length).toBe(1);
+      expect(fusionDegraded.body.data.matches[0].row.text).toBe("handshake protocol notes angle=0.1");
     } finally {
       proc.kill();
       await proc.exited;

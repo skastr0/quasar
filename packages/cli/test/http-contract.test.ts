@@ -544,6 +544,25 @@ describe("CLI HTTP client <-> server contract", () => {
       });
       expect(fusionOn.body.data.matches.length).toBeGreaterThanOrEqual(2);
       expect(fusionOn.body.data.matches[0].row.text).toBe("contract handshake over http");
+
+      // Embedder loss for an uncached query (SYNTHETIC_API_KEY is "" in this
+      // test's env, so any cache-miss embed call fails immediately):
+      // /search/semantic keeps its own 503 contract, but /search/fusion never
+      // 503s for this — it degrades to the lexical leg alone.
+      const uncachedQuery = "uncached embedder degrade probe";
+      const semanticDegraded = await fetchJson(
+        `${rebootBase}/search/semantic?q=${encodeURIComponent(uncachedQuery)}&limit=5`,
+      );
+      expect(semanticDegraded.status).toBe(503);
+      expect(semanticDegraded.body.error.type).toBe("EmbeddingUnavailable");
+
+      const fusionDegraded = await fetchJson(
+        `${rebootBase}/search/fusion?q=${encodeURIComponent(uncachedQuery)}&limit=5`,
+      );
+      expect(fusionDegraded.status).toBe(200);
+      expect(fusionDegraded.body.ok).toBe(true);
+      expect(fusionDegraded.body.data.degraded).toBe(true);
+      expect(fusionDegraded.body.data.matches).toEqual([]);
     } finally {
       proc.kill();
       await proc.exited;
