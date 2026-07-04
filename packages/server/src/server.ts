@@ -656,6 +656,21 @@ const maintenanceMaterializeEmbeddingVectors = Effect.gen(function* () {
   }));
 });
 
+const maintenanceMaterializeSqliteEmbeddingVectors = Effect.gen(function* () {
+  const embeddings = yield* Embeddings;
+  const store = yield* LocalStore;
+  const params = yield* query;
+  const report = yield* embeddings.materializeMissingVectorsToSqlite({
+    limit: positiveInt(params, "limit", 1_000),
+  });
+  const coverage = yield* store.messageVectorCoverage(embeddings.profile.cacheNamespace);
+  return json(ok("maintenance/embeddings/materialize-sqlite", {
+    report,
+    coverage,
+    embedding: { provider: embeddingProviderFromEnv(), profile: embeddings.profile },
+  }));
+});
+
 // Minimal self-contained dashboard served at the canonical root URL. No external
 // assets or egress: it calls the same-origin /status and /search/{mode} endpoints.
 const DASHBOARD_HTML = `<!doctype html>
@@ -749,6 +764,7 @@ const routesWithMaintenance = routes.pipe(
   HttpRouter.get("/maintenance/repair", maintenanceRepair),
   HttpRouter.get("/maintenance/embeddings/replay-cache", maintenanceReplayEmbeddingCache),
   HttpRouter.get("/maintenance/embeddings/materialize", maintenanceMaterializeEmbeddingVectors),
+  HttpRouter.get("/maintenance/embeddings/materialize-sqlite", maintenanceMaterializeSqliteEmbeddingVectors),
   HttpRouter.get("/", dashboard),
   HttpRouter.get("*", json({ ok: false, error: { type: "NotFound", message: "No route" } }, { status: 404 })),
 );

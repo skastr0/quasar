@@ -816,6 +816,150 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                   elapsedMs: elapsedSince(started),
                 };
               }),
+            materializeMissingVectorsToSqlite: (options = {}) =>
+              Effect.gen(function* () {
+                const started = performance.now();
+                const startedAt = options.now ?? nowIso();
+                const materializationLimit = options.limit ?? 1_000;
+                const messages = yield* store.listMessagesMissingVector({
+                  model: profile.cacheNamespace,
+                  limit: materializationLimit,
+                });
+                let cacheHits = 0;
+                let cacheMisses = 0;
+                let embedded = 0;
+                let skipped = 0;
+                let sqliteVectorsUpserted = 0;
+                const cachedSqliteRows: Array<ReturnType<typeof toSqliteVectorRow>> = [];
+                const misses: MessageRow[] = [];
+
+                for (const message of messages) {
+                  if (!isSemanticSearchDocument(message)) {
+                    skipped += 1;
+                    continue;
+                  }
+                  const cached = yield* getCached(documentCacheHash(message));
+                  if (cached !== undefined) {
+                    cachedSqliteRows.push(toSqliteVectorRow(message, cached.vector, startedAt));
+                    cacheHits += 1;
+                    continue;
+                  }
+                  cacheMisses += 1;
+                  misses.push(message);
+                }
+
+                sqliteVectorsUpserted += yield* upsertAllSqliteVectors(
+                  "materializeMissingVectorsToSqlite.cacheHit.upsertMessageVectors",
+                  cachedSqliteRows,
+                );
+
+                type MaterializeSqliteChunkReport = {
+                  readonly embedded: number;
+                  readonly sqliteVectorsUpserted: number;
+                };
+                const emptyMaterializeSqliteChunkReport: MaterializeSqliteChunkReport = {
+                  embedded: 0,
+                  sqliteVectorsUpserted: 0,
+                };
+                const mergeMaterializeSqliteChunkReport = (
+                  total: MaterializeSqliteChunkReport,
+                  report: MaterializeSqliteChunkReport,
+                ): MaterializeSqliteChunkReport => ({
+                  embedded: total.embedded + report.embedded,
+                  sqliteVectorsUpserted: total.sqliteVectorsUpserted + report.sqliteVectorsUpserted,
+                });
+                const processMissChunk: (chunk: readonly MessageRow[]) => Effect.Effect<MaterializeSqliteChunkReport, unknown> = (chunk) =>
+                  Effect.gen(function* () {
+                    if (chunk.length === 0) return emptyMaterializeSqliteChunkReport;
+                    if (chunk.some((message) => documentInputs(message.text).length > 1) && chunk.length > 1) {
+                      const splitAt = Math.ceil(chunk.length / 2);
+                      const splitReports = yield* Effect.forEach(
+                        [chunk.slice(0, splitAt), chunk.slice(splitAt)].filter((split) => split.length > 0),
+                        processMissChunk,
+                        { concurrency: 1 },
+                      );
+                      return splitReports.reduce(mergeMaterializeSqliteChunkReport, emptyMaterializeSqliteChunkReport);
+                    }
+
+                    const result = yield* (
+                      chunk.length === 1 && documentInputs(chunk[0]?.text ?? "").length > 1
+                        ? embedDocument(chunk[0]?.text ?? "").pipe(Effect.map((vector) => [vector]))
+                        : embedInputsAdaptive(chunk.map((message) => prefixed(profile.documentPrefix, message.text)))
+                    ).pipe(Effect.either);
+
+                    if (result._tag === "Left") {
+                      if (isRetryableEmbeddingCause(result.left) && chunk.length > 1) {
+                        const splitAt = Math.ceil(chunk.length / 2);
+                        const splitReports = yield* Effect.forEach(
+                          [chunk.slice(0, splitAt), chunk.slice(splitAt)].filter((split) => split.length > 0),
+                          processMissChunk,
+                          { concurrency: 1 },
+                        );
+                        return splitReports.reduce(mergeMaterializeSqliteChunkReport, emptyMaterializeSqliteChunkReport);
+                      }
+                      return yield* Effect.fail(
+                        new EmbeddingError({
+                          operation: "materializeMissingVectorsToSqlite.embed",
+                          message: result.left instanceof Error ? result.left.message : String(result.left),
+                          cause: result.left,
+                        }),
+                      );
+                    }
+
+                    const sqliteRows = [];
+                    for (let index = 0; index < chunk.length; index += 1) {
+                      const message = chunk[index];
+                      const vector = result.right[index];
+                      if (message === undefined) continue;
+                      if (vector === undefined) {
+                        return yield* Effect.fail(
+                          new EmbeddingError({
+                            operation: "materializeMissingVectorsToSqlite.embed",
+                            message: "embedder returned fewer vectors than requested",
+                          }),
+                        );
+                      }
+                      const input = prefixed(profile.documentPrefix, message.text);
+                      const cached = yield* putCached({
+                        contentHash: documentCacheHash(message),
+                        text: input,
+                        vector,
+                        now: startedAt,
+                      });
+                      sqliteRows.push(toSqliteVectorRow(message, cached.vector, startedAt));
+                    }
+                    const sqliteAccepted = yield* upsertAllSqliteVectors(
+                      "materializeMissingVectorsToSqlite.cacheMiss.upsertMessageVectors",
+                      sqliteRows,
+                    );
+                    return {
+                      embedded: sqliteRows.length,
+                      sqliteVectorsUpserted: sqliteAccepted,
+                    };
+                  });
+
+                const chunkReports = yield* Effect.forEach(
+                  chunksOf(misses, positiveIntEnv("QUASAR_EMBEDDING_API_BATCH_SIZE", DEFAULT_EMBEDDING_API_BATCH_SIZE)),
+                  processMissChunk,
+                  { concurrency: positiveIntEnv("QUASAR_EMBEDDING_API_CONCURRENCY", 4) },
+                );
+                for (const chunkReport of chunkReports) {
+                  embedded += chunkReport.embedded;
+                  sqliteVectorsUpserted += chunkReport.sqliteVectorsUpserted;
+                }
+
+                return {
+                  scanned: messages.length,
+                  cacheHits,
+                  cacheMisses,
+                  embedded,
+                  skipped,
+                  sqliteVectorsUpserted,
+                  startedAt,
+                  finishedAt: options.now ?? nowIso(),
+                  elapsedMs: elapsedSince(started),
+                };
+              }),
             status: tryEmbedding("status", () => {
               const cached = (db.query("SELECT COUNT(*) AS count FROM embedding_cache WHERE model = ?").get(profile.cacheNamespace) as { count: number }).count;
               return { cached, pending: 0, profile };

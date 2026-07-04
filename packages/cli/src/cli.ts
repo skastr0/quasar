@@ -643,6 +643,11 @@ switch (command) {
     await materializeEmbeddingVectors();
     break;
   }
+  case "materialize-sqlite-embedding-vectors": {
+    if (!checkInt("materialize-sqlite-embedding-vectors", "--limit", 1)) break;
+    await fetchServer("materialize-sqlite-embedding-vectors", "/maintenance/embeddings/materialize-sqlite", { limit: arg("--limit") });
+    break;
+  }
   case "workers": {
     await fetchServer("workers", "/status");
     break;
@@ -687,6 +692,7 @@ switch (command) {
           "repair-index [--limit n] [--lease-ms n] [--server url]",
           "replay-embedding-cache [--limit n] [--server url]",
           "materialize-embedding-vectors [--limit n] [--until-empty] [--max-batches n] [--require-provider local|synthetic] [--out path] [--server url]",
+          "materialize-sqlite-embedding-vectors [--limit n] [--server url]",
           "workers [--server url]",
           "search --query text [--mode lexical|semantic|fusion] [--project-key key] [--role user|assistant] [--limit n] [--server url]",
           "stats",
