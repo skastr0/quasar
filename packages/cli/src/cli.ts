@@ -9,6 +9,14 @@ import { Provider, SessionRole } from "./core/schemas";
 import { ingestFailureError, ingestReportPayload } from "./ingest-report";
 import { ingestRemote } from "./ingest";
 import { fail, ok, writeJson } from "./json";
+import {
+  addMaterializeTotals,
+  decideMaterializeLoop,
+  emptyMaterializeTotals,
+  materializeClosureReceipt,
+  parseMaterializeBatch,
+  type MaterializeTotals,
+} from "./materialize-receipt";
 
 const arg = (name: string): string | undefined => {
   const index = process.argv.indexOf(name);
@@ -381,180 +389,22 @@ const PROVIDERS = Provider.literals;
 const INGEST_PROVIDERS = ["all", ...PROVIDERS] as const;
 const ROLES = SessionRole.literals;
 
-const recordValue = (value: unknown, key: string): unknown =>
-  typeof value === "object" && value !== null ? (value as Record<string, unknown>)[key] : undefined;
-
-const fieldFailure = (name: string, key: string, expected: "number" | "boolean", received: unknown) =>
-  fail(name, new CommandInputError(`server response field must be ${expected}: ${key}`, {
-    path: key,
-    expected,
-    received,
-    hint: "Inspect the server response shape before retrying the loop.",
-  }));
-
-const numberField = (name: string, value: unknown, key: string) => {
-  const field = recordValue(value, key);
-  return typeof field === "number" && Number.isFinite(field)
-    ? { ok: true as const, value: field }
-    : { ok: false as const, body: fieldFailure(name, key, "number", field) };
-};
-
-const booleanField = (name: string, value: unknown, key: string) => {
-  const field = recordValue(value, key);
-  return typeof field === "boolean"
-    ? { ok: true as const, value: field }
-    : { ok: false as const, body: fieldFailure(name, key, "boolean", field) };
-};
-
-const materializeCounters = [
-  "scanned",
-  "cacheHits",
-  "cacheMisses",
-  "embedded",
-  "skipped",
-  "sqliteVectorsUpserted",
-  "lanceRowsUpserted",
-  "lanceRowsRepaired",
-] as const;
-
-type MaterializeCounter =
-  | "scanned"
-  | "cacheHits"
-  | "cacheMisses"
-  | "embedded"
-  | "skipped"
-  | "sqliteVectorsUpserted"
-  | "lanceRowsUpserted"
-  | "lanceRowsRepaired";
-
-interface MaterializeTotals {
-  scanned: number;
-  cacheHits: number;
-  cacheMisses: number;
-  embedded: number;
-  skipped: number;
-  sqliteVectorsUpserted: number;
-  lanceRowsUpserted: number;
-  lanceRowsRepaired: number;
-}
-
-interface MaterializeBatchReceipt {
-  readonly data: unknown;
-  readonly counters: MaterializeTotals;
-  readonly vectorlessMessages: number;
-  readonly rowCountMatches: boolean;
-  readonly failedEmbedMessages: number;
-  readonly lanceScanComplete: boolean;
-  readonly nextLanceOffset: number;
-}
-
-const emptyMaterializeTotals = (): MaterializeTotals => ({
-  scanned: 0,
-  cacheHits: 0,
-  cacheMisses: 0,
-  embedded: 0,
-  skipped: 0,
-  sqliteVectorsUpserted: 0,
-  lanceRowsUpserted: 0,
-  lanceRowsRepaired: 0,
-});
-
-const addMaterializeTotals = (totals: MaterializeTotals, counters: MaterializeTotals): void => {
-  for (const key of materializeCounters) totals[key] += counters[key];
-};
-
-const parseMaterializeBatch = (name: string, body: unknown):
-  | { readonly ok: true; readonly receipt: MaterializeBatchReceipt }
-  | { readonly ok: false; readonly body: unknown } => {
-  if (recordValue(body, "ok") !== true) return { ok: false, body };
-  const data = recordValue(body, "data");
-  const report = recordValue(data, "report");
-  const counters = emptyMaterializeTotals();
-  for (const key of materializeCounters) {
-    const field = numberField(name, report, key);
-    if (!field.ok) return field;
-    counters[key] = field.value;
-  }
-  const lanceScan = recordValue(report, "lanceScan");
-  const nextLanceOffset = numberField(name, lanceScan, "nextOffset");
-  if (!nextLanceOffset.ok) return nextLanceOffset;
-  const lanceScanComplete = booleanField(name, lanceScan, "complete");
-  if (!lanceScanComplete.ok) return lanceScanComplete;
-  const vectorlessMessages = numberField(name, recordValue(data, "coverage"), "vectorlessMessages");
-  if (!vectorlessMessages.ok) return vectorlessMessages;
-  const divergence = recordValue(recordValue(data, "lance"), "divergence");
-  const rowCountMatches = booleanField(name, divergence, "rowCountMatches");
-  if (!rowCountMatches.ok) return rowCountMatches;
-  const failedEmbedMessages = numberField(name, recordValue(recordValue(data, "queue"), "embedMessage"), "failed");
-  if (!failedEmbedMessages.ok) return failedEmbedMessages;
-  return {
-    ok: true,
-    receipt: {
-      data,
-      counters,
-      vectorlessMessages: vectorlessMessages.value,
-      rowCountMatches: rowCountMatches.value,
-      failedEmbedMessages: failedEmbedMessages.value,
-      lanceScanComplete: lanceScanComplete.value,
-      nextLanceOffset: nextLanceOffset.value,
-    },
-  };
-};
-
-type MaterializeLoopDecision =
-  | { readonly kind: "success" }
-  | { readonly kind: "continue"; readonly nextLanceOffset: number }
-  | { readonly kind: "failure"; readonly error: CommandInputError };
-
-const decideMaterializeLoop = (receipt: MaterializeBatchReceipt): MaterializeLoopDecision => {
-  if (
-    receipt.vectorlessMessages === 0
-    && receipt.rowCountMatches
-    && receipt.failedEmbedMessages === 0
-    && receipt.lanceScanComplete
-  ) return { kind: "success" };
-  if (receipt.vectorlessMessages > 0 && receipt.counters.scanned === 0) {
-    return {
-      kind: "failure",
-      error: new CommandInputError("materialization made no SQLite progress while vectorless messages remain", {
-        expected: "scanned > 0 until vectorlessMessages reaches 0",
-        received: { scanned: receipt.counters.scanned, vectorlessMessages: receipt.vectorlessMessages },
-        hint: "Inspect the server response and embedding provider readiness.",
-      }),
-    };
-  }
-  if (receipt.vectorlessMessages === 0 && receipt.rowCountMatches && receipt.lanceScanComplete && receipt.failedEmbedMessages > 0) {
-    return {
-      kind: "failure",
-      error: new CommandInputError("embed-message dead letters remain after vector materialization", {
-        expected: "queue.embedMessage.failed = 0",
-        received: receipt.failedEmbedMessages,
-        hint: "Drain or inspect failed embed-message jobs before accepting the coverage receipt.",
-      }),
-    };
-  }
-  if (receipt.vectorlessMessages === 0 && receipt.lanceScanComplete && !receipt.rowCountMatches) {
-    return {
-      kind: "failure",
-      error: new CommandInputError("LanceDB divergence remains after a full SQLite-vector repair pass", {
-        expected: "active Lance row count matches SQLite vector rows",
-        received: recordValue(recordValue(receipt.data, "lance"), "divergence"),
-        hint: "Run maintenance inspection before treating semantic/fusion search as rebuilt.",
-      }),
-    };
-  }
-  return {
-    kind: "continue",
-    nextLanceOffset: receipt.vectorlessMessages === 0 ? receipt.nextLanceOffset : 0,
-  };
-};
-
 const materializeFailureDetails = (details: unknown, batches: number, totals: MaterializeTotals, last: unknown) => ({
   ...(typeof details === "object" && details !== null ? details as Record<string, unknown> : {}),
   batches,
   totals,
   last,
 });
+
+const writeJsonAndMaybeOut = (value: unknown): void => {
+  const outPath = arg("--out");
+  if (outPath !== undefined && outPath.trim() !== "") {
+    const resolved = resolve(outPath);
+    mkdirSync(dirname(resolved), { recursive: true });
+    writeFileSync(resolved, `${JSON.stringify(value, null, 2)}\n`);
+  }
+  writeJson(value);
+};
 
 const materializeEmbeddingVectorsUntilEmpty = async () => {
   const name = "materialize-embedding-vectors";
@@ -571,9 +421,9 @@ const materializeEmbeddingVectorsUntilEmpty = async () => {
       lanceOffset: String(lanceOffset),
     });
     if (body === undefined) return;
-    const parsed = parseMaterializeBatch(name, body);
+    const parsed = parseMaterializeBatch(body);
     if (!parsed.ok) {
-      writeJson(parsed.body);
+      writeJson(fail(name, parsed.error));
       process.exitCode = 1;
       return;
     }
@@ -582,13 +432,14 @@ const materializeEmbeddingVectorsUntilEmpty = async () => {
     lastData = parsed.receipt.data;
     const decision = decideMaterializeLoop(parsed.receipt);
     if (decision.kind === "success") {
-      writeJson(ok(name, {
+      writeJsonAndMaybeOut(ok(name, {
         mode: "until-empty",
         startedAt,
         finishedAt: new Date().toISOString(),
         elapsedMs: Math.round((performance.now() - started) * 100) / 100,
         batches,
         totals,
+        closure: materializeClosureReceipt(parsed.receipt),
         last: lastData,
       }));
       return;
@@ -618,6 +469,14 @@ const materializeEmbeddingVectorsUntilEmpty = async () => {
 const materializeEmbeddingVectors = async () => {
   const name = "materialize-embedding-vectors";
   if (!(checkInt(name, "--limit", 1) && checkInt(name, "--max-batches", 1))) return;
+  if (arg("--out") !== undefined && !flag("--until-empty")) {
+    rejectInput(name, new CommandInputError("--out requires --until-empty", {
+      path: "--out",
+      expected: "use --out only with the complete materialization loop",
+      hint: "Run materialize-embedding-vectors --until-empty --out <path> for a durable closure receipt.",
+    }));
+    return;
+  }
   if (flag("--until-empty")) {
     await materializeEmbeddingVectorsUntilEmpty();
   } else {
@@ -792,7 +651,7 @@ switch (command) {
           "freshness [--limit n] [--server url]",
           "repair-index [--limit n] [--lease-ms n] [--server url]",
           "replay-embedding-cache [--limit n] [--server url]",
-          "materialize-embedding-vectors [--limit n] [--until-empty] [--max-batches n] [--server url]",
+          "materialize-embedding-vectors [--limit n] [--until-empty] [--max-batches n] [--out path] [--server url]",
           "workers [--server url]",
           "search --query text [--mode lexical|semantic|fusion] [--project-key key] [--role user|assistant] [--limit n] [--server url]",
           "stats",
