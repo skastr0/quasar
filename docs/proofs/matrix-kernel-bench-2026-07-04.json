@@ -1,0 +1,82 @@
+{
+  "generatedAt": "2026-07-04T21:31:53.492Z",
+  "script": "scripts/matrix-kernel-bench.ts",
+  "machine": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "cpuModel": "Apple M1",
+    "cpuCount": 8,
+    "totalMemBytes": 17179869184,
+    "bunVersion": "1.3.14"
+  },
+  "input": {
+    "rows": 700000,
+    "dims": 768,
+    "samples": 60,
+    "model": "bench-matrix-model"
+  },
+  "kernel": {
+    "package": "simsimd",
+    "version": "6.5.5",
+    "mode": "simsimd-ffi",
+    "libraryPath": "/Users/guilhermecastro/Projects/quasar/packages/server/.native/libsimsimd-v6.5.5-darwin-arm64.dylib",
+    "capabilities": {
+      "neon": true,
+      "neonF16": true
+    },
+    "workerCount": 8
+  },
+  "generate": {
+    "elapsedMs": 14242,
+    "dbBytes": 1556361216,
+    "reusedExistingDb": false
+  },
+  "gates": {
+    "bootLoad": {
+      "limitMs": 5000,
+      "loadMs": 3856.81,
+      "rows": 700000,
+      "skippedRows": 0,
+      "pass": true
+    },
+    "rssAfterLoad": {
+      "limitBytes": 4294967296,
+      "rssBytes": 2340208640,
+      "rssAfterQueriesBytes": 2702721024,
+      "pass": true
+    },
+    "unfilteredScan": {
+      "limitMs": 100,
+      "samples": 60,
+      "minMs": 40.33,
+      "medianMs": 46.9,
+      "p95Ms": 53.27,
+      "p99Ms": 55.13,
+      "maxMs": 55.13,
+      "pass": true
+    },
+    "filteredScan": {
+      "limitMs": 100,
+      "candidates": 70000,
+      "candidateFraction": 0.1,
+      "prefilter": {
+        "samples": 60,
+        "minMs": 8.47,
+        "medianMs": 8.89,
+        "p95Ms": 10.56,
+        "p99Ms": 13.18,
+        "maxMs": 13.18
+      },
+      "full": {
+        "samples": 60,
+        "minMs": 27.31,
+        "medianMs": 28.74,
+        "p95Ms": 32.84,
+        "p99Ms": 46.25,
+        "maxMs": 46.25
+      },
+      "pass": true
+    }
+  },
+  "pass": true
+}
