@@ -18,7 +18,6 @@ const runCli = async (args: readonly string[], env: Record<string, string> = {})
       TMPDIR: tmpdir(),
       QUASAR_CONFIG: join(home, "missing-config.json"),
       QUASAR_LOCAL_SQLITE: join(home, "quasar.sqlite"),
-      QUASAR_SEARCH_DATA_DIR: join(home, "search.lance"),
       ...env,
     },
     stdout: "pipe",

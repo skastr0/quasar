@@ -116,7 +116,6 @@ const waitFor = async (url: string) => {
 
 const spawnServer = (
   sqlite: string,
-  lance: string,
   port: number,
   token: string,
   env: Record<string, string | undefined> = {},
@@ -127,7 +126,6 @@ const spawnServer = (
       ...process.env,
       QUASAR_INGEST_TOKEN: token,
       QUASAR_LOCAL_SQLITE: sqlite,
-      QUASAR_SEARCH_DATA_DIR: lance,
       ...env,
     },
     stdout: "ignore",
@@ -143,11 +141,10 @@ describe("CLI HTTP client <-> server contract", () => {
   test("a normalized MappedSession POSTed via the CLI client persists and is served back over HTTP", async () => {
     const dir = tempDir();
     const sqlite = join(dir, "quasar.sqlite");
-    const lance = join(dir, "search.lance");
     const port = randomPort();
     const token = "contract-ingest-token";
     const base = `http://127.0.0.1:${port}`;
-    const proc = spawnServer(sqlite, lance, port, token);
+    const proc = spawnServer(sqlite, port, token);
 
     try {
       await waitFor(`${base}/health`);
@@ -157,7 +154,7 @@ describe("CLI HTTP client <-> server contract", () => {
       expect(outcome.status).toBe("ok");
       expect(outcome.messagesWritten).toBe(2);
       expect(outcome.toolCallsWritten).toBe(1);
-      expect(outcome.jobsEnqueued).toBe(3);
+      expect(outcome.jobsEnqueued).toBe(2);
 
       // The CLI client fingerprint probe must agree the session is now unchanged.
       const unchanged = await postFingerprintProbe(
@@ -183,14 +180,15 @@ describe("CLI HTTP client <-> server contract", () => {
         "assistant contract reply",
       ]);
       expect(toolCalls.data.rows.map((row: { id: string }) => row.id)).toEqual(["contract-tool"]);
-      // The store/queue enqueued the derived-index work: one index-session job
-      // plus one embed-message job per searchable message (the two messages).
-      // Search itself is derived state built by the worker; that the queue holds
-      // exactly this work is the locked CLI->server contract on the write path.
-      expect(status.data.queue.pending).toBe(3);
+      // The store/queue enqueued the derived work: one embed-message job per
+      // searchable message (the two messages). Lexical search is trigger-
+      // maintained in SQLite, so there is no index-session job; that the queue
+      // holds exactly this work is the locked CLI->server contract on the
+      // write path.
+      expect(status.data.queue.pending).toBe(2);
       const byKind = status.data.queue.byKind as readonly { readonly kind: string; readonly pending: number }[];
       const pendingFor = (kind: string) => byKind.find((entry) => entry.kind === kind)?.pending;
-      expect(pendingFor("index-session")).toBe(1);
+      expect(pendingFor("index-session")).toBeUndefined();
       expect(pendingFor("embed-message")).toBe(2);
     } finally {
       proc.kill();
@@ -201,11 +199,10 @@ describe("CLI HTTP client <-> server contract", () => {
   test("a malformed wire payload yields an explicit 4xx via the CLI client and never falls back to local runtime", async () => {
     const dir = tempDir();
     const sqlite = join(dir, "quasar.sqlite");
-    const lance = join(dir, "search.lance");
     const port = randomPort();
     const token = "contract-ingest-token";
     const base = `http://127.0.0.1:${port}`;
-    const proc = spawnServer(sqlite, lance, port, token);
+    const proc = spawnServer(sqlite, port, token);
 
     try {
       await waitFor(`${base}/health`);
@@ -244,11 +241,10 @@ describe("CLI HTTP client <-> server contract", () => {
   test("search and readiness expose the current HTTP contract over derived index state", async () => {
     const dir = tempDir();
     const sqlite = join(dir, "quasar.sqlite");
-    const lance = join(dir, "search.lance");
     const port = randomPort();
     const token = "contract-ingest-token";
     const base = `http://127.0.0.1:${port}`;
-    const proc = spawnServer(sqlite, lance, port, token, {
+    const proc = spawnServer(sqlite, port, token, {
       QUASAR_SEARCH_PROFILE: "1",
       QUASAR_EMBEDDING_PROVIDER: "synthetic",
       SYNTHETIC_API_KEY: "",
@@ -262,23 +258,18 @@ describe("CLI HTTP client <-> server contract", () => {
       expect(emptyLexical.body).toMatchObject({ ok: true, command: "search/lexical" });
       expect(emptyLexical.body.data.matches).toEqual([]);
 
+      // /ready is cheap truth: lexical serves from the SQLite truth table;
+      // semantic/fusion are disabled pending vector materialization (QSR-232).
       const emptyReady = await fetchJson(`${base}/ready`);
-      expect(emptyReady.status).toBe(503);
+      expect(emptyReady.status).toBe(200);
       expect(emptyReady.body).toMatchObject({
-        ok: false,
-        error: {
-          type: "ServiceUnavailable",
-          code: "SearchIndexNotReady",
-          message: "Search index is not ready",
-          modes: {
-            lexical: { ok: true, mode: "lexical" },
-            semantic: { ok: false, mode: "semantic", syntheticEmbeddingReady: false },
-            fusion: { ok: false, mode: "fusion", syntheticEmbeddingReady: false },
-          },
+        ok: true,
+        command: "ready",
+        data: {
+          modes: { lexical: true, semantic: false, fusion: false },
+          reason: "semantic pending vector materialization",
         },
       });
-      expect(typeof emptyReady.body.error.modes.semantic.syntheticEmbeddingReason).toBe("string");
-      expect(typeof emptyReady.body.error.modes.fusion.syntheticEmbeddingReason).toBe("string");
 
       const outcome = await postMappedSession(base, mappedSession(), { ingestToken: token });
       expect(outcome.status).toBe("ok");
@@ -334,44 +325,26 @@ describe("CLI HTTP client <-> server contract", () => {
         dbAfterReplay.close();
       }
 
-      const materialize = await fetchJson(`${base}/maintenance/embeddings/materialize?limit=10`);
+      const materialize = await fetchJson(`${base}/maintenance/embeddings/materialize-sqlite?limit=10`);
       expect(materialize.status).toBe(200);
       expect(materialize.body).toMatchObject({
         ok: true,
-        command: "maintenance/embeddings/materialize",
+        command: "maintenance/embeddings/materialize-sqlite",
         data: {
           report: {
             scanned: 1,
             cacheHits: 1,
             cacheMisses: 0,
             embedded: 0,
+            skipped: 0,
             sqliteVectorsUpserted: 1,
-            lanceRowsUpserted: 2,
-            lanceRowsRepaired: 1,
-            lanceScan: { scanned: 2, missingOrStale: 1, complete: true },
           },
           coverage: { searchableMessages: 2, vectorRows: 2, vectorlessMessages: 0, staleVectorRows: 0 },
           embedding: { provider: "synthetic" },
-          queue: { embedMessage: { kind: "embed-message", failed: 0 } },
-          lance: { divergence: { rowCountMatches: true, rowCountDelta: 0 } },
         },
       });
-      expect(materialize.body.data.lance.activeVectorTableName).toStartWith("messages_");
-
-      const preMaintenanceLexical = await fetchJson(
-        `${base}/search/lexical?q=${encodeURIComponent("handshake")}&limit=5&projectKey=contract-project`,
-      );
-      expect(preMaintenanceLexical.status).toBe(200);
-      expect(preMaintenanceLexical.body).toMatchObject({ ok: true, command: "search/lexical" });
-      expect(Array.isArray(preMaintenanceLexical.body.data.matches)).toBe(true);
-
-      const repair = await fetchJson(`${base}/maintenance/repair?workerId=contract-indexer&limit=10`);
-      expect(repair.status).toBe(200);
-      expect(repair.body).toMatchObject({ ok: true, command: "maintenance/repair" });
-
-      const maintenance = await fetchJson(`${base}/maintenance/run`);
-      expect(maintenance.status).toBe(200);
-      expect(maintenance.body).toMatchObject({ ok: true, command: "maintenance/run" });
+      expect(materialize.body.data.lance).toBeUndefined();
+      expect(materialize.body.data.queue).toBeUndefined();
 
       const lexical = await fetchJson(
         `${base}/search/lexical?q=${encodeURIComponent("handshake")}&limit=5&projectKey=contract-project`,
@@ -429,27 +402,37 @@ describe("CLI HTTP client <-> server contract", () => {
       });
 
       const ready = await fetchJson(`${base}/ready`);
-      expect(ready.status).toBe(503);
+      expect(ready.status).toBe(200);
       expect(ready.body).toMatchObject({
-        ok: false,
-        error: {
-          type: "ServiceUnavailable",
-          code: "SearchIndexNotReady",
-          message: "Search index is not ready",
-          modes: {
-            lexical: { ok: true, mode: "lexical" },
-            semantic: { ok: false, mode: "semantic", syntheticEmbeddingReady: false },
-            fusion: { ok: false, mode: "fusion", syntheticEmbeddingReady: false },
-          },
+        ok: true,
+        command: "ready",
+        data: {
+          modes: { lexical: true, semantic: false, fusion: false },
+          reason: "semantic pending vector materialization",
         },
       });
-      expect(typeof ready.body.error.modes.semantic.syntheticEmbeddingReason).toBe("string");
-      expect(typeof ready.body.error.modes.fusion.syntheticEmbeddingReason).toBe("string");
 
-      const semantic = await fetch(`${base}/search/semantic?q=${encodeURIComponent("handshake")}&limit=5`);
-      expect(semantic.status).toBe(500);
-      const fusion = await fetch(`${base}/search/fusion?q=${encodeURIComponent("handshake")}&limit=5`);
-      expect(fusion.status).toBe(500);
+      // Semantic surfaces are honestly disabled: fast 503, no probing, no gate.
+      const semantic = await fetchJson(`${base}/search/semantic?q=${encodeURIComponent("handshake")}&limit=5`);
+      expect(semantic.status).toBe(503);
+      expect(semantic.body).toEqual({
+        ok: false,
+        route: "search/semantic",
+        error: {
+          type: "SemanticDisabled",
+          message: "semantic search disabled pending vector materialization (QSR-232)",
+        },
+      });
+      const fusion = await fetchJson(`${base}/search/fusion?q=${encodeURIComponent("handshake")}&limit=5`);
+      expect(fusion.status).toBe(503);
+      expect(fusion.body).toEqual({
+        ok: false,
+        route: "search/fusion",
+        error: {
+          type: "SemanticDisabled",
+          message: "semantic search disabled pending vector materialization (QSR-232)",
+        },
+      });
     } finally {
       proc.kill();
       await proc.exited;

@@ -24,7 +24,7 @@ afterEach(() => {
 
 const materializeBatch = () => ({
   ok: true,
-  command: "maintenance/embeddings/materialize",
+  command: "maintenance/embeddings/materialize-sqlite",
   data: {
     report: {
       scanned: 1,
@@ -33,88 +33,38 @@ const materializeBatch = () => ({
       embedded: 0,
       skipped: 0,
       sqliteVectorsUpserted: 1,
-      lanceRowsUpserted: 1,
-      lanceRowsRepaired: 2,
-      lanceScan: { offset: 0, nextOffset: 2, scanned: 2, complete: true },
     },
     coverage: {
-      semanticRows: 3,
+      searchableMessages: 3,
       vectorRows: 3,
       vectorlessMessages: 0,
-    },
-    queue: {
-      embedMessage: { kind: "embed-message", pending: 0, leased: 0, failed: 0 },
-      activeEmbedMessage: { kind: "embed-message", pending: 0, leased: 0, failed: 0 },
-      activeEmbeddingProfile: "local:test",
-      byKind: [],
+      staleVectorRows: 0,
     },
     embedding: {
       provider: "local",
       profile: { cacheNamespace: "local:test", model: "test", dimensions: 768, task: "search_document" },
     },
-    lance: {
-      activeVectorTableName: "messages_active",
-      divergence: {
-        sqliteVectorRows: 3,
-        lanceRowCount: 3,
-        rowCountMatches: true,
-        rowCountDelta: 0,
-      },
-    },
   },
 });
 
 describe("materialize-embedding-vectors CLI", () => {
-  test("receipt decisions fail when dead letters remain", () => {
-    const parsed = parseMaterializeBatch({
-      ...materializeBatch(),
-      data: {
-        ...materializeBatch().data,
-        queue: {
-          embedMessage: { kind: "embed-message", pending: 0, leased: 0, failed: 1 },
-          byKind: [],
-        },
-      },
-    });
+  test("receipt decision succeeds once vectorless messages reach zero", () => {
+    const parsed = parseMaterializeBatch(materializeBatch());
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
-    const decision = decideMaterializeLoop(parsed.receipt);
-    expect(decision.kind).toBe("failure");
-    if (decision.kind !== "failure") return;
-    expect(decision.error.message).toContain("dead letters remain");
-  });
-
-  test("receipt decisions ignore legacy global dead letters when the active profile is clean", () => {
-    const parsed = parseMaterializeBatch({
-      ...materializeBatch(),
-      data: {
-        ...materializeBatch().data,
-        queue: {
-          embedMessage: { kind: "embed-message", pending: 0, leased: 0, failed: 7 },
-          activeEmbedMessage: { kind: "embed-message", pending: 0, leased: 0, failed: 0 },
-          activeEmbeddingProfile: "local:test",
-          byKind: [],
-        },
-      },
-    });
-    expect(parsed.ok).toBe(true);
-    if (!parsed.ok) return;
-    expect(parsed.receipt.globalFailedEmbedMessages).toBe(7);
-    expect(parsed.receipt.failedEmbedMessages).toBe(0);
+    expect(parsed.receipt.vectorlessMessages).toBe(0);
+    expect(parsed.receipt.activeEmbeddingProfile).toBe("local:test");
     expect(decideMaterializeLoop(parsed.receipt)).toEqual({ kind: "success" });
   });
 
-  test("receipt decisions fail when active-profile dead letters remain", () => {
+  test("receipt decision fails when no progress is made while vectorless messages remain", () => {
+    const batch = materializeBatch();
     const parsed = parseMaterializeBatch({
-      ...materializeBatch(),
+      ...batch,
       data: {
-        ...materializeBatch().data,
-        queue: {
-          embedMessage: { kind: "embed-message", pending: 0, leased: 0, failed: 0 },
-          activeEmbedMessage: { kind: "embed-message", pending: 0, leased: 0, failed: 1 },
-          activeEmbeddingProfile: "local:test",
-          byKind: [],
-        },
+        ...batch.data,
+        report: { ...batch.data.report, scanned: 0 },
+        coverage: { ...batch.data.coverage, vectorlessMessages: 5 },
       },
     });
     expect(parsed.ok).toBe(true);
@@ -122,14 +72,29 @@ describe("materialize-embedding-vectors CLI", () => {
     const decision = decideMaterializeLoop(parsed.receipt);
     expect(decision.kind).toBe("failure");
     if (decision.kind !== "failure") return;
-    expect(decision.error.message).toContain("active-profile");
+    expect(decision.error.message).toContain("no SQLite progress");
+  });
+
+  test("receipt decision continues while progress is made and vectorless messages remain", () => {
+    const batch = materializeBatch();
+    const parsed = parseMaterializeBatch({
+      ...batch,
+      data: {
+        ...batch.data,
+        coverage: { ...batch.data.coverage, vectorlessMessages: 5 },
+      },
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(decideMaterializeLoop(parsed.receipt)).toEqual({ kind: "continue" });
   });
 
   test("receipt provider requirement rejects the wrong active provider", () => {
+    const batch = materializeBatch();
     const parsed = parseMaterializeBatch({
-      ...materializeBatch(),
+      ...batch,
       data: {
-        ...materializeBatch().data,
+        ...batch.data,
         embedding: {
           provider: "synthetic",
           profile: { cacheNamespace: "synthetic:test", model: "test", dimensions: 768, task: "search_document" },
@@ -142,14 +107,14 @@ describe("materialize-embedding-vectors CLI", () => {
     expect(error?.message).toContain("wrong embedding provider");
   });
 
-  test("until-empty writes an explicit durable closure receipt", async () => {
+  test("until-empty drives the SQLite-only endpoint and writes an explicit durable closure receipt", async () => {
     const dir = tempDir();
     const outPath = join(dir, "receipt.json");
     const server = Bun.serve({
       port: 0,
       fetch(request) {
         const url = new URL(request.url);
-        expect(url.pathname).toBe("/maintenance/embeddings/materialize");
+        expect(url.pathname).toBe("/maintenance/embeddings/materialize-sqlite");
         return Response.json(materializeBatch());
       },
     });
@@ -187,25 +152,8 @@ describe("materialize-embedding-vectors CLI", () => {
       expect(fromStdout.data.closure).toEqual({
         embedding: { provider: "local", activeEmbeddingProfile: "local:test" },
         coverage: { vectorlessMessages: 0, vectorRows: 3 },
-        queue: {
-          activeEmbeddingProfile: "local:test",
-          embedMessage: { pending: 0, failed: 0 },
-          globalEmbedMessage: { pending: 0, failed: 0 },
-        },
-        lance: {
-          activeVectorTableName: "messages_active",
-          sqliteVectorRows: 3,
-          lanceRowCount: 3,
-          rowCountMatches: true,
-          rowCountDelta: 0,
-          scanComplete: true,
-          nextOffset: 2,
-        },
         gates: {
           zeroVectorlessMessages: true,
-          zeroActiveEmbedMessageDeadLetters: true,
-          lanceRowCountMatches: true,
-          lanceRepairScanComplete: true,
         },
       });
     } finally {
@@ -213,28 +161,14 @@ describe("materialize-embedding-vectors CLI", () => {
     }
   });
 
-  test("sqlite-only materialization command calls the SQLite-only endpoint", async () => {
+  test("single-batch materialization calls the SQLite-only endpoint", async () => {
     const server = Bun.serve({
       port: 0,
       fetch(request) {
         const url = new URL(request.url);
         expect(url.pathname).toBe("/maintenance/embeddings/materialize-sqlite");
         expect(url.searchParams.get("limit")).toBe("25");
-        return Response.json({
-          ok: true,
-          command: "maintenance/embeddings/materialize-sqlite",
-          data: {
-            report: {
-              scanned: 2,
-              cacheHits: 1,
-              cacheMisses: 1,
-              embedded: 1,
-              skipped: 0,
-              sqliteVectorsUpserted: 2,
-            },
-            coverage: { vectorlessMessages: 0, vectorRows: 2 },
-          },
-        });
+        return Response.json(materializeBatch());
       },
     });
 
@@ -243,7 +177,7 @@ describe("materialize-embedding-vectors CLI", () => {
         "bun",
         "run",
         "src/cli.ts",
-        "materialize-sqlite-embedding-vectors",
+        "materialize-embedding-vectors",
         "--server",
         `http://127.0.0.1:${server.port}`,
         "--limit",
@@ -262,7 +196,7 @@ describe("materialize-embedding-vectors CLI", () => {
       expect(stderr).toBe("");
       const body = JSON.parse(stdout);
       expect(body.command).toBe("maintenance/embeddings/materialize-sqlite");
-      expect(body.data.report.sqliteVectorsUpserted).toBe(2);
+      expect(body.data.report.sqliteVectorsUpserted).toBe(1);
     } finally {
       server.stop(true);
     }
@@ -275,11 +209,12 @@ describe("materialize-embedding-vectors CLI", () => {
       port: 0,
       fetch(request) {
         const url = new URL(request.url);
-        expect(url.pathname).toBe("/maintenance/embeddings/materialize");
+        expect(url.pathname).toBe("/maintenance/embeddings/materialize-sqlite");
+        const batch = materializeBatch();
         return Response.json({
-          ...materializeBatch(),
+          ...batch,
           data: {
-            ...materializeBatch().data,
+            ...batch.data,
             embedding: {
               provider: "synthetic",
               profile: { cacheNamespace: "synthetic:test", model: "test", dimensions: 768, task: "search_document" },
@@ -296,6 +231,8 @@ describe("materialize-embedding-vectors CLI", () => {
         "materialize",
         "--server",
         `http://127.0.0.1:${server.port}`,
+        "--require-provider",
+        "local",
         "--out",
         outPath,
       ], {

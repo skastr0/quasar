@@ -430,11 +430,9 @@ const materializeEmbeddingVectorsUntilEmpty = async (requiredProvider: Materiali
   const totals = emptyMaterializeTotals();
   let batches = 0;
   let lastData: unknown;
-  let lanceOffset = 0;
   while (batches < maxBatches) {
-    const body = await fetchServerJson(name, "/maintenance/embeddings/materialize", {
+    const body = await fetchServerJson(name, "/maintenance/embeddings/materialize-sqlite", {
       limit: arg("--limit"),
-      lanceOffset: String(lanceOffset),
     });
     if (body === undefined) return;
     const parsed = parseMaterializeBatch(body);
@@ -477,7 +475,6 @@ const materializeEmbeddingVectorsUntilEmpty = async (requiredProvider: Materiali
       process.exitCode = 1;
       return;
     }
-    lanceOffset = decision.nextLanceOffset;
   }
   writeJson(fail(name, new CommandInputError("--max-batches exhausted before coverage reached zero", {
     path: "--max-batches",
@@ -515,7 +512,7 @@ const materializeEmbeddingVectors = async () => {
   if (flag("--until-empty")) {
     await materializeEmbeddingVectorsUntilEmpty(requiredProvider);
   } else {
-    await fetchServer(name, "/maintenance/embeddings/materialize", { limit: arg("--limit") });
+    await fetchServer(name, "/maintenance/embeddings/materialize-sqlite", { limit: arg("--limit") });
   }
 };
 
@@ -620,20 +617,6 @@ switch (command) {
     await fetchServer("ingest-runs", "/ingest-runs", { status: arg("--status"), limit: arg("--limit"), offset: arg("--offset") });
     break;
   }
-  case "maintain": {
-    await fetchServer("maintain", "/maintenance/run");
-    break;
-  }
-  case "freshness": {
-    if (!checkInt("freshness", "--limit", 1)) break;
-    await fetchServer("freshness", "/maintenance/freshness", { limit: arg("--limit") });
-    break;
-  }
-  case "repair-index": {
-    if (!(checkInt("repair-index", "--limit", 1) && checkInt("repair-index", "--lease-ms", 1))) break;
-    await fetchServer("repair-index", "/maintenance/repair", { limit: arg("--limit"), leaseMs: arg("--lease-ms") });
-    break;
-  }
   case "replay-embedding-cache": {
     if (!checkInt("replay-embedding-cache", "--limit", 1)) break;
     await fetchServer("replay-embedding-cache", "/maintenance/embeddings/replay-cache", { limit: arg("--limit") });
@@ -641,11 +624,6 @@ switch (command) {
   }
   case "materialize-embedding-vectors": {
     await materializeEmbeddingVectors();
-    break;
-  }
-  case "materialize-sqlite-embedding-vectors": {
-    if (!checkInt("materialize-sqlite-embedding-vectors", "--limit", 1)) break;
-    await fetchServer("materialize-sqlite-embedding-vectors", "/maintenance/embeddings/materialize-sqlite", { limit: arg("--limit") });
     break;
   }
   case "workers": {
@@ -687,12 +665,8 @@ switch (command) {
           "tool-calls [--session-id id] [--project-key key] [--provider name] [--tool-name name] [--limit n] [--offset n]",
           "tool-call --id id",
           "ingest-runs [--status running|completed|failed] [--limit n]",
-          "maintain [--server url]",
-          "freshness [--limit n] [--server url]",
-          "repair-index [--limit n] [--lease-ms n] [--server url]",
           "replay-embedding-cache [--limit n] [--server url]",
           "materialize-embedding-vectors [--limit n] [--until-empty] [--max-batches n] [--require-provider local|synthetic] [--out path] [--server url]",
-          "materialize-sqlite-embedding-vectors [--limit n] [--server url]",
           "workers [--server url]",
           "search --query text [--mode lexical|semantic|fusion] [--project-key key] [--role user|assistant] [--limit n] [--server url]",
           "stats",
@@ -703,7 +677,6 @@ switch (command) {
           QUASAR_LOCAL_HOME: "override ~/.config/quasar/server",
           QUASAR_CONFIG: "override ~/.config/quasar/config.json for default server/token routing",
           QUASAR_LOCAL_SQLITE: "override SQLite file path",
-          QUASAR_SEARCH_DATA_DIR: "override LanceDB directory",
           QUASAR_CODEX_ROOT: "override Codex history root",
           QUASAR_CLAUDE_ROOT: "override Claude history root",
           QUASAR_OPENCODE_ROOT: "override OpenCode history root",
