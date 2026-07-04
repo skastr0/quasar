@@ -236,7 +236,10 @@ The receipt is accepted only when the CLI loop reaches all four gates:
 
 The SQLite-first proof command snapshots a source SQLite database with
 `VACUUM INTO`, then creates proof-only FTS/vector tables inside the work database.
-It never writes to the source database.
+It never writes to the source database. Saved embeddings are read from
+`embedding_cache` by `(cacheNamespace, documentHash)` and replayed into
+`proof_message_vectors`; a missing row means the cache is incomplete, not that the
+source text must be changed.
 
 For the local-vs-cached embedding parity gate, pass the cache namespace that owns
 the saved corpus vectors and an explicit cosine threshold:
@@ -244,6 +247,8 @@ the saved corpus vectors and an explicit cosine threshold:
 ```bash
 bun run proof:sqlite-first --source-db /path/to/quasar.sqlite \
   --cache-namespace synthetic:hf:nomic-ai/nomic-embed-text-v1.5:768:search_document \
+  --fts-samples 60 \
+  --filter-role assistant \
   --vector-limit all \
   --scan-limit all \
   --parity-sample 1000 \
@@ -251,11 +256,12 @@ bun run proof:sqlite-first --source-db /path/to/quasar.sqlite \
   --out docs/proofs/sqlite-first-proof.json
 ```
 
-The parity section is accepted only when `sampleSize` equals the requested sample,
+The FTS section is accepted only when `filteredBenchmarks` records the applied
+project/role filters and p95/p99 timings over the requested sample count. The
+parity section is accepted only when `sampleSize` equals the requested sample,
 `passed` is true, and the report records the exact threshold used. The QSR-229
-exact-scan gate still requires target-container native-kernel evidence; the
-proof command's built-in scan is a pure-JS baseline unless a native scan proof is
-added.
+exact-scan gate still requires target-container native-kernel evidence; the proof
+command's built-in scan is a pure-JS baseline unless a native scan proof is added.
 
 ## Ingesting from another Tailscale machine
 
