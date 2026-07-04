@@ -488,9 +488,10 @@ interface SemanticQueryOutcome {
 }
 
 /** Shared semantic pipeline for /search/semantic and the semantic arm of
- * /search/fusion: embed the query through the active profile, prefilter to an
- * exact candidate set when any scope filter is present, scan the resident
- * matrix, and assemble truth rows. */
+ * /search/fusion: embed the query through the active profile, scan the
+ * resident matrix (scope filters mask in-process against the matrix's own
+ * per-slot dictionary-encoded arrays — no SQL prefilter), and assemble truth
+ * rows. */
 const runSemanticQuery = (options: {
   readonly text: string;
   readonly limit: number;
@@ -505,16 +506,13 @@ const runSemanticQuery = (options: {
     const vector = yield* embeddings.embedText(options.text);
     const embedMs = Math.round(performance.now() - embedStarted);
     const searchStarted = performance.now();
-    const filtered = options.projectKey !== undefined || options.role !== undefined || options.providers !== undefined;
-    const candidates = filtered
-      ? yield* store.listMessageVectorKeys({
-        model: options.model,
-        projectKey: options.projectKey,
-        providers: options.providers,
-        role: options.role,
-      })
-      : undefined;
-    const hits = yield* matrix.search({ vector, limit: options.limit, candidates });
+    const hits = yield* matrix.search({
+      vector,
+      limit: options.limit,
+      projectKey: options.projectKey,
+      role: options.role,
+      providers: options.providers,
+    });
     const matches = yield* assembleSemanticMatches(store, hits);
     const searchMs = Math.round(performance.now() - searchStarted);
     return { matches, embedMs, searchMs } satisfies SemanticQueryOutcome;

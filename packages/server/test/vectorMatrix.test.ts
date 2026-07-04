@@ -235,20 +235,17 @@ describe("vectorMatrix boot", () => {
 });
 
 describe("vectorMatrix filtered scan", () => {
-  test("candidate masks are exact; empty or unknown candidate sets short-circuit", async () => {
+  test("scope filters (projectKey/role/providers) mask the exact scan in-matrix; unknown values short-circuit", async () => {
     const path = sqlitePath();
     await withMatrix(path, ({ store }) => seedCorpus(store));
     await withMatrix(path, ({ matrix }) =>
       Effect.gen(function* () {
         yield* matrix.awaitLoaded;
+
         const betaOnly = yield* matrix.search({
           vector: queryVector(),
           limit: 10,
-          candidates: [
-            { sessionId: "codex:beta", seq: 0 },
-            { sessionId: "codex:beta", seq: 1 },
-            { sessionId: "codex:beta", seq: 2 },
-          ],
+          projectKey: "project-beta",
         });
         expect(betaOnly.map((hit) => `${hit.sessionId}:${hit.seq}`)).toEqual([
           "codex:beta:0",
@@ -256,15 +253,38 @@ describe("vectorMatrix filtered scan", () => {
           "codex:beta:2",
         ]);
 
-        const empty = yield* matrix.search({ vector: queryVector(), limit: 10, candidates: [] });
-        expect(empty).toEqual([]);
+        // A projectKey never seen by this matrix short-circuits to [] without
+        // scanning (no dictionary code exists for it).
+        const unknownProjectKey = yield* matrix.search({ vector: queryVector(), limit: 10, projectKey: "project-nope" });
+        expect(unknownProjectKey).toEqual([]);
 
-        const unknown = yield* matrix.search({
+        // An empty (or entirely-unknown) providers allow-list can never match.
+        const emptyProviders = yield* matrix.search({ vector: queryVector(), limit: 10, providers: [] });
+        expect(emptyProviders).toEqual([]);
+        const unknownProvider = yield* matrix.search({
           vector: queryVector(),
           limit: 10,
-          candidates: [{ sessionId: "codex:nope", seq: 0 }],
+          providers: ["nonexistent-provider"],
         });
-        expect(unknown).toEqual([]);
+        expect(unknownProvider).toEqual([]);
+
+        const roleFiltered = yield* matrix.search({ vector: queryVector(), limit: 10, role: "user" });
+        expect(roleFiltered.length).toBeGreaterThan(0);
+        expect(roleFiltered.every((hit) => hit.seq % 2 === 1)).toBe(true);
+
+        // All three filters combine as an AND: alpha's assistant rows via the
+        // known "codex" provider are exactly seq 0 and 2.
+        const combined = yield* matrix.search({
+          vector: queryVector(),
+          limit: 10,
+          projectKey: "project-alpha",
+          role: "assistant",
+          providers: ["codex"],
+        });
+        expect(combined.map((hit) => `${hit.sessionId}:${hit.seq}`).sort()).toEqual([
+          "codex:alpha:0",
+          "codex:alpha:2",
+        ]);
       }),
     );
   });

@@ -69,11 +69,17 @@ export interface MessageVectorCoverage {
 
 /** Raw f16 vector blob row for the resident-matrix boot loader (no decode).
  * Carries the rowid because the loader walks the table in rowid order —
- * sequential IO — while slot assignment happens in (session_id, seq) order. */
+ * sequential IO — while slot assignment happens in (session_id, seq) order.
+ * Also carries role/projectKey/provider so the matrix can dictionary-encode
+ * its per-slot scope filters in this same pass, at zero extra IO cost: pass 2
+ * already reads the full row off the page for the vector blob. */
 export interface MessageVectorBlobRow {
   readonly rowid: number;
   readonly sessionId: string;
   readonly seq: number;
+  readonly role: string;
+  readonly projectKey: string;
+  readonly provider: string;
   readonly dimensions: number;
   readonly encoding: string;
   readonly vectorBlob: Uint8Array;
@@ -157,11 +163,12 @@ export interface LocalStoreService {
     readonly afterRowid: number;
     readonly limit: number;
   }) => Effect.Effect<readonly MessageVectorBlobRow[], SqliteStoreError>;
+  /** Unfiltered (session_id, seq) keys for `model`, in canonical
+   * (session_id, seq) order: the resident matrix's sole use is boot-pass-1
+   * slot assignment. Scope filtering lives in the matrix itself (per-slot
+   * dictionary-encoded arrays), not in SQL — there is no filtered variant. */
   readonly listMessageVectorKeys: (options: {
     readonly model: string;
-    readonly projectKey?: string;
-    readonly providers?: readonly string[];
-    readonly role?: string;
   }) => Effect.Effect<readonly MessageVectorKey[], SqliteStoreError>;
   readonly getMessagesBySessionSeq: (
     pairs: readonly MessageVectorKey[],
@@ -1114,7 +1121,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               const pageLimit = positiveInt(limit, 8_192);
               return db
                 .query(
-                  `SELECT rowid, session_id AS sessionId, seq, dimensions, encoding, vector_blob AS vectorBlob
+                  `SELECT rowid, session_id AS sessionId, seq, role, project_key AS projectKey, provider, dimensions, encoding, vector_blob AS vectorBlob
                    FROM message_vectors NOT INDEXED
                    WHERE model = ? AND rowid > ?
                    ORDER BY rowid ASC
@@ -1122,30 +1129,16 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                 )
                 .all(model, afterRowid, pageLimit) as MessageVectorBlobRow[];
             }),
-          listMessageVectorKeys: ({ model, projectKey, providers, role }) =>
-            trySqlite("listMessageVectorKeys", () => {
-              const filters = ["model = ?"];
-              const args: Array<string | number> = [model];
-              if (projectKey !== undefined) {
-                filters.push("project_key = ?");
-                args.push(projectKey);
-              }
-              if (providers !== undefined && providers.length > 0) {
-                filters.push(`provider IN (${providers.map(() => "?").join(", ")})`);
-                args.push(...providers);
-              }
-              if (role !== undefined) {
-                filters.push("role = ?");
-                args.push(role);
-              }
-              return db
+          listMessageVectorKeys: ({ model }) =>
+            trySqlite("listMessageVectorKeys", () =>
+              db
                 .query(
                   `SELECT session_id AS sessionId, seq FROM message_vectors
-                   WHERE ${filters.join(" AND ")}
+                   WHERE model = ?
                    ORDER BY session_id ASC, seq ASC`,
                 )
-                .all(...args) as MessageVectorKey[];
-            }),
+                .all(model) as MessageVectorKey[],
+            ),
           getMessagesBySessionSeq: (pairs) =>
             trySqlite("getMessagesBySessionSeq", () => {
               const selectMessage = db.prepare(

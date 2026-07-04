@@ -84,9 +84,13 @@ export interface VectorMatrixHit {
 export interface VectorMatrixSearchRequest {
   readonly vector: readonly number[];
   readonly limit: number;
-  /** Exact candidate allow-list from a SQL prefilter. undefined = unfiltered;
-   * an empty list (or no candidate present in the matrix) short-circuits to []. */
-  readonly candidates?: readonly { readonly sessionId: string; readonly seq: number }[];
+  /** Scope filters, matched against per-slot dictionary-encoded arrays held
+   * IN the matrix (no SQL, no store round trip). undefined = unfiltered; a
+   * filter value never seen in this matrix (or an empty providers list)
+   * short-circuits to []. */
+  readonly projectKey?: string;
+  readonly role?: string;
+  readonly providers?: readonly string[];
 }
 
 export interface VectorMatrixService {
@@ -148,11 +152,45 @@ interface MatrixState {
   watermark: VectorMatrixWatermark;
   sessionIds: string[];
   seqs: number[];
+  /** Per-slot scope filters, resident in the matrix (u8 provider/role
+   * dictionary codes, u32 projectKey dictionary code) so a filtered search
+   * masks in-process with zero SQL and zero store round trip. Parallel to
+   * sessionIds/seqs; kept in sync through append, boot load, and compaction. */
+  providerCodes: Uint8Array;
+  roleCodes: Uint8Array;
+  projectKeyCodes: Uint32Array;
+  providerDict: string[];
+  providerCodeByName: Map<string, number>;
+  roleDict: string[];
+  roleCodeByName: Map<string, number>;
+  projectKeyDict: string[];
+  projectKeyCodeByName: Map<string, number>;
   rowIndex: Map<string, Map<number, number>>;
   workers: Worker[];
   pendingScans: Map<number, PendingScan>;
   nextScanId: number;
 }
+
+/** u8 dictionary codes cap at 255 distinct values (provider/role cardinality
+ * is a handful in real corpora); an overflow value is diagnosed and pinned to
+ * a shared sentinel code that never matches an exact filter, rather than
+ * growing unbounded or crashing. */
+const U8_DICT_OVERFLOW_CODE = 255;
+const U8_DICT_CAPACITY = 255;
+
+const growUint8 = (current: Uint8Array, minLength: number): Uint8Array => {
+  if (current.length >= minLength) return current;
+  const next = new Uint8Array(minLength);
+  next.set(current);
+  return next;
+};
+
+const growUint32 = (current: Uint32Array, minLength: number): Uint32Array => {
+  if (current.length >= minLength) return current;
+  const next = new Uint32Array(minLength);
+  next.set(current);
+  return next;
+};
 
 const nowIso = () => new Date().toISOString();
 
@@ -199,6 +237,15 @@ export const makeVectorMatrixLayer = (
         watermark: { matrixRows: 0, sqliteRows: 0, checkedAt: nowIso() },
         sessionIds: [],
         seqs: [],
+        providerCodes: new Uint8Array(0),
+        roleCodes: new Uint8Array(0),
+        projectKeyCodes: new Uint32Array(0),
+        providerDict: [],
+        providerCodeByName: new Map(),
+        roleDict: [],
+        roleCodeByName: new Map(),
+        projectKeyDict: [],
+        projectKeyCodeByName: new Map(),
         rowIndex: new Map(),
         workers: [],
         pendingScans: new Map(),
@@ -207,6 +254,48 @@ export const makeVectorMatrixLayer = (
 
       const rowFor = (sessionId: string, seq: number): number | undefined =>
         state.rowIndex.get(sessionId)?.get(seq);
+
+      /** Dictionary-encode a scope value into a u8 code, growing the dict on
+       * first sight. Overflow past 255 distinct values is diagnosed and
+       * pinned to a sentinel code that can never match an exact filter,
+       * rather than growing unbounded (provider/role cardinality is a
+       * handful in every real corpus; this is a safety net, not a design). */
+      const internU8Code = (
+        kind: "provider" | "role",
+        dict: string[],
+        byName: Map<string, number>,
+        value: string,
+      ): number => {
+        const existing = byName.get(value);
+        if (existing !== undefined) return existing;
+        if (dict.length >= U8_DICT_CAPACITY) {
+          diagnostic("vector_matrix.scope_dict_overflow", { kind, value, capacity: U8_DICT_CAPACITY });
+          return U8_DICT_OVERFLOW_CODE;
+        }
+        const code = dict.length;
+        dict.push(value);
+        byName.set(value, code);
+        return code;
+      };
+
+      const internProjectKeyCode = (value: string): number => {
+        const existing = state.projectKeyCodeByName.get(value);
+        if (existing !== undefined) return existing;
+        const code = state.projectKeyDict.length;
+        state.projectKeyDict.push(value);
+        state.projectKeyCodeByName.set(value, code);
+        return code;
+      };
+
+      /** Write a row's scope codes into the per-slot dictionary arrays. Must
+       * be called for every row written into `bytes` (boot pass 2 and every
+       * append/overwrite) so the scope arrays never drift from the vector
+       * matrix they mask. */
+      const writeScopeCodes = (row: number, provider: string, role: string, projectKey: string): void => {
+        state.providerCodes[row] = internU8Code("provider", state.providerDict, state.providerCodeByName, provider);
+        state.roleCodes[row] = internU8Code("role", state.roleDict, state.roleCodeByName, role);
+        state.projectKeyCodes[row] = internProjectKeyCode(projectKey);
+      };
 
       const indexRow = (sessionId: string, seq: number, row: number): void => {
         let inner = state.rowIndex.get(sessionId);
@@ -223,9 +312,18 @@ export const makeVectorMatrixLayer = (
         const sab = state.sab;
         if (sab === undefined) return false;
         const needed = rows * rowBytes;
-        if (needed <= sab.byteLength) return true;
-        if (needed > sab.maxByteLength) return false;
-        sab.grow(Math.min(sab.maxByteLength, Math.max(needed, sab.byteLength + GROW_CHUNK_BYTES)));
+        if (needed > sab.byteLength) {
+          if (needed > sab.maxByteLength) return false;
+          sab.grow(Math.min(sab.maxByteLength, Math.max(needed, sab.byteLength + GROW_CHUNK_BYTES)));
+        }
+        // Scope arrays grow in lockstep with the row capacity the SAB now
+        // provides, so an appended row always has a slot to write its scope
+        // codes into (checked, not unconditionally reallocated: this runs on
+        // every append).
+        const capacityRows = sab.byteLength / rowBytes;
+        if (state.providerCodes.length < capacityRows) state.providerCodes = growUint8(state.providerCodes, capacityRows);
+        if (state.roleCodes.length < capacityRows) state.roleCodes = growUint8(state.roleCodes, capacityRows);
+        if (state.projectKeyCodes.length < capacityRows) state.projectKeyCodes = growUint32(state.projectKeyCodes, capacityRows);
         return true;
       };
 
@@ -261,6 +359,7 @@ export const makeVectorMatrixLayer = (
           const existing = rowFor(row.sessionId, row.seq);
           if (existing !== undefined) {
             writeRowBytes(existing, blob);
+            writeScopeCodes(existing, row.provider, row.role, row.projectKey);
             overwritten += 1;
             continue;
           }
@@ -274,6 +373,7 @@ export const makeVectorMatrixLayer = (
             continue;
           }
           writeRowBytes(state.rowCount, blob);
+          writeScopeCodes(state.rowCount, row.provider, row.role, row.projectKey);
           indexRow(row.sessionId, row.seq, state.rowCount);
           state.rowCount += 1;
           appended += 1;
@@ -414,6 +514,9 @@ export const makeVectorMatrixLayer = (
             bytes.copyWithin(write * rowBytes, read * rowBytes, (read + 1) * rowBytes);
             state.sessionIds[write] = sessionId;
             state.seqs[write] = seq;
+            state.providerCodes[write] = state.providerCodes[read] ?? 0;
+            state.roleCodes[write] = state.roleCodes[read] ?? 0;
+            state.projectKeyCodes[write] = state.projectKeyCodes[read] ?? 0;
             state.rowIndex.get(sessionId)!.set(seq, write);
           }
           write += 1;
@@ -454,6 +557,9 @@ export const makeVectorMatrixLayer = (
         });
         state.sab = sab;
         state.bytes = new Uint8Array(sab);
+        state.providerCodes = new Uint8Array(slots);
+        state.roleCodes = new Uint8Array(slots);
+        state.projectKeyCodes = new Uint32Array(slots);
         let lastSessionId: string | undefined;
         for (let slot = 0; slot < slots; slot += 1) {
           const key = keys[slot]!;
@@ -480,6 +586,7 @@ export const makeVectorMatrixLayer = (
               continue;
             }
             writeRowBytes(slot, row.vectorBlob);
+            writeScopeCodes(slot, row.provider, row.role, row.projectKey);
             filled[slot] = 1;
           }
           if (page.length < LOAD_PAGE_ROWS) break;
@@ -557,16 +664,36 @@ export const makeVectorMatrixLayer = (
           }
           const rowCount = state.rowCount;
           const k = Math.min(Math.max(1, request.limit), MAX_TOP_K, rowCount);
+          const filtered = request.projectKey !== undefined || request.role !== undefined || request.providers !== undefined;
           let mask: Uint8Array | undefined;
-          if (request.candidates !== undefined) {
+          if (filtered) {
+            // Resolve each requested scope value to its in-matrix dictionary
+            // code up front. A value never seen by this matrix (or an empty
+            // providers list) can never match any row: short-circuit to []
+            // without scanning.
+            const projectKeyCode = request.projectKey !== undefined
+              ? state.projectKeyCodeByName.get(request.projectKey)
+              : undefined;
+            if (request.projectKey !== undefined && projectKeyCode === undefined) return [] as const;
+            const roleCode = request.role !== undefined ? state.roleCodeByName.get(request.role) : undefined;
+            if (request.role !== undefined && roleCode === undefined) return [] as const;
+            let providerCodes: Set<number> | undefined;
+            if (request.providers !== undefined) {
+              providerCodes = new Set(
+                request.providers
+                  .map((provider) => state.providerCodeByName.get(provider))
+                  .filter((code): code is number => code !== undefined),
+              );
+              if (providerCodes.size === 0) return [] as const;
+            }
             mask = new Uint8Array(rowCount);
             let found = 0;
-            for (const candidate of request.candidates) {
-              const row = rowFor(candidate.sessionId, candidate.seq);
-              if (row !== undefined && row < rowCount) {
-                mask[row] = 1;
-                found += 1;
-              }
+            for (let row = 0; row < rowCount; row += 1) {
+              if (projectKeyCode !== undefined && state.projectKeyCodes[row] !== projectKeyCode) continue;
+              if (roleCode !== undefined && state.roleCodes[row] !== roleCode) continue;
+              if (providerCodes !== undefined && !providerCodes.has(state.providerCodes[row] ?? 0)) continue;
+              mask[row] = 1;
+              found += 1;
             }
             if (found === 0) return [] as const;
           }

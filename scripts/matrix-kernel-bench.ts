@@ -6,9 +6,10 @@
 // vectorMatrix loader, and enforces the receipted gates:
 //   - boot matrix load          < 5s
 //   - process RSS after load    < 4GB
-//   - unfiltered scan p95       < 100ms   (default 60 samples)
-//   - filtered scan p95         < 100ms   (~10% SQL candidate mask, full
-//                                          prefilter+mask+scan path)
+//   - unfiltered scan p95       < 60ms   (default 60 samples)
+//   - filtered scan p95         < 60ms   (~10% scope match, in-matrix
+//                                         dictionary-code mask + scan — no
+//                                         SQL, no store round trip)
 // Writes the raw numbers to --out (default docs/proofs/) and exits non-zero
 // when any gate fails.
 //
@@ -62,7 +63,7 @@ const ROW_BYTES = DIMS * 2;
 
 const GATE_LOAD_MS = 5_000;
 const GATE_RSS_BYTES = 4 * 1024 * 1024 * 1024;
-const GATE_SCAN_MS = 100;
+const GATE_SCAN_MS = 60;
 
 const quantile = (sortedValues: readonly number[], q: number): number => {
   if (sortedValues.length === 0) return 0;
@@ -179,11 +180,15 @@ interface GateReport {
   readonly pass: boolean;
 }
 
+// The generator assigns HOT_PROJECT to exactly every 10th row deterministically
+// (index % 10 === 0), so the hot-project row count is known analytically —
+// no store query needed now that scope filtering lives in the matrix.
+const HOT_PROJECT_ROWS = Math.ceil(ROWS / 10);
+
 const report: GateReport = await Effect.runPromise(
   Effect.scoped(
     Effect.gen(function* () {
       const matrix = yield* VectorMatrix;
-      const store = yield* LocalStore;
       yield* matrix.awaitLoaded;
       const status = yield* matrix.status;
       if (!status.enabled || status.rows !== ROWS) {
@@ -209,30 +214,23 @@ const report: GateReport = await Effect.runPromise(
       }
       log("unfiltered.done", timingStats(unfilteredMs));
 
-      const candidatesPreview = yield* store.listMessageVectorKeys({ model: MODEL, projectKey: HOT_PROJECT });
-      const prefilterMs: number[] = [];
-      const filteredFullMs: number[] = [];
-      // filtered warmup
+      const filteredMs: number[] = [];
+      // filtered warmup: in-matrix scope filter, no SQL, no store round trip.
       for (let round = 0; round < 3; round += 1) {
-        const keys = yield* store.listMessageVectorKeys({ model: MODEL, projectKey: HOT_PROJECT });
-        yield* matrix.search({ vector: randomVector(queryRandom), limit: 10, candidates: keys });
+        yield* matrix.search({ vector: randomVector(queryRandom), limit: 10, projectKey: HOT_PROJECT });
       }
       for (let sample = 0; sample < SAMPLES; sample += 1) {
         const vector = randomVector(queryRandom);
         const started = performance.now();
-        const keys = yield* store.listMessageVectorKeys({ model: MODEL, projectKey: HOT_PROJECT });
-        const afterPrefilter = performance.now();
-        const hits = yield* matrix.search({ vector, limit: 10, candidates: keys });
-        const finished = performance.now();
-        prefilterMs.push(afterPrefilter - started);
-        filteredFullMs.push(finished - started);
+        const hits = yield* matrix.search({ vector, limit: 10, projectKey: HOT_PROJECT });
+        filteredMs.push(performance.now() - started);
         if (hits.length !== 10) throw new Error(`filtered scan returned ${hits.length} hits`);
       }
-      log("filtered.done", { full: timingStats(filteredFullMs), prefilter: timingStats(prefilterMs) });
+      log("filtered.done", timingStats(filteredMs));
 
       const rssAfterQueries = process.memoryUsage().rss;
       const unfiltered = timingStats(unfilteredMs);
-      const filteredFull = timingStats(filteredFullMs);
+      const filtered = timingStats(filteredMs);
       const gates = {
         bootLoad: {
           limitMs: GATE_LOAD_MS,
@@ -254,11 +252,10 @@ const report: GateReport = await Effect.runPromise(
         },
         filteredScan: {
           limitMs: GATE_SCAN_MS,
-          candidates: candidatesPreview.length,
-          candidateFraction: Math.round((candidatesPreview.length / ROWS) * 10_000) / 10_000,
-          prefilter: timingStats(prefilterMs),
-          full: filteredFull,
-          pass: filteredFull.p95Ms < GATE_SCAN_MS,
+          candidates: HOT_PROJECT_ROWS,
+          candidateFraction: Math.round((HOT_PROJECT_ROWS / ROWS) * 10_000) / 10_000,
+          ...filtered,
+          pass: filtered.p95Ms < GATE_SCAN_MS,
         },
       };
       const pass = gates.bootLoad.pass && gates.rssAfterLoad.pass && gates.unfilteredScan.pass && gates.filteredScan.pass;
