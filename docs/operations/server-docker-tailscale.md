@@ -3,8 +3,10 @@
 This is the operational path for Quasar on the Mac mini.
 
 - Docker supervises the Effect local server.
-- SQLite in `/data/quasar/quasar.sqlite` is OLTP truth.
-- LanceDB in `/data/quasar/search.lance` is derived search state.
+- SQLite in `/data/quasar/quasar.sqlite` is the whole data plane: OLTP truth,
+  trigger-maintained FTS (lexical search), and `message_vectors` (embeddings).
+- Semantic/fusion search is disabled pending vector materialization (QSR-232);
+  those routes return an honest 503 `SemanticDisabled`.
 - Client access is through the Tailscale Service hostname assigned to `svc:quasar`.
 - `platform/server/.env` is local-only and must not be committed.
 
@@ -20,7 +22,9 @@ Set at least:
 - `QUASAR_PUBLISH_HOST=0.0.0.0` unless Docker can bind the Tailscale IP directly.
 - `QUASAR_PUBLISH_PORT=7180` (host publish port; the container always binds 6180 internally). 7180 is dedicated to quasar — 6180 on the Mac mini belongs to an unrelated dev server. The canonical client URL is `http://<mac-mini-tailnet-ip>:7180`.
 - `QUASAR_INGEST_TOKEN=<long random token>`. Remote write ingest is disabled unless this is configured, and client machines must send the same token.
-- Local ONNX embedding profile values. The default provider is local `nomic-ai/nomic-embed-text-v1.5`; set `QUASAR_EMBEDDING_PROVIDER=synthetic` plus `SYNTHETIC_API_KEY` only for BYO-cloud fallback.
+- `SYNTHETIC_API_KEY`. The embedding provider is pinned to `synthetic` in
+  `compose.yaml`; a provider flip is an explicit receipted cutover, never a
+  deploy side-effect.
 
 Keep `QUASAR_HOME=/data/quasar` pinned in compose. That preserves Quasar's machine identity and idempotency across container rebuilds.
 
@@ -34,8 +38,6 @@ bun run server:ps          # compose service state
 bun run server:logs        # follow logs
 bun run server:ready       # lightweight readiness check
 bun run server:status      # SQLite/queue/cache status
-bun run server:lance       # direct LanceDB table/index inventory
-bun run server:maintain    # LanceDB indexes/optimize inside container
 bun run server:materialize # embedding vector materialization with JSON receipt
 bun run server:backup      # write ./quasar-truth-backup.tar
 ```
@@ -43,8 +45,6 @@ bun run server:backup      # write ./quasar-truth-backup.tar
 Raw helper form:
 
 ```bash
-bun scripts/server-ops.mjs status --lance
-bun scripts/server-ops.mjs lance
 bun scripts/server-ops.mjs materialize --out docs/proofs/materialization-closure.json
 bun scripts/server-ops.mjs exec -- sh -lc 'du -sh /data/quasar/*'
 ```
@@ -71,7 +71,6 @@ bun scripts/server-ops.mjs exec -- sh -lc 'du -sh /data/quasar/*'
    bun run server:ps
    bun run server:ready
    bun run server:status
-   bun run server:lance
    ```
 
 5. From another Tailnet client, verify the `svc:quasar` Tailscale Service:
@@ -135,7 +134,7 @@ printf '%s\n' '{"schemaVersion":3,"projectKey":"quasar","serverUrl":"https://<qu
 QUASAR_CONFIG="$tmp/config.json" npx -y @skastr0/quasar-cli stats
 QUASAR_CONFIG="$tmp/config.json" npx -y @skastr0/quasar-cli search \
   --query "effect server" \
-  --mode fusion \
+  --mode lexical \
   --limit 3
 ```
 
@@ -171,7 +170,7 @@ serving surface is read/search only:
 | Project list | `projects` | `GET /projects` | `limit`, `offset` |
 | Session list | `sessions` | `GET /sessions` | `projectKey`, `provider`, `limit`, `offset` |
 | Session read | `messages --session-id <id>` | `GET /messages` | `sessionId`, `limit` |
-| Search | `search --query <text> --mode lexical\|semantic\|fusion` | `GET /search/<mode>` | `q`/`query`, `projectKey`, `role=user\|assistant`, `limit` |
+| Search | `search --query <text> --mode lexical\|semantic\|fusion` | `GET /search/<mode>` | `q`/`query`, `projectKey`, `role=user\|assistant`, `limit`; `semantic`/`fusion` return 503 `SemanticDisabled` pending QSR-232 |
 | Tool-call list | `tool-calls` | `GET /tool-calls` | `sessionId`, `projectKey`, `provider`, `toolName`, `limit`, `offset` |
 | Tool-call read | `tool-call --id <id>` | `GET /tool-call` | `id` |
 | Remote ingest | `ingest --provider all` | `POST /ingest/session` | operator only; set `QUASAR_SERVER_URL` and `QUASAR_INGEST_TOKEN` |
@@ -179,9 +178,8 @@ serving surface is read/search only:
 Notes for wrappers:
 
 - Use `projectKey` at the HTTP layer and `--project-key` at the CLI layer.
-- `role` applies to indexed message search documents (`user`, `assistant`).
-  The current semantic corpus embeds `user` and `assistant` message rows; tool-call
-  input/output remains structural/lexical evidence, not semantic embeddings.
+- `role` applies to searchable message rows (`user`, `assistant`, `reasoning`);
+  tool-call input/output remains structural/lexical evidence.
 - Operator-only commands: agent wrappers should not expose ingest, embedding,
   maintenance, or backfill as default tools. Those remain operator actions.
 - If a wrapper cannot reach `QUASAR_SERVER_URL`, fail closed with a connection
@@ -193,22 +191,19 @@ The server does not ingest provider histories. New sessions reach it only throug
 CLI clients that read local history folders and POST mapped sessions over HTTP — see
 [Ingesting from another Tailscale machine](#ingesting-from-another-tailscale-machine).
 
-Freshness repair, LanceDB optimize, and index maintenance remain explicit server
-operations, not part of any minute tick. Run `bun run server:maintain` after
-large ingests or when `server:status` shows queued repair/index work that is
-not draining. Embedding is not a cron shell loop: the server-owned embedding worker
-leases queued `embed-message` jobs, batches provider calls, uses the cache, and backs
+Lexical search needs no maintenance: the FTS index is trigger-maintained on the
+SQLite messages truth table, so ingested rows are searchable immediately.
+Embedding is not a cron shell loop: the server-owned embedding worker leases
+queued `embed-message` jobs, batches provider calls, uses the cache, and backs
 off on retryable provider limits.
 
 ## Embedding Materialization Proof
 
 Before running a full materialization/backfill against the canonical service, take
-a truth backup and inspect the active profile:
+a truth backup:
 
 ```bash
 bun run server:backup
-bun scripts/server-ops.mjs status --lance
-bun scripts/server-ops.mjs lance
 ```
 
 Then run the materialization loop from the host against the published server port:
@@ -219,21 +214,18 @@ bun run server:materialize
 
 By default this writes `docs/proofs/materialization-closure-<timestamp>.json` and
 also prints the same JSON envelope to stdout. The wrapper requires the active
-embedding provider to be `local` by default, so a legacy Synthetic run cannot be
-mistaken for the SQLite-first materialization receipt. Pass `--out` to choose a
-stable proof path:
+embedding provider to match the pinned deploy provider (`synthetic`) by default;
+pass `--require-provider local` only as part of an explicit provider cutover.
+Pass `--out` to choose a stable proof path:
 
 ```bash
 bun scripts/server-ops.mjs materialize --out docs/proofs/materialization-closure.json
 ```
 
-The receipt is accepted only when the CLI loop reaches all five gates:
+The receipt is accepted only when the CLI loop reaches both gates:
 
 - `coverage.vectorlessMessages = 0`
-- `embedding.provider = local`
-- `queue.embedMessage.failed = 0` for the active embedding profile
-- active Lance row count matches SQLite `message_vectors`
-- the Lance repair scan has completed
+- `embedding.provider` matches the required provider
 
 ## SQLite-First Spike Proof
 
@@ -294,7 +286,7 @@ export QUASAR_HERMES_ROOT="$HOME/.hermes"
 
 # First smoke test.
 quasar stats
-quasar search --mode fusion --query "quasar local server" --limit 3
+quasar search --mode lexical --query "quasar local server" --limit 3
 
 # Ingest this machine's corpus into the Mac mini server.
 quasar ingest --provider all --summary
@@ -313,7 +305,6 @@ missing.
 
 Recommended schedule:
 
-- daily or after large ingests: `bun run server:maintain`
 - before risky changes: `bun run server:backup`
 
 On remote Macs, use the released CLI's production daemon installer. It installs a
@@ -351,50 +342,18 @@ runs as a client that reads local histories and POSTs them to the server over HT
 
 ## Worker policy
 
-Use one active embedding profile per running server process. For the Mac mini default:
+Use one active embedding profile per running server process. For the Mac mini default
+(the provider itself is pinned to `synthetic` in `compose.yaml`):
 
 ```env
 QUASAR_EMBEDDING_MODEL=hf:nomic-ai/nomic-embed-text-v1.5
 QUASAR_EMBEDDING_DIMENSIONS=768
 QUASAR_EMBEDDING_TASK=search_document
-QUASAR_EMBEDDING_PROVIDER=local
-QUASAR_EMBEDDING_MODEL_CACHE_DIR=/data/quasar/models
-QUASAR_EMBEDDING_ONNX_DTYPE=q8
 QUASAR_EMBEDDING_DOCUMENT_PREFIX="search_document: "
 QUASAR_EMBEDDING_QUERY_PREFIX="search_query: "
 ```
 
-The embedding worker drains `embed-message` jobs; the index repair worker drains `index-session` jobs into LanceDB. The embedding cache and SQLite `message_vectors` table are profile-scoped. Quasar does not intentionally embed one message into multiple embedding spaces during ordinary operation. Side-by-side profile comparison is an explicit proof workflow, not daemon behavior.
-
-## Maintenance
-
-LanceDB maintenance is the derived-store hygiene pass:
-
-- ensure lexical FTS index exists on the shared `messages` table,
-- ensure vector index exists on the active profile table,
-- optimize/compact fragments,
-- report row/index/fragment stats.
-
-Run it inside the container:
-
-```bash
-bun run server:maintain
-```
-
-Avoid the HTTP maintenance endpoint for long optimize runs. HTTP is fine for small inspection and repair endpoints, but optimize can outlive request lifetimes while the server itself remains healthy.
-
-Healthy proof shape:
-
-- active profile vector table has `vector_idx` and `text_idx`,
-- `numUnindexedRows` is `0`,
-- lexical `messages` table has `text_idx`,
-- queue has `0` failed jobs unless investigating a provider outage.
-
-Inspect with:
-
-```bash
-bun run server:lance
-```
+The embedding worker drains `embed-message` jobs into SQLite `message_vectors`. The embedding cache and `message_vectors` table are profile-scoped. Quasar does not intentionally embed one message into multiple embedding spaces during ordinary operation. Side-by-side profile comparison is an explicit proof workflow, not daemon behavior.
 
 ## Backup / restore
 
@@ -409,7 +368,9 @@ This writes `./quasar-truth-backup.tar` with:
 - `quasar.sqlite`, produced by SQLite `VACUUM INTO` so the snapshot is coherent while the server is running,
 - `machine.json`, so provider session IDs remain stable after restore.
 
-It intentionally does **not** archive `search.lance` by default. LanceDB is derived from SQLite message/search state and is rebuilt with server workers and `maintain`; backing up it by default turns a truth backup into a slow multi-GB derived-index copy.
+SQLite is the whole data plane, so this backup is complete: the FTS index is
+rebuilt by the store's `user_version` migration and `message_vectors` rides
+inside the same file.
 
 Restore is intentionally manual because it replaces the truth store:
 
@@ -421,24 +382,18 @@ bun scripts/server-ops.mjs exec -- sh -lc 'rm -rf /data/quasar'
 docker compose --env-file platform/server/.env -f platform/server/compose.yaml cp ./quasar-truth-backup.tar server:/tmp/quasar-truth-backup.tar
 bun scripts/server-ops.mjs exec -- sh -lc 'mkdir -p /data/quasar && tar -xf /tmp/quasar-truth-backup.tar -C /data/quasar'
 bun run server:restart
-bun run server:maintain
 ```
 
 ## Troubleshooting checklist
 
 1. `bun run server:ps` — container running and healthy?
-2. `bun run server:logs` — crash loop, provider errors, SQLite/LanceDB errors?
+2. `bun run server:logs` — crash loop, provider errors, SQLite errors?
 3. `bun run server:status` — queue pending/leased/failed counts?
-4. `bun run server:lance` — all LanceDB tables, indexes, and unindexed rows?
-5. `bun scripts/server-ops.mjs exec -- sh -lc 'du -sh /data/quasar/*'` — disk growth sane?
-6. If jobs are leased forever after a crash, restart the server (`bun run server:restart`); stale worker leases are recovered automatically by the maintenance and embedding workers.
-
-7. If search misses fresh sessions, re-run ingest from the source machine's CLI
-   (`quasar ingest --provider all`), then rebuild derived search state:
-
-   ```bash
-   bun run server:maintain
-   ```
+4. `bun scripts/server-ops.mjs exec -- sh -lc 'du -sh /data/quasar/*'` — disk growth sane?
+5. If jobs are leased forever after a crash, restart the server (`bun run server:restart`); stale worker leases are recovered automatically by the embedding worker.
+6. If search misses fresh sessions, re-run ingest from the source machine's CLI
+   (`quasar ingest --provider all`); lexical search serves them immediately from
+   the trigger-maintained FTS index.
 
 ## Production proof artifacts
 

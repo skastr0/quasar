@@ -169,11 +169,9 @@ const eitherRight = (either) => either?._tag === "Right" ? either.right : undefi
 const renderStatus = (status) => {
   const data = status.body?.data ?? {};
   const sqlite = eitherRight(data.sqlite);
-  const lance = eitherRight(data.lance);
   return [
     `- HTTP: ${status.ok ? "ok" : "failed"} (${status.status}, ${status.elapsedMs}ms)`,
     `- SQLite: ${sqlite ? `${sqlite.sessions} sessions, ${sqlite.messages} messages, ${sqlite.toolCalls} tool calls` : "unavailable"}`,
-    `- LanceDB: ${lance ? `${lance.tableName} ${lance.rowCount} rows, ${lance.indices?.map((index) => index.name).join(", ") || "no indexes"}` : "unavailable"}`,
     `- Embedding cache: ${data.embeddings ? `${data.embeddings.cached} cached, ${data.embeddings.pending} pending` : "unavailable"}`,
     `- Queue: ${data.queue ? `${data.queue.pending} pending, ${data.queue.leased} leased, ${data.queue.failed} failed` : "unavailable"}`,
   ].join("\n");

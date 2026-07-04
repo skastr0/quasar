@@ -21,18 +21,14 @@ const usage = {
     logs: "follow server logs; pass --no-follow to print once",
     ready: "GET /ready from the local server",
     health: "GET /health from the local server (liveness)",
-    status: "GET /status from the local server; pass --lance for LanceDB stats",
-    lance: "inspect all LanceDB tables and indexes directly inside the container",
+    status: "GET /status from the local server",
     exec: "run a command inside the container after --",
-    maintain: "run LanceDB maintenance inside the container, not through HTTP",
     materialize: "run embedding vector materialization through HTTP and write a proof receipt",
     backup: "write ./quasar-truth-backup.tar with SQLite truth and machine identity",
   },
   examples: [
     "bun scripts/server-ops.mjs deploy",
-    "bun scripts/server-ops.mjs status --lance",
-    "bun scripts/server-ops.mjs lance",
-    "bun scripts/server-ops.mjs maintain",
+    "bun scripts/server-ops.mjs status",
     "bun scripts/server-ops.mjs materialize --out docs/proofs/materialization-closure.json",
     "bun scripts/server-ops.mjs exec -- sh -lc 'ls -lah /data/quasar'",
   ],
@@ -76,11 +72,8 @@ switch (command) {
     else containerGetJson("/health");
     break;
   case "status":
-    if (rest.includes("--external")) await getJson(rest.includes("--lance") ? "/status?lance=true" : "/status");
-    else containerGetJson(rest.includes("--lance") ? "/status?lance=true" : "/status");
-    break;
-  case "lance":
-    lanceTables();
+    if (rest.includes("--external")) await getJson("/status");
+    else containerGetJson("/status");
     break;
   case "exec": {
     const separator = rest.indexOf("--");
@@ -89,9 +82,6 @@ switch (command) {
     exec(args);
     break;
   }
-  case "maintain":
-    containerGetJson("/maintenance/run");
-    break;
   case "materialize":
     materializeVectors();
     break;
@@ -104,13 +94,6 @@ switch (command) {
 
 function sh(script) {
   exec(["sh", "-lc", script]);
-}
-
-function lanceTables() {
-  sh([
-    "cd /app/packages/server",
-    "bun -e 'import * as lancedb from \"@lancedb/lancedb\"; const db = await lancedb.connect(process.env.QUASAR_SEARCH_DATA_DIR); const tables = []; for (const name of await db.tableNames()) { const table = await db.openTable(name); tables.push({ name, rows: await table.countRows(), indices: (await table.listIndices()).map((index) => ({ name: index.name, type: index.indexType, columns: index.columns, indexedRows: index.numIndexedRows, unindexedRows: index.numUnindexedRows })) }); } console.log(JSON.stringify({ ok: true, command: \"lance\", data: { tables } }, null, 2));'",
-  ].join(" && "));
 }
 
 function backupTruth() {
@@ -132,7 +115,9 @@ function materializeVectors() {
   const serverUrl = optionValue("--server", process.env.QUASAR_SERVER_URL ?? `http://127.0.0.1:${process.env.QUASAR_PUBLISH_PORT ?? "7180"}`);
   const timestamp = new Date().toISOString().replaceAll(":", "-");
   const outPath = optionValue("--out", `docs/proofs/materialization-closure-${timestamp}.json`);
-  const requiredProvider = optionValue("--require-provider", "local");
+  // The deployed provider is pinned to synthetic in compose.yaml; a flip to
+  // local is an explicit receipted cutover, passed here as --require-provider.
+  const requiredProvider = optionValue("--require-provider", "synthetic");
   const args = [
     "run",
     "packages/cli/src/cli.ts",

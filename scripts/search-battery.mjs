@@ -307,7 +307,7 @@ const shellSnapshot = (command, args) => {
 const opsSnapshot = async (label) => {
   const [ready, status] = await Promise.allSettled([
     requestJson("/ready"),
-    requestJson("/status", { lance: true }),
+    requestJson("/status"),
   ]);
   const statusData = status.status === "fulfilled" ? status.value.body?.data ?? {} : {};
   return {
@@ -327,8 +327,6 @@ const opsSnapshot = async (label) => {
       startedAt: status.value.startedAt,
       completedAt: status.value.completedAt,
       elapsedMs: status.value.elapsedMs,
-      lanceStatsAvailable: Boolean(statusData.lance && statusData.lance._tag !== "Right"),
-      activeVectorTableName: statusData.lance?.activeVectorTableName,
       data: statusData,
     } : { ok: false, error: String(status.reason) },
     dockerStats: hasFlag("--ops")

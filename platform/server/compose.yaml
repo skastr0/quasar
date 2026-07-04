@@ -24,16 +24,12 @@ services:
       QUASAR_HOME: /data/quasar
       QUASAR_LOCAL_HOME: /data/quasar
       QUASAR_LOCAL_SQLITE: /data/quasar/quasar.sqlite
-      QUASAR_SEARCH_DATA_DIR: /data/quasar/search.lance
       QUASAR_LOCAL_HOST: 0.0.0.0
       QUASAR_LOCAL_PORT: 6180
       QUASAR_SEARCH_PROFILE: ${QUASAR_SEARCH_PROFILE:-0}
       QUASAR_INGEST_TOKEN: ${QUASAR_INGEST_TOKEN:?set QUASAR_INGEST_TOKEN in platform/server/.env for remote ingest writes}
-      # Workers are always-on (no enable/disable toggles); the embedding provider
-      # is local ONNX by default, with Synthetic available as an explicit fallback.
-      # The previous worker enable/interval/lease/
-      # limit vars were env theater (zero code references) and were removed.
-      QUASAR_EMBEDDING_PROVIDER: ${QUASAR_EMBEDDING_PROVIDER:-local}
+      # Pinned: an embedding provider flip is an explicit receipted cutover, never a deploy side-effect.
+      QUASAR_EMBEDDING_PROVIDER: synthetic
       QUASAR_EMBEDDING_MODEL_CACHE_DIR: ${QUASAR_EMBEDDING_MODEL_CACHE_DIR:-/data/quasar/models}
       QUASAR_EMBEDDING_ONNX_DTYPE: ${QUASAR_EMBEDDING_ONNX_DTYPE:-q8}
       QUASAR_EMBEDDING_API_BATCH_SIZE: ${QUASAR_EMBEDDING_API_BATCH_SIZE:-100}
