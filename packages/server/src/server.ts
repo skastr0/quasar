@@ -147,6 +147,13 @@ const positiveInt = (params: URLSearchParams, name: string, fallback: number): n
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 };
 
+const nonNegativeInt = (params: URLSearchParams, name: string, fallback: number): number => {
+  const raw = params.get(name);
+  if (raw === null) return fallback;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+};
+
 const health = Effect.gen(function* () {
   const config = yield* LocalServerConfig;
   const store = yield* LocalStore;
@@ -607,6 +614,41 @@ const maintenanceReplayEmbeddingCache = Effect.gen(function* () {
   return json(ok("maintenance/embeddings/replay-cache", { report, coverage }));
 });
 
+const maintenanceMaterializeEmbeddingVectors = Effect.gen(function* () {
+  const embeddings = yield* Embeddings;
+  const store = yield* LocalStore;
+  const queue = yield* DurableQueue;
+  const search = yield* LanceDb;
+  const params = yield* query;
+  const report = yield* embeddings.materializeMissingVectors({
+    limit: positiveInt(params, "limit", 1_000),
+    lanceOffset: nonNegativeInt(params, "lanceOffset", 0),
+  });
+  const coverage = yield* store.messageVectorCoverage(embeddings.profile.cacheNamespace);
+  const queueByKind = yield* queue.statsByKind;
+  const embedMessageQueue = queueByKind.find((stats) => stats.kind === "embed-message") ?? {
+    kind: "embed-message",
+    pending: 0,
+    leased: 0,
+    failed: 0,
+  };
+  const activeVectorTableName = embeddingProfileSearchTable(embeddings.profile);
+  const activeVectorTable = yield* search.tableStats({ tableName: activeVectorTableName }).pipe(Effect.either);
+  const lanceRowCount = activeVectorTable._tag === "Right" ? activeVectorTable.right.rowCount : undefined;
+  const divergence = {
+    sqliteVectorRows: coverage.vectorRows,
+    lanceRowCount,
+    rowCountMatches: lanceRowCount === coverage.vectorRows,
+    rowCountDelta: lanceRowCount === undefined ? undefined : coverage.vectorRows - lanceRowCount,
+  };
+  return json(ok("maintenance/embeddings/materialize", {
+    report,
+    coverage,
+    queue: { embedMessage: embedMessageQueue, byKind: queueByKind },
+    lance: { activeVectorTableName, activeVectorTable, divergence },
+  }));
+});
+
 // Minimal self-contained dashboard served at the canonical root URL. No external
 // assets or egress: it calls the same-origin /status and /search/{mode} endpoints.
 const DASHBOARD_HTML = `<!doctype html>
@@ -699,6 +741,7 @@ const routesWithMaintenance = routes.pipe(
   HttpRouter.get("/maintenance/freshness", maintenanceFreshness),
   HttpRouter.get("/maintenance/repair", maintenanceRepair),
   HttpRouter.get("/maintenance/embeddings/replay-cache", maintenanceReplayEmbeddingCache),
+  HttpRouter.get("/maintenance/embeddings/materialize", maintenanceMaterializeEmbeddingVectors),
   HttpRouter.get("/", dashboard),
   HttpRouter.get("*", json({ ok: false, error: { type: "NotFound", message: "No route" } }, { status: 404 })),
 );

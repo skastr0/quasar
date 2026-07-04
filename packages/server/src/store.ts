@@ -57,6 +57,10 @@ export interface MessageVectorRow {
   readonly updatedAt: string;
 }
 
+export interface MessageVectorSearchRow extends MessageVectorRow {
+  readonly text: string;
+}
+
 export interface MessageVectorCoverage {
   readonly model: string;
   readonly searchableMessages: number;
@@ -136,6 +140,11 @@ export interface LocalStoreService {
     readonly model?: string;
     readonly limit?: number;
   }) => Effect.Effect<readonly MessageVectorRow[], SqliteStoreError>;
+  readonly listMessageVectorsForSearch: (options: {
+    readonly model: string;
+    readonly limit: number;
+    readonly offset?: number;
+  }) => Effect.Effect<readonly MessageVectorSearchRow[], SqliteStoreError>;
   readonly messageVectorCoverage: (model: string) => Effect.Effect<MessageVectorCoverage, SqliteStoreError>;
   readonly lexicalSearch: (request: {
     readonly query: string;
@@ -911,6 +920,78 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                   vector: decodeFloat16Vector(row.vectorBlob, row.dimensions),
                   createdAt: row.createdAt,
                   updatedAt: row.updatedAt,
+                };
+              });
+            }),
+          listMessageVectorsForSearch: ({ model, limit, offset }) =>
+            trySqlite("listMessageVectorsForSearch", () => {
+              const rows = db
+                .query(
+                  `SELECT
+                    v.model,
+                    v.modality,
+                    v.session_id AS sessionId,
+                    v.seq,
+                    v.role,
+                    v.project_key AS projectKey,
+                    v.provider,
+                    v.content_hash AS contentHash,
+                    v.document_hash AS documentHash,
+                    v.dimensions,
+                    v.encoding,
+                    v.vector_blob AS vectorBlob,
+                    v.created_at AS createdAt,
+                    v.updated_at AS updatedAt,
+                    m.text
+                  FROM message_vectors AS v
+                  INNER JOIN messages AS m
+                    ON m.session_id = v.session_id
+                   AND m.seq = v.seq
+                   AND m.role = v.role
+                   AND m.content_hash = v.content_hash
+                  WHERE v.model = ?
+                    AND v.document_hash IS NOT NULL
+                    AND m.role IN ('user', 'assistant', 'reasoning')
+                  ORDER BY v.session_id ASC, v.seq ASC, v.role ASC
+                  LIMIT ? OFFSET ?`,
+                )
+                .all(model, positiveInt(limit, 1_000), Math.max(0, offset ?? 0)) as Array<{
+                  model: string;
+                  modality: "text";
+                  sessionId: string;
+                  seq: number;
+                  role: string;
+                  projectKey: string;
+                  provider: string;
+                  contentHash: string;
+                  documentHash: string;
+                  dimensions: number;
+                  encoding: typeof VECTOR_BLOB_ENCODING;
+                  vectorBlob: Uint8Array;
+                  createdAt: string;
+                  updatedAt: string;
+                  text: string;
+                }>;
+              return rows.map((row) => {
+                if (row.encoding !== VECTOR_BLOB_ENCODING) {
+                  throw new Error(`unsupported message vector encoding: ${row.encoding}`);
+                }
+                return {
+                  model: row.model,
+                  modality: row.modality,
+                  sessionId: row.sessionId,
+                  seq: row.seq,
+                  role: row.role,
+                  projectKey: row.projectKey,
+                  provider: row.provider,
+                  contentHash: row.contentHash,
+                  documentHash: row.documentHash,
+                  dimensions: row.dimensions,
+                  encoding: row.encoding,
+                  vector: decodeFloat16Vector(row.vectorBlob, row.dimensions),
+                  createdAt: row.createdAt,
+                  updatedAt: row.updatedAt,
+                  text: row.text,
                 };
               });
             }),

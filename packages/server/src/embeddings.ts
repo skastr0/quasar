@@ -1,4 +1,4 @@
-import { LanceDb, type SearchRole } from "./lancedb";
+import { LanceDb, messageSearchKey, type SearchRole } from "./lancedb";
 import { Database } from "bun:sqlite";
 import { Effect, Layer, Ref, Schedule, Schema } from "effect";
 import { createHash } from "node:crypto";
@@ -8,7 +8,7 @@ import type { MessageRow, QueueJobRow } from "./model";
 import { ensureParentDir, sqlitePath } from "./paths";
 import { isSemanticSearchDocument } from "./searchPolicy";
 import { DurableQueue, Embeddings, type EmbeddingCacheRow, type EmbeddingReadinessStatus } from "./services";
-import { LocalStore } from "./store";
+import { LocalStore, type MessageVectorSearchRow } from "./store";
 import { makeLocalOnnxEmbedder } from "./localOnnxEmbeddings";
 import { makeSyntheticEmbedder, SyntheticEmbeddingError } from "./syntheticEmbeddings";
 
@@ -296,6 +296,17 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
             vector,
           });
 
+          const storedVectorToSearchRow = (row: MessageVectorSearchRow) => ({
+            sessionId: row.sessionId,
+            seq: row.seq,
+            role: row.role as SearchRole,
+            projectKey: row.projectKey,
+            text: row.text,
+            contentHash: row.contentHash,
+            provider: row.provider,
+            vector: row.vector,
+          });
+
           const toSqliteVectorRow = (message: MessageRow, vector: readonly number[], now?: string) => ({
             model: profile.cacheNamespace,
             modality: "text" as const,
@@ -366,7 +377,7 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
 
           const upsertAllLanceVectors = (operation: string, rows: readonly ReturnType<typeof toVectorRow>[]) =>
             Effect.gen(function* () {
-              if (rows.length === 0) return;
+              if (rows.length === 0) return 0;
               const receipt = yield* search.upsertMessageRows({ rows, tableName, vectorDimension: profile.dimensions });
               if (!receipt.complete) {
                 return yield* Effect.fail(
@@ -376,7 +387,11 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                   }),
                 );
               }
+              return receipt.applied;
             });
+
+          const elapsedSince = (started: number) =>
+            Math.round((performance.now() - started) * 100) / 100;
 
           return Embeddings.of({
             model: profile.model,
@@ -598,6 +613,207 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                   cacheHits,
                   missingCache,
                   sqliteVectorsUpserted,
+                };
+              }),
+            materializeMissingVectors: (options = {}) =>
+              Effect.gen(function* () {
+                const started = performance.now();
+                const startedAt = options.now ?? nowIso();
+                const materializationLimit = options.limit ?? 1_000;
+                const lanceOffset = Math.max(0, options.lanceOffset ?? 0);
+                const messages = yield* store.listMessagesMissingVector({
+                  model: profile.cacheNamespace,
+                  limit: materializationLimit,
+                });
+                let cacheHits = 0;
+                let cacheMisses = 0;
+                let embedded = 0;
+                let skipped = 0;
+                let sqliteVectorsUpserted = 0;
+                let lanceRowsUpserted = 0;
+                let lanceRowsRepaired = 0;
+                const cachedVectorRows: Array<ReturnType<typeof toVectorRow>> = [];
+                const cachedSqliteRows: Array<ReturnType<typeof toSqliteVectorRow>> = [];
+                const misses: MessageRow[] = [];
+
+                for (const message of messages) {
+                  if (!isSemanticSearchDocument(message)) {
+                    skipped += 1;
+                    continue;
+                  }
+                  const cached = yield* getCached(documentCacheHash(message));
+                  if (cached !== undefined) {
+                    cachedVectorRows.push(toVectorRow(message, cached.vector));
+                    cachedSqliteRows.push(toSqliteVectorRow(message, cached.vector, startedAt));
+                    cacheHits += 1;
+                    continue;
+                  }
+                  cacheMisses += 1;
+                  misses.push(message);
+                }
+
+                if (cachedVectorRows.length > 0) {
+                  sqliteVectorsUpserted += yield* upsertAllSqliteVectors("materializeMissingVectors.cacheHit.upsertMessageVectors", cachedSqliteRows);
+                  lanceRowsUpserted += yield* upsertAllLanceVectors("materializeMissingVectors.cacheHit.upsertSearchRows", cachedVectorRows);
+                }
+
+                type MaterializeChunkReport = {
+                  readonly embedded: number;
+                  readonly sqliteVectorsUpserted: number;
+                  readonly lanceRowsUpserted: number;
+                };
+                const emptyMaterializeChunkReport: MaterializeChunkReport = {
+                  embedded: 0,
+                  sqliteVectorsUpserted: 0,
+                  lanceRowsUpserted: 0,
+                };
+                const mergeMaterializeChunkReport = (
+                  total: MaterializeChunkReport,
+                  report: MaterializeChunkReport,
+                ): MaterializeChunkReport => ({
+                  embedded: total.embedded + report.embedded,
+                  sqliteVectorsUpserted: total.sqliteVectorsUpserted + report.sqliteVectorsUpserted,
+                  lanceRowsUpserted: total.lanceRowsUpserted + report.lanceRowsUpserted,
+                });
+                const processMissChunk: (chunk: readonly MessageRow[]) => Effect.Effect<MaterializeChunkReport, unknown> = (chunk) =>
+                  Effect.gen(function* () {
+                    if (chunk.length === 0) return emptyMaterializeChunkReport;
+                    if (chunk.some((message) => documentInputs(message.text).length > 1) && chunk.length > 1) {
+                      const splitAt = Math.ceil(chunk.length / 2);
+                      const splitReports = yield* Effect.forEach(
+                        [chunk.slice(0, splitAt), chunk.slice(splitAt)].filter((split) => split.length > 0),
+                        processMissChunk,
+                        { concurrency: 1 },
+                      );
+                      return splitReports.reduce(mergeMaterializeChunkReport, emptyMaterializeChunkReport);
+                    }
+
+                    const result = yield* (
+                      chunk.length === 1 && documentInputs(chunk[0]?.text ?? "").length > 1
+                        ? embedDocument(chunk[0]?.text ?? "").pipe(Effect.map((vector) => [vector]))
+                        : embedInputsAdaptive(chunk.map((message) => prefixed(profile.documentPrefix, message.text)))
+                    ).pipe(Effect.either);
+
+                    if (result._tag === "Left") {
+                      if (isRetryableEmbeddingCause(result.left) && chunk.length > 1) {
+                        const splitAt = Math.ceil(chunk.length / 2);
+                        const splitReports = yield* Effect.forEach(
+                          [chunk.slice(0, splitAt), chunk.slice(splitAt)].filter((split) => split.length > 0),
+                          processMissChunk,
+                          { concurrency: 1 },
+                        );
+                        return splitReports.reduce(mergeMaterializeChunkReport, emptyMaterializeChunkReport);
+                      }
+                      return yield* Effect.fail(
+                        new EmbeddingError({
+                          operation: "materializeMissingVectors.embed",
+                          message: result.left instanceof Error ? result.left.message : String(result.left),
+                          cause: result.left,
+                        }),
+                      );
+                    }
+
+                    const vectorRows = [];
+                    const sqliteRows = [];
+                    for (let index = 0; index < chunk.length; index += 1) {
+                      const message = chunk[index];
+                      const vector = result.right[index];
+                      if (message === undefined) continue;
+                      if (vector === undefined) {
+                        return yield* Effect.fail(
+                          new EmbeddingError({
+                            operation: "materializeMissingVectors.embed",
+                            message: "embedder returned fewer vectors than requested",
+                          }),
+                        );
+                      }
+                      const input = prefixed(profile.documentPrefix, message.text);
+                      const cached = yield* putCached({
+                        contentHash: documentCacheHash(message),
+                        text: input,
+                        vector,
+                        now: startedAt,
+                      });
+                      vectorRows.push(toVectorRow(message, cached.vector));
+                      sqliteRows.push(toSqliteVectorRow(message, cached.vector, startedAt));
+                    }
+                    const sqliteAccepted = yield* upsertAllSqliteVectors("materializeMissingVectors.cacheMiss.upsertMessageVectors", sqliteRows);
+                    const lanceAccepted = yield* upsertAllLanceVectors("materializeMissingVectors.cacheMiss.upsertSearchRows", vectorRows);
+                    return {
+                      embedded: vectorRows.length,
+                      sqliteVectorsUpserted: sqliteAccepted,
+                      lanceRowsUpserted: lanceAccepted,
+                    };
+                  });
+
+                const chunkReports = yield* Effect.forEach(
+                  chunksOf(misses, positiveIntEnv("QUASAR_EMBEDDING_API_BATCH_SIZE", DEFAULT_EMBEDDING_API_BATCH_SIZE)),
+                  processMissChunk,
+                  { concurrency: positiveIntEnv("QUASAR_EMBEDDING_API_CONCURRENCY", 4) },
+                );
+                for (const chunkReport of chunkReports) {
+                  embedded += chunkReport.embedded;
+                  sqliteVectorsUpserted += chunkReport.sqliteVectorsUpserted;
+                  lanceRowsUpserted += chunkReport.lanceRowsUpserted;
+                }
+
+                const lanceCandidates = yield* store.listMessageVectorsForSearch({
+                  model: profile.cacheNamespace,
+                  limit: materializationLimit,
+                  offset: lanceOffset,
+                });
+                const sessionIds = [...new Set(lanceCandidates.map((row) => row.sessionId))];
+                const existingRowsBySession = yield* Effect.forEach(
+                  sessionIds,
+                  (sessionId) =>
+                    search.readMessageRowsBySession({
+                      sessionId,
+                      tableName,
+                      limit: 100_000,
+                      select: ["key", "contentHash"],
+                    }),
+                  { concurrency: 4 },
+                );
+                const existingContentHashByKey = new Map<string, string>();
+                for (const row of existingRowsBySession.flat()) {
+                  if (typeof row.key === "string" && typeof row.contentHash === "string") {
+                    existingContentHashByKey.set(row.key, row.contentHash);
+                  }
+                }
+                const lanceRepairRows = lanceCandidates
+                  .filter((row) => {
+                    const key = messageSearchKey({
+                      sessionId: row.sessionId,
+                      seq: row.seq,
+                      role: row.role as SearchRole,
+                    });
+                    return existingContentHashByKey.get(key) !== row.contentHash;
+                  })
+                  .map(storedVectorToSearchRow);
+                if (lanceRepairRows.length > 0) {
+                  lanceRowsRepaired = yield* upsertAllLanceVectors("materializeMissingVectors.repairSearchRows", lanceRepairRows);
+                  lanceRowsUpserted += lanceRowsRepaired;
+                }
+
+                return {
+                  scanned: messages.length,
+                  cacheHits,
+                  cacheMisses,
+                  embedded,
+                  skipped,
+                  sqliteVectorsUpserted,
+                  lanceRowsUpserted,
+                  lanceRowsRepaired,
+                  lanceScan: {
+                    offset: lanceOffset,
+                    scanned: lanceCandidates.length,
+                    missingOrStale: lanceRepairRows.length,
+                    nextOffset: lanceOffset + lanceCandidates.length,
+                    complete: lanceCandidates.length < materializationLimit,
+                  },
+                  startedAt,
+                  finishedAt: options.now ?? nowIso(),
+                  elapsedMs: elapsedSince(started),
                 };
               }),
             status: tryEmbedding("status", () => {
