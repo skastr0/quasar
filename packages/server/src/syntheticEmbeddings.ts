@@ -4,7 +4,12 @@ import type { EmbeddingProfile } from "./embeddingProfiles";
 import type { Embedder } from "./embeddings";
 
 const DEFAULT_SYNTHETIC_BASE_URL = "https://api.synthetic.new/openai/v1";
-const DEFAULT_SYNTHETIC_REQUEST_TIMEOUT_MS = 5_000;
+// Server-wide bound on every Synthetic call (query path AND document worker):
+// 3s timeout + exactly one in-client retry. The durable queue remains the
+// outer retry loop for document jobs; this inner retry only absorbs the known
+// ~6% transient flake (truncated/malformed body, timeout, 5xx).
+const DEFAULT_SYNTHETIC_REQUEST_TIMEOUT_MS = 3_000;
+const SYNTHETIC_REQUEST_ATTEMPTS = 2;
 
 export class SyntheticEmbeddingError extends Schema.TaggedError<SyntheticEmbeddingError>()(
   "SyntheticEmbeddingError",
@@ -87,6 +92,85 @@ const validateResponseIndexes = (data: readonly SyntheticEmbeddingData[], expect
   }
 };
 
+/** Truncated/malformed-body responses (the known ~6% flake), timeouts, and
+ * 429/5xx are worth one in-client retry; auth/4xx contract errors are not. */
+const isRetryableSyntheticFailure = (cause: unknown): boolean => {
+  if (cause instanceof SyntheticEmbeddingError) {
+    if (cause.operation === "synthetic.embeddings.decode") return true;
+    return cause.status === 429 || (cause.status !== undefined && cause.status >= 500);
+  }
+  return true; // network error / abort (timeout)
+};
+
+const diagnostic = (event: string, fields: Record<string, unknown>): void => {
+  console.error(JSON.stringify({ event, at: new Date().toISOString(), ...fields }));
+};
+
+const embedManyOnce = async (
+  profile: EmbeddingProfile,
+  options: SyntheticEmbeddingClientOptions,
+  values: readonly string[],
+  apiKey: string,
+): Promise<readonly (readonly number[])[]> => {
+  const baseUrl = options.baseUrl ?? process.env.SYNTHETIC_OPENAI_BASE_URL?.trim() ?? DEFAULT_SYNTHETIC_BASE_URL;
+  const response = await fetchWithTimeout(options.fetch ?? fetch, `${baseUrl.replace(/\/$/, "")}/embeddings`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: profile.model,
+      input: [...values],
+      dimensions: profile.dimensions,
+    }),
+  }, syntheticRequestTimeoutMs());
+
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch (cause) {
+    throw new SyntheticEmbeddingError({
+      operation: "synthetic.embeddings.decode",
+      message: "Synthetic embeddings response was not JSON",
+      status: response.status,
+      cause,
+    });
+  }
+
+  if (!response.ok) {
+    const message = typeof body === "object" && body !== null && "error" in body
+      ? JSON.stringify((body as { error: unknown }).error)
+      : `Synthetic embeddings request failed with HTTP ${response.status}`;
+    throw new SyntheticEmbeddingError({
+      operation: "synthetic.embeddings",
+      message,
+      status: response.status,
+    });
+  }
+
+  const data = dataFromUnknown(body);
+  if (data === undefined) {
+    throw new SyntheticEmbeddingError({
+      operation: "synthetic.embeddings.decode",
+      message: "Synthetic embeddings response did not match expected shape",
+    });
+  }
+  validateResponseIndexes(data, values.length);
+
+  const vectors = new Array<readonly number[]>(values.length);
+  for (const item of data) {
+    vectors[item.index] = item.embedding;
+  }
+  if (vectors.some((vector) => vector === undefined)) {
+    throw new SyntheticEmbeddingError({
+      operation: "synthetic.embeddings.decode",
+      message: "Synthetic embeddings response omitted one or more input indexes",
+    });
+  }
+  return vectors;
+};
+
 export const makeSyntheticEmbedder = (profile: EmbeddingProfile, options: SyntheticEmbeddingClientOptions = {}): Embedder => ({
   embedMany: async (values) => {
     const apiKey = options.apiKey ?? syntheticApiKeyFromEnv();
@@ -96,63 +180,23 @@ export const makeSyntheticEmbedder = (profile: EmbeddingProfile, options: Synthe
         message: "SYNTHETIC_API_KEY is required for Synthetic embeddings",
       });
     }
-
-    const baseUrl = options.baseUrl ?? process.env.SYNTHETIC_OPENAI_BASE_URL?.trim() ?? DEFAULT_SYNTHETIC_BASE_URL;
-    const response = await fetchWithTimeout(options.fetch ?? fetch, `${baseUrl.replace(/\/$/, "")}/embeddings`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model: profile.model,
-        input: [...values],
-        dimensions: profile.dimensions,
-      }),
-    }, syntheticRequestTimeoutMs());
-
-    let body: unknown;
-    try {
-      body = await response.json();
-    } catch (cause) {
-      throw new SyntheticEmbeddingError({
-        operation: "synthetic.embeddings.decode",
-        message: "Synthetic embeddings response was not JSON",
-        status: response.status,
-        cause,
-      });
+    let lastFailure: unknown;
+    for (let attempt = 1; attempt <= SYNTHETIC_REQUEST_ATTEMPTS; attempt += 1) {
+      try {
+        return await embedManyOnce(profile, options, values, apiKey);
+      } catch (cause) {
+        lastFailure = cause;
+        if (cause instanceof SyntheticEmbeddingError && cause.operation === "synthetic.embeddings.decode") {
+          diagnostic("synthetic_embeddings.malformed_body", {
+            attempt,
+            status: cause.status,
+            detail: cause.message,
+          });
+        }
+        if (attempt < SYNTHETIC_REQUEST_ATTEMPTS && isRetryableSyntheticFailure(cause)) continue;
+        throw cause;
+      }
     }
-
-    if (!response.ok) {
-      const message = typeof body === "object" && body !== null && "error" in body
-        ? JSON.stringify((body as { error: unknown }).error)
-        : `Synthetic embeddings request failed with HTTP ${response.status}`;
-      throw new SyntheticEmbeddingError({
-        operation: "synthetic.embeddings",
-        message,
-        status: response.status,
-      });
-    }
-
-    const data = dataFromUnknown(body);
-    if (data === undefined) {
-      throw new SyntheticEmbeddingError({
-        operation: "synthetic.embeddings.decode",
-        message: "Synthetic embeddings response did not match expected shape",
-      });
-    }
-    validateResponseIndexes(data, values.length);
-
-    const vectors = new Array<readonly number[]>(values.length);
-    for (const item of data) {
-      vectors[item.index] = item.embedding;
-    }
-    if (vectors.some((vector) => vector === undefined)) {
-      throw new SyntheticEmbeddingError({
-        operation: "synthetic.embeddings.decode",
-        message: "Synthetic embeddings response omitted one or more input indexes",
-      });
-    }
-    return vectors;
+    throw lastFailure;
   },
 });

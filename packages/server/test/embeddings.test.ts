@@ -1033,4 +1033,65 @@ describe("Embeddings", () => {
     await expect(makeSyntheticEmbedder(profile, { apiKey: "test-key", fetch: fakeFetch }).embedMany(["a"]))
       .rejects.toThrow("Synthetic embeddings response included invalid index 2");
   });
+
+  test("synthetic embedder retries a truncated body exactly once, then succeeds", async () => {
+    const profile = makeEmbeddingProfile({
+      model: "hf:nomic-ai/nomic-embed-text-v1.5",
+      dimensions: 3,
+      task: "search_document",
+    });
+    let calls = 0;
+    const fakeFetch: typeof fetch = async () => {
+      calls += 1;
+      if (calls === 1) {
+        // The known ~6% flake: HTTP 200 with a truncated (non-JSON) body.
+        return new Response('{"data": [{"index": 0, "embe', { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ data: [{ index: 0, embedding: [1, 0, 0] }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+
+    const vectors = await makeSyntheticEmbedder(profile, { apiKey: "test-key", fetch: fakeFetch }).embedMany(["a"]);
+    expect(vectors).toEqual([[1, 0, 0]]);
+    expect(calls).toBe(2);
+  });
+
+  test("synthetic embedder gives up after the single retry (bounded, queue is the outer loop)", async () => {
+    const profile = makeEmbeddingProfile({
+      model: "hf:nomic-ai/nomic-embed-text-v1.5",
+      dimensions: 3,
+      task: "search_document",
+    });
+    let calls = 0;
+    const fakeFetch: typeof fetch = async () => {
+      calls += 1;
+      return new Response("not json at all", { status: 200, headers: { "content-type": "application/json" } });
+    };
+
+    await expect(makeSyntheticEmbedder(profile, { apiKey: "test-key", fetch: fakeFetch }).embedMany(["a"]))
+      .rejects.toThrow("Synthetic embeddings response was not JSON");
+    expect(calls).toBe(2);
+  });
+
+  test("synthetic embedder does not retry non-retryable HTTP contract failures", async () => {
+    const profile = makeEmbeddingProfile({
+      model: "hf:nomic-ai/nomic-embed-text-v1.5",
+      dimensions: 3,
+      task: "search_document",
+    });
+    let calls = 0;
+    const fakeFetch: typeof fetch = async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ error: { message: "invalid api key" } }), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      });
+    };
+
+    await expect(makeSyntheticEmbedder(profile, { apiKey: "bad-key", fetch: fakeFetch }).embedMany(["a"]))
+      .rejects.toThrow("invalid api key");
+    expect(calls).toBe(1);
+  });
 });
