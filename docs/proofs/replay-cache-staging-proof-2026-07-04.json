@@ -1,0 +1,77 @@
+{
+  "ok": true,
+  "command": "replay-cache-staging-proof",
+  "data": {
+    "sourceDb": "/source/quasar.sqlite",
+    "workDir": "/tmp/quasar-replay-cache-staging-JRaKnE",
+    "workDb": "/tmp/quasar-replay-cache-staging-JRaKnE/quasar.sqlite",
+    "startedAt": "2026-07-04T14:48:05.613Z",
+    "finishedAt": "2026-07-04T15:45:59.641Z",
+    "elapsedMs": 3474029.72,
+    "cache": {
+      "model": "synthetic:hf:nomic-ai/nomic-embed-text-v1.5:768:search_document",
+      "dimensions": 768,
+      "rows": 315197,
+      "textBytes": 299471126,
+      "firstCreatedAt": "2026-06-19T00:06:17.781Z",
+      "lastUpdatedAt": "2026-07-04T08:26:41.808Z"
+    },
+    "replayLimit": 20000,
+    "maxBatches": 100000,
+    "expected": {
+      "cacheNamespace": "synthetic:hf:nomic-ai/nomic-embed-text-v1.5:768:search_document",
+      "cacheRows": 315197,
+      "searchableMessages": 688338,
+      "replayableMessagesByDocumentHash": 678306,
+      "missingReplayableMessages": 10032,
+      "replayCoverage": 0.9854257646679393,
+      "rawContentHashMatches": 0
+    },
+    "replay": {
+      "initialCoverage": {
+        "model": "synthetic:hf:nomic-ai/nomic-embed-text-v1.5:768:search_document",
+        "searchableMessages": 688338,
+        "vectorRows": 0,
+        "vectorlessMessages": 688338,
+        "staleVectorRows": 0
+      },
+      "finalCoverage": {
+        "model": "synthetic:hf:nomic-ai/nomic-embed-text-v1.5:768:search_document",
+        "searchableMessages": 688338,
+        "vectorRows": 678306,
+        "vectorlessMessages": 10032,
+        "staleVectorRows": 0
+      },
+      "batchCount": 48,
+      "totals": {
+        "scanned": 956226,
+        "cacheHits": 678306,
+        "missingCache": 277920,
+        "sqliteVectorsUpserted": 678306
+      },
+      "lastBatch": {
+        "batch": 48,
+        "report": {
+          "scanned": 16226,
+          "cacheHits": 6194,
+          "missingCache": 10032,
+          "sqliteVectorsUpserted": 6194
+        },
+        "coverage": {
+          "model": "synthetic:hf:nomic-ai/nomic-embed-text-v1.5:768:search_document",
+          "searchableMessages": 688338,
+          "vectorRows": 678306,
+          "vectorlessMessages": 10032,
+          "staleVectorRows": 0
+        }
+      },
+      "providerCalls": 0
+    },
+    "gates": {
+      "reachedCacheReplayCeiling": true,
+      "remainingEqualsUncached": true,
+      "staleVectorRowsZero": true,
+      "providerCallsBlocked": true
+    }
+  }
+}
