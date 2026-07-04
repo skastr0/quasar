@@ -45,7 +45,7 @@ const assertCollapseInvariant = (
   const userMessages = events.filter((e) => e.role === "user" && e.kind === "message");
   const assistantMessages = events.filter((e) => e.role === "assistant" && e.kind === "message");
   expect(userMessages.length).toBeGreaterThan(0);
-  expect(assistantMessages.length).toBeLessThanOrEqual(userMessages.length + 1);
+  expect(assistantMessages.length).toBeLessThanOrEqual(userMessages.length);
   expect(assistantMessages.length).toBeGreaterThanOrEqual(userMessages.length - 1);
   // Mid-loop planner ticks must never masquerade as assistant messages.
   const leakedMidLoop = assistantMessages.filter(
@@ -56,6 +56,22 @@ const assertCollapseInvariant = (
       e.contentText?.startsWith("Reading") === true,
   );
   expect(leakedMidLoop).toHaveLength(0);
+};
+
+const hasExactOrTrailingOpenAssistantCount = (
+  events: Awaited<ReturnType<typeof antigravityAdapter.read>>["sessions"][number]["events"],
+): boolean => {
+  const users = events
+    .map((event, index) => ({ event, index }))
+    .filter(({ event }) => event.role === "user" && event.kind === "message");
+  const assistants = events
+    .map((event, index) => ({ event, index }))
+    .filter(({ event }) => event.role === "assistant" && event.kind === "message");
+  if (assistants.length === users.length) return true;
+  if (assistants.length !== users.length - 1) return false;
+  const lastUser = users[users.length - 1];
+  const lastAssistant = assistants[assistants.length - 1];
+  return lastUser !== undefined && (lastAssistant === undefined || lastUser.index > lastAssistant.index);
 };
 
 // ---------------------------------------------------------------------------
@@ -608,6 +624,35 @@ describe("T5: cumulative replay collapse — estate validation", () => {
     expect(session.events.filter((e) => e.kind === "message")).toHaveLength(TURNS * 2);
   });
 
+  const activeRoot = join(testRoot, "t5-active");
+  const activeBrainRoot = join(activeRoot, "brain");
+  const activeUuid = "dddddddd-0004-0004-0004-000000000005";
+  const activeTranscriptDir = join(activeBrainRoot, activeUuid, ".system_generated", "logs");
+  mkdirSync(activeTranscriptDir, { recursive: true });
+  writeJsonLines(join(activeTranscriptDir, "transcript_full.jsonl"), [
+    {
+      type: "USER_INPUT",
+      source: "USER_EXPLICIT",
+      status: "DONE",
+      created_at: "2026-06-12T08:59:00Z",
+      content: "This active session has not received a terminal answer yet.",
+    },
+  ]);
+
+  test("active trailing-user fixture satisfies collapse invariant without allowing extra assistants", async () => {
+    const result = await antigravityAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { antigravity: activeRoot },
+    });
+    expect(result.sessions).toHaveLength(1);
+    const session = result.sessions[0]!;
+    assertCollapseInvariant(session.events);
+    expect(hasExactOrTrailingOpenAssistantCount(session.events)).toBe(true);
+    expect(session.events.filter((e) => e.role === "user" && e.kind === "message")).toHaveLength(1);
+    expect(session.events.filter((e) => e.role === "assistant" && e.kind === "message")).toHaveLength(0);
+  });
+
   const estateRoot = process.env.ANTIGRAVITY_ESTATE_ROOT ?? join(homedir(), ".gemini/antigravity-cli");
   const estateBrain = join(estateRoot, "brain");
 
@@ -622,11 +667,7 @@ describe("T5: cumulative replay collapse — estate validation", () => {
       expect(result.sessions.length).toBeGreaterThan(0);
       for (const session of result.sessions) {
         assertCollapseInvariant(session.events);
-        const users = session.events.filter((e) => e.role === "user" && e.kind === "message");
-        const assistants = session.events.filter(
-          (e) => e.role === "assistant" && e.kind === "message",
-        );
-        expect(assistants.length).toBe(users.length);
+        expect(hasExactOrTrailingOpenAssistantCount(session.events)).toBe(true);
       }
     },
     30_000,

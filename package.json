@@ -36,6 +36,7 @@
     "server:maintain": "bun scripts/server-ops.mjs maintain",
     "server:backup": "bun scripts/server-ops.mjs backup",
     "proof:retrieval": "bun scripts/compare-local-search.mjs",
+    "proof:sqlite-first": "bun packages/server/src/sqliteFirstProofCli.ts",
     "build:npm-packages": "bun run --cwd packages/cli build:npm-packages",
     "install:dev": "bun run --cwd packages/cli build && bun run --cwd packages/cli install:dev",
     "pack:dry-run": "bun scripts/pack-npm.mjs",

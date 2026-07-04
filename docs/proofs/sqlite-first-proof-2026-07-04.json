@@ -1,0 +1,169 @@
+{
+  "generatedAt": "2026-07-04T03:16:15.704Z",
+  "sourceDb": "/tmp/quasar-sqlite-first-proof.zITAJB/quasar.sqlite",
+  "workDb": "/tmp/quasar-sqlite-first-proof.zITAJB/proof-work.sqlite",
+  "profile": {
+    "model": "hf:nomic-ai/nomic-embed-text-v1.5",
+    "dimensions": 768,
+    "task": "search_document",
+    "documentPrefix": "search_document: ",
+    "queryPrefix": "search_query: ",
+    "cacheNamespace": "synthetic:hf:nomic-ai/nomic-embed-text-v1.5:768:search_document"
+  },
+  "embeddingCoverage": {
+    "semanticRows": 674182,
+    "distinctDocumentHashes": 245840,
+    "activeProfileCacheHashes": 311129,
+    "cachedDocumentHashes": 244511,
+    "missingDocumentHashes": 1329,
+    "likelyQueryCacheHashes": 66618,
+    "missingExamples": [
+      {
+        "sessionId": "antigravity:0b8e4291040af28ea1aa07bbab0ac110",
+        "seq": 0,
+        "documentHash": "5e5c0122518922edd83b904050fda238644fbe271ab9ebded5c1a5942274eaa2"
+      },
+      {
+        "sessionId": "antigravity:0b8e4291040af28ea1aa07bbab0ac110",
+        "seq": 1,
+        "documentHash": "c407dd514b679895a49d1a9f6b3ebb1ad897ee2f7ce1a89b4da91980e91d8395"
+      },
+      {
+        "sessionId": "antigravity:29c2915c84aed1dbf42f1a96b453d6a5",
+        "seq": 0,
+        "documentHash": "8d393242dd990fb0a94f0f254ef9c2f23cb21086b5dbb429f5b864f8262c67a2"
+      },
+      {
+        "sessionId": "antigravity:29c2915c84aed1dbf42f1a96b453d6a5",
+        "seq": 1,
+        "documentHash": "e0ca7fb9479214b35ef3081a9ca64d02c7fb6b3d081d85ff5072330fe2ab8a2c"
+      },
+      {
+        "sessionId": "antigravity:2eb4299e972aa8015c2508d4018a11bf",
+        "seq": 0,
+        "documentHash": "c995de3e1d6a7c62d06f1d207d2919f917798f1d5ceeb43b4d4e13eb4fdad1ad"
+      },
+      {
+        "sessionId": "antigravity:2eb4299e972aa8015c2508d4018a11bf",
+        "seq": 1,
+        "documentHash": "c897854697bff9e2897f93c0ed3ae002da6b36d49d5f2d654b44d101b88c1db6"
+      },
+      {
+        "sessionId": "antigravity:3e5c43fcd06b8163065e5192807771c9",
+        "seq": 0,
+        "documentHash": "03e02620d6cc7fdabee9a48484fc0f285de1554e8e423f0112b1ddb57e6fbda2"
+      },
+      {
+        "sessionId": "antigravity:3e5c43fcd06b8163065e5192807771c9",
+        "seq": 1,
+        "documentHash": "76dc0aa42dddde063fda0130e4433e8a99cfd83537a5a73ad7e0f0d09ff05477"
+      },
+      {
+        "sessionId": "antigravity:41448ffc6a1e411bcdadcdf2acd74091",
+        "seq": 0,
+        "documentHash": "c22270b80e4239086b0522c356ed663124a514be4118e1fa5724dae001136195"
+      },
+      {
+        "sessionId": "antigravity:52148bfa13d2e541b50884207aafb8cf",
+        "seq": 0,
+        "documentHash": "4b790f1b4ab39d4bc3b2df1b375b5c9dcead73507835e2624e84a38cdeee3e32"
+      },
+      {
+        "sessionId": "antigravity:606086bee75c1d95ee46b4d09cfe5e07",
+        "seq": 0,
+        "documentHash": "1b3679d76838cb4947b86be90415712546f541746860b7742ab8a17675743ea4"
+      },
+      {
+        "sessionId": "antigravity:7ef1e831f5513f227b42ee8bb661bfd4",
+        "seq": 0,
+        "documentHash": "a73c7b5c0ba0cf8dde4c86c711f3db26c99780a2f5fc4316153119694269120d"
+      },
+      {
+        "sessionId": "antigravity:8eca40babf57e0013f1885142d0475d3",
+        "seq": 0,
+        "documentHash": "c81e3f7968d4935cae375caccb6445fbd73c3add7efed060d09c862f6fec8133"
+      },
+      {
+        "sessionId": "antigravity:97c8580b23a9f084f8dcc90d78b1cfc6",
+        "seq": 0,
+        "documentHash": "6e6b2b0a9eb64759f5e840487adee1de2f6244c6093ed6963d1a71c0191d10f9"
+      },
+      {
+        "sessionId": "antigravity:daef77e54c5c6afa583ca9f75237cf0c",
+        "seq": 0,
+        "documentHash": "debb2c3b870feb7b33aa7ce5dfa6f4810fdae4d395608a3b6803e57b5165790f"
+      },
+      {
+        "sessionId": "antigravity:ebd591b52dd12e925d83c23ff306fcac",
+        "seq": 0,
+        "documentHash": "62d9ae69200a3ab707bd547de93a0b9d21f2a1850e0e6518634dad9f1a63baee"
+      },
+      {
+        "sessionId": "antigravity:ebd591b52dd12e925d83c23ff306fcac",
+        "seq": 1,
+        "documentHash": "1f2d00a032f21d3d6361bdc4bf3ef21fdcaee422f7e4badac23d4d923a088ec8"
+      },
+      {
+        "sessionId": "claude:0a7c2ea629e95b515bfb63c8e748c88b",
+        "seq": 0,
+        "documentHash": "a3eedb54c13b79c7c5a94a03326791d8a540537e18e88d32c799bb86aa2f3e25"
+      },
+      {
+        "sessionId": "claude:11636c14859fca1766c476128b8474fd",
+        "seq": 0,
+        "documentHash": "bcc288c1f8994ae1ba2fb963880e0def7621c2e4dc7c04e30ca7e0a663e01aa9"
+      },
+      {
+        "sessionId": "claude:12fdd73dd92bd20654e94f6385252904",
+        "seq": 0,
+        "documentHash": "343e31484742e12d12fa79efb8d7bc091ca31f84a041bb0d1809dfc7ea288cd7"
+      }
+    ]
+  },
+  "fts": {
+    "rowsIndexed": 674182,
+    "buildElapsedMs": 19952.84,
+    "queryTimings": [
+      {
+        "query": "sqlite lancedb readiness",
+        "ftsQuery": "\"sqlite\" AND \"lancedb\" AND \"readiness\"",
+        "elapsedMs": 4.82,
+        "hits": 10
+      },
+      {
+        "query": "embedding profile vector dimension",
+        "ftsQuery": "\"embedding\" AND \"profile\" AND \"vector\" AND \"dimension\"",
+        "elapsedMs": 11.15,
+        "hits": 10
+      },
+      {
+        "query": "tool payloads session search",
+        "ftsQuery": "\"tool\" AND \"payloads\" AND \"session\" AND \"search\"",
+        "elapsedMs": 32.73,
+        "hits": 10
+      }
+    ]
+  },
+  "vectors": {
+    "rowLimit": 50000,
+    "rowsScanned": 50000,
+    "rowsInserted": 49834,
+    "rowsMissingCache": 166,
+    "dimension": 768,
+    "materializeElapsedMs": 9405.91
+  },
+  "exactScan": {
+    "implementation": "pure-js-float32-baseline",
+    "queryAnchor": {
+      "sessionId": "antigravity:019bda1f6f84829c22225e91fb41bf26",
+      "seq": 0
+    },
+    "rowsScanned": 49833,
+    "elapsedMs": 132.47,
+    "best": {
+      "sessionId": "antigravity:916f46a41fda5ec3e93ff1fea7268065",
+      "seq": 0,
+      "score": 0.9999882386422435
+    }
+  }
+}
