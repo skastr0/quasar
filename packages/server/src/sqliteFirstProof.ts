@@ -178,6 +178,12 @@ export const documentCacheKey = (text: string, profile: Pick<EmbeddingProfile, "
 const quoteSqlString = (value: string): string =>
   `'${value.replaceAll("'", "''")}'`;
 
+export const ftsProjectScopeToken = (projectKey: string): string =>
+  `p${createHash("sha1").update(projectKey).digest("hex")}`;
+
+export const ftsRoleScopeToken = (role: string): string =>
+  `r${role.replaceAll(/[^a-zA-Z0-9]/g, "").toLowerCase()}`;
+
 const elapsed = <A>(run: () => A): { readonly value: A; readonly elapsedMs: number } => {
   const startedAt = performance.now();
   const value = run();
@@ -335,12 +341,42 @@ export const buildFtsProof = (
         tokenize = 'unicode61'
       )
     `);
-    db.exec(`
-      INSERT INTO proof_messages_fts(session_id, seq, role, project_key, text, content_hash)
-      SELECT session_id, seq, role, project_key, text, content_hash
+    const rows = db.query(`
+      SELECT session_id AS sessionId, seq, role, project_key AS projectKey, text, content_hash AS contentHash
       FROM messages
       WHERE role IN ('user', 'assistant', 'reasoning')
+      ORDER BY session_id, seq
     `);
+    const insert = db.prepare(`
+      INSERT INTO proof_messages_fts(session_id, seq, role, project_key, text, content_hash)
+      VALUES ($sessionId, $seq, $role, $projectKey, $text, $contentHash)
+    `);
+    const projectTokens = new Map<string, string>();
+    const insertRows = db.transaction(() => {
+      for (const row of rows.iterate() as Iterable<{
+        sessionId: string;
+        seq: number;
+        role: string;
+        projectKey: string;
+        text: string;
+        contentHash: string;
+      }>) {
+        let projectToken = projectTokens.get(row.projectKey);
+        if (projectToken === undefined) {
+          projectToken = ftsProjectScopeToken(row.projectKey);
+          projectTokens.set(row.projectKey, projectToken);
+        }
+        insert.run({
+          $sessionId: row.sessionId,
+          $seq: row.seq,
+          $role: row.role,
+          $projectKey: row.projectKey,
+          $text: `${projectToken} ${ftsRoleScopeToken(row.role)} ${row.text}`,
+          $contentHash: row.contentHash,
+        });
+      }
+    });
+    insertRows();
   });
   const rowsIndexed = (db.query("SELECT COUNT(*) AS count FROM proof_messages_fts").get() as { count: number }).count;
 
@@ -388,12 +424,18 @@ export const buildFtsProof = (
   for (const query of queries) {
     const ftsQuery = fts5QueryForText(query);
     if (ftsQuery === undefined) continue;
+    const scopedTerms = [
+      filters.projectKey === undefined ? undefined : ftsProjectScopeToken(filters.projectKey),
+      filters.role === undefined ? undefined : ftsRoleScopeToken(filters.role),
+      ftsQuery,
+    ].filter((term): term is string => term !== undefined);
+    const scopedFtsQuery = scopedTerms.join(" AND ");
     const timings: number[] = [];
     let hits = 0;
     for (let sample = 0; sample < benchmarkSamples; sample += 1) {
       const timing = elapsed(() =>
         benchmarkStatement.all({
-          $query: ftsQuery,
+          $query: scopedFtsQuery,
           $projectKey: filters.projectKey ?? null,
           $role: filters.role ?? null,
           $limit: limit,
@@ -404,7 +446,7 @@ export const buildFtsProof = (
     }
     filteredBenchmarks.push({
       query,
-      ftsQuery,
+      ftsQuery: scopedFtsQuery,
       filters,
       samples: benchmarkSamples,
       limit,
@@ -450,11 +492,32 @@ type CachedParityCandidate = {
   readonly cachedVector: readonly number[];
 };
 
+type CachedParitySampleRow = {
+  readonly sessionId: string;
+  readonly seq: number;
+  readonly text: string;
+  readonly documentHash: string;
+};
+
+const deterministicRandom = () => {
+  let state = 0x9e3779b9;
+  return () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 0x100000000;
+  };
+};
+
 const selectCachedParityCandidates = (
   db: Database,
   profile: EmbeddingProfile,
   requestedSampleSize: number,
 ): { readonly eligibleCachedMessages: number; readonly sample: readonly CachedParityCandidate[] } => {
+  const cacheHashes = new Set<string>();
+  for (const row of db
+    .query("SELECT content_hash AS contentHash FROM embedding_cache WHERE model = $model")
+    .iterate({ $model: profile.cacheNamespace }) as Iterable<{ contentHash: string }>) {
+    cacheHashes.add(row.contentHash);
+  }
   const selectCache = db.query(`
     SELECT vector_json AS vectorJson
     FROM embedding_cache
@@ -466,41 +529,40 @@ const selectCachedParityCandidates = (
     WHERE role IN ('user', 'assistant', 'reasoning')
     ORDER BY session_id, seq
   `);
-  const cachedRows = (): Iterable<{ sessionId: string; seq: number; text: string; vectorJson: string }> => ({
-    *[Symbol.iterator]() {
-      for (const row of messages.iterate() as Iterable<{ sessionId: string; seq: number; text: string }>) {
-        const documentHash = documentCacheKey(row.text, profile);
-        const cached = selectCache.get({
-          $model: profile.cacheNamespace,
-          $contentHash: documentHash,
-        }) as { vectorJson: string } | null;
-        if (cached !== null) yield { ...row, vectorJson: cached.vectorJson };
-      }
-    },
-  });
 
+  const random = deterministicRandom();
+  const sampledRows: CachedParitySampleRow[] = [];
   let eligibleCachedMessages = 0;
-  for (const _row of cachedRows()) eligibleCachedMessages += 1;
-
-  const sampleSize = Math.min(requestedSampleSize, eligibleCachedMessages);
-  if (sampleSize === 0) return { eligibleCachedMessages, sample: [] };
-  const positions = new Set(
-    Array.from({ length: sampleSize }, (_value, index) =>
-      sampleSize === 1 ? 0 : Math.floor((index * (eligibleCachedMessages - 1)) / (sampleSize - 1))),
-  );
+  for (const row of messages.iterate() as Iterable<{ sessionId: string; seq: number; text: string }>) {
+    const documentHash = documentCacheKey(row.text, profile);
+    if (!cacheHashes.has(documentHash)) continue;
+    eligibleCachedMessages += 1;
+    const sampleRow = { ...row, documentHash };
+    if (sampledRows.length < requestedSampleSize) {
+      sampledRows.push(sampleRow);
+      continue;
+    }
+    const replacementIndex = Math.floor(random() * eligibleCachedMessages);
+    if (replacementIndex < requestedSampleSize) {
+      sampledRows[replacementIndex] = sampleRow;
+    }
+  }
+  if (sampledRows.length === 0) return { eligibleCachedMessages, sample: [] };
 
   const sample: CachedParityCandidate[] = [];
-  let cachedIndex = 0;
-  for (const row of cachedRows()) {
-    if (positions.has(cachedIndex)) {
+  for (const row of sampledRows.sort((a, b) => a.sessionId.localeCompare(b.sessionId) || a.seq - b.seq)) {
+    const cached = selectCache.get({
+      $model: profile.cacheNamespace,
+      $contentHash: row.documentHash,
+    }) as { vectorJson: string } | null;
+    if (cached !== null) {
       sample.push({
         sessionId: row.sessionId,
         seq: row.seq,
         text: row.text,
-        cachedVector: JSON.parse(row.vectorJson) as readonly number[],
+        cachedVector: JSON.parse(cached.vectorJson) as readonly number[],
       });
     }
-    cachedIndex += 1;
   }
   return { eligibleCachedMessages, sample };
 };
@@ -654,12 +716,21 @@ export const materializeProofVectors = (
   };
 };
 
-const cosine = (a: Float32Array, aMagnitude: number, b: Float32Array, bMagnitude: number): number => {
-  if (aMagnitude === 0 || bMagnitude === 0) return 0;
+const cosineMatrixRow = (
+  query: Float32Array,
+  queryMagnitude: number,
+  matrix: Float32Array,
+  rowIndex: number,
+  dimensions: number,
+  rowMagnitude: number,
+): number => {
+  if (queryMagnitude === 0 || rowMagnitude === 0) return 0;
   let dot = 0;
-  const length = Math.min(a.length, b.length);
-  for (let index = 0; index < length; index += 1) dot += (a[index] ?? 0) * (b[index] ?? 0);
-  return dot / (aMagnitude * bMagnitude);
+  const offset = rowIndex * dimensions;
+  for (let index = 0; index < dimensions; index += 1) {
+    dot += (query[index] ?? 0) * (matrix[offset + index] ?? 0);
+  }
+  return dot / (queryMagnitude * rowMagnitude);
 };
 
 export const runExactScanBaseline = (
@@ -675,18 +746,10 @@ export const runExactScanBaseline = (
   const samples = positiveInt(options.samples, 1);
   const kernel = options.kernel ?? "usearch";
   const threads = positiveInt(options.threads, 1);
-  const rows = db.query(`
-    SELECT session_id AS sessionId, seq, vector_blob AS vectorBlob, magnitude
-    FROM proof_message_vectors
-    ORDER BY session_id, seq
-    LIMIT $limit
-  `).all({ $limit: limit }) as Array<{
-    sessionId: string;
-    seq: number;
-    vectorBlob: Uint8Array;
-    magnitude: number;
-  }>;
-  if (rows.length === 0 || rows[0] === undefined) {
+  const totalRow = db.query("SELECT COUNT(*) AS count FROM proof_message_vectors")
+    .get() as { readonly count: number } | null;
+  const rowCount = Math.min(totalRow?.count ?? 0, limit);
+  if (rowCount === 0) {
     return {
       implementation: exactScanImplementation(kernel),
       kernel: exactScanKernelReport(kernel, threads),
@@ -700,13 +763,54 @@ export const runExactScanBaseline = (
       maxMs: 0,
     };
   }
-  const decodedRows = rows.map((row) => ({
-    sessionId: row.sessionId,
-    seq: row.seq,
-    vector: vectorFromBlob(row.vectorBlob),
-    magnitude: row.magnitude,
-  }));
-  const [anchor, ...candidates] = decodedRows;
+  const rows = db.query(`
+    SELECT session_id AS sessionId, seq, vector_blob AS vectorBlob, magnitude
+    FROM proof_message_vectors
+    ORDER BY session_id, seq
+    LIMIT $limit
+  `).iterate({ $limit: limit }) as Iterable<{
+    sessionId: string;
+    seq: number;
+    vectorBlob: Uint8Array;
+    magnitude: number;
+  }>;
+
+  let anchor: {
+    readonly sessionId: string;
+    readonly seq: number;
+    readonly vector: Float32Array;
+    readonly magnitude: number;
+  } | undefined;
+  let dimensions = 0;
+  let candidateMatrix: Float32Array | undefined;
+  const candidateSessionIds: string[] = [];
+  const candidateSeqs: number[] = [];
+  const candidateMagnitudes: number[] = [];
+
+  let index = 0;
+  for (const row of rows) {
+    const vector = vectorFromBlob(row.vectorBlob);
+    if (index === 0) {
+      anchor = { sessionId: row.sessionId, seq: row.seq, vector, magnitude: row.magnitude };
+      dimensions = vector.length;
+      if (rowCount > 1) {
+        candidateMatrix = new Float32Array((rowCount - 1) * dimensions);
+      }
+    } else {
+      if (vector.length !== dimensions) {
+        throw new SqliteFirstProofError(
+          "mixed_vector_dimensions",
+          `mixed vector dimensions in proof vectors: expected ${dimensions}, got ${vector.length}`,
+        );
+      }
+      const candidateIndex = index - 1;
+      candidateMatrix!.set(vector, candidateIndex * dimensions);
+      candidateSessionIds.push(row.sessionId);
+      candidateSeqs.push(row.seq);
+      candidateMagnitudes.push(row.magnitude);
+    }
+    index += 1;
+  }
   if (anchor === undefined) {
     return {
       implementation: exactScanImplementation(kernel),
@@ -723,35 +827,35 @@ export const runExactScanBaseline = (
   }
   const queryVector = anchor.vector;
   const queryMagnitude = anchor.magnitude;
-  const usearchKernel = kernel === "usearch" && candidates.length > 0 ? loadUsearchKernel() : undefined;
-  const dimensions = queryVector.length;
-  const usearchMatrix = usearchKernel === undefined
-    ? undefined
-    : (() => {
-      const matrix = new Float32Array(candidates.length * dimensions);
-      for (let rowIndex = 0; rowIndex < candidates.length; rowIndex += 1) {
-        matrix.set(candidates[rowIndex]!.vector, rowIndex * dimensions);
-      }
-      return matrix;
-    })();
+  const candidateCount = candidateSessionIds.length;
+  const usearchKernel = kernel === "usearch" && candidateCount > 0 ? loadUsearchKernel() : undefined;
   const scanPureJsOnce = (): ExactScanReport["best"] => {
     let best: ExactScanReport["best"];
-    for (const row of candidates) {
-      const score = cosine(queryVector, queryMagnitude, row.vector, row.magnitude);
+    if (candidateMatrix === undefined) return undefined;
+    for (let rowIndex = 0; rowIndex < candidateCount; rowIndex += 1) {
+      const score = cosineMatrixRow(
+        queryVector,
+        queryMagnitude,
+        candidateMatrix,
+        rowIndex,
+        dimensions,
+        candidateMagnitudes[rowIndex] ?? 0,
+      );
       if (best === undefined || score > best.score) {
-        best = { sessionId: row.sessionId, seq: row.seq, score };
+        best = { sessionId: candidateSessionIds[rowIndex]!, seq: candidateSeqs[rowIndex]!, score };
       }
     }
     return best;
   };
   const scanUsearchOnce = (): ExactScanReport["best"] => {
-    if (usearchKernel === undefined || usearchMatrix === undefined || candidates.length === 0) return undefined;
-    const result = usearchKernel.exactSearch(usearchMatrix, queryVector, dimensions, 1, usearchKernel.metricCos, threads);
+    if (usearchKernel === undefined || candidateMatrix === undefined || candidateCount === 0) return undefined;
+    const result = usearchKernel.exactSearch(candidateMatrix, queryVector, dimensions, 1, usearchKernel.metricCos, threads);
     const candidateIndex = Number(result.keys[0]);
-    const candidate = candidates[candidateIndex];
-    if (candidate === undefined) return undefined;
+    const sessionId = candidateSessionIds[candidateIndex];
+    const seq = candidateSeqs[candidateIndex];
+    if (sessionId === undefined || seq === undefined) return undefined;
     const distance = result.distances[0] ?? Number.POSITIVE_INFINITY;
-    return { sessionId: candidate.sessionId, seq: candidate.seq, score: 1 - distance };
+    return { sessionId, seq, score: 1 - distance };
   };
   const scanOnce = kernel === "usearch" ? scanUsearchOnce : scanPureJsOnce;
   const timings: number[] = [];
@@ -767,7 +871,7 @@ export const runExactScanBaseline = (
     kernel: exactScanKernelReport(kernel, threads),
     queryAnchor: { sessionId: anchor.sessionId, seq: anchor.seq },
     samples,
-    rowsScanned: candidates.length,
+    rowsScanned: candidateCount,
     elapsedMs: timings[0] ?? 0,
     ...stats,
     best,

@@ -1,0 +1,48 @@
+{
+  "generatedAt": "2026-07-04T12:08:08.714Z",
+  "workDb": "/tmp/quasar-sqlite-first-proof-full-20260704082453/sqlite-first-work.sqlite",
+  "purpose": "cached synthetic/HF namespace versus local ONNX replay compatibility",
+  "verdict": "do_not_reuse_cached_namespace_reembed_local_namespace",
+  "parity": {
+    "cachedProfile": {
+      "model": "hf:nomic-ai/nomic-embed-text-v1.5",
+      "dimensions": 768,
+      "task": "search_document",
+      "documentPrefix": "search_document: ",
+      "queryPrefix": "search_query: ",
+      "cacheNamespace": "synthetic:hf:nomic-ai/nomic-embed-text-v1.5:768:search_document"
+    },
+    "localProfile": {
+      "model": "hf:nomic-ai/nomic-embed-text-v1.5",
+      "dimensions": 768,
+      "task": "search_document",
+      "documentPrefix": "search_document: ",
+      "queryPrefix": "search_query: ",
+      "cacheNamespace": "local-proof:hf:nomic-ai/nomic-embed-text-v1.5:768:search_document"
+    },
+    "requestedSampleSize": 200,
+    "eligibleCachedMessages": 678250,
+    "sampleSize": 200,
+    "batchSize": 1,
+    "threshold": 0.99,
+    "passed": false,
+    "elapsedMs": 59299.15,
+    "scores": {
+      "min": 0.9237209563602184,
+      "mean": 0.9619703911653091,
+      "p50": 0.962193841511157,
+      "p95": 0.971775246691085
+    },
+    "belowThresholdExamplesRedacted": 20
+  },
+  "memoryUsage": {
+    "rss": 426131456,
+    "heapTotal": 17270784,
+    "heapUsed": 30523963,
+    "external": 20216875,
+    "arrayBuffers": 3001816
+  },
+  "redaction": {
+    "sessionIdentifiers": "omitted from committed proof receipt"
+  }
+}

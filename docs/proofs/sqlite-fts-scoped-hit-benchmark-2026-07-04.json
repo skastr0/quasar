@@ -1,0 +1,78 @@
+{
+  "generatedAt": "2026-07-04T12:12:29.749Z",
+  "workDb": "/tmp/quasar-sqlite-first-proof-full-20260704082453/sqlite-first-work.sqlite",
+  "sourceTable": "proof_messages_fts_scoped",
+  "design": "project and role tokens indexed into MATCH scope_text",
+  "rowsIndexed": 683010,
+  "buildElapsedMs": 32097.89,
+  "filteredBenchmarks": [
+    {
+      "query": "pulsar forge",
+      "scopedQuery": "p323d6e5dfb448a6414d15440c678396a5d494427 AND rassistant AND \"pulsar\" AND \"forge\"",
+      "filters": {
+        "projectKey": "git:github.com/skastr0/pulsar",
+        "role": "assistant"
+      },
+      "totalHits": 781,
+      "returnedHits": 10,
+      "samples": 60,
+      "limit": 10,
+      "minMs": 17.26,
+      "medianMs": 21.28,
+      "p95Ms": 34.53,
+      "p99Ms": 64.69,
+      "maxMs": 64.69
+    },
+    {
+      "query": "pulsar search",
+      "scopedQuery": "p323d6e5dfb448a6414d15440c678396a5d494427 AND rassistant AND \"pulsar\" AND \"search\"",
+      "filters": {
+        "projectKey": "git:github.com/skastr0/pulsar",
+        "role": "assistant"
+      },
+      "totalHits": 83,
+      "returnedHits": 10,
+      "samples": 60,
+      "limit": 10,
+      "minMs": 15.46,
+      "medianMs": 19.34,
+      "p95Ms": 26.64,
+      "p99Ms": 34.42,
+      "maxMs": 34.42
+    },
+    {
+      "query": "agent workflow",
+      "scopedQuery": "p323d6e5dfb448a6414d15440c678396a5d494427 AND rassistant AND \"agent\" AND \"workflow\"",
+      "filters": {
+        "projectKey": "git:github.com/skastr0/pulsar",
+        "role": "assistant"
+      },
+      "totalHits": 80,
+      "returnedHits": 10,
+      "samples": 60,
+      "limit": 10,
+      "minMs": 15.14,
+      "medianMs": 19.04,
+      "p95Ms": 37.24,
+      "p99Ms": 42.03,
+      "maxMs": 42.03
+    },
+    {
+      "query": "tower readiness",
+      "scopedQuery": "p323d6e5dfb448a6414d15440c678396a5d494427 AND rassistant AND \"tower\" AND \"readiness\"",
+      "filters": {
+        "projectKey": "git:github.com/skastr0/pulsar",
+        "role": "assistant"
+      },
+      "totalHits": 12,
+      "returnedHits": 10,
+      "samples": 60,
+      "limit": 10,
+      "minMs": 13.57,
+      "medianMs": 17.58,
+      "p95Ms": 22.03,
+      "p99Ms": 24.18,
+      "maxMs": 24.18
+    }
+  ]
+}
