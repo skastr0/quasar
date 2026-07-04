@@ -36,6 +36,7 @@ bun run server:ready       # lightweight readiness check
 bun run server:status      # SQLite/queue/cache status
 bun run server:lance       # direct LanceDB table/index inventory
 bun run server:maintain    # LanceDB indexes/optimize inside container
+bun run server:materialize # embedding vector materialization with JSON receipt
 bun run server:backup      # write ./quasar-truth-backup.tar
 ```
 
@@ -44,6 +45,7 @@ Raw helper form:
 ```bash
 bun scripts/server-ops.mjs status --lance
 bun scripts/server-ops.mjs lance
+bun scripts/server-ops.mjs materialize --out docs/proofs/materialization-closure.json
 bun scripts/server-ops.mjs exec -- sh -lc 'du -sh /data/quasar/*'
 ```
 
@@ -197,6 +199,38 @@ large ingests or when `server:status` shows queued repair/index work that is
 not draining. Embedding is not a cron shell loop: the server-owned embedding worker
 leases queued `embed-message` jobs, batches provider calls, uses the cache, and backs
 off on retryable provider limits.
+
+## Embedding Materialization Proof
+
+Before running a full materialization/backfill against the canonical service, take
+a truth backup and inspect the active profile:
+
+```bash
+bun run server:backup
+bun scripts/server-ops.mjs status --lance
+bun scripts/server-ops.mjs lance
+```
+
+Then run the materialization loop from the host against the published server port:
+
+```bash
+bun run server:materialize
+```
+
+By default this writes `docs/proofs/materialization-closure-<timestamp>.json` and
+also prints the same JSON envelope to stdout. Pass `--out` to choose a stable proof
+path:
+
+```bash
+bun scripts/server-ops.mjs materialize --out docs/proofs/materialization-closure.json
+```
+
+The receipt is accepted only when the CLI loop reaches all four gates:
+
+- `coverage.vectorlessMessages = 0`
+- `queue.embedMessage.failed = 0`
+- active Lance row count matches SQLite `message_vectors`
+- the Lance repair scan has completed
 
 ## Ingesting from another Tailscale machine
 

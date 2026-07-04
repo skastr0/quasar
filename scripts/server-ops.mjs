@@ -25,6 +25,7 @@ const usage = {
     lance: "inspect all LanceDB tables and indexes directly inside the container",
     exec: "run a command inside the container after --",
     maintain: "run LanceDB maintenance inside the container, not through HTTP",
+    materialize: "run embedding vector materialization through HTTP and write a proof receipt",
     backup: "write ./quasar-truth-backup.tar with SQLite truth and machine identity",
   },
   examples: [
@@ -32,6 +33,7 @@ const usage = {
     "bun scripts/server-ops.mjs status --lance",
     "bun scripts/server-ops.mjs lance",
     "bun scripts/server-ops.mjs maintain",
+    "bun scripts/server-ops.mjs materialize --out docs/proofs/materialization-closure.json",
     "bun scripts/server-ops.mjs exec -- sh -lc 'ls -lah /data/quasar'",
   ],
 };
@@ -88,6 +90,9 @@ switch (command) {
   case "maintain":
     containerGetJson("/maintenance/run");
     break;
+  case "materialize":
+    materializeVectors();
+    break;
   case "backup":
     backupTruth();
     break;
@@ -119,6 +124,28 @@ function backupTruth() {
   ].join("\n"));
   docker(["cp", "server:/tmp/quasar-truth-backup.tar", "./quasar-truth-backup.tar"]);
   sh("rm -f /tmp/quasar-truth-backup.tar");
+}
+
+function materializeVectors() {
+  const serverUrl = optionValue("--server", process.env.QUASAR_SERVER_URL ?? `http://127.0.0.1:${process.env.QUASAR_PUBLISH_PORT ?? "7180"}`);
+  const timestamp = new Date().toISOString().replaceAll(":", "-");
+  const outPath = optionValue("--out", `docs/proofs/materialization-closure-${timestamp}.json`);
+  const args = [
+    "run",
+    "packages/cli/src/cli.ts",
+    "materialize-embedding-vectors",
+    "--server",
+    serverUrl,
+    "--until-empty",
+    "--out",
+    outPath,
+  ];
+  for (const flag of ["--limit", "--max-batches", "--timeout-ms"]) {
+    const value = optionValue(flag);
+    if (value !== undefined) args.push(flag, value);
+  }
+  const result = spawnSync("bun", args, { cwd: repoRoot, stdio: "inherit", env: process.env });
+  if (result.status !== 0) process.exit(result.status ?? 1);
 }
 
 function exec(args) {
@@ -174,6 +201,14 @@ function withShellSecrets(env) {
 function readInteractiveShellEnv(key) {
   const result = spawnSync("zsh", ["-ic", `printf %s \"$${key}\"`], { encoding: "utf8" });
   return result.status === 0 ? result.stdout.trim() : "";
+}
+
+function optionValue(flag, fallback) {
+  const index = rest.indexOf(flag);
+  if (index === -1) return fallback;
+  const value = rest[index + 1];
+  if (value === undefined || value.startsWith("--")) fail(`missing value for ${flag}`);
+  return value;
 }
 
 function requireFile(path, message) {

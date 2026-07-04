@@ -30,9 +30,11 @@ describe("server ops config", () => {
     expect(pkg).toContain("server:maintain");
     expect(pkg).toContain("server:lance");
     expect(pkg).toContain("server:backup");
+    expect(pkg).toContain("server:materialize");
     expect(pkg).toContain("server:ready");
     expect(pkg).toContain("server:health");
     expect(ops).toContain("case \"maintain\"");
+    expect(ops).toContain("case \"materialize\"");
     expect(ops).toContain("case \"lance\"");
     expect(ops).toContain("case \"ready\"");
     expect(ops).toContain('getJson("/ready")');
@@ -40,6 +42,9 @@ describe("server ops config", () => {
     expect(ops).toContain("@lancedb/lancedb");
     expect(ops).toContain("VACUUM INTO");
     expect(ops).toContain("quasar-truth-backup.tar");
+    expect(ops).toContain("materialize-embedding-vectors");
+    expect(ops).toContain("materialization-closure-");
+    expect(ops).toContain("missing value for");
     expect(runbook).toContain("quasar daemon install --interval-seconds 60");
     expect(runbook).toContain("quasar daemon uninstall");
     expect(runbook).toContain("so a slow first");
