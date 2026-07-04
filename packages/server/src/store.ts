@@ -7,6 +7,7 @@ import { messageSearchKey, type SearchHit } from "./lancedb";
 import { isSearchableRole, normalizeIndexedContentHash } from "./searchPolicy";
 import { ensureParentDir, sqlitePath } from "./paths";
 import { fts5QueryForText, positiveInt } from "./fts5";
+import { decodeFloat16Vector, encodeFloat16Vector, VECTOR_BLOB_ENCODING } from "./vectorBlob";
 
 export class SqliteStoreError extends Schema.TaggedError<SqliteStoreError>()(
   "SqliteStoreError",
@@ -23,6 +24,45 @@ export interface StoreStats {
   readonly messages: number;
   readonly toolCalls: number;
   readonly ingestRuns: number;
+}
+
+export interface MessageVectorUpsert {
+  readonly model: string;
+  readonly modality: "text";
+  readonly sessionId: string;
+  readonly seq: number;
+  readonly role: string;
+  readonly projectKey: string;
+  readonly provider: string;
+  readonly contentHash: string;
+  readonly documentHash: string;
+  readonly vector: readonly number[];
+  readonly now?: string;
+}
+
+export interface MessageVectorRow {
+  readonly model: string;
+  readonly modality: "text";
+  readonly sessionId: string;
+  readonly seq: number;
+  readonly role: string;
+  readonly projectKey: string;
+  readonly provider: string;
+  readonly contentHash: string;
+  readonly documentHash: string;
+  readonly dimensions: number;
+  readonly encoding: typeof VECTOR_BLOB_ENCODING;
+  readonly vector: readonly number[];
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface MessageVectorCoverage {
+  readonly model: string;
+  readonly searchableMessages: number;
+  readonly vectorRows: number;
+  readonly vectorlessMessages: number;
+  readonly staleVectorRows: number;
 }
 
 export interface LocalStoreService {
@@ -86,6 +126,17 @@ export interface LocalStoreService {
   readonly countUnembeddedMessages: () => Effect.Effect<number, SqliteStoreError>;
   /** Count searchable messages total. */
   readonly countSearchableMessages: () => Effect.Effect<number, SqliteStoreError>;
+  readonly upsertMessageVectors: (rows: readonly MessageVectorUpsert[]) => Effect.Effect<number, SqliteStoreError>;
+  readonly listMessagesMissingVector: (options: {
+    readonly model: string;
+    readonly limit?: number;
+  }) => Effect.Effect<readonly MessageRow[], SqliteStoreError>;
+  readonly listMessageVectorsBySession: (options: {
+    readonly sessionId: string;
+    readonly model?: string;
+    readonly limit?: number;
+  }) => Effect.Effect<readonly MessageVectorRow[], SqliteStoreError>;
+  readonly messageVectorCoverage: (model: string) => Effect.Effect<MessageVectorCoverage, SqliteStoreError>;
   readonly lexicalSearch: (request: {
     readonly query: string;
     readonly projectKey?: string;
@@ -182,6 +233,105 @@ const MESSAGES_FTS_MIGRATION_SQL = `
   WHERE m.role IN ('user', 'assistant', 'reasoning')
     AND NOT EXISTS (SELECT 1 FROM messages_fts AS f WHERE f.key = m.session_id || ':' || m.seq || ':' || m.role);
 `;
+
+const MESSAGE_VECTORS_MIGRATION_SQL = `
+  CREATE TABLE IF NOT EXISTS message_vectors (
+    model TEXT NOT NULL,
+    modality TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    project_key TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    document_hash TEXT NOT NULL,
+    dimensions INTEGER NOT NULL,
+    encoding TEXT NOT NULL,
+    vector_blob BLOB NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (model, session_id, seq)
+  );
+  CREATE INDEX IF NOT EXISTS message_vectors_by_model ON message_vectors(model, session_id, seq);
+  CREATE INDEX IF NOT EXISTS message_vectors_by_message ON message_vectors(session_id, seq);
+  CREATE INDEX IF NOT EXISTS message_vectors_by_model_project ON message_vectors(model, project_key, session_id, seq);
+  DROP TRIGGER IF EXISTS message_vectors_ad;
+  DROP TRIGGER IF EXISTS message_vectors_au;
+  CREATE TRIGGER IF NOT EXISTS message_vectors_ad
+  AFTER DELETE ON messages
+  BEGIN
+    DELETE FROM message_vectors WHERE session_id = OLD.session_id AND seq = OLD.seq;
+  END;
+  CREATE TRIGGER IF NOT EXISTS message_vectors_au
+  AFTER UPDATE ON messages
+  BEGIN
+    DELETE FROM message_vectors WHERE session_id = OLD.session_id AND seq = OLD.seq;
+  END;
+`;
+
+const MESSAGE_VECTOR_COLUMNS = [
+  "model",
+  "modality",
+  "session_id",
+  "seq",
+  "role",
+  "project_key",
+  "provider",
+  "content_hash",
+  "document_hash",
+  "dimensions",
+  "encoding",
+  "vector_blob",
+  "created_at",
+  "updated_at",
+] as const;
+
+const migrateMessageVectorsTable = (db: Database): void => {
+  const existing = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'message_vectors'").get() as { name: string } | null;
+  if (existing === null) return;
+  const columns = db.query("PRAGMA table_info(message_vectors)").all() as Array<{ name: string; pk: number }>;
+  const primaryKey = columns
+    .filter((column) => column.pk > 0)
+    .sort((left, right) => left.pk - right.pk)
+    .map((column) => column.name);
+  if (primaryKey.join("\0") === "model\0session_id\0seq") return;
+
+  db.exec(`
+    DROP TRIGGER IF EXISTS message_vectors_ad;
+    DROP TRIGGER IF EXISTS message_vectors_au;
+  `);
+  const columnNames = new Set(columns.map((column) => column.name));
+  const canCopy = MESSAGE_VECTOR_COLUMNS.every((column) => columnNames.has(column));
+  if (!canCopy) {
+    db.exec("DROP TABLE message_vectors");
+    return;
+  }
+
+  db.exec(`
+    ALTER TABLE message_vectors RENAME TO message_vectors_old;
+    CREATE TABLE message_vectors (
+      model TEXT NOT NULL,
+      modality TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      role TEXT NOT NULL,
+      project_key TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      document_hash TEXT NOT NULL,
+      dimensions INTEGER NOT NULL,
+      encoding TEXT NOT NULL,
+      vector_blob BLOB NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (model, session_id, seq)
+    );
+    INSERT OR IGNORE INTO message_vectors(${MESSAGE_VECTOR_COLUMNS.join(", ")})
+    SELECT ${MESSAGE_VECTOR_COLUMNS.join(", ")}
+    FROM message_vectors_old;
+    DROP TABLE message_vectors_old;
+  `);
+};
 
 const migrate = (db: Database): void => {
   db.exec(`
@@ -302,6 +452,8 @@ const migrate = (db: Database): void => {
     db.exec("ALTER TABLE sessions ADD COLUMN indexed_at TEXT");
     db.exec("CREATE INDEX IF NOT EXISTS sessions_stale_index ON sessions(indexed_at, updated_at)");
   }
+  migrateMessageVectorsTable(db);
+  db.exec(MESSAGE_VECTORS_MIGRATION_SQL);
   db.exec(MESSAGES_FTS_MIGRATION_SQL);
 };
 
@@ -352,6 +504,45 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
            VALUES ($runId, $provider, $status, $startedAt, $completedAt, $sessionsSeen, $sessionsWritten, $sessionsSkipped, $sessionsFailed)
            ON CONFLICT(run_id) DO UPDATE SET provider = excluded.provider, status = excluded.status, started_at = excluded.started_at, completed_at = excluded.completed_at, sessions_seen = excluded.sessions_seen, sessions_written = excluded.sessions_written, sessions_skipped = excluded.sessions_skipped, sessions_failed = excluded.sessions_failed`,
         );
+        const selectMessageVectorCreated = db.prepare(
+          "SELECT created_at AS createdAt FROM message_vectors WHERE model = ? AND session_id = ? AND seq = ?",
+        );
+        const upsertMessageVector = db.prepare(
+          `INSERT INTO message_vectors(model, modality, session_id, seq, role, project_key, provider, content_hash, document_hash, dimensions, encoding, vector_blob, created_at, updated_at)
+           SELECT $model, $modality, m.session_id, m.seq, m.role, m.project_key, $provider, m.content_hash, $documentHash, $dimensions, $encoding, $vectorBlob, $createdAt, $updatedAt
+           FROM messages AS m
+           WHERE m.session_id = $sessionId
+             AND m.seq = $seq
+             AND m.role = $role
+             AND m.project_key = $projectKey
+             AND m.content_hash = $contentHash
+           ON CONFLICT(model, session_id, seq) DO UPDATE SET modality = excluded.modality, role = excluded.role, project_key = excluded.project_key, provider = excluded.provider, content_hash = excluded.content_hash, document_hash = excluded.document_hash, dimensions = excluded.dimensions, encoding = excluded.encoding, vector_blob = excluded.vector_blob, updated_at = excluded.updated_at`,
+        );
+        const replaceMessageVectors = db.transaction((rows: readonly MessageVectorUpsert[]) => {
+          let accepted = 0;
+          for (const row of rows) {
+            const at = row.now ?? new Date().toISOString();
+            const existing = selectMessageVectorCreated.get(row.model, row.sessionId, row.seq) as { createdAt: string } | null;
+            const result = upsertMessageVector.run({
+              $model: row.model,
+              $modality: row.modality,
+              $sessionId: row.sessionId,
+              $seq: row.seq,
+              $role: row.role,
+              $projectKey: row.projectKey,
+              $provider: row.provider,
+              $contentHash: row.contentHash,
+              $documentHash: row.documentHash,
+              $dimensions: row.vector.length,
+              $encoding: VECTOR_BLOB_ENCODING,
+              $vectorBlob: encodeFloat16Vector(row.vector),
+              $createdAt: existing?.createdAt ?? at,
+              $updatedAt: at,
+            });
+            accepted += result.changes > 0 ? 1 : 0;
+          }
+          return accepted;
+        });
         const replaceSession = db.transaction((mapped: MappedSession) => {
           upsertProject.run({
             $projectKey: mapped.project.projectKey,
@@ -624,6 +815,142 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                 "SELECT COUNT(*) AS count FROM messages WHERE role IN ('user', 'assistant', 'reasoning')",
               ).get() as { count: number };
               return row.count;
+            }),
+          upsertMessageVectors: (rows) =>
+            trySqlite("upsertMessageVectors", () => replaceMessageVectors(rows)),
+          listMessagesMissingVector: ({ model, limit }) =>
+            trySqlite("listMessagesMissingVector", () =>
+              db
+                .query(
+                  `SELECT
+                    m.session_id AS sessionId,
+                    m.seq,
+                    m.role,
+                    m.text,
+                    m.ts,
+                    m.project_key AS projectKey,
+                    m.content_hash AS contentHash
+                  FROM messages AS m
+                  WHERE m.role IN ('user', 'assistant', 'reasoning')
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM message_vectors AS v
+                      WHERE v.model = ?
+                        AND v.session_id = m.session_id
+                        AND v.seq = m.seq
+                        AND v.role = m.role
+                        AND v.content_hash = m.content_hash
+                    )
+                  ORDER BY m.session_id ASC, m.seq ASC
+                  LIMIT ?`,
+                )
+                .all(model, positiveInt(limit, 1_000)) as MessageRow[],
+            ),
+          listMessageVectorsBySession: ({ sessionId, model, limit }) =>
+            trySqlite("listMessageVectorsBySession", () => {
+              const filters = ["session_id = ?"];
+              const args: Array<string | number> = [sessionId];
+              if (model !== undefined) {
+                filters.push("model = ?");
+                args.push(model);
+              }
+              const rows = db
+                .query(
+                  `SELECT
+                    model,
+                    modality,
+                    session_id AS sessionId,
+                    seq,
+                    role,
+                    project_key AS projectKey,
+                    provider,
+                    content_hash AS contentHash,
+                    document_hash AS documentHash,
+                    dimensions,
+                    encoding,
+                    vector_blob AS vectorBlob,
+                    created_at AS createdAt,
+                    updated_at AS updatedAt
+                  FROM message_vectors
+                  WHERE ${filters.join(" AND ")}
+                  ORDER BY model ASC, seq ASC
+                  LIMIT ?`,
+                )
+                .all(...args, positiveInt(limit, 100)) as Array<{
+                  model: string;
+                  modality: "text";
+                  sessionId: string;
+                  seq: number;
+                  role: string;
+                  projectKey: string;
+                  provider: string;
+                  contentHash: string;
+                  documentHash: string;
+                  dimensions: number;
+                  encoding: typeof VECTOR_BLOB_ENCODING;
+                  vectorBlob: Uint8Array;
+                  createdAt: string;
+                  updatedAt: string;
+                }>;
+              return rows.map((row) => {
+                if (row.encoding !== VECTOR_BLOB_ENCODING) {
+                  throw new Error(`unsupported message vector encoding: ${row.encoding}`);
+                }
+                return {
+                  model: row.model,
+                  modality: row.modality,
+                  sessionId: row.sessionId,
+                  seq: row.seq,
+                  role: row.role,
+                  projectKey: row.projectKey,
+                  provider: row.provider,
+                  contentHash: row.contentHash,
+                  documentHash: row.documentHash,
+                  dimensions: row.dimensions,
+                  encoding: row.encoding,
+                  vector: decodeFloat16Vector(row.vectorBlob, row.dimensions),
+                  createdAt: row.createdAt,
+                  updatedAt: row.updatedAt,
+                };
+              });
+            }),
+          messageVectorCoverage: (model) =>
+            trySqlite("messageVectorCoverage", () => {
+              const searchable = db.query(
+                "SELECT COUNT(*) AS count FROM messages WHERE role IN ('user', 'assistant', 'reasoning')",
+              ).get() as { count: number };
+              const matching = db.query(
+                `SELECT COUNT(*) AS count
+                 FROM messages AS m
+                 INNER JOIN message_vectors AS v
+                   ON v.model = ?
+                  AND v.session_id = m.session_id
+                  AND v.seq = m.seq
+                  AND v.role = m.role
+                  AND v.content_hash = m.content_hash
+                  AND v.document_hash IS NOT NULL
+                 WHERE m.role IN ('user', 'assistant', 'reasoning')`,
+              ).get(model) as { count: number };
+              const stale = db.query(
+                `SELECT COUNT(*) AS count
+                 FROM message_vectors AS v
+                 LEFT JOIN messages AS m
+                   ON m.session_id = v.session_id
+                  AND m.seq = v.seq
+                 WHERE v.model = ?
+                   AND (
+                     m.session_id IS NULL
+                     OR m.role != v.role
+                     OR m.content_hash != v.content_hash
+                   )`,
+              ).get(model) as { count: number };
+              return {
+                model,
+                searchableMessages: searchable.count,
+                vectorRows: matching.count,
+                vectorlessMessages: Math.max(0, searchable.count - matching.count),
+                staleVectorRows: stale.count,
+              };
             }),
           lexicalSearch: ({ query, projectKey, role, providers, limit }) =>
             trySqlite("lexicalSearch", () => {

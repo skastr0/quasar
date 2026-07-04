@@ -490,6 +490,11 @@ switch (command) {
     await fetchServer("repair-index", "/maintenance/repair", { limit: arg("--limit"), leaseMs: arg("--lease-ms") });
     break;
   }
+  case "replay-embedding-cache": {
+    if (!checkInt("replay-embedding-cache", "--limit", 1)) break;
+    await fetchServer("replay-embedding-cache", "/maintenance/embeddings/replay-cache", { limit: arg("--limit") });
+    break;
+  }
   case "workers": {
     await fetchServer("workers", "/status");
     break;
@@ -532,6 +537,7 @@ switch (command) {
           "maintain [--server url]",
           "freshness [--limit n] [--server url]",
           "repair-index [--limit n] [--lease-ms n] [--server url]",
+          "replay-embedding-cache [--limit n] [--server url]",
           "workers [--server url]",
           "search --query text [--mode lexical|semantic|fusion] [--project-key key] [--role user|assistant] [--limit n] [--server url]",
           "stats",

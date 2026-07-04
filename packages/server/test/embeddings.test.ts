@@ -2,12 +2,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { LanceDb, makeLanceDbLayer } from "../src/lancedb";
+import { LanceDb, makeLanceDbLayer, WriteReceipt } from "../src/lancedb";
 import { afterEach, describe, expect, test } from "bun:test";
 import { Effect, Layer } from "effect";
 import { createHash } from "node:crypto";
 
-import { embeddingProfileSearchTable, makeEmbeddingProfile, type EmbeddingProfile } from "../src/embeddingProfiles";
+import { EmbeddingConfigurationError, embeddingProfileFromEnv, embeddingProfileSearchTable, makeEmbeddingProfile, type EmbeddingProfile } from "../src/embeddingProfiles";
 import { makeEmbeddingsLayer, type Embedder } from "../src/embeddings";
 import type { MappedSession } from "../src/model";
 import { Embeddings, DurableQueue, makeDurableQueueLayer } from "../src/services";
@@ -134,7 +134,7 @@ describe("Embeddings", () => {
       },
     };
 
-    const [report, cached, rows, queueStats] = await withEmbeddings(
+    const [report, cached, rows, sqliteRows, coverage, queueStats] = await withEmbeddings(
       embedder,
       Effect.gen(function* () {
         const store = yield* LocalStore;
@@ -146,16 +146,76 @@ describe("Embeddings", () => {
         const report = yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
         const cached = yield* embeddings.getCached("hash-a");
         const rows = yield* search.readMessageRowsBySession({ sessionId: "session-a", tableName: embeddingProfileSearchTable(defaultEmbeddingProfile), select: ["contentHash"] });
+        const sqliteRows = yield* store.listMessageVectorsBySession({ sessionId: "session-a", model: defaultEmbeddingProfile.cacheNamespace });
+        const coverage = yield* store.messageVectorCoverage(defaultEmbeddingProfile.cacheNamespace);
         const queueStats = yield* queue.stats;
-        return [report, cached, rows, queueStats] as const;
+        return [report, cached, rows, sqliteRows, coverage, queueStats] as const;
       }),
     );
 
     expect(calls).toBe(1);
-    expect(report).toMatchObject({ leased: 1, cacheHits: 0, cacheMisses: 1, embedded: 1, retried: 0, failed: 0 });
+    expect(report).toMatchObject({ leased: 1, cacheHits: 0, cacheMisses: 1, embedded: 1, retried: 0, failed: 0, sqliteVectorsUpserted: 1 });
     expect(cached?.dimensions).toBe(1536);
     expect(rows[0]?.contentHash).toBe("hash-a");
+    expect(sqliteRows).toHaveLength(1);
+    expect(sqliteRows[0]?.contentHash).toBe("hash-a");
+    expect(sqliteRows[0]?.encoding).toBe("f16le");
+    expect(sqliteRows[0]?.vector[0]).toBe(1);
+    expect(coverage).toMatchObject({ searchableMessages: 1, vectorRows: 1, vectorlessMessages: 0, staleVectorRows: 0 });
     expect(queueStats).toEqual({ pending: 0, leased: 0, failed: 0 });
+  });
+
+  test("does not ack embedding jobs when LanceDB reports a short write", async () => {
+    const sqlite = join(tempDir(), "quasar.sqlite");
+    const lance = join(tempDir(), "search.lance");
+    const embedder: Embedder = { embedMany: async () => [vector(0)] };
+    const storeLayer = makeLocalStoreLayer(sqlite);
+    const queueLayer = makeDurableQueueLayer(sqlite);
+    const realSearchLayer = makeLanceDbLayer({ dataDir: lance });
+    const shortSearchLayer = Layer.effect(
+      LanceDb,
+      Effect.gen(function* () {
+        const real = yield* LanceDb;
+        return LanceDb.make({
+          ...real,
+          upsertMessageRows: (request) =>
+            Effect.succeed(new WriteReceipt({
+              table: request.tableName ?? "messages",
+              requested: request.rows.length,
+              inserted: 0,
+              updated: 0,
+              deleted: 0,
+            })),
+        });
+      }),
+    ).pipe(Layer.provide(realSearchLayer));
+    const embeddingsLayer = makeEmbeddingsLayer({ sqlite, profile: defaultEmbeddingProfile, embedder }).pipe(
+      Layer.provide(Layer.mergeAll(storeLayer, queueLayer, shortSearchLayer)),
+    );
+
+    const [result, queueStats] = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const store = yield* LocalStore;
+          const queue = yield* DurableQueue;
+          const embeddings = yield* Embeddings;
+          yield* store.upsertSession(mappedSession());
+          yield* enqueueEmbeddingJob(queue);
+          const result = yield* Effect.either(
+            embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" }),
+          );
+          const queueStats = yield* queue.stats;
+          return [result, queueStats] as const;
+        }).pipe(Effect.provide(Layer.mergeAll(storeLayer, queueLayer, shortSearchLayer, embeddingsLayer))),
+      ),
+    );
+
+    expect(result._tag).toBe("Left");
+    expect(result.left).toMatchObject({
+      operation: "processBatch.cacheMiss.upsertSearchRows",
+    });
+    expect(String((result.left as Error).message)).toMatch(/^LanceDB applied 0 of 1 message vector rows in messages_/);
+    expect(queueStats).toEqual({ pending: 0, leased: 1, failed: 0 });
   });
 
   test("cache hit avoids provider calls and still updates LanceDB", async () => {
@@ -167,7 +227,7 @@ describe("Embeddings", () => {
       },
     };
 
-    const [report, rows] = await withEmbeddings(
+    const [report, rows, sqliteRows, coverage] = await withEmbeddings(
       embedder,
       Effect.gen(function* () {
         const store = yield* LocalStore;
@@ -179,13 +239,170 @@ describe("Embeddings", () => {
         yield* enqueueEmbeddingJob(queue);
         const report = yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
         const rows = yield* search.readMessageRowsBySession({ sessionId: "session-a", tableName: embeddingProfileSearchTable(defaultEmbeddingProfile), select: ["contentHash"] });
-        return [report, rows] as const;
+        const sqliteRows = yield* store.listMessageVectorsBySession({ sessionId: "session-a", model: defaultEmbeddingProfile.cacheNamespace });
+        const coverage = yield* store.messageVectorCoverage(defaultEmbeddingProfile.cacheNamespace);
+        return [report, rows, sqliteRows, coverage] as const;
       }),
     );
 
     expect(calls).toBe(0);
-    expect(report).toMatchObject({ leased: 1, cacheHits: 1, cacheMisses: 0, embedded: 0 });
+    expect(report).toMatchObject({ leased: 1, cacheHits: 1, cacheMisses: 0, embedded: 0, sqliteVectorsUpserted: 1 });
     expect(rows[0]?.contentHash).toBe("hash-a");
+    expect(sqliteRows[0]?.contentHash).toBe("hash-a");
+    expect(sqliteRows[0]?.vector[0]).toBe(1);
+    expect(coverage).toMatchObject({ searchableMessages: 1, vectorRows: 1, vectorlessMessages: 0, staleVectorRows: 0 });
+  });
+
+  test("materializeCachedVectors replays the existing cache into SQLite without provider calls", async () => {
+    let calls = 0;
+    const embedder: Embedder = {
+      embedMany: async () => {
+        calls += 1;
+        return [vector(1)];
+      },
+    };
+
+    const [report, sqliteRows, coverage] = await withEmbeddings(
+      embedder,
+      Effect.gen(function* () {
+        const store = yield* LocalStore;
+        const embeddings = yield* Embeddings;
+        yield* store.upsertSession({
+          ...mappedSession(),
+          messages: [
+            { sessionId: "session-a", seq: 1, role: "user", text: "alpha terminal", projectKey: "project-a", contentHash: "hash-a" },
+            { sessionId: "session-a", seq: 2, role: "assistant", text: "beta terminal", projectKey: "project-a", contentHash: "hash-b" },
+          ],
+        });
+        yield* embeddings.putCached({ contentHash: "hash-a", text: "alpha terminal", vector: vector(0), now: "2026-06-18T09:00:00.000Z" });
+        const report = yield* embeddings.materializeCachedVectors({ limit: 10, now: "2099-06-18T10:00:00.000Z" });
+        const sqliteRows = yield* store.listMessageVectorsBySession({ sessionId: "session-a", model: defaultEmbeddingProfile.cacheNamespace });
+        const coverage = yield* store.messageVectorCoverage(defaultEmbeddingProfile.cacheNamespace);
+        return [report, sqliteRows, coverage] as const;
+      }),
+    );
+
+    expect(calls).toBe(0);
+    expect(report).toEqual({ scanned: 2, cacheHits: 1, missingCache: 1, sqliteVectorsUpserted: 1 });
+    expect(sqliteRows.map((row) => row.seq)).toEqual([1]);
+    expect(sqliteRows[0]?.vector[0]).toBe(1);
+    expect(coverage).toMatchObject({ searchableMessages: 2, vectorRows: 1, vectorlessMessages: 1, staleVectorRows: 0 });
+  });
+
+  test("message_vectors rows are deleted when the source message is replaced", async () => {
+    const embedder: Embedder = { embedMany: async () => [vector(0)] };
+
+    const [before, after] = await withEmbeddings(
+      embedder,
+      Effect.gen(function* () {
+        const store = yield* LocalStore;
+        const queue = yield* DurableQueue;
+        const embeddings = yield* Embeddings;
+        yield* store.upsertSession(mappedSession("alpha terminal"));
+        yield* enqueueEmbeddingJob(queue);
+        yield* embeddings.processBatch({ workerId: "worker-a", limit: 10, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
+        const before = yield* store.messageVectorCoverage(defaultEmbeddingProfile.cacheNamespace);
+        yield* store.upsertSession({
+          ...mappedSession("replacement terminal"),
+          messages: [{
+            sessionId: "session-a",
+            seq: 1,
+            role: "user",
+            text: "replacement terminal",
+            projectKey: "project-a",
+            contentHash: "hash-b",
+          }],
+        });
+        const after = yield* store.messageVectorCoverage(defaultEmbeddingProfile.cacheNamespace);
+        return [before, after] as const;
+      }),
+    );
+
+    expect(before).toMatchObject({ searchableMessages: 1, vectorRows: 1, vectorlessMessages: 0, staleVectorRows: 0 });
+    expect(after).toMatchObject({ searchableMessages: 1, vectorRows: 0, vectorlessMessages: 1, staleVectorRows: 0 });
+  });
+
+  test("late message_vectors writes are rejected after the source message changes", async () => {
+    const accepted = await withEmbeddings(
+      { embedMany: async () => [vector(0)] },
+      Effect.gen(function* () {
+        const store = yield* LocalStore;
+        yield* store.upsertSession(mappedSession("alpha terminal"));
+        yield* store.upsertSession({
+          ...mappedSession("replacement terminal"),
+          messages: [{
+            sessionId: "session-a",
+            seq: 1,
+            role: "user",
+            text: "replacement terminal",
+            projectKey: "project-a",
+            contentHash: "hash-b",
+          }],
+        });
+        return yield* store.upsertMessageVectors([{
+          model: defaultEmbeddingProfile.cacheNamespace,
+          modality: "text",
+          sessionId: "session-a",
+          seq: 1,
+          role: "user",
+          projectKey: "project-a",
+          provider: "session-a",
+          contentHash: "hash-a",
+          documentHash: "hash-a",
+          vector: vector(0),
+        }]);
+      }),
+    );
+
+    expect(accepted).toBe(0);
+  });
+
+  test("environment profile namespaces include provider and vector-affecting settings", () => {
+    const previous = {
+      provider: process.env.QUASAR_EMBEDDING_PROVIDER,
+      namespace: process.env.QUASAR_EMBEDDING_CACHE_NAMESPACE,
+      dtype: process.env.QUASAR_EMBEDDING_ONNX_DTYPE,
+      documentPrefix: process.env.QUASAR_EMBEDDING_DOCUMENT_PREFIX,
+    };
+
+    try {
+      delete process.env.QUASAR_EMBEDDING_CACHE_NAMESPACE;
+      process.env.QUASAR_EMBEDDING_PROVIDER = "local";
+      process.env.QUASAR_EMBEDDING_ONNX_DTYPE = "q8";
+      process.env.QUASAR_EMBEDDING_DOCUMENT_PREFIX = "search_document: ";
+      const local = embeddingProfileFromEnv();
+      process.env.QUASAR_EMBEDDING_PROVIDER = "synthetic";
+      const synthetic = embeddingProfileFromEnv();
+      process.env.QUASAR_EMBEDDING_PROVIDER = "local";
+      process.env.QUASAR_EMBEDDING_DOCUMENT_PREFIX = "passage: ";
+      const localWithDifferentPrefix = embeddingProfileFromEnv();
+
+      expect(local.cacheNamespace).toStartWith("local:hf:nomic-ai/nomic-embed-text-v1.5:768:search_document:");
+      expect(synthetic.cacheNamespace).toStartWith("synthetic:hf:nomic-ai/nomic-embed-text-v1.5:768:search_document:");
+      expect(local.cacheNamespace).not.toBe(synthetic.cacheNamespace);
+      expect(local.cacheNamespace).not.toBe(localWithDifferentPrefix.cacheNamespace);
+    } finally {
+      if (previous.provider === undefined) delete process.env.QUASAR_EMBEDDING_PROVIDER;
+      else process.env.QUASAR_EMBEDDING_PROVIDER = previous.provider;
+      if (previous.namespace === undefined) delete process.env.QUASAR_EMBEDDING_CACHE_NAMESPACE;
+      else process.env.QUASAR_EMBEDDING_CACHE_NAMESPACE = previous.namespace;
+      if (previous.dtype === undefined) delete process.env.QUASAR_EMBEDDING_ONNX_DTYPE;
+      else process.env.QUASAR_EMBEDDING_ONNX_DTYPE = previous.dtype;
+      if (previous.documentPrefix === undefined) delete process.env.QUASAR_EMBEDDING_DOCUMENT_PREFIX;
+      else process.env.QUASAR_EMBEDDING_DOCUMENT_PREFIX = previous.documentPrefix;
+    }
+  });
+
+  test("environment profile rejects unknown embedding providers", () => {
+    const previous = process.env.QUASAR_EMBEDDING_PROVIDER;
+    try {
+      process.env.QUASAR_EMBEDDING_PROVIDER = "locla";
+      expect(() => embeddingProfileFromEnv()).toThrow("QUASAR_EMBEDDING_PROVIDER must be one of: local, synthetic; got locla");
+      expect(() => embeddingProfileFromEnv()).toThrow(EmbeddingConfigurationError);
+    } finally {
+      if (previous === undefined) delete process.env.QUASAR_EMBEDDING_PROVIDER;
+      else process.env.QUASAR_EMBEDDING_PROVIDER = previous;
+    }
   });
 
   test("readiness is a non-blocking Ref read — never a per-call network probe", async () => {

@@ -12,6 +12,7 @@
   "dependencies": {
     "@effect/platform": "^0.96.1",
     "@effect/platform-bun": "^0.90.0",
+    "@huggingface/transformers": "^4.2.0",
     "@lancedb/lancedb": "^0.30.0",
     "apache-arrow": "18.1.0",
     "effect": "^3.21.2"

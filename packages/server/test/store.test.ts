@@ -139,6 +139,39 @@ describe("LocalStore", () => {
     expect(stats).toEqual({ projects: 1, sessions: 1, messages: 2, toolCalls: 2, ingestRuns: 0 });
   });
 
+  test("keeps message vectors scoped by embedding profile", async () => {
+    const path = sqlitePath();
+
+    const rows = await withStore(
+      path,
+      (store) =>
+        Effect.gen(function* () {
+          yield* store.upsertSession(mappedSession());
+          for (const [model, vector] of [
+            ["profile-a", [1, 0, 0]],
+            ["profile-b", [0, 1, 0]],
+          ] as const) {
+            yield* store.upsertMessageVectors([{
+              model,
+              modality: "text",
+              sessionId: "session-a",
+              seq: 1,
+              role: "user",
+              projectKey: "project-a",
+              provider: "codex",
+              contentHash: "hash-1",
+              documentHash: `${model}:hash-1`,
+              vector,
+            }]);
+          }
+          return yield* store.listMessageVectorsBySession({ sessionId: "session-a" });
+        }),
+    );
+
+    expect(rows.map((row) => row.model)).toEqual(["profile-a", "profile-b"]);
+    expect(rows.map((row) => row.contentHash)).toEqual(["hash-1", "hash-1"]);
+  });
+
   test("builds hostile-input-safe SQLite FTS5 query strings", () => {
     expect(fts5QueryForText("sqlite: proof - vector")).toBe('"sqlite" AND "proof" AND "vector"');
     expect(fts5QueryForText('" OR foo:bar - ()')).toBe('"OR" AND "foo" AND "bar"');

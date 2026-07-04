@@ -20,8 +20,7 @@ Set at least:
 - `QUASAR_PUBLISH_HOST=0.0.0.0` unless Docker can bind the Tailscale IP directly.
 - `QUASAR_PUBLISH_PORT=7180` (host publish port; the container always binds 6180 internally). 7180 is dedicated to quasar — 6180 on the Mac mini belongs to an unrelated dev server. The canonical client URL is `http://<mac-mini-tailnet-ip>:7180`.
 - `QUASAR_INGEST_TOKEN=<long random token>`. Remote write ingest is disabled unless this is configured, and client machines must send the same token.
-- Synthetic API embedding profile values for bulk text embeddings.
-- `SYNTHETIC_API_KEY` in the environment or the invoking shell. `scripts/server-ops.mjs deploy` will also read it from the Mac mini interactive zsh environment when it is not already exported.
+- Local ONNX embedding profile values. The default provider is local `nomic-ai/nomic-embed-text-v1.5`; set `QUASAR_EMBEDDING_PROVIDER=synthetic` plus `SYNTHETIC_API_KEY` only for BYO-cloud fallback.
 
 Keep `QUASAR_HOME=/data/quasar` pinned in compose. That preserves Quasar's machine identity and idempotency across container rebuilds.
 
@@ -284,16 +283,14 @@ Use one active embedding profile per running server process. For the Mac mini de
 QUASAR_EMBEDDING_MODEL=hf:nomic-ai/nomic-embed-text-v1.5
 QUASAR_EMBEDDING_DIMENSIONS=768
 QUASAR_EMBEDDING_TASK=search_document
+QUASAR_EMBEDDING_PROVIDER=local
+QUASAR_EMBEDDING_MODEL_CACHE_DIR=/data/quasar/models
+QUASAR_EMBEDDING_ONNX_DTYPE=q8
 QUASAR_EMBEDDING_DOCUMENT_PREFIX="search_document: "
 QUASAR_EMBEDDING_QUERY_PREFIX="search_query: "
-QUASAR_WORKERS_ENABLED=true
-QUASAR_EMBEDDING_WORKER_ENABLED=true
-QUASAR_INDEX_REPAIR_WORKER_ENABLED=true
-QUASAR_FRESHNESS_WORKER_ENABLED=false
-QUASAR_MAINTENANCE_WORKER_ENABLED=false
 ```
 
-The embedding worker drains `embed-message` jobs; the index repair worker drains `index-session` jobs into LanceDB. The cache namespace and vector table are profile-scoped. Quasar does not intentionally embed one message into multiple embedding spaces during ordinary operation. Side-by-side profile comparison is an explicit proof workflow, not daemon behavior.
+The embedding worker drains `embed-message` jobs; the index repair worker drains `index-session` jobs into LanceDB. The embedding cache and SQLite `message_vectors` table are profile-scoped. Quasar does not intentionally embed one message into multiple embedding spaces during ordinary operation. Side-by-side profile comparison is an explicit proof workflow, not daemon behavior.
 
 ## Maintenance
 

@@ -16,9 +16,11 @@
  */
 
 import { mkdtempSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 
 import { postFingerprintProbe, postMappedSession } from "../src/ingest";
@@ -41,6 +43,8 @@ afterEach(() => {
 });
 
 const randomPort = () => 20_000 + Math.floor(Math.random() * 20_000);
+
+const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
 
 const mappedSession = (overrides: { readonly fingerprint?: string; readonly firstText?: string } = {}): MappedSession => ({
   project: { projectKey: "contract-project", displayName: "Contract Project", rawPath: "/tmp/contract-project" },
@@ -246,6 +250,7 @@ describe("CLI HTTP client <-> server contract", () => {
     const base = `http://127.0.0.1:${port}`;
     const proc = spawnServer(sqlite, lance, port, token, {
       QUASAR_SEARCH_PROFILE: "1",
+      QUASAR_EMBEDDING_PROVIDER: "synthetic",
       SYNTHETIC_API_KEY: "",
     });
 
@@ -277,6 +282,38 @@ describe("CLI HTTP client <-> server contract", () => {
 
       const outcome = await postMappedSession(base, mappedSession(), { ingestToken: token });
       expect(outcome.status).toBe("ok");
+
+      const embeddingStatus = await fetchJson(`${base}/status`);
+      const cacheNamespace = embeddingStatus.body.data.embeddings.profile.cacheNamespace as string;
+      const documentText = "search_document: contract handshake over http";
+      const db = new Database(sqlite);
+      try {
+        db.prepare(
+          `INSERT INTO embedding_cache(model, content_hash, dimensions, text_bytes, vector_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          cacheNamespace,
+          sha256(documentText),
+          768,
+          new TextEncoder().encode(documentText).byteLength,
+          JSON.stringify(Array.from({ length: 768 }, (_, index) => index === 0 ? 1 : 0)),
+          "2026-06-18T10:00:00.000Z",
+          "2026-06-18T10:00:00.000Z",
+        );
+      } finally {
+        db.close();
+      }
+
+      const replay = await fetchJson(`${base}/maintenance/embeddings/replay-cache?limit=10`);
+      expect(replay.status).toBe(200);
+      expect(replay.body).toMatchObject({
+        ok: true,
+        command: "maintenance/embeddings/replay-cache",
+        data: {
+          report: { scanned: 2, cacheHits: 1, missingCache: 1, sqliteVectorsUpserted: 1 },
+          coverage: { searchableMessages: 2, vectorRows: 1, vectorlessMessages: 1, staleVectorRows: 0 },
+        },
+      });
 
       const preMaintenanceLexical = await fetchJson(
         `${base}/search/lexical?q=${encodeURIComponent("handshake")}&limit=5&projectKey=contract-project`,

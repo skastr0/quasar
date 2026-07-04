@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 export interface EmbeddingProfile {
   readonly model: string;
   readonly dimensions: number;
@@ -5,6 +7,22 @@ export interface EmbeddingProfile {
   readonly cacheNamespace: string;
   readonly documentPrefix?: string;
   readonly queryPrefix?: string;
+}
+
+export type EmbeddingProvider = "local" | "synthetic";
+
+export class EmbeddingConfigurationError extends Error {
+  override readonly name = "EmbeddingConfigurationError";
+  readonly variable: string;
+  readonly expected: readonly string[];
+  readonly received: string;
+
+  constructor(options: { readonly variable: string; readonly expected: readonly string[]; readonly received: string }) {
+    super(`${options.variable} must be one of: ${options.expected.join(", ")}; got ${options.received}`);
+    this.variable = options.variable;
+    this.expected = options.expected;
+    this.received = options.received;
+  }
 }
 
 export const makeEmbeddingProfile = (
@@ -30,14 +48,44 @@ export const embeddingProfileJobNamespace = (profile: Pick<EmbeddingProfile, "ca
 export const embeddingProfileSearchTable = (profile: EmbeddingProfile): string =>
   `messages_${Buffer.from(profile.cacheNamespace).toString("base64url").slice(0, 24)}`;
 
+const sha256Short = (value: string): string =>
+  createHash("sha256").update(value).digest("hex").slice(0, 16);
+
+export const embeddingProviderFromEnv = (): EmbeddingProvider => {
+  const raw = process.env.QUASAR_EMBEDDING_PROVIDER?.trim().toLowerCase();
+  if (raw === undefined || raw === "" || raw === "local") return "local";
+  if (raw === "synthetic") return "synthetic";
+  throw new EmbeddingConfigurationError({
+    variable: "QUASAR_EMBEDDING_PROVIDER",
+    expected: ["local", "synthetic"],
+    received: raw,
+  });
+};
+
+const defaultCacheNamespaceFromEnv = (profile: Omit<EmbeddingProfile, "cacheNamespace">): string => {
+  const provider = embeddingProviderFromEnv();
+  const onnxDtype = process.env.QUASAR_EMBEDDING_ONNX_DTYPE?.trim() || "q8";
+  const fingerprint = sha256Short(JSON.stringify({
+    version: 2,
+    provider,
+    onnxDtype: provider === "local" ? onnxDtype : undefined,
+    documentPrefix: profile.documentPrefix ?? "",
+    queryPrefix: profile.queryPrefix ?? "",
+  }));
+  return `${provider}:${profile.model}:${profile.dimensions}:${profile.task}:${fingerprint}`;
+};
+
 export const embeddingProfileFromEnv = (): EmbeddingProfile => {
   const model = process.env.QUASAR_EMBEDDING_MODEL?.trim() || "hf:nomic-ai/nomic-embed-text-v1.5";
-  return makeEmbeddingProfile({
+  const profile = {
     model,
     dimensions: positiveIntEnv("QUASAR_EMBEDDING_DIMENSIONS", 768),
     task: process.env.QUASAR_EMBEDDING_TASK?.trim() || "search_document",
     documentPrefix: process.env.QUASAR_EMBEDDING_DOCUMENT_PREFIX ?? "search_document: ",
     queryPrefix: process.env.QUASAR_EMBEDDING_QUERY_PREFIX ?? "search_query: ",
-    cacheNamespace: process.env.QUASAR_EMBEDDING_CACHE_NAMESPACE?.trim() || undefined,
+  };
+  return makeEmbeddingProfile({
+    ...profile,
+    cacheNamespace: process.env.QUASAR_EMBEDDING_CACHE_NAMESPACE?.trim() || defaultCacheNamespaceFromEnv(profile),
   });
 };

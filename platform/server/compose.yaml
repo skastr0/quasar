@@ -29,9 +29,13 @@ services:
       QUASAR_LOCAL_PORT: 6180
       QUASAR_SEARCH_PROFILE: ${QUASAR_SEARCH_PROFILE:-0}
       QUASAR_INGEST_TOKEN: ${QUASAR_INGEST_TOKEN:?set QUASAR_INGEST_TOKEN in platform/server/.env for remote ingest writes}
-      # Workers are always-on (no enable/disable toggles); only the Synthetic
-      # embedding client is tunable. The previous worker enable/interval/lease/
+      # Workers are always-on (no enable/disable toggles); the embedding provider
+      # is local ONNX by default, with Synthetic available as an explicit fallback.
+      # The previous worker enable/interval/lease/
       # limit vars were env theater (zero code references) and were removed.
+      QUASAR_EMBEDDING_PROVIDER: ${QUASAR_EMBEDDING_PROVIDER:-local}
+      QUASAR_EMBEDDING_MODEL_CACHE_DIR: ${QUASAR_EMBEDDING_MODEL_CACHE_DIR:-/data/quasar/models}
+      QUASAR_EMBEDDING_ONNX_DTYPE: ${QUASAR_EMBEDDING_ONNX_DTYPE:-q8}
       QUASAR_EMBEDDING_API_BATCH_SIZE: ${QUASAR_EMBEDDING_API_BATCH_SIZE:-100}
       QUASAR_EMBEDDING_API_CONCURRENCY: ${QUASAR_EMBEDDING_API_CONCURRENCY:-4}
       QUASAR_EMBEDDING_RETRY_BASE_MS: ${QUASAR_EMBEDDING_RETRY_BASE_MS:-30000}
@@ -42,7 +46,7 @@ services:
       QUASAR_EMBEDDING_DOCUMENT_PREFIX: "${QUASAR_EMBEDDING_DOCUMENT_PREFIX:-search_document: }"
       QUASAR_EMBEDDING_QUERY_PREFIX: "${QUASAR_EMBEDDING_QUERY_PREFIX:-search_query: }"
       QUASAR_EMBEDDING_CACHE_NAMESPACE: ${QUASAR_EMBEDDING_CACHE_NAMESPACE:-}
-      SYNTHETIC_API_KEY: ${SYNTHETIC_API_KEY:?set SYNTHETIC_API_KEY in platform/server/.env for Synthetic embeddings}
+      SYNTHETIC_API_KEY: ${SYNTHETIC_API_KEY:-}
       SYNTHETIC_OPENAI_BASE_URL: ${SYNTHETIC_OPENAI_BASE_URL:-https://api.synthetic.new/openai/v1}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:6180/health"]

@@ -1,0 +1,75 @@
+{
+  "generatedAt": "2026-07-04T00:00:00.000Z",
+  "scope": "SQLite message_vectors storage, embedding cache replay, and local ONNX provider smoke",
+  "status": "partial",
+  "proved": [
+    "message_vectors persists per-profile vectors keyed by model, session_id, and seq",
+    "embedding worker writes SQLite vectors before LanceDB and only ACKs after a complete LanceDB write receipt",
+    "embedding cache replay is exposed through /maintenance/embeddings/replay-cache and quasar replay-embedding-cache",
+    "local ONNX provider loads nomic-ai/nomic-embed-text-v1.5 in the Docker image and returns a 768-dimensional vector"
+  ],
+  "notYetProved": [
+    "full live-corpus materialization to 100 percent message_vector coverage",
+    "final LanceDB parity decision after complete SQLite vector coverage"
+  ],
+  "focusedValidation": {
+    "command": "bun test packages/server/test/localOnnxEmbeddings.test.ts packages/server/test/store.test.ts packages/server/test/embeddings.test.ts packages/cli/test/http-contract.test.ts",
+    "result": "52 pass, 0 fail, 196 expect calls"
+  },
+  "typecheck": {
+    "command": "bun run typecheck",
+    "result": "passed"
+  },
+  "containerLocalOnnxSmoke": {
+    "image": "quasar-server:onnx-check",
+    "environment": {
+      "QUASAR_EMBEDDING_MODEL_CACHE_DIR": "/tmp/quasar-models",
+      "QUASAR_EMBEDDING_ONNX_DTYPE": "q8"
+    },
+    "result": {
+      "model": "hf:nomic-ai/nomic-embed-text-v1.5",
+      "dimensions": 768,
+      "vectorLength": 768,
+      "first": [
+        0.01670096255838871,
+        0.0602467842400074,
+        -0.14535251259803772,
+        -0.05813176557421684,
+        0.031480688601732254
+      ]
+    },
+    "stderrNote": "onnxruntime emitted a CPU vendor warning but the process exited successfully"
+  },
+  "cacheReplayHttpContract": {
+    "route": "/maintenance/embeddings/replay-cache?limit=10",
+    "seed": "one cached document vector inserted into embedding_cache for the active profile",
+    "result": {
+      "scanned": 2,
+      "cacheHits": 1,
+      "missingCache": 1,
+      "sqliteVectorsUpserted": 1,
+      "coverage": {
+        "searchableMessages": 2,
+        "vectorRows": 1,
+        "vectorlessMessages": 1,
+        "staleVectorRows": 0
+      }
+    }
+  },
+  "snapshotReplayPartial": {
+    "source": "read-only Docker volume snapshot",
+    "chunkLimit": 20000,
+    "chunksCompleted": 3,
+    "totals": {
+      "cacheHits": 59523,
+      "missingCache": 477,
+      "sqliteVectorsUpserted": 59523,
+      "coverage": {
+        "vectorRows": 59523,
+        "vectorlessMessages": 620683,
+        "staleVectorRows": 0
+      }
+    },
+    "note": "Stopped intentionally before full-corpus completion; this is replay-path evidence, not final coverage."
+  }
+}
