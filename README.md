@@ -5,8 +5,9 @@ Status: pre-release, under an active v2 rebuild.
 Quasar is a local-first repository for AI agent sessions. It ingests local
 agent histories, normalizes them into session and tool-call rows, and serves
 bounded session inspection through a local Effect server consumed by a CLI and
-agent MCP tools. SQLite is the truth store and durable queue. LanceDB owns the
-derived lexical/vector/fusion search indexes on the Mac mini filesystem.
+agent MCP tools. SQLite is the whole data plane: truth store, durable queue,
+trigger-maintained FTS (lexical search), and message vectors. Semantic/fusion
+search is disabled pending vector materialization (QSR-232).
 
 The single current architecture direction is
 [docs/architecture/quasar-effect-server-plan-2026-06-18.md](docs/architecture/quasar-effect-server-plan-2026-06-18.md).
@@ -15,7 +16,7 @@ The measured corpus evidence and normalized entity model live in
 
 Honest current state: this repository contains provider session parsing,
 normalization, redaction, a CLI, a server package under construction, and
-search support through LanceDB. Adapters exist for the providers with data on a
+SQLite FTS lexical search. Adapters exist for the providers with data on a
 real host: Codex, Claude Code, OpenCode, Grok, Hermes, and Antigravity.
 Extraction is read-only; brittle local formats fail soft with diagnostics rather
 than writing to native history.
@@ -23,7 +24,7 @@ than writing to native history.
 ## Workspace
 
 - `packages/cli`: the `quasar` CLI — provider history parsing (adapters), session mapping, ingest client, and JSON query commands.
-- `packages/server`: the local Effect server: SQLite truth, durable queue, workers, LanceDB search (`src/lancedb.ts`), and HTTP control surface.
+- `packages/server`: the local Effect server: SQLite truth, durable queue, embedding worker, FTS search, and HTTP control surface.
 
 The dashboard is not present. Only the CLI is prepared for npm publication.
 
@@ -70,7 +71,7 @@ pnpm --package @skastr0/quasar-cli dlx quasar --help
 
 Extraction is read-only: adapters do not write to native agent history folders.
 The production target is a local server on the Mac mini, reachable over
-Tailscale, with persistent SQLite and LanceDB volumes.
+Tailscale, with a persistent SQLite volume.
 
 ## Security and License
 
