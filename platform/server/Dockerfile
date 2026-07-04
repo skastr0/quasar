@@ -18,7 +18,6 @@ COPY scripts ./scripts
 ENV NODE_ENV=production \
   QUASAR_LOCAL_HOME=/data/quasar \
   QUASAR_LOCAL_SQLITE=/data/quasar/quasar.sqlite \
-  QUASAR_SEARCH_DATA_DIR=/data/quasar/search.lance \
   QUASAR_LOCAL_HOST=0.0.0.0 \
   QUASAR_LOCAL_PORT=6180
 

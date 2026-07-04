@@ -12,10 +12,12 @@ describe("server ops config", () => {
 
     expect(compose).toContain("QUASAR_HOME: /data/quasar");
     expect(compose).toContain("QUASAR_LOCAL_SQLITE: /data/quasar/quasar.sqlite");
-    expect(compose).toContain("QUASAR_SEARCH_DATA_DIR: /data/quasar/search.lance");
-    expect(compose).toContain("QUASAR_EMBEDDING_PROVIDER: ${QUASAR_EMBEDDING_PROVIDER:-local}");
+    expect(compose).not.toContain("QUASAR_SEARCH_DATA_DIR");
+    // Provider is pinned — a flip is an explicit receipted cutover, never a deploy side-effect.
+    expect(compose).toContain("QUASAR_EMBEDDING_PROVIDER: synthetic");
     expect(compose).toContain("QUASAR_EMBEDDING_MODEL_CACHE_DIR: ${QUASAR_EMBEDDING_MODEL_CACHE_DIR:-/data/quasar/models}");
     expect(compose).toContain("SYNTHETIC_API_KEY: ${SYNTHETIC_API_KEY:-}");
+    expect(dockerfile).not.toContain("QUASAR_SEARCH_DATA_DIR");
     expect(dockerfile).toContain("COPY scripts ./scripts");
     expect(dockerfile).toContain('CMD ["bun", "packages/server/src/main.ts"');
     expect(dockerfile).toContain("/health");
@@ -52,6 +54,9 @@ describe("server ops config", () => {
     expect(runbook).toContain("so a slow first");
     expect(runbook).not.toContain("Staged Local Materialization Proof");
     expect(runbook).not.toContain("materialize-staging");
+    expect(runbook).not.toContain("server:lance");
+    expect(runbook).not.toContain("server:maintain");
+    expect(runbook).toContain("SemanticDisabled");
   });
 
   test("server-side history ingestion paths are removed", () => {
