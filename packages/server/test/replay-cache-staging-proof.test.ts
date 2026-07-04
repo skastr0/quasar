@@ -202,6 +202,8 @@ describe("replay cache staging proof script", () => {
         },
       },
       gates: {
+        initialSqliteVectorsZero: true,
+        upsertedReplayableMessages: true,
         reachedCacheReplayCeiling: true,
         remainingEqualsUncached: true,
         staleVectorRowsZero: true,

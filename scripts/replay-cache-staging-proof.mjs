@@ -130,6 +130,8 @@ try {
     expectedReplayableMessages: expected.replayableMessagesByDocumentHash,
   });
   const gates = {
+    initialSqliteVectorsZero: replay.initialCoverage.vectorRows === 0,
+    upsertedReplayableMessages: replay.totals.sqliteVectorsUpserted === expected.replayableMessagesByDocumentHash,
     reachedCacheReplayCeiling: replay.finalCoverage.vectorRows >= expected.replayableMessagesByDocumentHash,
     remainingEqualsUncached: replay.finalCoverage.vectorlessMessages === expected.missingReplayableMessages,
     staleVectorRowsZero: replay.finalCoverage.staleVectorRows === 0,
