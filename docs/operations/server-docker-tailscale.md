@@ -251,6 +251,9 @@ bun run proof:sqlite-first --source-db /path/to/quasar.sqlite \
   --filter-role assistant \
   --vector-limit all \
   --scan-limit all \
+  --scan-samples 60 \
+  --scan-kernel usearch \
+  --scan-threads 1 \
   --parity-sample 1000 \
   --parity-threshold <cosine-threshold> \
   --out docs/proofs/sqlite-first-proof.json
@@ -261,7 +264,10 @@ project/role filters and p95/p99 timings over the requested sample count. The
 parity section is accepted only when `sampleSize` equals the requested sample,
 `passed` is true, and the report records the exact threshold used. The QSR-229
 exact-scan gate still requires target-container native-kernel evidence; the proof
-command's built-in scan is a pure-JS baseline unless a native scan proof is added.
+command records `usearch` exact-kernel timing separately from the pure-JS
+baseline. Accept the native scan only when the target-container report records
+`exactScan.kernel.package == "usearch"` and the import/exact-search smoke for the
+same image succeeds.
 
 ## Ingesting from another Tailscale machine
 

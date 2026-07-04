@@ -60,7 +60,10 @@ Options:
   --filter-role     Optional role filter for filtered FTS timing. Defaults to assistant.
   --cache-namespace Override the embedding cache namespace inspected for saved vectors.
   --vector-limit    Rows to materialize into proof_message_vectors. Default 20000; use "all" for all rows.
-  --scan-limit      Rows to pure-JS exact-scan. Defaults to vector-limit.
+  --scan-limit      Rows to exact-scan. Defaults to vector-limit.
+  --scan-samples    Repeated exact-scan samples. Use 60 for the p95/p99 gate. Default 1.
+  --scan-kernel     Exact-scan kernel: usearch or pure-js. Default usearch.
+  --scan-threads    Threads for the usearch exact-scan kernel. Default 1.
   --parity-sample   Optional local-vs-cached parity sample size. Use at least 1000 for the QSR-229 gate.
   --parity-threshold Required with --parity-sample. Cosine threshold in (0, 1].
   --parity-batch-size Local ONNX batch size for parity. Default 32.
@@ -92,6 +95,9 @@ const ftsFilterProjectKey = valueFor("--filter-project-key");
 const ftsFilterRole = valueFor("--filter-role");
 const vectorLimit = numberFor("--vector-limit", 20_000);
 const exactScanLimit = numberFor("--scan-limit", vectorLimit);
+const exactScanSamples = numberFor("--scan-samples", 1);
+const exactScanKernel = valueFor("--scan-kernel", "usearch");
+const exactScanThreads = numberFor("--scan-threads", 1);
 const paritySample = optionalPositiveIntFor("--parity-sample");
 const parityThreshold = optionalUnitNumberFor("--parity-threshold");
 const parityBatchSize = optionalPositiveIntFor("--parity-batch-size") ?? 32;
@@ -107,6 +113,12 @@ if (paritySample !== undefined && parityThreshold === undefined) {
   process.exit(1);
 }
 
+if (exactScanKernel !== "usearch" && exactScanKernel !== "pure-js") {
+  usage();
+  console.error("Invalid --scan-kernel; expected usearch or pure-js");
+  process.exit(1);
+}
+
 let report: SqliteFirstProofReport = runSqliteFirstProof({
   sourceDb: resolve(sourceDb),
   workDb: resolve(workDb!),
@@ -117,6 +129,9 @@ let report: SqliteFirstProofReport = runSqliteFirstProof({
   ftsFilterRole,
   vectorLimit,
   exactScanLimit,
+  exactScanSamples,
+  exactScanKernel,
+  exactScanThreads,
 });
 
 if (paritySample !== undefined && parityThreshold !== undefined) {
