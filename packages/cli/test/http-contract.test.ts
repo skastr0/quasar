@@ -315,6 +315,48 @@ describe("CLI HTTP client <-> server contract", () => {
         },
       });
 
+      const secondDocumentText = "search_document: assistant contract reply";
+      const dbAfterReplay = new Database(sqlite);
+      try {
+        dbAfterReplay.prepare(
+          `INSERT INTO embedding_cache(model, content_hash, dimensions, text_bytes, vector_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          cacheNamespace,
+          sha256(secondDocumentText),
+          768,
+          new TextEncoder().encode(secondDocumentText).byteLength,
+          JSON.stringify(Array.from({ length: 768 }, (_, index) => index === 1 ? 1 : 0)),
+          "2026-06-18T10:00:00.000Z",
+          "2026-06-18T10:00:00.000Z",
+        );
+      } finally {
+        dbAfterReplay.close();
+      }
+
+      const materialize = await fetchJson(`${base}/maintenance/embeddings/materialize?limit=10`);
+      expect(materialize.status).toBe(200);
+      expect(materialize.body).toMatchObject({
+        ok: true,
+        command: "maintenance/embeddings/materialize",
+        data: {
+          report: {
+            scanned: 1,
+            cacheHits: 1,
+            cacheMisses: 0,
+            embedded: 0,
+            sqliteVectorsUpserted: 1,
+            lanceRowsUpserted: 2,
+            lanceRowsRepaired: 1,
+            lanceScan: { scanned: 2, missingOrStale: 1, complete: true },
+          },
+          coverage: { searchableMessages: 2, vectorRows: 2, vectorlessMessages: 0, staleVectorRows: 0 },
+          queue: { embedMessage: { kind: "embed-message", failed: 0 } },
+          lance: { divergence: { rowCountMatches: true, rowCountDelta: 0 } },
+        },
+      });
+      expect(materialize.body.data.lance.activeVectorTableName).toStartWith("messages_");
+
       const preMaintenanceLexical = await fetchJson(
         `${base}/search/lexical?q=${encodeURIComponent("handshake")}&limit=5&projectKey=contract-project`,
       );

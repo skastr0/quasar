@@ -95,6 +95,27 @@ export interface EmbeddingCacheReplayReport {
   readonly sqliteVectorsUpserted: number;
 }
 
+export interface EmbeddingMaterializationReport {
+  readonly scanned: number;
+  readonly cacheHits: number;
+  readonly cacheMisses: number;
+  readonly embedded: number;
+  readonly skipped: number;
+  readonly sqliteVectorsUpserted: number;
+  readonly lanceRowsUpserted: number;
+  readonly lanceRowsRepaired: number;
+  readonly lanceScan: {
+    readonly offset: number;
+    readonly scanned: number;
+    readonly missingOrStale: number;
+    readonly nextOffset: number;
+    readonly complete: boolean;
+  };
+  readonly startedAt: string;
+  readonly finishedAt: string;
+  readonly elapsedMs: number;
+}
+
 export interface EmbeddingService {
   readonly model: string;
   readonly profile: EmbeddingProfile;
@@ -116,6 +137,11 @@ export interface EmbeddingService {
     readonly limit?: number;
     readonly now?: string;
   }) => Effect.Effect<EmbeddingCacheReplayReport, unknown>;
+  readonly materializeMissingVectors: (options?: {
+    readonly limit?: number;
+    readonly lanceOffset?: number;
+    readonly now?: string;
+  }) => Effect.Effect<EmbeddingMaterializationReport, unknown>;
   readonly status: Effect.Effect<EmbeddingServiceStatus, unknown>;
   readonly readiness: Effect.Effect<EmbeddingReadinessStatus, unknown>;
 }
@@ -345,6 +371,7 @@ export const EmbeddingsLive = Layer.succeed(
       putCached: () => Effect.fail(new Error("EmbeddingsLive is not configured")),
       processBatch: () => Effect.fail(new Error("EmbeddingsLive is not configured")),
       materializeCachedVectors: () => Effect.fail(new Error("EmbeddingsLive is not configured")),
+      materializeMissingVectors: () => Effect.fail(new Error("EmbeddingsLive is not configured")),
       status: Effect.succeed({ cached: 0, pending: 0, profile }),
       readiness: Effect.succeed({ ok: false, checkedAt: nowIso(), reason: "EmbeddingsLive is not configured" }),
     });

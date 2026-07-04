@@ -289,6 +289,162 @@ describe("Embeddings", () => {
     expect(coverage).toMatchObject({ searchableMessages: 2, vectorRows: 1, vectorlessMessages: 1, staleVectorRows: 0 });
   });
 
+  test("materializeMissingVectors uses cache first, embeds misses, and dual-writes vectors", async () => {
+    let calls = 0;
+    const embedder: Embedder = {
+      embedMany: async (values) => {
+        calls += 1;
+        expect(values).toEqual(["beta terminal"]);
+        return [vector(2)];
+      },
+    };
+
+    const [report, cached, searchRows, sqliteRows, coverage] = await withEmbeddings(
+      embedder,
+      Effect.gen(function* () {
+        const store = yield* LocalStore;
+        const embeddings = yield* Embeddings;
+        const search = yield* LanceDb;
+        yield* store.upsertSession({
+          ...mappedSession(),
+          messages: [
+            { sessionId: "session-a", seq: 1, role: "user", text: "alpha terminal", projectKey: "project-a", contentHash: "hash-a" },
+            { sessionId: "session-a", seq: 2, role: "assistant", text: "beta terminal", projectKey: "project-a", contentHash: "hash-b" },
+          ],
+        });
+        yield* embeddings.putCached({ contentHash: "hash-a", text: "alpha terminal", vector: vector(0), now: "2026-06-18T09:00:00.000Z" });
+        const report = yield* embeddings.materializeMissingVectors({ limit: 10, now: "2099-06-18T10:00:00.000Z" });
+        const cached = yield* embeddings.getCached("hash-b");
+        const searchRows = yield* search.readMessageRowsBySession({
+          sessionId: "session-a",
+          tableName: embeddingProfileSearchTable(defaultEmbeddingProfile),
+          select: ["contentHash"],
+        });
+        const sqliteRows = yield* store.listMessageVectorsBySession({ sessionId: "session-a", model: defaultEmbeddingProfile.cacheNamespace });
+        const coverage = yield* store.messageVectorCoverage(defaultEmbeddingProfile.cacheNamespace);
+        return [report, cached, searchRows, sqliteRows, coverage] as const;
+      }),
+    );
+
+    expect(calls).toBe(1);
+    expect(report).toMatchObject({
+      scanned: 2,
+      cacheHits: 1,
+      cacheMisses: 1,
+      embedded: 1,
+      skipped: 0,
+      sqliteVectorsUpserted: 2,
+      lanceRowsUpserted: 2,
+      startedAt: "2099-06-18T10:00:00.000Z",
+      finishedAt: "2099-06-18T10:00:00.000Z",
+    });
+    expect(typeof report.elapsedMs).toBe("number");
+    expect(cached?.contentHash).toBe("hash-b");
+    expect(searchRows.map((row) => row.contentHash).sort()).toEqual(["hash-a", "hash-b"]);
+    expect(sqliteRows.map((row) => row.seq)).toEqual([1, 2]);
+    expect(coverage).toMatchObject({ searchableMessages: 2, vectorRows: 2, vectorlessMessages: 0, staleVectorRows: 0 });
+  });
+
+  test("materializeMissingVectors repairs LanceDB from existing SQLite vectors", async () => {
+    let calls = 0;
+    const embedder: Embedder = {
+      embedMany: async () => {
+        calls += 1;
+        return [vector(1)];
+      },
+    };
+
+    const [replay, report, searchRows, coverage] = await withEmbeddings(
+      embedder,
+      Effect.gen(function* () {
+        const store = yield* LocalStore;
+        const embeddings = yield* Embeddings;
+        const search = yield* LanceDb;
+        yield* store.upsertSession({
+          ...mappedSession(),
+          messages: [
+            { sessionId: "session-a", seq: 1, role: "user", text: "alpha terminal", projectKey: "project-a", contentHash: "hash-a" },
+            { sessionId: "session-a", seq: 2, role: "assistant", text: "beta terminal", projectKey: "project-a", contentHash: "hash-b" },
+          ],
+        });
+        yield* embeddings.putCached({ contentHash: "hash-a", text: "alpha terminal", vector: vector(0), now: "2026-06-18T09:00:00.000Z" });
+        yield* embeddings.putCached({ contentHash: "hash-b", text: "beta terminal", vector: vector(1), now: "2026-06-18T09:00:00.000Z" });
+        const replay = yield* embeddings.materializeCachedVectors({ limit: 10, now: "2099-06-18T10:00:00.000Z" });
+        const report = yield* embeddings.materializeMissingVectors({ limit: 10, now: "2099-06-18T10:01:00.000Z" });
+        const searchRows = yield* search.readMessageRowsBySession({
+          sessionId: "session-a",
+          tableName: embeddingProfileSearchTable(defaultEmbeddingProfile),
+          select: ["contentHash"],
+        });
+        const coverage = yield* store.messageVectorCoverage(defaultEmbeddingProfile.cacheNamespace);
+        return [replay, report, searchRows, coverage] as const;
+      }),
+    );
+
+    expect(calls).toBe(0);
+    expect(replay).toMatchObject({ scanned: 2, cacheHits: 2, missingCache: 0, sqliteVectorsUpserted: 2 });
+    expect(report).toMatchObject({
+      scanned: 0,
+      cacheHits: 0,
+      cacheMisses: 0,
+      embedded: 0,
+      sqliteVectorsUpserted: 0,
+      lanceRowsUpserted: 2,
+      lanceRowsRepaired: 2,
+      lanceScan: { offset: 0, scanned: 2, missingOrStale: 2, nextOffset: 2, complete: true },
+    });
+    expect(searchRows.map((row) => row.contentHash).sort()).toEqual(["hash-a", "hash-b"]);
+    expect(coverage).toMatchObject({ searchableMessages: 2, vectorRows: 2, vectorlessMessages: 0, staleVectorRows: 0 });
+  });
+
+  test("materializeMissingVectors fails when LanceDB reports a short write", async () => {
+    const sqlite = join(tempDir(), "quasar.sqlite");
+    const lance = join(tempDir(), "search.lance");
+    const embedder: Embedder = { embedMany: async () => [vector(0)] };
+    const storeLayer = makeLocalStoreLayer(sqlite);
+    const queueLayer = makeDurableQueueLayer(sqlite);
+    const realSearchLayer = makeLanceDbLayer({ dataDir: lance });
+    const shortSearchLayer = Layer.effect(
+      LanceDb,
+      Effect.gen(function* () {
+        const real = yield* LanceDb;
+        return LanceDb.make({
+          ...real,
+          upsertMessageRows: (request) =>
+            Effect.succeed(new WriteReceipt({
+              table: request.tableName ?? "messages",
+              requested: request.rows.length,
+              inserted: 0,
+              updated: 0,
+              deleted: 0,
+            })),
+        });
+      }),
+    ).pipe(Layer.provide(realSearchLayer));
+    const embeddingsLayer = makeEmbeddingsLayer({ sqlite, profile: defaultEmbeddingProfile, embedder }).pipe(
+      Layer.provide(Layer.mergeAll(storeLayer, queueLayer, shortSearchLayer)),
+    );
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const store = yield* LocalStore;
+          const embeddings = yield* Embeddings;
+          yield* store.upsertSession(mappedSession());
+          return yield* Effect.either(
+            embeddings.materializeMissingVectors({ limit: 10, now: "2099-06-18T10:00:00.000Z" }),
+          );
+        }).pipe(Effect.provide(Layer.mergeAll(storeLayer, queueLayer, shortSearchLayer, embeddingsLayer))),
+      ),
+    );
+
+    expect(result._tag).toBe("Left");
+    expect(result.left).toMatchObject({
+      operation: "materializeMissingVectors.cacheMiss.upsertSearchRows",
+    });
+    expect(String((result.left as Error).message)).toMatch(/^LanceDB applied 0 of 1 message vector rows in messages_/);
+  });
+
   test("message_vectors rows are deleted when the source message is replaced", async () => {
     const embedder: Embedder = { embedMany: async () => [vector(0)] };
 
