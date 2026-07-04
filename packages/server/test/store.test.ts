@@ -417,6 +417,59 @@ describe("LocalStore", () => {
     expect(hits.map((hit) => hit.row.text)).toEqual(["First message"]);
   });
 
+  test("QSR-D5: filtered lexical search (projectKey+role, single- and multi-provider) returns rows whose text is exactly the original message text, on a real migrated DB", async () => {
+    const path = sqlitePath();
+
+    // Two sessions across two projects and two providers, each with the same
+    // two fixed messages ("First message" / "Second message") — so every
+    // filter variant below must narrow to exactly the right rows, and every
+    // returned row's text must be the untouched original, never the
+    // scope-token-prefixed FTS text.
+    await withStore(path, (store) =>
+      Effect.all([
+        store.upsertSession(
+          mappedSession({ sessionId: "codex:project-alpha-session", projectKey: "project-alpha", provider: "codex" }),
+        ),
+        store.upsertSession(
+          mappedSession({
+            sessionId: "opencode:project-beta-session",
+            projectKey: "project-beta",
+            provider: "opencode",
+          }),
+        ),
+      ]),
+    );
+
+    // projectKey + role narrows via BOTH the scoped MATCH and the backstop
+    // predicate to the single matching row across both sessions.
+    const scoped = await withStore(path, (store) =>
+      store.lexicalSearch({ query: "message", projectKey: "project-alpha", role: "user", limit: 10 }),
+    );
+    expect(scoped.map((hit) => hit.row.text)).toEqual(["First message"]);
+    expect(scoped.map((hit) => hit.row.projectKey)).toEqual(["project-alpha"]);
+    expect(scoped.map((hit) => hit.row.role)).toEqual(["user"]);
+
+    // Single-provider allow-list narrows the MATCH itself via the provider
+    // scope token — still returns exact, untouched text.
+    const singleProvider = await withStore(path, (store) =>
+      store.lexicalSearch({ query: "message", providers: ["opencode"], limit: 10 }),
+    );
+    expect(singleProvider.map((hit) => hit.row.text).sort()).toEqual(["First message", "Second message"]);
+    expect(singleProvider.every((hit) => hit.row.provider === "opencode")).toBe(true);
+
+    // Multi-provider allow-list can't be a single AND-ed scope token, so it
+    // falls through to the provider IN (...) backstop — text integrity holds.
+    const multiProvider = await withStore(path, (store) =>
+      store.lexicalSearch({ query: "message", providers: ["codex", "opencode"], limit: 10 }),
+    );
+    expect(multiProvider.map((hit) => hit.row.text).sort()).toEqual([
+      "First message",
+      "First message",
+      "Second message",
+      "Second message",
+    ]);
+  });
+
   test("round-trips host and identity scheme version provenance on read", async () => {
     const path = sqlitePath();
     const sessions = await withStore(
