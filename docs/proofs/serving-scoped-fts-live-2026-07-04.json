@@ -1,0 +1,227 @@
+{
+  "generatedAt": "2026-07-04T19:30:00.000Z",
+  "stage": "recovery deploy \u2014 live serving receipts for scoped-token FTS (sqlite-only surface)",
+  "environment": {
+    "image": "quasar-server:latest sha256:1992c139b442de605e6c3bef185fefab55f67fc1af32af4f4f78286b5ab300ac",
+    "container": "quasar-server-server-1 (running, healthy)",
+    "corpus": "live volume",
+    "lance": "deleted",
+    "volume": "quasar-server_quasar-data (quasar.sqlite 10.7GB; search.lance physically deleted)",
+    "embeddingProvider": "synthetic (pinned in compose)",
+    "endpoint": "http://localhost:7180",
+    "rollback": "/Users/guilhermecastro/quasar-backups/ cold backup (untouched)"
+  },
+  "bootMigration": {
+    "event": "store.migrate.fts_scoped_tokens",
+    "at": "2026-07-04T19:24:50.524Z",
+    "backfilledRows": 690765,
+    "rebuiltRows": 690765,
+    "elapsedMs": 64324.77
+  },
+  "queries": [
+    {
+      "query": "pulsar forge",
+      "label": "pulsar forge",
+      "filters": {
+        "projectKey": "git:github.com/skastr0/pulsar",
+        "role": "assistant"
+      },
+      "warmups": 5,
+      "samples": 60,
+      "limit": 10,
+      "returnedHits": 10,
+      "scopeTokenInText": false,
+      "minMs": 19.14,
+      "medianMs": 19.99,
+      "p95Ms": 20.77,
+      "p99Ms": 21.02,
+      "maxMs": 21.02
+    },
+    {
+      "query": "pulsar search",
+      "label": "pulsar search",
+      "filters": {
+        "projectKey": "git:github.com/skastr0/pulsar",
+        "role": "assistant"
+      },
+      "warmups": 5,
+      "samples": 60,
+      "limit": 10,
+      "returnedHits": 10,
+      "scopeTokenInText": false,
+      "minMs": 13.79,
+      "medianMs": 16.29,
+      "p95Ms": 17.28,
+      "p99Ms": 18.83,
+      "maxMs": 18.83
+    },
+    {
+      "query": "agent workflow",
+      "label": "agent workflow",
+      "filters": {
+        "projectKey": "git:github.com/skastr0/pulsar",
+        "role": "assistant"
+      },
+      "warmups": 5,
+      "samples": 60,
+      "limit": 10,
+      "returnedHits": 10,
+      "scopeTokenInText": false,
+      "minMs": 16.04,
+      "medianMs": 17.26,
+      "p95Ms": 19.73,
+      "p99Ms": 49.31,
+      "maxMs": 49.31
+    },
+    {
+      "query": "tower readiness",
+      "label": "tower readiness",
+      "filters": {
+        "projectKey": "git:github.com/skastr0/pulsar",
+        "role": "assistant"
+      },
+      "warmups": 5,
+      "samples": 60,
+      "limit": 10,
+      "returnedHits": 10,
+      "scopeTokenInText": false,
+      "minMs": 13.07,
+      "medianMs": 13.95,
+      "p95Ms": 14.95,
+      "p99Ms": 18.88,
+      "maxMs": 18.88
+    },
+    {
+      "query": "pulsar forge",
+      "label": "pulsar forge (provider=claude)",
+      "filters": {
+        "projectKey": "git:github.com/skastr0/pulsar",
+        "role": "assistant",
+        "provider": "claude"
+      },
+      "warmups": 5,
+      "samples": 60,
+      "limit": 10,
+      "returnedHits": 10,
+      "scopeTokenInText": false,
+      "minMs": 13.46,
+      "medianMs": 14.31,
+      "p95Ms": 15.29,
+      "p99Ms": 16.98,
+      "maxMs": 16.98
+    },
+    {
+      "query": "agent workflow",
+      "label": "agent workflow (provider=codex)",
+      "filters": {
+        "projectKey": "git:github.com/skastr0/pulsar",
+        "role": "assistant",
+        "provider": "codex"
+      },
+      "warmups": 5,
+      "samples": 60,
+      "limit": 10,
+      "returnedHits": 10,
+      "scopeTokenInText": false,
+      "minMs": 24.9,
+      "medianMs": 27.64,
+      "p95Ms": 28.73,
+      "p99Ms": 29.62,
+      "maxMs": 29.62
+    }
+  ],
+  "ready": [
+    {
+      "status": 200,
+      "elapsedMs": 1.04,
+      "body": {
+        "ok": true,
+        "command": "ready",
+        "data": {
+          "modes": {
+            "lexical": true,
+            "semantic": false,
+            "fusion": false
+          },
+          "reason": "semantic pending vector materialization"
+        }
+      }
+    },
+    {
+      "status": 200,
+      "elapsedMs": 0.92,
+      "body": {
+        "ok": true,
+        "command": "ready",
+        "data": {
+          "modes": {
+            "lexical": true,
+            "semantic": false,
+            "fusion": false
+          },
+          "reason": "semantic pending vector materialization"
+        }
+      }
+    },
+    {
+      "status": 200,
+      "elapsedMs": 0.5,
+      "body": {
+        "ok": true,
+        "command": "ready",
+        "data": {
+          "modes": {
+            "lexical": true,
+            "semantic": false,
+            "fusion": false
+          },
+          "reason": "semantic pending vector materialization"
+        }
+      }
+    }
+  ],
+  "semanticDisabled": {
+    "status": 503,
+    "elapsedMs": 0.49,
+    "body": {
+      "ok": false,
+      "route": "search/semantic",
+      "error": {
+        "type": "SemanticDisabled",
+        "message": "semantic search disabled pending vector materialization (QSR-232)"
+      }
+    }
+  },
+  "cliSmoke": {
+    "command": "quasar search --query \"lancedb optimize\" --mode lexical --limit 3",
+    "exitCode": 0,
+    "endToEndMs": 306.0,
+    "matches": 3,
+    "serverReceipt": {
+      "route": "search/lexical",
+      "mode": "lexical",
+      "query": "lancedb optimize",
+      "limit": 3,
+      "statusCode": 200,
+      "searchMs": 96,
+      "totalMs": 96,
+      "matches": 3
+    },
+    "textClean": true,
+    "note": "corpus-wide unfiltered query (no projectKey/role); output is clean JSON with readable text, no scope-token prefixes"
+  },
+  "gate": {
+    "filteredLexicalP95Under100ms": true,
+    "worstFilteredP95Ms": 28.73,
+    "readyUnder100ms": true,
+    "readyModes": {
+      "lexical": true,
+      "semantic": false,
+      "fusion": false
+    },
+    "semanticEnvelopeCorrect": true,
+    "noScopeTokenInReturnedText": true,
+    "cliSmokeClean": true,
+    "passed": true
+  }
+}
