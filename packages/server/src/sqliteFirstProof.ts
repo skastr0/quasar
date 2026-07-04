@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 import { performance } from "node:perf_hooks";
 
 import { embeddingProfileFromEnv, type EmbeddingProfile } from "./embeddingProfiles";
+import type { Embedder } from "./embeddings";
 import { fts5QueryForText, positiveInt } from "./fts5";
 
 const SEARCHABLE_ROLES = ["user", "assistant", "reasoning"] as const;
@@ -65,6 +66,29 @@ export interface ExactScanReport {
   };
 }
 
+export interface EmbeddingParityReport {
+  readonly cachedProfile: EmbeddingProfile;
+  readonly localProfile: EmbeddingProfile;
+  readonly requestedSampleSize: number;
+  readonly eligibleCachedMessages: number;
+  readonly sampleSize: number;
+  readonly batchSize: number;
+  readonly threshold: number;
+  readonly passed: boolean;
+  readonly elapsedMs: number;
+  readonly scores: {
+    readonly min: number;
+    readonly mean: number;
+    readonly p50: number;
+    readonly p95: number;
+  };
+  readonly belowThreshold: readonly {
+    readonly sessionId: string;
+    readonly seq: number;
+    readonly score: number;
+  }[];
+}
+
 export interface SqliteFirstProofReport {
   readonly generatedAt: string;
   readonly sourceDb: string;
@@ -74,6 +98,7 @@ export interface SqliteFirstProofReport {
   readonly fts: FtsProofReport;
   readonly vectors: VectorMaterializationReport;
   readonly exactScan: ExactScanReport;
+  readonly embeddingParity?: EmbeddingParityReport;
 }
 
 export interface SqliteFirstProofOptions {
@@ -88,7 +113,9 @@ export interface SqliteFirstProofOptions {
 
 export type SqliteFirstProofErrorCode =
   | "work_db_exists"
-  | "mixed_vector_dimensions";
+  | "mixed_vector_dimensions"
+  | "invalid_parity_threshold"
+  | "parity_embedder_short_response";
 
 export class SqliteFirstProofError extends Error {
   constructor(
@@ -254,6 +281,143 @@ const vectorMagnitude = (vector: readonly number[]): number => {
   let sum = 0;
   for (const value of vector) sum += value * value;
   return Math.sqrt(sum);
+};
+
+const quantile = (sortedValues: readonly number[], q: number): number => {
+  if (sortedValues.length === 0) return 0;
+  const index = Math.min(sortedValues.length - 1, Math.max(0, Math.ceil(q * sortedValues.length) - 1));
+  return sortedValues[index] ?? 0;
+};
+
+const cosineNumbers = (a: readonly number[], b: readonly number[]): number => {
+  const aMagnitude = vectorMagnitude(a);
+  const bMagnitude = vectorMagnitude(b);
+  if (aMagnitude === 0 || bMagnitude === 0) return 0;
+  let dot = 0;
+  const length = Math.min(a.length, b.length);
+  for (let index = 0; index < length; index += 1) dot += (a[index] ?? 0) * (b[index] ?? 0);
+  return dot / (aMagnitude * bMagnitude);
+};
+
+type CachedParityCandidate = {
+  readonly sessionId: string;
+  readonly seq: number;
+  readonly text: string;
+  readonly cachedVector: readonly number[];
+};
+
+const selectCachedParityCandidates = (
+  db: Database,
+  profile: EmbeddingProfile,
+  requestedSampleSize: number,
+): { readonly eligibleCachedMessages: number; readonly sample: readonly CachedParityCandidate[] } => {
+  const selectCache = db.query(`
+    SELECT vector_json AS vectorJson
+    FROM embedding_cache
+    WHERE model = $model AND content_hash = $contentHash
+  `);
+  const messages = db.query(`
+    SELECT session_id AS sessionId, seq, text
+    FROM messages
+    WHERE role IN ('user', 'assistant', 'reasoning')
+    ORDER BY session_id, seq
+  `);
+  const cachedRows = (): Iterable<{ sessionId: string; seq: number; text: string; vectorJson: string }> => ({
+    *[Symbol.iterator]() {
+      for (const row of messages.iterate() as Iterable<{ sessionId: string; seq: number; text: string }>) {
+        const documentHash = documentCacheKey(row.text, profile);
+        const cached = selectCache.get({
+          $model: profile.cacheNamespace,
+          $contentHash: documentHash,
+        }) as { vectorJson: string } | null;
+        if (cached !== null) yield { ...row, vectorJson: cached.vectorJson };
+      }
+    },
+  });
+
+  let eligibleCachedMessages = 0;
+  for (const _row of cachedRows()) eligibleCachedMessages += 1;
+
+  const sampleSize = Math.min(requestedSampleSize, eligibleCachedMessages);
+  if (sampleSize === 0) return { eligibleCachedMessages, sample: [] };
+  const positions = new Set(
+    Array.from({ length: sampleSize }, (_value, index) =>
+      sampleSize === 1 ? 0 : Math.floor((index * (eligibleCachedMessages - 1)) / (sampleSize - 1))),
+  );
+
+  const sample: CachedParityCandidate[] = [];
+  let cachedIndex = 0;
+  for (const row of cachedRows()) {
+    if (positions.has(cachedIndex)) {
+      sample.push({
+        sessionId: row.sessionId,
+        seq: row.seq,
+        text: row.text,
+        cachedVector: JSON.parse(row.vectorJson) as readonly number[],
+      });
+    }
+    cachedIndex += 1;
+  }
+  return { eligibleCachedMessages, sample };
+};
+
+export const measureEmbeddingParity = async (
+  db: Database,
+  cachedProfile: EmbeddingProfile,
+  localProfile: EmbeddingProfile,
+  embedder: Embedder,
+  options: { readonly sampleSize: number; readonly threshold: number; readonly batchSize?: number },
+): Promise<EmbeddingParityReport> => {
+  const requestedSampleSize = positiveInt(options.sampleSize, 1_000);
+  const batchSize = positiveInt(options.batchSize, 32);
+  const threshold = options.threshold;
+  if (!Number.isFinite(threshold) || threshold <= 0 || threshold > 1) {
+    throw new SqliteFirstProofError("invalid_parity_threshold", `invalid parity threshold: ${threshold}`);
+  }
+
+  const startedAt = performance.now();
+  const { eligibleCachedMessages, sample } = selectCachedParityCandidates(db, cachedProfile, requestedSampleSize);
+  const scores: number[] = [];
+  const belowThreshold: Array<{ readonly sessionId: string; readonly seq: number; readonly score: number }> = [];
+
+  for (let offset = 0; offset < sample.length; offset += batchSize) {
+    const batch = sample.slice(offset, offset + batchSize);
+    const inputs = batch.map((row) => documentEmbeddingInput(row.text, localProfile));
+    const localVectors = await embedder.embedMany(inputs);
+    for (let index = 0; index < batch.length; index += 1) {
+      const row = batch[index]!;
+      const localVector = localVectors[index];
+      if (localVector === undefined) {
+        throw new SqliteFirstProofError("parity_embedder_short_response", `local embedder returned too few vectors for parity batch at offset ${offset}`);
+      }
+      const score = cosineNumbers(row.cachedVector, localVector);
+      scores.push(score);
+      if (score < threshold && belowThreshold.length < 20) {
+        belowThreshold.push({ sessionId: row.sessionId, seq: row.seq, score });
+      }
+    }
+  }
+
+  const sorted = [...scores].sort((a, b) => a - b);
+  const mean = scores.length === 0 ? 0 : scores.reduce((sum, value) => sum + value, 0) / scores.length;
+  return {
+    cachedProfile,
+    localProfile,
+    requestedSampleSize,
+    eligibleCachedMessages,
+    sampleSize: sample.length,
+    batchSize,
+    threshold,
+    passed: sample.length === requestedSampleSize && belowThreshold.length === 0,
+    elapsedMs: Math.round((performance.now() - startedAt) * 100) / 100,
+    scores: {
+      min: sorted[0] ?? 0,
+      mean,
+      p50: quantile(sorted, 0.5),
+      p95: quantile(sorted, 0.95),
+    },
+    belowThreshold,
+  };
 };
 
 export const materializeProofVectors = (

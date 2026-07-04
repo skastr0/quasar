@@ -3,15 +3,23 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { Database } from "bun:sqlite";
 
 import { embeddingProfileFromEnv } from "./embeddingProfiles";
-import { runSqliteFirstProof } from "./sqliteFirstProof";
+import { makeLocalOnnxEmbedder } from "./localOnnxEmbeddings";
+import { measureEmbeddingParity, runSqliteFirstProof, type SqliteFirstProofReport } from "./sqliteFirstProof";
 
 const args = process.argv.slice(2);
 
 const valueFor = (name: string, fallback?: string): string | undefined => {
   const index = args.lastIndexOf(name);
-  return index === -1 ? fallback : args[index + 1] ?? fallback;
+  if (index === -1) return fallback;
+  const value = args[index + 1];
+  if (value === undefined || value.startsWith("--")) {
+    console.error(`Missing value for ${name}`);
+    process.exit(1);
+  }
+  return value;
 };
 
 const hasFlag = (name: string): boolean => args.includes(name);
@@ -24,6 +32,20 @@ const numberFor = (name: string, fallback: number): number => {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 };
 
+const optionalPositiveIntFor = (name: string): number | undefined => {
+  const raw = valueFor(name);
+  if (raw === undefined) return undefined;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+};
+
+const optionalUnitNumberFor = (name: string): number | undefined => {
+  const raw = valueFor(name);
+  if (raw === undefined) return undefined;
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) && parsed > 0 && parsed <= 1 ? parsed : undefined;
+};
+
 const usage = () => {
   console.log(`Usage:
   bun run proof:sqlite-first --source-db /path/to/quasar.sqlite [--work-db /tmp/proof.sqlite] [--out docs/proofs/sqlite-first-proof.json]
@@ -33,10 +55,16 @@ Options:
   --work-db         Optional. Destination proof DB. Must not already exist.
   --out             Optional JSON report path. Defaults under docs/proofs/.
   --query           Repeatable FTS query. Defaults to a small built-in set.
+  --cache-namespace Override the embedding cache namespace inspected for saved vectors.
   --vector-limit    Rows to materialize into proof_message_vectors. Default 20000; use "all" for all rows.
   --scan-limit      Rows to pure-JS exact-scan. Defaults to vector-limit.
+  --parity-sample   Optional local-vs-cached parity sample size. Use at least 1000 for the QSR-229 gate.
+  --parity-threshold Required with --parity-sample. Cosine threshold in (0, 1].
+  --parity-batch-size Local ONNX batch size for parity. Default 32.
+  --onnx-cache-dir  Optional Hugging Face/ONNX model cache directory.
 
 The source database is opened read-only. FTS and vector proof tables are created only in the work DB.
+Parity reads cached vectors from the work DB snapshot and embeds the sampled text locally; it does not write to either database.
 `);
 };
 
@@ -58,15 +86,58 @@ const outPath = valueFor("--out", `docs/proofs/sqlite-first-proof-${generatedAt}
 const queries = args.flatMap((arg, index) => (arg === "--query" && args[index + 1] !== undefined ? [args[index + 1]!] : []));
 const vectorLimit = numberFor("--vector-limit", 20_000);
 const exactScanLimit = numberFor("--scan-limit", vectorLimit);
+const paritySample = optionalPositiveIntFor("--parity-sample");
+const parityThreshold = optionalUnitNumberFor("--parity-threshold");
+const parityBatchSize = optionalPositiveIntFor("--parity-batch-size") ?? 32;
+const baseProfile = embeddingProfileFromEnv();
+const profile = {
+  ...baseProfile,
+  cacheNamespace: valueFor("--cache-namespace", baseProfile.cacheNamespace)!,
+};
 
-const report = runSqliteFirstProof({
+if (paritySample !== undefined && parityThreshold === undefined) {
+  usage();
+  console.error("Missing required --parity-threshold for --parity-sample");
+  process.exit(1);
+}
+
+let report: SqliteFirstProofReport = runSqliteFirstProof({
   sourceDb: resolve(sourceDb),
   workDb: resolve(workDb!),
-  profile: embeddingProfileFromEnv(),
+  profile,
   queries: queries.length > 0 ? queries : undefined,
   vectorLimit,
   exactScanLimit,
 });
+
+if (paritySample !== undefined && parityThreshold !== undefined) {
+  const localProfile = {
+    ...profile,
+    cacheNamespace: valueFor(
+      "--parity-local-cache-namespace",
+      `local-proof:${profile.model}:${profile.dimensions}:${profile.task}`,
+    )!,
+  };
+  const db = new Database(report.workDb, { readonly: true });
+  try {
+    report = {
+      ...report,
+      embeddingParity: await measureEmbeddingParity(
+        db,
+        profile,
+        localProfile,
+        makeLocalOnnxEmbedder(localProfile, { cacheDir: valueFor("--onnx-cache-dir") }),
+        {
+          sampleSize: paritySample,
+          threshold: parityThreshold,
+          batchSize: parityBatchSize,
+        },
+      ),
+    };
+  } finally {
+    db.close();
+  }
+}
 
 mkdirSync(dirname(resolve(outPath)), { recursive: true });
 writeFileSync(outPath, `${JSON.stringify(report, null, 2)}\n`);
