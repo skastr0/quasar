@@ -35,6 +35,7 @@
     "server:lance": "bun scripts/server-ops.mjs lance",
     "server:maintain": "bun scripts/server-ops.mjs maintain",
     "server:materialize": "bun scripts/server-ops.mjs materialize",
+    "server:materialize-staging": "bun scripts/server-ops.mjs materialize-staging",
     "server:backup": "bun scripts/server-ops.mjs backup",
     "proof:retrieval": "bun scripts/compare-local-search.mjs",
     "proof:materialize-staging": "bun scripts/materialize-staging-proof.mjs",

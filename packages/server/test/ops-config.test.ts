@@ -16,6 +16,7 @@ describe("server ops config", () => {
     expect(compose).toContain("QUASAR_EMBEDDING_PROVIDER: ${QUASAR_EMBEDDING_PROVIDER:-local}");
     expect(compose).toContain("QUASAR_EMBEDDING_MODEL_CACHE_DIR: ${QUASAR_EMBEDDING_MODEL_CACHE_DIR:-/data/quasar/models}");
     expect(compose).toContain("SYNTHETIC_API_KEY: ${SYNTHETIC_API_KEY:-}");
+    expect(dockerfile).toContain("COPY scripts ./scripts");
     expect(dockerfile).toContain('CMD ["bun", "packages/server/src/main.ts"');
     expect(dockerfile).toContain("/health");
     expect(dockerfile).not.toContain("packages/server/src/cli.ts");
@@ -31,11 +32,13 @@ describe("server ops config", () => {
     expect(pkg).toContain("server:lance");
     expect(pkg).toContain("server:backup");
     expect(pkg).toContain("server:materialize");
+    expect(pkg).toContain("server:materialize-staging");
     expect(pkg).toContain("proof:materialize-staging");
     expect(pkg).toContain("server:ready");
     expect(pkg).toContain("server:health");
     expect(ops).toContain("case \"maintain\"");
     expect(ops).toContain("case \"materialize\"");
+    expect(ops).toContain("case \"materialize-staging\"");
     expect(ops).toContain("case \"lance\"");
     expect(ops).toContain("case \"ready\"");
     expect(ops).toContain('getJson("/ready")');
@@ -44,6 +47,12 @@ describe("server ops config", () => {
     expect(ops).toContain("VACUUM INTO");
     expect(ops).toContain("quasar-truth-backup.tar");
     expect(ops).toContain("materialize-embedding-vectors");
+    expect(ops).toContain("quasar-server_quasar-data");
+    expect(ops).toContain("type=volume,source=");
+    expect(ops).toContain("target=/source,readonly");
+    expect(ops).toContain("mkdtempSync(join(tmpdir(), \"quasar-materialize-staging-proof-out-\")");
+    expect(ops).toContain("copyFileSync(join(proofDir, outFile), outPath)");
+    expect(ops).not.toContain('optionValue("--image"');
     expect(ops).toContain('if (command !== "materialize")');
     expect(ops).toContain('optionValue("--require-provider", "local")');
     expect(ops).toContain("--require-provider");
@@ -58,6 +67,8 @@ describe("server ops config", () => {
     expect(runbook).toContain("embedding.provider = local");
     expect(runbook).toContain("Staged Local Materialization Proof");
     expect(runbook).toContain("proof:materialize-staging --source-db");
+    expect(runbook).toContain("server:materialize-staging --out");
+    expect(runbook).toContain("quasar-server_quasar-data");
     expect(runbook).toContain("QUASAR_EMBEDDING_PROVIDER=local");
   });
 

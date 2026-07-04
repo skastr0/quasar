@@ -13,6 +13,7 @@ COPY packages/cli/package.json packages/cli/package.json
 RUN bun install --frozen-lockfile
 
 COPY packages ./packages
+COPY scripts ./scripts
 
 ENV NODE_ENV=production \
   QUASAR_LOCAL_HOME=/data/quasar \

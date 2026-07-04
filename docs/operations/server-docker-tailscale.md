@@ -292,6 +292,21 @@ a wrapped receipt that includes the normal materialization closure gates plus th
 staging `workDb` and `searchDir`. The source database is opened read-only and is
 never used as the running server database.
 
+For the Docker volume corpus, use the one-off container wrapper so the host does
+not need both a source copy and a staged copy:
+
+```bash
+bun run server:materialize-staging --out docs/proofs/materialize-staging-docker.json \
+  --limit 1000 \
+  --max-batches 100000
+```
+
+This builds an image from the current checkout, mounts the `quasar-server_quasar-data`
+Docker volume read-only at `/source`, runs the same staging proof against
+`/source/quasar.sqlite`, and bind-mounts only the JSON proof output directory back
+to the host. It does not recreate the live service and does not use the live
+SQLite file as the running server database.
+
 ## Ingesting from another Tailscale machine
 
 Install the released CLI on the other machine, point it at the `svc:quasar`
