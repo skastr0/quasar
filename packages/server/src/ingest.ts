@@ -29,15 +29,6 @@ export const enqueueDownstreamJobs = (queue: DurableQueueService, session: Mappe
     const embeddingJobNamespace = embeddingProfileJobNamespace(embeddingProfileFromEnv());
     const embeddingMaxAttempts = EMBEDDING_JOB_MAX_ATTEMPTS;
     const messages = searchableMessages(session);
-    yield* queue.enqueue({
-      kind: "index-session",
-      payload: {
-        sessionId: session.session.sessionId,
-        projectKey: session.session.projectKey,
-        sourceFingerprint: session.session.sourceFingerprint,
-      },
-      idempotencyKey: `index-session:${session.session.sessionId}`,
-    });
     yield* Effect.forEach(
       messages,
       (message) =>
@@ -56,7 +47,7 @@ export const enqueueDownstreamJobs = (queue: DurableQueueService, session: Mappe
         }),
       { concurrency: 16 },
     );
-    return 1 + messages.length;
+    return messages.length;
   });
 
 export const ingestMappedSession = (

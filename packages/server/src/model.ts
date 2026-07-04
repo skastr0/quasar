@@ -93,30 +93,3 @@ export interface MappedSession {
   readonly messages: readonly MessageRow[];
   readonly toolCalls: readonly ToolCallRow[];
 }
-
-/** Cheap session-version snapshot used to guard index verification against a
- * concurrent re-ingest (TOCTOU) between reading SQLite truth and Lance truth. */
-export interface SessionVersion {
-  readonly updatedAt: string | null;
-  readonly messageCount: number;
-}
-
-/** One session's divergence between the SQLite searchable set and the Lance
- * index, stored in the divergence-only ledger. `missing` = expected-but-absent,
- * `stale` = present-but-wrong-content, `extra` = present-but-not-expected. */
-export interface DivergenceRow {
-  readonly sessionId: string;
-  readonly expected: number;
-  readonly present: number;
-  readonly missingKeys: readonly string[];
-  readonly staleKeys: readonly string[];
-  readonly extraKeys: readonly string[];
-}
-
-/** O(divergent) roll-up that feeds the readiness gate without scanning the corpus. */
-export interface DivergenceAggregate {
-  readonly sessions: number;
-  readonly missing: number;
-  readonly stale: number;
-  readonly extra: number;
-}

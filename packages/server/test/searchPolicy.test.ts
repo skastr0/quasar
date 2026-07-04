@@ -2,12 +2,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { LanceDb, makeLanceDbLayer } from "../src/lancedb";
 import { afterEach, describe, expect, test } from "bun:test";
-import { Effect, Layer } from "effect";
+import { Effect } from "effect";
 
 import type { MappedSession } from "../src/model";
-import { DerivedSearch, DerivedSearchLive } from "../src/search";
 import { decideSearchDocument, isSearchableRole } from "../src/searchPolicy";
 import { LocalStore, makeLocalStoreLayer } from "../src/store";
 
@@ -25,17 +23,9 @@ afterEach(() => {
   }
 });
 
-const withSearch = <A>(
-  run: Effect.Effect<A, unknown, LocalStore | LanceDb | DerivedSearch>,
-) => {
+const withStore = <A>(run: Effect.Effect<A, unknown, LocalStore>) => {
   const sqlite = join(tempDir(), "quasar.sqlite");
-  const lance = join(tempDir(), "search.lance");
-  const dataLayer = Layer.mergeAll(
-    makeLocalStoreLayer(sqlite),
-    makeLanceDbLayer({ dataDir: lance }),
-  );
-  const searchLayer = DerivedSearchLive.pipe(Layer.provide(dataLayer));
-  return Effect.runPromise(run.pipe(Effect.provide(Layer.merge(dataLayer, searchLayer))));
+  return Effect.runPromise(run.pipe(Effect.provide(makeLocalStoreLayer(sqlite))));
 };
 
 const reasoningSession = (text: string): MappedSession => ({
@@ -86,60 +76,30 @@ describe("searchPolicy — reasoning role", () => {
     expect(decision.reason).toBe("semantic-eligible");
   });
 
-  test("reasoning message is indexed and findable via lexical search", async () => {
-    const [report, hits] = await withSearch(
+  test("reasoning message is findable via lexical search immediately after ingest", async () => {
+    const hits = await withStore(
       Effect.gen(function* () {
         const store = yield* LocalStore;
-        const derived = yield* DerivedSearch;
         yield* store.upsertSession(reasoningSession("the model struggled on this edge case deeply"));
-        const report = yield* derived.indexSession("session-r");
-        yield* derived.createLexicalIndex;
-        const hits = yield* derived.lexicalSearch({ query: "struggled", limit: 10 });
-        return [report, hits] as const;
+        return yield* store.lexicalSearch({ query: "struggled", limit: 10 });
       }),
     );
 
-    expect(report.rowsUpserted).toBe(1);
-    expect(report.semanticRowsUpserted).toBe(1);
     expect(hits.length).toBe(1);
     expect(hits[0]?.row.role).toBe("reasoning");
-    expect(hits[0]?.row.text).toContain("struggled");
+    expect(String(hits[0]?.row.text)).toContain("struggled");
   });
 
   test("reasoning role filter passes through to lexical search without zero results", async () => {
-    const hits = await withSearch(
+    const hits = await withStore(
       Effect.gen(function* () {
         const store = yield* LocalStore;
-        const derived = yield* DerivedSearch;
         yield* store.upsertSession(reasoningSession("deep analysis of the token budget tradeoff"));
-        yield* derived.indexSession("session-r");
-        yield* derived.createLexicalIndex;
-        return yield* derived.lexicalSearch({ query: "token", role: "reasoning", limit: 10 });
+        return yield* store.lexicalSearch({ query: "token", role: "reasoning", limit: 10 });
       }),
     );
 
     expect(hits.length).toBe(1);
     expect(hits[0]?.row.role).toBe("reasoning");
-  });
-
-  test("reasoning row gets unembedded contentHash prefix marking it semantic-eligible", async () => {
-    const rows = await withSearch(
-      Effect.gen(function* () {
-        const store = yield* LocalStore;
-        const derived = yield* DerivedSearch;
-        const search = yield* LanceDb;
-        yield* store.upsertSession(reasoningSession("semantic eligibility check"));
-        yield* derived.indexSession("session-r");
-        return yield* search.readMessageRowsBySession({
-          sessionId: "session-r",
-          select: ["contentHash", "role"],
-        });
-      }),
-    );
-
-    expect(rows.length).toBe(1);
-    const row = rows[0];
-    expect(String(row?.contentHash).startsWith("unembedded:")).toBe(true);
-    expect(row?.role).toBe("reasoning");
   });
 });

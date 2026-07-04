@@ -45,9 +45,6 @@ export const profileCacheNamespace = (profile: Omit<EmbeddingProfile, "cacheName
 export const embeddingProfileJobNamespace = (profile: Pick<EmbeddingProfile, "cacheNamespace">): string =>
   profile.cacheNamespace;
 
-export const embeddingProfileSearchTable = (profile: EmbeddingProfile): string =>
-  `messages_${Buffer.from(profile.cacheNamespace).toString("base64url").slice(0, 24)}`;
-
 const sha256Short = (value: string): string =>
   createHash("sha256").update(value).digest("hex").slice(0, 16);
 

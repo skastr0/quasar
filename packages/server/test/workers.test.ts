@@ -2,15 +2,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { LanceDb, makeLanceDbLayer } from "../src/lancedb";
 import { afterEach, describe, expect, test } from "bun:test";
 import { Effect, Layer } from "effect";
 
-import { embeddingProfileSearchTable, makeEmbeddingProfile } from "../src/embeddingProfiles";
+import { makeEmbeddingProfile } from "../src/embeddingProfiles";
 import { makeEmbeddingsLayer, type Embedder } from "../src/embeddings";
-import { SearchMaintenance, SearchMaintenanceLive } from "../src/maintenance";
 import type { MappedSession } from "../src/model";
-import { DerivedSearch, DerivedSearchLive } from "../src/search";
 import { DurableQueue, Embeddings, makeDurableQueueLayer, WorkerSupervisor } from "../src/services";
 import { LocalStore, makeLocalStoreLayer } from "../src/store";
 import { WorkerSupervisorLive } from "../src/workers";
@@ -55,31 +52,27 @@ const mappedSession = (): MappedSession => ({
   toolCalls: [],
 });
 
-const withWorkers = <A>(run: Effect.Effect<A, unknown, LocalStore | LanceDb | DurableQueue | DerivedSearch | SearchMaintenance | Embeddings | WorkerSupervisor>) => {
+const withWorkers = <A>(run: Effect.Effect<A, unknown, LocalStore | DurableQueue | Embeddings | WorkerSupervisor>) => {
   const sqlite = join(tempDir(), "quasar.sqlite");
-  const lance = join(tempDir(), "search.lance");
   const embedder: Embedder = { embedMany: async () => [vector()] };
-  const dataLayer = Layer.mergeAll(makeLocalStoreLayer(sqlite), makeLanceDbLayer({ dataDir: lance }));
+  const dataLayer = makeLocalStoreLayer(sqlite);
   const queueLayer = makeDurableQueueLayer(sqlite);
-  const searchLayer = DerivedSearchLive.pipe(Layer.provide(dataLayer));
   const embeddingsLayer = makeEmbeddingsLayer({
     sqlite,
     profile: workerEmbeddingProfile,
     embedder,
   }).pipe(Layer.provide(Layer.merge(dataLayer, queueLayer)));
-  const maintenanceLayer = SearchMaintenanceLive.pipe(Layer.provide(Layer.mergeAll(dataLayer, queueLayer, searchLayer)));
-  const workersLayer = WorkerSupervisorLive.pipe(Layer.provide(Layer.mergeAll(embeddingsLayer, maintenanceLayer)));
-  return Effect.runPromise(run.pipe(Effect.provide(Layer.mergeAll(dataLayer, queueLayer, searchLayer, embeddingsLayer, maintenanceLayer, workersLayer))));
+  const workersLayer = WorkerSupervisorLive.pipe(Layer.provide(embeddingsLayer));
+  return Effect.runPromise(run.pipe(Effect.provide(Layer.mergeAll(dataLayer, queueLayer, embeddingsLayer, workersLayer))));
 };
 
 describe("WorkerSupervisor", () => {
-  test("tickOnce processes embed/index/maintenance work and records reports", async () => {
-    const [status, queueStats, rows] = await withWorkers(
+  test("tickOnce drains embed-message work into SQLite message_vectors and records reports", async () => {
+    const [status, queueStats, vectors] = await withWorkers(
       Effect.gen(function* () {
         const store = yield* LocalStore;
         const queue = yield* DurableQueue;
         const workers = yield* WorkerSupervisor;
-        const search = yield* LanceDb;
         yield* store.upsertSession(mappedSession());
         yield* queue.enqueue({
           kind: "embed-message",
@@ -88,22 +81,23 @@ describe("WorkerSupervisor", () => {
         });
         const status = yield* workers.tickOnce;
         const queueStats = yield* queue.statsByKind;
-        const rows = yield* search.readMessageRowsBySession({ sessionId: "session-a", tableName: embeddingProfileSearchTable(workerEmbeddingProfile), select: ["contentHash"] });
-        return [status, queueStats, rows] as const;
+        const vectors = yield* store.listMessageVectorsBySession({
+          sessionId: "session-a",
+          model: workerEmbeddingProfile.cacheNamespace,
+        });
+        return [status, queueStats, vectors] as const;
       }),
     );
 
     expect(status.enabled).toBe(true);
-    expect(Object.keys(status.lastReports).sort()).toEqual(["embeddings", "index-repair", "maintenance", "reconcile"]);
+    expect(Object.keys(status.lastReports)).toEqual(["embeddings"]);
     expect(status.lastErrors).toEqual({});
-    // The rolling reconcile worker may enqueue a targeted index-session repair for a
-    // not-yet-indexed session; the contract asserted here is that the embed-message
-    // work was drained.
     expect(queueStats.filter((k) => k.kind === "embed-message" && k.pending + k.leased > 0)).toEqual([]);
-    expect(rows[0]?.contentHash).toBe("hash-a");
+    expect(vectors.length).toBe(1);
+    expect(vectors[0]?.contentHash).toBe("hash-a");
   });
 
-  test("workers are always on: status reflects all active workers", async () => {
+  test("workers are always on: status reflects the embedding worker", async () => {
     const status = await withWorkers(
       Effect.gen(function* () {
         const workers = yield* WorkerSupervisor;
@@ -112,6 +106,6 @@ describe("WorkerSupervisor", () => {
     );
 
     expect(status.enabled).toBe(true);
-    expect(status.workers).toEqual(["embeddings", "index-repair", "maintenance", "reconcile"]);
+    expect(status.workers).toEqual(["embeddings"]);
   });
 });

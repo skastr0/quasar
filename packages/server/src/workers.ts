@@ -1,6 +1,5 @@
 import { Effect, Layer, Ref } from "effect";
 
-import { SearchMaintenance } from "./maintenance";
 import { Embeddings, WorkerSupervisor, type WorkerSupervisorStatus } from "./services";
 
 // Tuning constants — no env overrides; workers always run.
@@ -8,8 +7,6 @@ const WORKER_IDLE_INTERVAL_MS = 5_000;
 const WORKER_BUSY_INTERVAL_MS = 100;
 const WORKER_LEASE_MS = 600_000;
 const EMBEDDING_BATCH_LIMIT = 1_000;
-const INDEX_BATCH_LIMIT = 100;
-const RECONCILE_BATCH = 200;
 
 const renderError = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const reportLeased = (report: unknown): number =>
@@ -21,10 +18,8 @@ export const WorkerSupervisorLive = Layer.scoped(
   WorkerSupervisor,
   Effect.gen(function* () {
     const embeddings = yield* Embeddings;
-    const maintenance = yield* SearchMaintenance;
 
-    const workers = ["embeddings", "index-repair", "maintenance", "reconcile"] as const;
-    const reconcileCursor = yield* Ref.make(0);
+    const workers = ["embeddings"] as const;
     const state = yield* Ref.make<WorkerSupervisorStatus>({
       enabled: true,
       workers: [...workers],
@@ -57,28 +52,9 @@ export const WorkerSupervisorLive = Layer.scoped(
       limit: EMBEDDING_BATCH_LIMIT,
       leaseMs: WORKER_LEASE_MS,
     });
-    const indexOnce = () => maintenance.repairOnce({
-      workerId: "index-worker",
-      limit: INDEX_BATCH_LIMIT,
-      leaseMs: WORKER_LEASE_MS,
-    });
-    const maintenanceOnce = () => maintenance.maintain();
-    // Rolling reconcile: verify+heal a batch of sessions per tick, advancing a cursor
-    // that wraps at the end of the corpus, so divergence is continuously re-derived
-    // and the divergence ledger the gate reads stays current — without a full scan.
-    const reconcileOnce = () =>
-      Effect.gen(function* () {
-        const offset = yield* Ref.get(reconcileCursor);
-        const report = yield* maintenance.reconcileFreshness({ limit: RECONCILE_BATCH, offset });
-        yield* Ref.set(reconcileCursor, report.sessionsChecked < RECONCILE_BATCH ? 0 : offset + RECONCILE_BATCH);
-        return report;
-      });
 
     const tickOnce = Effect.gen(function* () {
       yield* runWorker("embeddings", embeddingOnce());
-      yield* runWorker("index-repair", indexOnce());
-      yield* runWorker("maintenance", maintenanceOnce());
-      yield* runWorker("reconcile", reconcileOnce());
       return yield* Ref.get(state);
     });
 
@@ -90,9 +66,6 @@ export const WorkerSupervisorLive = Layer.scoped(
       }).pipe(Effect.forever, Effect.forkScoped);
 
     yield* loopWorker("embeddings", embeddingOnce);
-    yield* loopWorker("index-repair", indexOnce);
-    yield* loopWorker("maintenance", maintenanceOnce);
-    yield* loopWorker("reconcile", reconcileOnce);
 
     return WorkerSupervisor.of({
       status: Ref.get(state),
