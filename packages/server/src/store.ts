@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { performance } from "node:perf_hooks";
 import { Context, Effect, Layer, Schema } from "effect";
 
 import type { DivergenceAggregate, DivergenceRow, IngestRunRow, MappedSession, MessageRow, ProjectRow, SessionRow, SessionVersion, ToolCallRow } from "./model";
@@ -6,7 +7,7 @@ import type { IndexProof } from "./verify";
 import { messageSearchKey, type SearchHit } from "./lancedb";
 import { isSearchableRole, normalizeIndexedContentHash } from "./searchPolicy";
 import { ensureParentDir, sqlitePath } from "./paths";
-import { fts5QueryForText, positiveInt } from "./fts5";
+import { fts5QueryForText, ftsProjectScopeToken, positiveInt } from "./fts5";
 import { decodeFloat16Vector, encodeFloat16Vector, VECTOR_BLOB_ENCODING } from "./vectorBlob";
 
 export class SqliteStoreError extends Schema.TaggedError<SqliteStoreError>()(
@@ -167,8 +168,17 @@ const trySqlite = <A>(operation: string, run: () => A): Effect.Effect<A, SqliteS
       }),
   });
 
-const MESSAGES_FTS_MIGRATION_SQL = `
-  CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+// Scoped-token FTS (D1): the messages_fts `text` column is prefixed with bare
+// project/role/provider scope tokens ahead of the raw message text, so a
+// serving-path MATCH query can AND-join scope tokens with the user's query
+// terms. This whole shape (column + tokenized triggers) is versioned via
+// PRAGMA user_version and migrated exactly once — see
+// migrateMessagesFtsScopedTokens below — rather than re-created on every
+// boot like the rest of migrate()'s idempotent DDL.
+const FTS_SCOPED_TOKENS_SCHEMA_VERSION = 1;
+
+const MESSAGES_FTS_CREATE_SQL = `
+  CREATE VIRTUAL TABLE messages_fts USING fts5(
     text,
     key UNINDEXED,
     session_id UNINDEXED,
@@ -179,16 +189,34 @@ const MESSAGES_FTS_MIGRATION_SQL = `
     content_hash UNINDEXED,
     tokenize = 'unicode61'
   );
-  DROP TRIGGER IF EXISTS messages_fts_ai;
-  DROP TRIGGER IF EXISTS messages_fts_ad;
-  DROP TRIGGER IF EXISTS messages_fts_au;
-  CREATE TRIGGER IF NOT EXISTS messages_fts_ai
+`;
+
+// Role scope token as a pure-SQL CASE over the fixed searchable-role enum.
+// Matches fts5.ts ftsRoleScopeToken byte-for-byte for these three values
+// (already lowercase alnum, so 'r' + role is exact) — no SQL UDF needed.
+const ROLE_SCOPE_TOKEN_CASE_SQL = `
+      CASE NEW.role
+        WHEN 'user' THEN 'ruser'
+        WHEN 'assistant' THEN 'rassistant'
+        WHEN 'reasoning' THEN 'rreasoning'
+      END`;
+
+// Provider scope token derived in pure SQL from the session_id prefix before
+// the first ':'. Matches fts5.ts ftsProviderScopeToken + providerFromSessionId
+// for real session ids, which are always `${provider}:${hash}` (see
+// sessionIdFor in packages/cli/src/adapters/common.ts) with providers drawn
+// from the fixed lowercase-alnum Provider enum in provider.ts.
+const PROVIDER_SCOPE_TOKEN_SQL =
+  "('v' || lower(substr(NEW.session_id, 1, instr(NEW.session_id, ':') - 1)))";
+
+const MESSAGES_FTS_TRIGGERS_SQL = `
+  CREATE TRIGGER messages_fts_ai
   AFTER INSERT ON messages
   WHEN NEW.role IN ('user', 'assistant', 'reasoning')
   BEGIN
     INSERT INTO messages_fts(text, key, session_id, seq, role, project_key, provider, content_hash)
     VALUES (
-      NEW.text,
+      NEW.project_scope_token || ' ' || ${ROLE_SCOPE_TOKEN_CASE_SQL} || ' ' || ${PROVIDER_SCOPE_TOKEN_SQL} || ' ' || NEW.text,
       NEW.session_id || ':' || NEW.seq || ':' || NEW.role,
       NEW.session_id,
       NEW.seq,
@@ -201,18 +229,18 @@ const MESSAGES_FTS_MIGRATION_SQL = `
       'unembedded:' || NEW.content_hash
     );
   END;
-  CREATE TRIGGER IF NOT EXISTS messages_fts_ad
+  CREATE TRIGGER messages_fts_ad
   AFTER DELETE ON messages
   BEGIN
     DELETE FROM messages_fts WHERE key = OLD.session_id || ':' || OLD.seq || ':' || OLD.role;
   END;
-  CREATE TRIGGER IF NOT EXISTS messages_fts_au
+  CREATE TRIGGER messages_fts_au
   AFTER UPDATE ON messages
   BEGIN
     DELETE FROM messages_fts WHERE key = OLD.session_id || ':' || OLD.seq || ':' || OLD.role;
     INSERT INTO messages_fts(text, key, session_id, seq, role, project_key, provider, content_hash)
     SELECT
-      NEW.text,
+      NEW.project_scope_token || ' ' || ${ROLE_SCOPE_TOKEN_CASE_SQL} || ' ' || ${PROVIDER_SCOPE_TOKEN_SQL} || ' ' || NEW.text,
       NEW.session_id || ':' || NEW.seq || ':' || NEW.role,
       NEW.session_id,
       NEW.seq,
@@ -225,23 +253,131 @@ const MESSAGES_FTS_MIGRATION_SQL = `
       'unembedded:' || NEW.content_hash
     WHERE NEW.role IN ('user', 'assistant', 'reasoning');
   END;
-  INSERT INTO messages_fts(text, key, session_id, seq, role, project_key, provider, content_hash)
-  SELECT
-    m.text,
-    m.session_id || ':' || m.seq || ':' || m.role,
-    m.session_id,
-    m.seq,
-    m.role,
-    m.project_key,
-    CASE
-      WHEN instr(m.session_id, ':') > 0 THEN substr(m.session_id, 1, instr(m.session_id, ':') - 1)
-      ELSE m.session_id
-    END,
-    'unembedded:' || m.content_hash
-  FROM messages AS m
-  WHERE m.role IN ('user', 'assistant', 'reasoning')
-    AND NOT EXISTS (SELECT 1 FROM messages_fts AS f WHERE f.key = m.session_id || ':' || m.seq || ':' || m.role);
 `;
+
+const PROJECT_SCOPE_TOKEN_BACKFILL_BATCH = 5_000;
+const MESSAGES_FTS_REBUILD_CHUNK = 10_000;
+
+// Step 2 of migrateMessagesFtsScopedTokens: backfill project_scope_token for
+// every pre-existing messages row in JS batches of 5000 rows/txn (sha1 is
+// computed in JS via the stage-1 fts5.ts function, not a SQL UDF). Resumable:
+// re-running after a crash only touches rows still NULL.
+const backfillProjectScopeTokens = (db: Database): number => {
+  const selectBatch = db.query(
+    "SELECT rowid AS rowid, project_key AS projectKey FROM messages WHERE project_scope_token IS NULL ORDER BY rowid ASC LIMIT ?",
+  );
+  const updateRow = db.prepare("UPDATE messages SET project_scope_token = ? WHERE rowid = ?");
+  const runBatch = db.transaction((rows: readonly { rowid: number; projectKey: string }[]) => {
+    for (const row of rows) {
+      updateRow.run(ftsProjectScopeToken(row.projectKey), row.rowid);
+    }
+  });
+  let backfilled = 0;
+  while (true) {
+    const rows = selectBatch.all(PROJECT_SCOPE_TOKEN_BACKFILL_BATCH) as Array<{ rowid: number; projectKey: string }>;
+    if (rows.length === 0) break;
+    runBatch(rows);
+    backfilled += rows.length;
+  }
+  return backfilled;
+};
+
+// Step 3 of migrateMessagesFtsScopedTokens: bulk-rebuild messages_fts from
+// messages in chunked (10k row) transactions, computing the same
+// token-prefixed text the triggers now write, via the same pure-SQL
+// expressions (kept textually identical to MESSAGES_FTS_TRIGGERS_SQL above).
+const rebuildMessagesFtsInChunks = (db: Database): number => {
+  const selectChunkRowids = db.query(
+    `SELECT rowid AS rowid FROM messages
+     WHERE role IN ('user', 'assistant', 'reasoning') AND rowid > ?
+     ORDER BY rowid ASC LIMIT ?`,
+  );
+  const insertChunk = db.prepare(`
+    INSERT INTO messages_fts(text, key, session_id, seq, role, project_key, provider, content_hash)
+    SELECT
+      m.project_scope_token || ' ' ||
+      CASE m.role
+        WHEN 'user' THEN 'ruser'
+        WHEN 'assistant' THEN 'rassistant'
+        WHEN 'reasoning' THEN 'rreasoning'
+      END || ' ' ||
+      ('v' || lower(substr(m.session_id, 1, instr(m.session_id, ':') - 1))) || ' ' ||
+      m.text,
+      m.session_id || ':' || m.seq || ':' || m.role,
+      m.session_id,
+      m.seq,
+      m.role,
+      m.project_key,
+      CASE
+        WHEN instr(m.session_id, ':') > 0 THEN substr(m.session_id, 1, instr(m.session_id, ':') - 1)
+        ELSE m.session_id
+      END,
+      'unembedded:' || m.content_hash
+    FROM messages AS m
+    WHERE m.rowid >= $startRowid AND m.rowid <= $endRowid
+      AND m.role IN ('user', 'assistant', 'reasoning')
+  `);
+  const runChunk = db.transaction((startRowid: number, endRowid: number) => {
+    insertChunk.run({ $startRowid: startRowid, $endRowid: endRowid });
+  });
+
+  let lastRowid = 0;
+  let rebuilt = 0;
+  while (true) {
+    const rows = selectChunkRowids.all(lastRowid, MESSAGES_FTS_REBUILD_CHUNK) as Array<{ rowid: number }>;
+    if (rows.length === 0) break;
+    const startRowid = rows[0]!.rowid;
+    const endRowid = rows[rows.length - 1]!.rowid;
+    runChunk(startRowid, endRowid);
+    rebuilt += rows.length;
+    lastRowid = endRowid;
+  }
+  return rebuilt;
+};
+
+// One-time (PRAGMA user_version-gated) migration to scoped-token FTS.
+// Idempotent/resumable if interrupted: every DB opened today is version 0
+// (see backfillProjectScopeTokens' NULL-guard and the full DROP+rebuild of
+// messages_fts below), and user_version only advances once every step below
+// has completed. Boot blocks until done.
+const migrateMessagesFtsScopedTokens = (db: Database): void => {
+  const { user_version: userVersion } = db.query("PRAGMA user_version").get() as { user_version: number };
+  if (userVersion >= FTS_SCOPED_TOKENS_SCHEMA_VERSION) return;
+
+  const startedAt = performance.now();
+
+  const messageColumns = new Set(
+    (db.query("PRAGMA table_info(messages)").all() as Array<{ name: string }>).map((column) => column.name),
+  );
+  if (!messageColumns.has("project_scope_token")) {
+    db.exec("ALTER TABLE messages ADD COLUMN project_scope_token TEXT");
+  }
+
+  const backfilledRows = backfillProjectScopeTokens(db);
+
+  db.exec(`
+    DROP TRIGGER IF EXISTS messages_fts_ai;
+    DROP TRIGGER IF EXISTS messages_fts_ad;
+    DROP TRIGGER IF EXISTS messages_fts_au;
+    DROP TABLE IF EXISTS messages_fts;
+  `);
+  db.exec(MESSAGES_FTS_CREATE_SQL);
+  db.exec(MESSAGES_FTS_TRIGGERS_SQL);
+  const rebuiltRows = rebuildMessagesFtsInChunks(db);
+
+  db.exec(`PRAGMA user_version = ${FTS_SCOPED_TOKENS_SCHEMA_VERSION}`);
+
+  const elapsedMs = Math.round((performance.now() - startedAt) * 100) / 100;
+  console.log(
+    JSON.stringify({
+      event: "store.migrate.fts_scoped_tokens",
+      at: new Date().toISOString(),
+      backfilledRows,
+      rebuiltRows,
+      elapsedMs,
+    }),
+  );
+};
 
 const MESSAGE_VECTORS_MIGRATION_SQL = `
   CREATE TABLE IF NOT EXISTS message_vectors (
@@ -463,7 +599,7 @@ const migrate = (db: Database): void => {
   }
   migrateMessageVectorsTable(db);
   db.exec(MESSAGE_VECTORS_MIGRATION_SQL);
-  db.exec(MESSAGES_FTS_MIGRATION_SQL);
+  migrateMessagesFtsScopedTokens(db);
 };
 
 const count = (db: Database, table: string): number =>
@@ -501,8 +637,8 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
            ON CONFLICT(session_id) DO UPDATE SET project_key = excluded.project_key, provider = excluded.provider, agent_name = excluded.agent_name, title = excluded.title, started_at = excluded.started_at, updated_at = excluded.updated_at, source_path = excluded.source_path, source_fingerprint = excluded.source_fingerprint, host = excluded.host, identity_scheme_version = excluded.identity_scheme_version, parent_session_id = excluded.parent_session_id, message_count = excluded.message_count, tool_call_count = excluded.tool_call_count`,
         );
         const insertMessage = db.prepare(
-          `INSERT INTO messages(session_id, seq, role, text, ts, project_key, content_hash)
-           VALUES ($sessionId, $seq, $role, $text, $ts, $projectKey, $contentHash)`,
+          `INSERT INTO messages(session_id, seq, role, text, ts, project_key, content_hash, project_scope_token)
+           VALUES ($sessionId, $seq, $role, $text, $ts, $projectKey, $contentHash, $projectScopeToken)`,
         );
         const insertToolCall = db.prepare(
           `INSERT INTO tool_calls(id, session_id, seq, tool_name, status, input_text, output_text, started_at, completed_at, project_key, provider)
@@ -587,6 +723,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               $ts: message.ts ?? null,
               $projectKey: message.projectKey,
               $contentHash: message.contentHash,
+              $projectScopeToken: ftsProjectScopeToken(message.projectKey),
             });
           }
           for (const toolCall of mapped.toolCalls) {
