@@ -112,6 +112,8 @@ describe("HTTP server", () => {
         ...process.env,
         QUASAR_INGEST_TOKEN: token,
         QUASAR_LOCAL_SQLITE: sqlite,
+        // Hermetic: never eager-load the local fp32 query pipeline in tests.
+        QUASAR_QUERY_EMBEDDING_PROVIDER: "synthetic",
       },
       stdout: "ignore",
       stderr: "ignore",
@@ -163,6 +165,8 @@ describe("HTTP server", () => {
         ...process.env,
         QUASAR_INGEST_TOKEN: token,
         QUASAR_LOCAL_SQLITE: sqlite,
+        // Hermetic: never eager-load the local fp32 query pipeline in tests.
+        QUASAR_QUERY_EMBEDDING_PROVIDER: "synthetic",
       },
       stdout: "ignore",
       stderr: "ignore",
@@ -234,6 +238,7 @@ describe("HTTP server", () => {
         ...process.env,
         QUASAR_SEARCH_PROFILE: "1",
         QUASAR_LOCAL_SQLITE: sqlite,
+        QUASAR_QUERY_EMBEDDING_PROVIDER: "synthetic",
       },
       stdout: "ignore",
       stderr: "ignore",

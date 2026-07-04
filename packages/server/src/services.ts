@@ -56,10 +56,22 @@ export interface DurableQueueService {
   readonly embedMessageStatsByProfile: (profile: string) => Effect.Effect<QueueKindStats, DurableQueueError>;
 }
 
+/** Which embedder currently serves query-side embedText (D8b): the local
+ * fp32 ONNX pipeline once its eager background load finishes, else the
+ * bounded synthetic path. */
+export interface QueryEmbedderStatus {
+  readonly provider: "local" | "synthetic";
+  readonly active: "local" | "synthetic";
+  readonly loadedAt?: string;
+  readonly loadMs?: number;
+  readonly loadFailure?: string;
+}
+
 export interface EmbeddingServiceStatus {
   readonly cached: number;
   readonly pending: number;
   readonly profile: EmbeddingProfile;
+  readonly queryEmbedder: QueryEmbedderStatus;
 }
 
 export interface EmbeddingReadinessStatus {
@@ -387,7 +399,12 @@ export const EmbeddingsLive = Layer.succeed(
       processBatch: () => Effect.fail(new Error("EmbeddingsLive is not configured")),
       materializeCachedVectors: () => Effect.fail(new Error("EmbeddingsLive is not configured")),
       materializeMissingVectorsToSqlite: () => Effect.fail(new Error("EmbeddingsLive is not configured")),
-      status: Effect.succeed({ cached: 0, pending: 0, profile }),
+      status: Effect.succeed({
+        cached: 0,
+        pending: 0,
+        profile,
+        queryEmbedder: { provider: "synthetic" as const, active: "synthetic" as const },
+      }),
       readiness: Effect.succeed({ ok: false, checkedAt: nowIso(), reason: "EmbeddingsLive is not configured" }),
     });
   })(),
