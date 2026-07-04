@@ -67,8 +67,11 @@ export interface MessageVectorCoverage {
   readonly staleVectorRows: number;
 }
 
-/** Raw f16 vector blob row for the resident-matrix boot loader (no decode). */
+/** Raw f16 vector blob row for the resident-matrix boot loader (no decode).
+ * Carries the rowid because the loader walks the table in rowid order —
+ * sequential IO — while slot assignment happens in (session_id, seq) order. */
 export interface MessageVectorBlobRow {
+  readonly rowid: number;
   readonly sessionId: string;
   readonly seq: number;
   readonly dimensions: number;
@@ -149,10 +152,9 @@ export interface LocalStoreService {
   }) => Effect.Effect<readonly MessageVectorSearchRow[], SqliteStoreError>;
   readonly messageVectorCoverage: (model: string) => Effect.Effect<MessageVectorCoverage, SqliteStoreError>;
   readonly countMessageVectors: (model: string) => Effect.Effect<number, SqliteStoreError>;
-  readonly listMessageVectorBlobsPage: (options: {
+  readonly listMessageVectorBlobsByRowidPage: (options: {
     readonly model: string;
-    readonly afterSessionId?: string;
-    readonly afterSeq?: number;
+    readonly afterRowid: number;
     readonly limit: number;
   }) => Effect.Effect<readonly MessageVectorBlobRow[], SqliteStoreError>;
   readonly listMessageVectorKeys: (options: {
@@ -1102,32 +1104,23 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
             trySqlite("countMessageVectors", () =>
               (countMessageVectorsForModel.get(model) as { count: number }).count,
             ),
-          listMessageVectorBlobsPage: ({ model, afterSessionId, afterSeq, limit }) =>
-            trySqlite("listMessageVectorBlobsPage", () => {
-              // Keyset pagination over the (model, session_id, seq) primary key:
-              // the resident-matrix loader streams the whole model partition in
-              // stable (session_id, seq) order without OFFSET rescans.
+          listMessageVectorBlobsByRowidPage: ({ model, afterRowid, limit }) =>
+            trySqlite("listMessageVectorBlobsByRowidPage", () => {
+              // NOT INDEXED + rowid keyset: blob pages come off the table
+              // b-tree in insertion order (sequential IO). Walking blobs
+              // through the (model, session_id, seq) index instead degrades
+              // into random table-page reads at corpus scale once the file
+              // outgrows the page cache.
               const pageLimit = positiveInt(limit, 8_192);
-              const rows = afterSessionId === undefined
-                ? db
-                  .query(
-                    `SELECT session_id AS sessionId, seq, dimensions, encoding, vector_blob AS vectorBlob
-                     FROM message_vectors
-                     WHERE model = ?
-                     ORDER BY session_id ASC, seq ASC
-                     LIMIT ?`,
-                  )
-                  .all(model, pageLimit)
-                : db
-                  .query(
-                    `SELECT session_id AS sessionId, seq, dimensions, encoding, vector_blob AS vectorBlob
-                     FROM message_vectors
-                     WHERE model = ? AND (session_id, seq) > (?, ?)
-                     ORDER BY session_id ASC, seq ASC
-                     LIMIT ?`,
-                  )
-                  .all(model, afterSessionId, afterSeq ?? -1, pageLimit);
-              return rows as MessageVectorBlobRow[];
+              return db
+                .query(
+                  `SELECT rowid, session_id AS sessionId, seq, dimensions, encoding, vector_blob AS vectorBlob
+                   FROM message_vectors NOT INDEXED
+                   WHERE model = ? AND rowid > ?
+                   ORDER BY rowid ASC
+                   LIMIT ?`,
+                )
+                .all(model, afterRowid, pageLimit) as MessageVectorBlobRow[];
             }),
           listMessageVectorKeys: ({ model, projectKey, providers, role }) =>
             trySqlite("listMessageVectorKeys", () => {

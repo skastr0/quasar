@@ -30,6 +30,10 @@ const LOAD_PAGE_ROWS = 8_192;
 const MAX_TOP_K = 256;
 const APPEND_HEADROOM_BYTES = 256 * 1024 * 1024;
 const GROW_CHUNK_BYTES = 32 * 1024 * 1024;
+/** Scan work unit: small enough that a preempted worker only delays one chunk
+ * (work-stealing bounds the p95 tail under CPU contention), large enough that
+ * per-chunk message overhead stays negligible. */
+const SCAN_CHUNK_ROWS = 32_768;
 
 export class VectorMatrixError extends Schema.TaggedError<VectorMatrixError>()(
   "VectorMatrixError",
@@ -110,12 +114,22 @@ interface ScanPart {
   readonly scores: Float64Array;
 }
 
+interface ScanChunk {
+  readonly rowStart: number;
+  readonly rowEnd: number;
+}
+
 interface PendingScan {
   remaining: number;
+  readonly queue: ScanChunk[];
+  readonly k: number;
+  readonly query: Uint16Array;
+  readonly mask: Uint8Array | undefined;
   readonly parts: ScanPart[];
   readonly resolve: (parts: ScanPart[]) => void;
   readonly reject: (cause: Error) => void;
 }
+
 
 interface MatrixState {
   sab: SharedArrayBuffer | undefined;
@@ -276,7 +290,26 @@ export const makeVectorMatrixLayer = (
       };
 
       // --- worker pool ---
-      const routeWorkerMessage = (message: { type: string; id?: number | null; rows?: Uint32Array; scores?: Float64Array; message?: string }): void => {
+      // One chunk per message; a worker that finishes a chunk immediately
+      // receives the scan's next queued chunk (work-stealing), so a core lost
+      // to another process delays one chunk, not a whole static shard.
+      const dispatchChunk = (worker: Worker, id: number, pending: PendingScan): void => {
+        const chunk = pending.queue.shift();
+        if (chunk === undefined) return;
+        const query = pending.query.slice();
+        const mask = pending.mask?.slice(chunk.rowStart, chunk.rowEnd);
+        const transfer: Transferable[] = [query.buffer as ArrayBuffer];
+        if (mask !== undefined) transfer.push(mask.buffer as ArrayBuffer);
+        worker.postMessage(
+          { type: "scan", id, rowStart: chunk.rowStart, rowEnd: chunk.rowEnd, k: pending.k, query, mask: mask ?? null },
+          transfer,
+        );
+      };
+
+      const routeWorkerMessage = (
+        worker: Worker,
+        message: { type: string; id?: number | null; rows?: Uint32Array; scores?: Float64Array; written?: number; skipped?: number; message?: string },
+      ): void => {
         if (message.type === "result" && typeof message.id === "number") {
           const pending = state.pendingScans.get(message.id);
           if (pending === undefined) return;
@@ -285,16 +318,18 @@ export const makeVectorMatrixLayer = (
           if (pending.remaining === 0) {
             state.pendingScans.delete(message.id);
             pending.resolve(pending.parts);
+            return;
           }
+          dispatchChunk(worker, message.id, pending);
           return;
         }
         if (message.type === "error") {
           const failure = new Error(message.message ?? "vector scan worker error");
           if (typeof message.id === "number") {
-            const pending = state.pendingScans.get(message.id);
-            if (pending !== undefined) {
+            const scan = state.pendingScans.get(message.id);
+            if (scan !== undefined) {
               state.pendingScans.delete(message.id);
-              pending.reject(failure);
+              scan.reject(failure);
             }
             return;
           }
@@ -316,7 +351,7 @@ export const makeVectorMatrixLayer = (
               const onFirstMessage = (event: MessageEvent) => {
                 const data = event.data as { type: string; native?: boolean; message?: string };
                 if (data.type === "ready") {
-                  worker.onmessage = (next: MessageEvent) => routeWorkerMessage(next.data);
+                  worker.onmessage = (next: MessageEvent) => routeWorkerMessage(worker, next.data);
                   resolve();
                   return;
                 }
@@ -342,36 +377,64 @@ export const makeVectorMatrixLayer = (
 
       const scanAll = (query: Uint16Array, rowCount: number, k: number, mask?: Uint8Array): Promise<ScanPart[]> =>
         new Promise<ScanPart[]>((resolve, reject) => {
-          const workers = state.workers;
-          const shard = Math.ceil(rowCount / workers.length);
-          const id = state.nextScanId;
-          state.nextScanId += 1;
-          const messages: Array<{ worker: Worker; payload: Record<string, unknown>; transfer: Transferable[] }> = [];
-          for (let index = 0; index < workers.length; index += 1) {
-            const rowStart = index * shard;
-            const rowEnd = Math.min(rowCount, rowStart + shard);
-            if (rowStart >= rowEnd) break;
-            const maskSlice = mask?.slice(rowStart, rowEnd);
-            const querySlice = query.slice();
-            const transfer: Transferable[] = [querySlice.buffer as ArrayBuffer];
-            if (maskSlice !== undefined) transfer.push(maskSlice.buffer as ArrayBuffer);
-            messages.push({
-              worker: workers[index]!,
-              payload: { type: "scan", id, rowStart, rowEnd, k, query: querySlice, mask: maskSlice ?? null },
-              transfer,
-            });
+          const queue: ScanChunk[] = [];
+          for (let rowStart = 0; rowStart < rowCount; rowStart += SCAN_CHUNK_ROWS) {
+            queue.push({ rowStart, rowEnd: Math.min(rowCount, rowStart + SCAN_CHUNK_ROWS) });
           }
-          if (messages.length === 0) {
+          if (queue.length === 0) {
             resolve([]);
             return;
           }
-          state.pendingScans.set(id, { remaining: messages.length, parts: [], resolve, reject });
-          for (const message of messages) {
-            message.worker.postMessage(message.payload, message.transfer);
+          const id = state.nextScanId;
+          state.nextScanId += 1;
+          const pending: PendingScan = { remaining: queue.length, queue, k, query, mask, parts: [], resolve, reject };
+          state.pendingScans.set(id, pending);
+          for (const worker of state.workers) {
+            if (pending.queue.length === 0) break;
+            dispatchChunk(worker, id, pending);
           }
         });
 
-      // --- boot load ---
+      // Compact validation holes left by pass 2: stable forward pass keeps the
+      // (session_id, seq) row order for every surviving row. No-op (zero
+      // copies) when every slot was filled.
+      const compactHoles = (slots: number, filled: Uint8Array): number => {
+        const bytes = state.bytes!;
+        let write = 0;
+        for (let read = 0; read < slots; read += 1) {
+          const sessionId = state.sessionIds[read]!;
+          const seq = state.seqs[read]!;
+          if (filled[read] !== 1) {
+            const inner = state.rowIndex.get(sessionId);
+            inner?.delete(seq);
+            if (inner !== undefined && inner.size === 0) state.rowIndex.delete(sessionId);
+            continue;
+          }
+          if (write !== read) {
+            bytes.copyWithin(write * rowBytes, read * rowBytes, (read + 1) * rowBytes);
+            state.sessionIds[write] = sessionId;
+            state.seqs[write] = seq;
+            state.rowIndex.get(sessionId)!.set(seq, write);
+          }
+          write += 1;
+        }
+        state.sessionIds.length = write;
+        state.seqs.length = write;
+        return write;
+      };
+
+      // --- boot load: two passes on the store's single connection ---
+      // Pass 1 walks the (model, session_id, seq) covering index once and
+      // assigns every key its matrix slot in canonical (session_id, seq)
+      // order. Pass 2 walks the table in rowid order — sequential IO — and
+      // writes each blob into its pre-assigned slot; walking blobs in index
+      // order instead degrades into random table-page reads at corpus scale.
+      // (No parallel connections: fresh bun:sqlite connections against a live
+      // WAL database tear intermittently at open time — reproduced
+      // 2026-07-04 — so all SQLite IO stays on the store connection.)
+      // Rows written after the key snapshot have no slot and are skipped —
+      // concurrent writes can never shift layout; validation failures leave
+      // holes that compact away afterwards.
       const load = Effect.gen(function* () {
         const started = performance.now();
         const total = yield* store.countMessageVectors(model);
@@ -383,40 +446,46 @@ export const makeVectorMatrixLayer = (
         const native = options.kernel === "js" ? undefined : loadNativeSimsimd();
         state.libraryPath = native?.libraryPath ?? null;
         state.kernel = native !== undefined ? "simsimd-ffi" : "js-fallback";
-        const sab = new SharedArrayBuffer(total * rowBytes, {
-          maxByteLength: total * rowBytes + APPEND_HEADROOM_BYTES,
+
+        const keys = yield* store.listMessageVectorKeys({ model });
+        const slots = keys.length;
+        const sab = new SharedArrayBuffer(slots * rowBytes, {
+          maxByteLength: slots * rowBytes + APPEND_HEADROOM_BYTES,
         });
         state.sab = sab;
         state.bytes = new Uint8Array(sab);
-        let cursor: { sessionId: string; seq: number } | undefined;
         let lastSessionId: string | undefined;
+        for (let slot = 0; slot < slots; slot += 1) {
+          const key = keys[slot]!;
+          const sessionId = key.sessionId === lastSessionId && lastSessionId !== undefined ? lastSessionId : key.sessionId;
+          lastSessionId = sessionId;
+          indexRow(sessionId, key.seq, slot);
+        }
+
+        const filled = new Uint8Array(slots);
+        let afterRowid = 0;
         while (true) {
-          const page = yield* store.listMessageVectorBlobsPage({
+          const page = yield* store.listMessageVectorBlobsByRowidPage({
             model,
-            afterSessionId: cursor?.sessionId,
-            afterSeq: cursor?.seq,
+            afterRowid,
             limit: LOAD_PAGE_ROWS,
           });
           if (page.length === 0) break;
           for (const row of page) {
-            cursor = { sessionId: row.sessionId, seq: row.seq };
+            afterRowid = row.rowid;
+            const slot = rowFor(row.sessionId, row.seq);
+            if (slot === undefined || slot >= slots) continue; // row appeared after the key snapshot
             if (row.encoding !== VECTOR_BLOB_ENCODING || row.dimensions !== dimensions || row.vectorBlob.byteLength !== rowBytes) {
               state.loadSkippedRows += 1;
               continue;
             }
-            if (!ensureRowCapacity(state.rowCount + 1)) {
-              state.loadSkippedRows += 1;
-              continue;
-            }
-            const sessionId = row.sessionId === lastSessionId && lastSessionId !== undefined ? lastSessionId : row.sessionId;
-            lastSessionId = sessionId;
-            writeRowBytes(state.rowCount, row.vectorBlob);
-            indexRow(sessionId, row.seq, state.rowCount);
-            state.rowCount += 1;
+            writeRowBytes(slot, row.vectorBlob);
+            filled[slot] = 1;
           }
           if (page.length < LOAD_PAGE_ROWS) break;
           yield* Effect.yieldNow();
         }
+        state.rowCount = compactHoles(slots, filled);
         if (state.rowCount === 0) {
           diagnostic("vector_matrix.load_empty_after_validation", { model, skipped: state.loadSkippedRows });
           return;
@@ -448,12 +517,13 @@ export const makeVectorMatrixLayer = (
         });
       }).pipe(
         Effect.catchAll((cause) =>
-          Effect.sync(() =>
+          Effect.sync(() => {
             diagnostic("vector_matrix.load_failed", {
               model,
               detail: cause instanceof Error ? cause.message : JSON.stringify(cause),
-            }),
-          ),
+            });
+            terminateWorkers();
+          }),
         ),
         Effect.ensuring(Deferred.succeed(loadedSignal, undefined)),
       );
