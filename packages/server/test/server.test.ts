@@ -27,14 +27,14 @@ afterEach(() => {
 const mappedSession = (overrides: { readonly fingerprint?: string; readonly firstText?: string } = {}): MappedSession => ({
   project: { projectKey: "project-http", displayName: "HTTP Project", rawPath: "/tmp/project-http" },
   session: {
-    sessionId: "session-http",
+    sessionId: "codex:session-http",
     projectKey: "project-http",
     provider: "codex",
     agentName: "codex",
     title: "HTTP fixture",
     startedAt: "2026-06-18T10:00:00.000Z",
     updatedAt: "2026-06-18T10:01:00.000Z",
-    sourcePath: "/history/session-http.jsonl",
+    sourcePath: "/history/codex-session-http.jsonl",
     sourceFingerprint: overrides.fingerprint ?? "fingerprint-http",
     host: "host-http",
     identitySchemeVersion: 1,
@@ -43,7 +43,7 @@ const mappedSession = (overrides: { readonly fingerprint?: string; readonly firs
   },
   messages: [
     {
-      sessionId: "session-http",
+      sessionId: "codex:session-http",
       seq: 1,
       role: "user",
       text: overrides.firstText ?? "hello over http",
@@ -52,7 +52,7 @@ const mappedSession = (overrides: { readonly fingerprint?: string; readonly firs
       contentHash: "hash-http-1",
     },
     {
-      sessionId: "session-http",
+      sessionId: "codex:session-http",
       seq: 2,
       role: "assistant",
       text: "assistant-only http memory",
@@ -64,7 +64,7 @@ const mappedSession = (overrides: { readonly fingerprint?: string; readonly firs
   toolCalls: [
     {
       id: "tool-http",
-      sessionId: "session-http",
+      sessionId: "codex:session-http",
       seq: 3,
       toolName: "shell_command",
       status: "ok",
@@ -91,7 +91,7 @@ const seedAndIndex = (sqlite: string, lance: string) => {
         const store = yield* LocalStore;
         const search = yield* DerivedSearch;
         yield* store.upsertSession(mappedSession());
-        yield* search.indexSession("session-http");
+        yield* search.indexSession("codex:session-http");
         yield* search.createLexicalIndex;
       }).pipe(Effect.provide(Layer.merge(dataLayer, searchLayer))),
     ),
@@ -148,7 +148,7 @@ describe("HTTP server", () => {
         headers: { "content-type": "application/json", "x-quasar-ingest-token": token },
         body: JSON.stringify({ session: mappedSession({ firstText: "forced http rewrite" }) }),
       }).then((response) => response.json());
-      const messages = await fetch(`http://127.0.0.1:${port}/messages?sessionId=session-http`).then((response) => response.json());
+      const messages = await fetch(`http://127.0.0.1:${port}/messages?sessionId=codex%3Asession-http`).then((response) => response.json());
       const status = await fetch(`http://127.0.0.1:${port}/status`).then((response) => response.json());
 
       expect(first.data.outcome.status).toBe("ok");
@@ -262,15 +262,33 @@ describe("HTTP server", () => {
 
     try {
       await waitFor(`http://127.0.0.1:${port}/health`);
-      const [projects, messages, toolCalls, wrongProviderToolCalls, toolCall, missingToolCallId, search, roleSearch, statusProfile] = await Promise.all([
+      const [
+        projects,
+        messages,
+        toolCalls,
+        wrongProviderToolCalls,
+        toolCall,
+        missingToolCallId,
+        search,
+        roleSearch,
+        providerSearch,
+        wrongProviderSearch,
+        projectSearch,
+        wrongProjectSearch,
+        statusProfile,
+      ] = await Promise.all([
         fetch(`http://127.0.0.1:${port}/projects`).then((response) => response.json()),
-        fetch(`http://127.0.0.1:${port}/messages?sessionId=session-http`).then((response) => response.json()),
+        fetch(`http://127.0.0.1:${port}/messages?sessionId=codex%3Asession-http`).then((response) => response.json()),
         fetch(`http://127.0.0.1:${port}/tool-calls?provider=codex&toolName=shell_command`).then((response) => response.json()),
         fetch(`http://127.0.0.1:${port}/tool-calls?provider=grok&toolName=shell_command`).then((response) => response.json()),
         fetch(`http://127.0.0.1:${port}/tool-call?id=tool-http`).then((response) => response.json()),
         fetch(`http://127.0.0.1:${port}/tool-call`).then((response) => response.json()),
         fetch(`http://127.0.0.1:${port}/search/lexical?q=hello`).then((response) => response.json()),
         fetch(`http://127.0.0.1:${port}/search/lexical?q=http&role=assistant`).then((response) => response.json()),
+        fetch(`http://127.0.0.1:${port}/search/lexical?q=http&provider=codex`).then((response) => response.json()),
+        fetch(`http://127.0.0.1:${port}/search/lexical?q=http&provider=grok`).then((response) => response.json()),
+        fetch(`http://127.0.0.1:${port}/search/lexical?q=http&projectKey=project-http`).then((response) => response.json()),
+        fetch(`http://127.0.0.1:${port}/search/lexical?q=http&projectKey=project-other`).then((response) => response.json()),
         fetch(`http://127.0.0.1:${port}/status?lance=true`).then((response) => response.json()),
       ]);
 
@@ -291,6 +309,16 @@ describe("HTTP server", () => {
       expect(statusProfile.data.workers.workers).toEqual(["embeddings", "index-repair", "maintenance", "reconcile"]);
       expect(search.data.matches.map((hit: { row: { text: string } }) => hit.row.text)).toEqual(["hello over http"]);
       expect(roleSearch.data.matches.map((hit: { row: { text: string } }) => hit.row.text)).toEqual(["assistant-only http memory"]);
+      expect(providerSearch.data.matches.map((hit: { row: { text: string } }) => hit.row.text).sort()).toEqual([
+        "assistant-only http memory",
+        "hello over http",
+      ]);
+      expect(wrongProviderSearch.data.matches).toEqual([]);
+      expect(projectSearch.data.matches.map((hit: { row: { text: string } }) => hit.row.text).sort()).toEqual([
+        "assistant-only http memory",
+        "hello over http",
+      ]);
+      expect(wrongProjectSearch.data.matches).toEqual([]);
     } finally {
       proc.kill();
       await proc.exited;

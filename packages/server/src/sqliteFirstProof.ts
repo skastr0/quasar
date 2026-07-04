@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 import { performance } from "node:perf_hooks";
 
 import { embeddingProfileFromEnv, type EmbeddingProfile } from "./embeddingProfiles";
+import { fts5QueryForText, positiveInt } from "./fts5";
 
 const SEARCHABLE_ROLES = ["user", "assistant", "reasoning"] as const;
 const DEFAULT_QUERIES = [
@@ -108,12 +109,6 @@ export const sha256 = (text: string): string =>
 export const documentCacheKey = (text: string, profile: Pick<EmbeddingProfile, "documentPrefix">): string =>
   sha256(documentEmbeddingInput(text, profile));
 
-export const fts5QueryForText = (query: string): string | undefined => {
-  const tokens = query.match(/[\p{L}\p{N}]+/gu)?.map((token) => token.trim()).filter(Boolean) ?? [];
-  if (tokens.length === 0) return undefined;
-  return tokens.map((token) => `"${token.replaceAll('"', '""')}"`).join(" AND ");
-};
-
 const quoteSqlString = (value: string): string =>
   `'${value.replaceAll("'", "''")}'`;
 
@@ -122,9 +117,6 @@ const elapsed = <A>(run: () => A): { readonly value: A; readonly elapsedMs: numb
   const value = run();
   return { value, elapsedMs: Math.round((performance.now() - startedAt) * 100) / 100 };
 };
-
-const positiveInt = (value: number | undefined, fallback: number): number =>
-  Number.isInteger(value) && value !== undefined && value > 0 ? value : fallback;
 
 export const snapshotSqliteDatabase = (sourceDb: string, workDb: string): void => {
   if (existsSync(workDb)) {

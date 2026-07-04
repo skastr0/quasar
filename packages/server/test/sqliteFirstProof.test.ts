@@ -6,9 +6,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 
 import type { EmbeddingProfile } from "../src/embeddingProfiles";
+import { fts5QueryForText } from "../src/fts5";
 import {
   documentCacheKey,
-  fts5QueryForText,
   inspectEmbeddingCoverage,
   runSqliteFirstProof,
 } from "../src/sqliteFirstProof";

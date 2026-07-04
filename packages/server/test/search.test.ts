@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { LanceDb, makeLanceDbLayer } from "../src/lancedb";
+import { LanceDb, makeLanceDbLayer, MESSAGE_SEARCH_COLUMNS } from "../src/lancedb";
 import { afterEach, describe, expect, test } from "bun:test";
 import { Effect, Layer } from "effect";
 
@@ -264,6 +264,70 @@ describe("DerivedSearch", () => {
 
     expect(userHits.map((hit) => hit.row.role)).toEqual(["user"]);
     expect(assistantHits.map((hit) => hit.row.role)).toEqual(["assistant"]);
+  });
+
+  test("SQLite FTS lexical search matches LanceDB lexical on a fixed filtered query set", async () => {
+    const comparisons = await withSearch(
+      Effect.gen(function* () {
+        const store = yield* LocalStore;
+        const derived = yield* DerivedSearch;
+        const search = yield* LanceDb;
+        const codexSessionId = "codex:fixed-parity";
+        const opencodeSessionId = "opencode:fixed-parity";
+        yield* store.upsertSession(
+          mappedSessionFor(codexSessionId, "codex", [
+            messageFor(codexSessionId, 1, "codex memory fragment"),
+            { ...messageFor(codexSessionId, 2, "assistant recall fragment"), role: "assistant" },
+          ]),
+        );
+        yield* store.upsertSession(
+          mappedSessionFor(opencodeSessionId, "opencode", [
+            messageFor(opencodeSessionId, 1, "opencode memory fragment"),
+          ]),
+        );
+        yield* derived.indexSession(codexSessionId);
+        yield* derived.indexSession(opencodeSessionId);
+        yield* derived.createLexicalIndex;
+
+        const requests = [
+          { query: "memory", limit: 10 },
+          { query: "fragment", providers: ["codex"], limit: 10 },
+          { query: "assistant", role: "assistant", limit: 10 },
+        ] as const;
+
+        const rows: Array<{ readonly sqlite: string[]; readonly lance: string[]; readonly scores: readonly number[] }> = [];
+        for (const request of requests) {
+          const sqlite = yield* store.lexicalSearch(request);
+          const lance = yield* search.ftsSearch({
+            query: request.query,
+            filter: messageSearchFilter({
+              role: request.role,
+              providers: request.providers,
+            }),
+            limit: request.limit,
+            select: MESSAGE_SEARCH_COLUMNS,
+          });
+          const keyFor = (hit: { readonly row: Record<string, unknown> }) =>
+            `${String(hit.row.sessionId)}:${String(hit.row.seq)}:${String(hit.row.role)}`;
+          rows.push({
+            sqlite: sqlite.map(keyFor),
+            lance: lance.map(keyFor),
+            scores: sqlite.map((hit) => hit.score),
+          });
+        }
+        return rows;
+      }),
+    );
+
+    expect(comparisons.every((comparison) => comparison.sqlite.length > 0)).toBe(true);
+    expect(comparisons.map((comparison) => comparison.sqlite)).toEqual(
+      comparisons.map((comparison) => comparison.lance),
+    );
+    const scores = comparisons.flatMap((comparison) => comparison.scores);
+    expect(scores.every((score) => Number.isFinite(score) && score > 0 && score <= 1)).toBe(true);
+    for (const comparison of comparisons) {
+      expect([...comparison.scores].sort((a, b) => b - a)).toEqual(comparison.scores);
+    }
   });
 
   test("keeps lexical rows global while alternate profiles use their own vector table", async () => {
