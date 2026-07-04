@@ -53,6 +53,7 @@ export interface DurableQueueService {
   readonly pruneCompleted: (olderThanIso: string) => Effect.Effect<number, DurableQueueError>;
   readonly stats: Effect.Effect<QueueStats, DurableQueueError>;
   readonly statsByKind: Effect.Effect<readonly QueueKindStats[], DurableQueueError>;
+  readonly embedMessageStatsByProfile: (profile: string) => Effect.Effect<QueueKindStats, DurableQueueError>;
 }
 
 export interface EmbeddingServiceStatus {
@@ -212,6 +213,7 @@ const queueMigrate = (db: Database): void => {
     CREATE INDEX IF NOT EXISTS queue_jobs_ready ON queue_jobs(status, next_run_at, created_at);
     CREATE INDEX IF NOT EXISTS queue_jobs_stale_leases ON queue_jobs(status, lease_until);
     CREATE INDEX IF NOT EXISTS queue_jobs_kind_status ON queue_jobs(kind, status, next_run_at);
+    CREATE INDEX IF NOT EXISTS queue_jobs_embed_profile_status ON queue_jobs(kind, status, json_extract(payload_json, '$.embeddingProfile'));
   `);
 };
 
@@ -263,23 +265,35 @@ export const makeDurableQueueLayer = (path = sqlitePath()): Layer.Layer<DurableQ
            VALUES ($jobId, $kind, $payloadJson, 'pending', 0, $maxAttempts, NULL, NULL, $nextRunAt, NULL, $idempotencyKey, $createdAt, $updatedAt)
            ON CONFLICT(idempotency_key) DO NOTHING`,
         );
+        const selectJobById = db.prepare(`${selectQueueJob} WHERE job_id = ?`);
+        const selectJobByIdempotencyKey = db.prepare(`${selectQueueJob} WHERE idempotency_key = ?`);
+        const selectReadyJobs = db.prepare(`${selectQueueJob} WHERE status = 'pending' AND next_run_at <= ? ORDER BY next_run_at ASC, created_at ASC LIMIT ?`);
+        const selectReadyJobsByKind = db.prepare(`${selectQueueJob} WHERE status = 'pending' AND next_run_at <= ? AND kind = ? ORDER BY next_run_at ASC, created_at ASC LIMIT ?`);
+        const queueStatsByStatus = db.prepare("SELECT status, COUNT(*) AS count FROM queue_jobs WHERE status IN ('pending', 'leased', 'failed') GROUP BY status");
+        const queueStatsByKind = db.prepare("SELECT kind, status, COUNT(*) AS count FROM queue_jobs WHERE status IN ('pending', 'leased', 'failed') GROUP BY kind, status ORDER BY kind ASC");
         const leaseReady = db.transaction((options: { readonly workerId: string; readonly kind?: string; readonly limit: number; readonly leaseUntil: string; readonly now: string }) => {
-          const kindFilter = options.kind === undefined ? "" : " AND kind = ?";
-          const args = options.kind === undefined ? [options.now, options.limit] : [options.now, options.kind, options.limit];
-          const ready = db
-            .query(`${selectQueueJob} WHERE status = 'pending' AND next_run_at <= ?${kindFilter} ORDER BY next_run_at ASC, created_at ASC LIMIT ?`)
-            .all(...args) as Record<string, unknown>[];
+          const ready = (options.kind === undefined
+            ? selectReadyJobs.all(options.now, options.limit)
+            : selectReadyJobsByKind.all(options.now, options.kind, options.limit)) as Record<string, unknown>[];
           const update = db.prepare("UPDATE queue_jobs SET status = 'leased', attempts = attempts + 1, leased_by = ?, lease_until = ?, updated_at = ? WHERE job_id = ? AND status = 'pending'");
           const leased: QueueJobRow[] = [];
           for (const row of ready) {
             const result = update.run(options.workerId, options.leaseUntil, options.now, row.jobId as string);
             if (result.changes > 0) {
-              const leasedRow = db.query(`${selectQueueJob} WHERE job_id = ?`).get(row.jobId as string) as Record<string, unknown>;
+              const leasedRow = selectJobById.get(row.jobId as string) as Record<string, unknown>;
               leased.push(rowToJob(leasedRow));
             }
           }
           return leased;
         });
+        const activeEmbedMessageStats = db.prepare(
+          `SELECT status, COUNT(*) AS count
+           FROM queue_jobs
+           WHERE kind = 'embed-message'
+             AND status IN ('pending', 'leased', 'failed')
+             AND json_extract(payload_json, '$.embeddingProfile') = ?
+           GROUP BY status`,
+        );
 
         return DurableQueue.of({
           enqueue: (job) =>
@@ -300,8 +314,8 @@ export const makeDurableQueueLayer = (path = sqlitePath()): Layer.Layer<DurableQ
                 $updatedAt: at,
               });
               const row = job.idempotencyKey === undefined
-                ? db.query(`${selectQueueJob} WHERE job_id = ?`).get(jobId)
-                : db.query(`${selectQueueJob} WHERE idempotency_key = ?`).get(job.idempotencyKey);
+                ? selectJobById.get(jobId)
+                : selectJobByIdempotencyKey.get(job.idempotencyKey);
               return rowToJob(row as Record<string, unknown>);
             }),
           leaseBatch: ({ workerId, kind, limit, leaseMs, now = nowIso() }) =>
@@ -331,12 +345,12 @@ export const makeDurableQueueLayer = (path = sqlitePath()): Layer.Layer<DurableQ
               return result.changes;
             }),
           stats: queueTry("stats", () => {
-            const byStatus = db.query("SELECT status, COUNT(*) AS count FROM queue_jobs WHERE status IN ('pending', 'leased', 'failed') GROUP BY status").all() as Array<{ status: string; count: number }>;
+            const byStatus = queueStatsByStatus.all() as Array<{ status: string; count: number }>;
             const countFor = (status: string) => byStatus.find((row) => row.status === status)?.count ?? 0;
             return { pending: countFor("pending"), leased: countFor("leased"), failed: countFor("failed") };
           }),
           statsByKind: queueTry("statsByKind", () => {
-            const rows = db.query("SELECT kind, status, COUNT(*) AS count FROM queue_jobs WHERE status IN ('pending', 'leased', 'failed') GROUP BY kind, status ORDER BY kind ASC").all() as Array<{ kind: string; status: string; count: number }>;
+            const rows = queueStatsByKind.all() as Array<{ kind: string; status: string; count: number }>;
             const byKind = new Map<string, { pending: number; leased: number; failed: number }>();
             for (const row of rows) {
               const stats = byKind.get(row.kind) ?? { pending: 0, leased: 0, failed: 0 };
@@ -347,6 +361,17 @@ export const makeDurableQueueLayer = (path = sqlitePath()): Layer.Layer<DurableQ
             }
             return [...byKind.entries()].map(([kind, stats]) => ({ kind, ...stats }));
           }),
+          embedMessageStatsByProfile: (profile) =>
+            queueTry("embedMessageStatsByProfile", () => {
+              const rows = activeEmbedMessageStats.all(profile) as Array<{ status: string; count: number }>;
+              const countFor = (status: string) => rows.find((row) => row.status === status)?.count ?? 0;
+              return {
+                kind: "embed-message",
+                pending: countFor("pending"),
+                leased: countFor("leased"),
+                failed: countFor("failed"),
+              };
+            }),
         });
       }),
     ),

@@ -109,6 +109,27 @@ describe("DurableQueue", () => {
     expect(indexLease.map((job) => job.kind)).toEqual(["index-session"]);
   });
 
+  test("embedMessageStatsByProfile counts only active embed-message jobs for the requested profile", async () => {
+    const path = sqlitePath();
+    const stats = await withQueue(
+      path,
+      (queue) =>
+        Effect.gen(function* () {
+          yield* queue.enqueue({ kind: "embed-message", payload: { id: "active-leased", embeddingProfile: "local:test" } });
+          yield* queue.enqueue({ kind: "embed-message", payload: { id: "legacy", embeddingProfile: "synthetic:test" } });
+          yield* queue.enqueue({ kind: "embed-message", payload: { id: "active-pending", embeddingProfile: "local:test" } });
+          const failed = yield* queue.enqueue({ kind: "embed-message", payload: { id: "active-failed", embeddingProfile: "local:test" } });
+          const completed = yield* queue.enqueue({ kind: "embed-message", payload: { id: "active-completed", embeddingProfile: "local:test" } });
+          yield* queue.leaseBatch({ workerId: "embedder", kind: "embed-message", limit: 1, leaseMs: 60_000, now: "2099-06-18T10:00:00.000Z" });
+          yield* queue.fail(failed.jobId, "bad vector", "2099-06-18T10:00:01.000Z");
+          yield* queue.ack(completed.jobId, "2099-06-18T10:00:01.000Z");
+          return yield* queue.embedMessageStatsByProfile("local:test");
+        }),
+    );
+
+    expect(stats).toEqual({ kind: "embed-message", pending: 1, leased: 1, failed: 1 });
+  });
+
   test("retry releases a job with delayed next_run_at", async () => {
     const path = sqlitePath();
     const [earlyLease, lateLease] = await withQueue(

@@ -632,6 +632,7 @@ const maintenanceMaterializeEmbeddingVectors = Effect.gen(function* () {
     leased: 0,
     failed: 0,
   };
+  const activeEmbedMessageQueue = yield* queue.embedMessageStatsByProfile(embeddings.profile.cacheNamespace);
   const activeVectorTableName = embeddingProfileSearchTable(embeddings.profile);
   const activeVectorTable = yield* search.tableStats({ tableName: activeVectorTableName }).pipe(Effect.either);
   const lanceRowCount = activeVectorTable._tag === "Right" ? activeVectorTable.right.rowCount : undefined;
@@ -644,7 +645,12 @@ const maintenanceMaterializeEmbeddingVectors = Effect.gen(function* () {
   return json(ok("maintenance/embeddings/materialize", {
     report,
     coverage,
-    queue: { embedMessage: embedMessageQueue, byKind: queueByKind },
+    queue: {
+      embedMessage: embedMessageQueue,
+      activeEmbedMessage: activeEmbedMessageQueue,
+      activeEmbeddingProfile: embeddings.profile.cacheNamespace,
+      byKind: queueByKind,
+    },
     lance: { activeVectorTableName, activeVectorTable, divergence },
   }));
 });
