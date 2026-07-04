@@ -1,15 +1,22 @@
-// Shard scanner for the resident f16 vector matrix.
+// Chunk scanner for the resident f16 vector matrix.
 //
-// Owns no state beyond an init-time view over the shared matrix. Each scan
-// message names an absolute row range, a top-k budget, an f16 query, and an
-// optional candidate mask (indexed relative to rowStart); the reply carries
-// the shard's top-k rows. Kernel: simsimd_cos_f16 via bun:ffi when a library
-// path is provided, else the pure-JS fallback (exact same spec as
-// cosineSimilarityF16Reference, decoded through a f16->f32 lookup table).
-// Non-finite similarities never enter the heap.
-import { dlopen, FFIType, ptr, type Pointer } from "bun:ffi";
+// Owns no state beyond an init-time view over the shared matrix. Scan chunks
+// name an absolute row range, a top-k budget, an f16 query, and an optional
+// candidate mask (indexed relative to rowStart); the reply carries the
+// chunk's top-k rows and the main thread work-steals chunks across workers.
+// Kernel: simsimd_cos_f16 via bun:ffi when a library path is provided, else
+// the pure-JS fallback (exact same spec as cosineSimilarityF16Reference,
+// decoded through a f16->f32 lookup table). Non-finite similarities never
+// enter the heap.
+//
+// Deliberately NO SQLite in workers: concurrent fresh connections against a
+// live WAL database tear intermittently in bun ("file is not a database" /
+// "malformed schema" at open time — reproduced 2026-07-04), so all SQLite IO
+// stays on the store's single connection in the main thread.
+import { ptr, type Pointer } from "bun:ffi";
 
 import { float16BitsToFloat32 } from "./vectorBlob";
+import { loadNativeSimsimd } from "./vectorKernel";
 
 declare var self: Worker;
 
@@ -144,13 +151,14 @@ self.onmessage = (event: MessageEvent<WorkerMessage>) => {
     if (message.type === "init") {
       let cosineDistanceF16: State["cosineDistanceF16"];
       if (message.libraryPath !== null) {
-        const library = dlopen(message.libraryPath, {
-          simsimd_cos_f16: {
-            args: [FFIType.ptr, FFIType.ptr, FFIType.u64_fast, FFIType.ptr],
-            returns: FFIType.void,
-          },
-        });
-        cosineDistanceF16 = library.symbols.simsimd_cos_f16 as State["cosineDistanceF16"];
+        // Same canonical resolution + self-check as the main thread; a worker
+        // that cannot load the library the main thread validated is an error,
+        // not a silent fallback.
+        const native = loadNativeSimsimd(message.libraryPath);
+        if (native === undefined) {
+          throw new Error(`worker failed to load simsimd kernel from ${message.libraryPath}`);
+        }
+        cosineDistanceF16 = native.cosineDistanceF16;
       }
       state = {
         matrix: new Uint16Array(message.sab),
