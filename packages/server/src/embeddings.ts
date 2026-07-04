@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { Effect, Layer, Ref, Schedule, Schema } from "effect";
 import { createHash } from "node:crypto";
 
-import { embeddingProfileFromEnv, embeddingProviderFromEnv, type EmbeddingProfile } from "./embeddingProfiles";
+import { embeddingProfileFromEnv, embeddingProviderFromEnv, queryEmbeddingProviderFromEnv, type EmbeddingProfile } from "./embeddingProfiles";
 import type { MessageRow, QueueJobRow } from "./model";
 import { ensureParentDir, sqlitePath } from "./paths";
 import { isSemanticSearchDocument } from "./searchPolicy";
@@ -42,7 +42,18 @@ export interface EmbeddingsLayerOptions {
   readonly sqlite?: string;
   readonly profile?: EmbeddingProfile;
   readonly embedder?: Embedder;
+  /** Test seam for the local query pipeline. Production always builds the
+   * fp32 ONNX pipeline; injecting here exercises the eager-load switch
+   * without ONNX. */
+  readonly localQueryEmbedder?: Embedder;
 }
+
+/** Query-side ONNX dtype is PINNED to fp32: q8 query vectors fail retrieval
+ * parity against the synthetic-embedded matrix (overlap@10 0.77 < 0.8 gate),
+ * and fp16 needs graph optimizations disabled to dodge an onnxruntime
+ * LayerNormFusion bug. Receipts: docs/proofs/query-embed-parity-2026-07-04.json
+ * and query-embed-parity-fp32-2026-07-04.json. Never make this configurable. */
+const QUERY_EMBEDDING_ONNX_DTYPE = "fp32";
 
 const nowIso = () => new Date().toISOString();
 
@@ -230,6 +241,82 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
         Effect.gen(function* () {
           const store = yield* LocalStore;
           const queue = yield* DurableQueue;
+
+          // --- query-side embedder (D8b): local fp32, eager background load ---
+          // Boot and lexical are never gated on the ~35s pipeline load. Until
+          // the load finishes (or if it fails), queries fall back to the
+          // bounded synthetic path. Query vectors from either source share the
+          // one embedding_cache namespace: fp32-local and synthetic query
+          // vectors are retrieval-interchangeable (parity receipts).
+          const queryProvider = queryEmbeddingProviderFromEnv();
+          const queryFallbackEmbedder: Embedder =
+            options.embedder ?? (embeddingProviderFromEnv() === "synthetic" ? embedder : makeSyntheticEmbedder(profile));
+          const queryState: {
+            active: "local" | "synthetic";
+            local: Embedder | undefined;
+            loadedAt: string | undefined;
+            loadMs: number | undefined;
+            loadFailure: string | undefined;
+          } = { active: "synthetic", local: undefined, loadedAt: undefined, loadMs: undefined, loadFailure: undefined };
+          const activeQueryEmbedder = (): Embedder =>
+            queryState.active === "local" && queryState.local !== undefined ? queryState.local : queryFallbackEmbedder;
+
+          // Build the local pipeline only when queries are configured local
+          // AND this layer is not running with an injected unit-test embedder
+          // (a real ONNX load inside unit tests would be a contract breach).
+          const localQueryPipeline: Embedder | undefined =
+            queryProvider !== "local"
+              ? undefined
+              : options.localQueryEmbedder
+                ?? (options.embedder === undefined
+                  ? makeLocalOnnxEmbedder(profile, {
+                    dtype: QUERY_EMBEDDING_ONNX_DTYPE,
+                    cacheDir: process.env.QUASAR_EMBEDDING_MODEL_CACHE_DIR?.trim() || undefined,
+                  })
+                  : undefined);
+          if (localQueryPipeline !== undefined) {
+            yield* Effect.forkScoped(
+              Effect.gen(function* () {
+                const started = performance.now();
+                const warm = yield* Effect.tryPromise({
+                  try: () => localQueryPipeline.embedMany([prefixed(profile.queryPrefix, "quasar query embedder warmup")]),
+                  catch: (cause) => cause,
+                }).pipe(Effect.either);
+                const loadMs = Math.round(performance.now() - started);
+                if (warm._tag === "Left") {
+                  queryState.loadFailure = warm.left instanceof Error ? warm.left.message : String(warm.left);
+                  console.error(JSON.stringify({
+                    event: "query_embedder.local_load_failed",
+                    at: nowIso(),
+                    loadMs,
+                    detail: queryState.loadFailure,
+                  }));
+                  return;
+                }
+                const vector = warm.right[0];
+                if (vector === undefined || vector.length !== profile.dimensions) {
+                  queryState.loadFailure = `local query pipeline warmup returned dimension ${vector?.length ?? "none"}; expected ${profile.dimensions}`;
+                  console.error(JSON.stringify({
+                    event: "query_embedder.local_load_failed",
+                    at: nowIso(),
+                    loadMs,
+                    detail: queryState.loadFailure,
+                  }));
+                  return;
+                }
+                queryState.local = localQueryPipeline;
+                queryState.active = "local";
+                queryState.loadedAt = nowIso();
+                queryState.loadMs = loadMs;
+                console.log(JSON.stringify({
+                  event: "query_embedder.local_active",
+                  at: queryState.loadedAt,
+                  dtype: QUERY_EMBEDDING_ONNX_DTYPE,
+                  loadMs,
+                }));
+              }),
+            );
+          }
           // Background Ref: probe fires on a fixed schedule (every readinessCacheTtlMs() ms),
           // with the first probe delayed by one full interval. The initial state is
           // "probe pending" (ok: false). The hot path (now only /ready) reads the Ref
@@ -363,7 +450,7 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                 const cached = yield* getCached(contentHash);
                 if (cached !== undefined) return cached.vector;
                 const vectors = yield* Effect.tryPromise({
-                  try: () => embedder.embedMany([input]),
+                  try: () => activeQueryEmbedder().embedMany([input]),
                   catch: (cause) => cause,
                 });
                 const vector = vectors[0];
@@ -715,7 +802,18 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
               }),
             status: tryEmbedding("status", () => {
               const cached = (db.query("SELECT COUNT(*) AS count FROM embedding_cache WHERE model = ?").get(profile.cacheNamespace) as { count: number }).count;
-              return { cached, pending: 0, profile };
+              return {
+                cached,
+                pending: 0,
+                profile,
+                queryEmbedder: {
+                  provider: queryProvider,
+                  active: queryState.active,
+                  loadedAt: queryState.loadedAt,
+                  loadMs: queryState.loadMs,
+                  loadFailure: queryState.loadFailure,
+                },
+              };
             }),
             readiness: Ref.get(readinessRef),
           });

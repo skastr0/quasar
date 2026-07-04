@@ -170,6 +170,9 @@ describe("semantic serving from the resident matrix", () => {
         ...process.env,
         QUASAR_LOCAL_SQLITE: sqlite,
         QUASAR_EMBEDDING_PROVIDER: "synthetic",
+        // Hermetic: this test pins the SYNTHETIC query path (including the
+        // stub-loss 503); the local fp32 pipeline must never activate here.
+        QUASAR_QUERY_EMBEDDING_PROVIDER: "synthetic",
         SYNTHETIC_API_KEY: "stub-key",
         SYNTHETIC_OPENAI_BASE_URL: `http://127.0.0.1:${stub.port}`,
       },

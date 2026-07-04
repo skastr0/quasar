@@ -247,6 +247,8 @@ describe("CLI HTTP client <-> server contract", () => {
     const searchEnv = {
       QUASAR_SEARCH_PROFILE: "1",
       QUASAR_EMBEDDING_PROVIDER: "synthetic",
+      // Hermetic: never eager-load the local fp32 query pipeline in tests.
+      QUASAR_QUERY_EMBEDDING_PROVIDER: "synthetic",
       SYNTHETIC_API_KEY: "",
     };
     let proc = spawnServer(sqlite, port, token, searchEnv);

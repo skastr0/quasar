@@ -967,6 +967,89 @@ describe("Embeddings", () => {
     expect(seen).toEqual([["search_document: alpha terminal"], ["search_query: find alpha"]]);
   });
 
+  test("query embedder switches from the synthetic fallback to the local pipeline once its eager load completes", async () => {
+    let fallbackCalls = 0;
+    const fallback: Embedder = {
+      embedMany: async () => {
+        fallbackCalls += 1;
+        return [vector(1)];
+      },
+    };
+    const local: Embedder = {
+      embedMany: async (values) => values.map(() => vector(2)),
+    };
+
+    const sqlite = join(tempDir(), "quasar.sqlite");
+    const dataLayer = makeLocalStoreLayer(sqlite);
+    const queueLayer = makeDurableQueueLayer(sqlite);
+    const embeddingsLayer = makeEmbeddingsLayer({
+      sqlite,
+      profile: defaultEmbeddingProfile,
+      embedder: fallback,
+      localQueryEmbedder: local,
+    }).pipe(Layer.provide(Layer.merge(dataLayer, queueLayer)));
+
+    const [active, embedded] = await Effect.runPromise(
+      Effect.gen(function* () {
+        const embeddings = yield* Embeddings;
+        // Eager load runs in a background fiber; poll status until the switch.
+        let status = yield* embeddings.status;
+        const deadline = Date.now() + 5_000;
+        while (status.queryEmbedder.active !== "local" && Date.now() < deadline) {
+          yield* Effect.sleep("10 millis");
+          status = yield* embeddings.status;
+        }
+        const embedded = yield* embeddings.embedText("post-switch query");
+        return [status.queryEmbedder, embedded] as const;
+      }).pipe(Effect.provide(Layer.mergeAll(dataLayer, queueLayer, embeddingsLayer))),
+    );
+
+    expect(active.active).toBe("local");
+    expect(active.provider).toBe("local");
+    expect(active.loadedAt).toBeDefined();
+    expect(embedded).toEqual(vector(2));
+    expect(fallbackCalls).toBe(0);
+  });
+
+  test("query embedder stays on the bounded synthetic fallback when the local pipeline load fails", async () => {
+    const fallback: Embedder = {
+      embedMany: async () => [vector(1)],
+    };
+    const local: Embedder = {
+      embedMany: async () => {
+        throw new Error("onnx pipeline load failed");
+      },
+    };
+
+    const sqlite = join(tempDir(), "quasar.sqlite");
+    const dataLayer = makeLocalStoreLayer(sqlite);
+    const queueLayer = makeDurableQueueLayer(sqlite);
+    const embeddingsLayer = makeEmbeddingsLayer({
+      sqlite,
+      profile: defaultEmbeddingProfile,
+      embedder: fallback,
+      localQueryEmbedder: local,
+    }).pipe(Layer.provide(Layer.merge(dataLayer, queueLayer)));
+
+    const [queryEmbedder, embedded] = await Effect.runPromise(
+      Effect.gen(function* () {
+        const embeddings = yield* Embeddings;
+        let status = yield* embeddings.status;
+        const deadline = Date.now() + 5_000;
+        while (status.queryEmbedder.loadFailure === undefined && Date.now() < deadline) {
+          yield* Effect.sleep("10 millis");
+          status = yield* embeddings.status;
+        }
+        const embedded = yield* embeddings.embedText("fallback query");
+        return [status.queryEmbedder, embedded] as const;
+      }).pipe(Effect.provide(Layer.mergeAll(dataLayer, queueLayer, embeddingsLayer))),
+    );
+
+    expect(queryEmbedder.active).toBe("synthetic");
+    expect(queryEmbedder.loadFailure).toContain("onnx pipeline load failed");
+    expect(embedded).toEqual(vector(1));
+  });
+
   test("synthetic embedder preserves response order by index", async () => {
     const profile = makeEmbeddingProfile({
       model: "hf:nomic-ai/nomic-embed-text-v1.5",
