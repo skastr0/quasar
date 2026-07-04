@@ -110,7 +110,13 @@ const waitFor = async (url: string) => {
   throw new Error(`server did not become ready: ${url}`);
 };
 
-const spawnServer = (sqlite: string, lance: string, port: number, token: string) =>
+const spawnServer = (
+  sqlite: string,
+  lance: string,
+  port: number,
+  token: string,
+  env: Record<string, string | undefined> = {},
+) =>
   Bun.spawn(["bun", "run", "src/main.ts", "--host", "127.0.0.1", "--port", String(port)], {
     cwd: serverRoot,
     env: {
@@ -118,10 +124,16 @@ const spawnServer = (sqlite: string, lance: string, port: number, token: string)
       QUASAR_INGEST_TOKEN: token,
       QUASAR_LOCAL_SQLITE: sqlite,
       QUASAR_SEARCH_DATA_DIR: lance,
+      ...env,
     },
     stdout: "ignore",
     stderr: "ignore",
   });
+
+const fetchJson = async (url: string): Promise<{ readonly status: number; readonly body: any }> => {
+  const response = await fetch(url);
+  return { status: response.status, body: await response.json() };
+};
 
 describe("CLI HTTP client <-> server contract", () => {
   test("a normalized MappedSession POSTed via the CLI client persists and is served back over HTTP", async () => {
@@ -224,4 +236,143 @@ describe("CLI HTTP client <-> server contract", () => {
       await proc.exited;
     }
   }, 20_000);
+
+  test("search and readiness expose the current HTTP contract over derived index state", async () => {
+    const dir = tempDir();
+    const sqlite = join(dir, "quasar.sqlite");
+    const lance = join(dir, "search.lance");
+    const port = randomPort();
+    const token = "contract-ingest-token";
+    const base = `http://127.0.0.1:${port}`;
+    const proc = spawnServer(sqlite, lance, port, token, {
+      QUASAR_SEARCH_PROFILE: "1",
+      SYNTHETIC_API_KEY: "",
+    });
+
+    try {
+      await waitFor(`${base}/health`);
+
+      const emptyLexical = await fetchJson(`${base}/search/lexical?q=${encodeURIComponent("handshake")}&limit=5`);
+      expect(emptyLexical.status).toBe(200);
+      expect(emptyLexical.body).toMatchObject({ ok: true, command: "search/lexical" });
+      expect(emptyLexical.body.data.matches).toEqual([]);
+
+      const emptyReady = await fetchJson(`${base}/ready`);
+      expect(emptyReady.status).toBe(503);
+      expect(emptyReady.body).toMatchObject({
+        ok: false,
+        error: {
+          type: "ServiceUnavailable",
+          code: "SearchIndexNotReady",
+          message: "Search index is not ready",
+          modes: {
+            lexical: { ok: true, mode: "lexical" },
+            semantic: { ok: false, mode: "semantic", syntheticEmbeddingReady: false },
+            fusion: { ok: false, mode: "fusion", syntheticEmbeddingReady: false },
+          },
+        },
+      });
+      expect(typeof emptyReady.body.error.modes.semantic.syntheticEmbeddingReason).toBe("string");
+      expect(typeof emptyReady.body.error.modes.fusion.syntheticEmbeddingReason).toBe("string");
+
+      const outcome = await postMappedSession(base, mappedSession(), { ingestToken: token });
+      expect(outcome.status).toBe("ok");
+
+      const preMaintenanceLexical = await fetchJson(
+        `${base}/search/lexical?q=${encodeURIComponent("handshake")}&limit=5&projectKey=contract-project`,
+      );
+      expect(preMaintenanceLexical.status).toBe(200);
+      expect(preMaintenanceLexical.body).toMatchObject({ ok: true, command: "search/lexical" });
+      expect(Array.isArray(preMaintenanceLexical.body.data.matches)).toBe(true);
+
+      const repair = await fetchJson(`${base}/maintenance/repair?workerId=contract-indexer&limit=10`);
+      expect(repair.status).toBe(200);
+      expect(repair.body).toMatchObject({ ok: true, command: "maintenance/repair" });
+
+      const maintenance = await fetchJson(`${base}/maintenance/run`);
+      expect(maintenance.status).toBe(200);
+      expect(maintenance.body).toMatchObject({ ok: true, command: "maintenance/run" });
+
+      const lexical = await fetchJson(
+        `${base}/search/lexical?q=${encodeURIComponent("handshake")}&limit=5&projectKey=contract-project`,
+      );
+      expect(lexical.status).toBe(200);
+      expect(lexical.body).toMatchObject({
+        ok: true,
+        command: "search/lexical",
+        data: {
+          receipt: {
+            route: "search/lexical",
+            mode: "lexical",
+            query: "handshake",
+            limit: 5,
+            statusCode: 200,
+          },
+        },
+      });
+      expect(lexical.body.data.matches.map((hit: { row: { text: string } }) => hit.row.text)).toEqual([
+        "contract handshake over http",
+      ]);
+
+      const roleSearch = await fetchJson(
+        `${base}/search/lexical?q=${encodeURIComponent("assistant")}&role=assistant&limit=5`,
+      );
+      expect(roleSearch.status).toBe(200);
+      expect(roleSearch.body.data.matches.map((hit: { row: { role: string; text: string } }) => hit.row)).toEqual([
+        expect.objectContaining({ role: "assistant", text: "assistant contract reply" }),
+      ]);
+
+      const hostileInput = "\" OR foo:bar - ()";
+      const hostileQuery = await fetchJson(`${base}/search/lexical?q=${encodeURIComponent(hostileInput)}&limit=5`);
+      expect(hostileQuery.status).toBe(200);
+      expect(hostileQuery.body).toMatchObject({
+        ok: true,
+        command: "search/lexical",
+        data: {
+          receipt: {
+            route: "search/lexical",
+            mode: "lexical",
+            query: hostileInput,
+            limit: 5,
+            statusCode: 200,
+          },
+        },
+      });
+      expect(Array.isArray(hostileQuery.body.data.matches)).toBe(true);
+
+      const missingQuery = await fetchJson(`${base}/search/lexical`);
+      expect(missingQuery.status).toBe(400);
+      expect(missingQuery.body).toEqual({
+        ok: false,
+        route: "search/lexical",
+        error: { type: "BadRequest", message: "q is required" },
+      });
+
+      const ready = await fetchJson(`${base}/ready`);
+      expect(ready.status).toBe(503);
+      expect(ready.body).toMatchObject({
+        ok: false,
+        error: {
+          type: "ServiceUnavailable",
+          code: "SearchIndexNotReady",
+          message: "Search index is not ready",
+          modes: {
+            lexical: { ok: true, mode: "lexical" },
+            semantic: { ok: false, mode: "semantic", syntheticEmbeddingReady: false },
+            fusion: { ok: false, mode: "fusion", syntheticEmbeddingReady: false },
+          },
+        },
+      });
+      expect(typeof ready.body.error.modes.semantic.syntheticEmbeddingReason).toBe("string");
+      expect(typeof ready.body.error.modes.fusion.syntheticEmbeddingReason).toBe("string");
+
+      const semantic = await fetch(`${base}/search/semantic?q=${encodeURIComponent("handshake")}&limit=5`);
+      expect(semantic.status).toBe(500);
+      const fusion = await fetch(`${base}/search/fusion?q=${encodeURIComponent("handshake")}&limit=5`);
+      expect(fusion.status).toBe(500);
+    } finally {
+      proc.kill();
+      await proc.exited;
+    }
+  }, 25_000);
 });
