@@ -1,19 +1,15 @@
 import { HttpMiddleware, HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "@effect/platform";
 import { BunHttpServer, BunRuntime } from "@effect/platform-bun";
-import { DEFAULT_SEARCH_TABLE, LanceDb, MESSAGE_SEARCH_COLUMNS } from "./lancedb";
 import { Effect, Layer, Schema } from "effect";
 
 import { LocalServerConfig } from "./config";
-import { embeddingProfileSearchTable, embeddingProviderFromEnv } from "./embeddingProfiles";
+import { embeddingProviderFromEnv } from "./embeddingProfiles";
 import { ingestMappedSession } from "./ingest";
 import { ok } from "./json";
-import { SearchMaintenance } from "./maintenance";
 import type { MappedSession } from "./model";
 import { Provider } from "./provider";
 import { AppLayer } from "./runtime";
-import { DerivedSearch, messageSearchFilter } from "./search";
-import { SearchReadiness, type SearchMode } from "./searchReadiness";
-import { VECTOR_READY_FILTER } from "./searchPolicy";
+import { DerivedSearch } from "./search";
 import { DurableQueue, Embeddings, IngestCoordinator, WorkerSupervisor } from "./services";
 import { LocalStore } from "./store";
 
@@ -22,6 +18,22 @@ const json = (value: unknown, options?: { readonly status?: number }) =>
 
 const badRequest = (route: string, message: string) =>
   json({ ok: false, route, error: { type: "BadRequest", message } }, { status: 400 });
+
+/** Honest fast 503 for the semantic surfaces: vectors live in SQLite
+ * message_vectors, and the serving-side vector index does not exist yet
+ * (QSR-232). No probing, no gate — the mode is disabled, say so cheaply. */
+const semanticDisabled = (route: string) =>
+  json(
+    {
+      ok: false,
+      route,
+      error: {
+        type: "SemanticDisabled",
+        message: "semantic search disabled pending vector materialization (QSR-232)",
+      },
+    },
+    { status: 503 },
+  );
 
 const unauthorized = (route: string, message: string) =>
   json({ ok: false, route, error: { type: "Unauthorized", message } }, { status: 401 });
@@ -147,13 +159,6 @@ const positiveInt = (params: URLSearchParams, name: string, fallback: number): n
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 };
 
-const nonNegativeInt = (params: URLSearchParams, name: string, fallback: number): number => {
-  const raw = params.get(name);
-  if (raw === null) return fallback;
-  const parsed = Number(raw);
-  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
-};
-
 const health = Effect.gen(function* () {
   const config = yield* LocalServerConfig;
   const store = yield* LocalStore;
@@ -161,39 +166,20 @@ const health = Effect.gen(function* () {
   return json(ok("health", { status: "ok", home: config.home, sqlite: store.dbPath, stats }));
 });
 
-// /ready: 200 only when ALL search modes pass assertSearchReady.
-// /health: always 200 if the process is up (never blocks on index state).
-const ready = Effect.gen(function* () {
-  const readiness = yield* SearchReadiness;
-  const [lexical, semantic, fusion] = yield* Effect.all([
-    readiness.assertSearchReady("lexical"),
-    readiness.assertSearchReady("semantic"),
-    readiness.assertSearchReady("fusion"),
-  ]);
-  const allReady = lexical.ok && semantic.ok && fusion.ok;
-  if (!allReady) {
-    return json(
-      {
-        ok: false,
-        error: {
-          type: "ServiceUnavailable",
-          code: "SearchIndexNotReady",
-          message: "Search index is not ready",
-          modes: { lexical, semantic, fusion },
-        },
-      },
-      { status: 503 },
-    );
-  }
-  return json(ok("ready", { status: "ready", modes: { lexical, semantic, fusion } }));
-});
+// /ready: cheap truth, no index probing. Lexical serves straight from the
+// SQLite messages truth table; semantic/fusion are disabled until QSR-232
+// materializes a serving-side vector index.
+// /health: always 200 if the process is up.
+const ready = Effect.succeed(
+  json(ok("ready", {
+    modes: { lexical: true, semantic: false, fusion: false },
+    reason: "semantic pending vector materialization",
+  })),
+);
 
 const status = Effect.gen(function* () {
-  const params = yield* query;
-  const includeLanceStats = booleanParam(params, "lance", false) || booleanParam(params, "heavy", false);
-  const [store, search, queue, embeddings, ingest, workers] = yield* Effect.all([
+  const [store, queue, embeddings, ingest, workers] = yield* Effect.all([
     LocalStore,
-    LanceDb,
     DurableQueue,
     Embeddings,
     IngestCoordinator,
@@ -207,19 +193,8 @@ const status = Effect.gen(function* () {
     ingest.status,
     workers.status,
   ]);
-  const activeVectorTableName = embeddingProfileSearchTable(embeddings.profile);
-  const lance = includeLanceStats
-    ? {
-        defaultTable: yield* search.tableStats({ tableName: DEFAULT_SEARCH_TABLE }).pipe(Effect.either),
-        activeVectorTableName,
-        activeVectorTable: activeVectorTableName === DEFAULT_SEARCH_TABLE
-          ? yield* search.tableStats({ tableName: DEFAULT_SEARCH_TABLE }).pipe(Effect.either)
-          : yield* search.tableStats({ tableName: activeVectorTableName }).pipe(Effect.either),
-      }
-    : { _tag: "Right" as const, right: "skipped; pass ?lance=true for LanceDB table stats" };
   return json(ok("status", {
     sqlite,
-    lance,
     queue: { ...queueStats, byKind: queueByKind },
     embeddings: embeddingStatus,
     ingest: ingestStatus,
@@ -367,6 +342,8 @@ const ingestSession = Effect.gen(function* () {
   return json(ok("ingest/session", { outcome }), { status });
 });
 
+type SearchMode = "lexical" | "semantic" | "fusion";
+
 interface SearchReceipt {
   readonly route: string;
   readonly mode: SearchMode;
@@ -392,13 +369,6 @@ const emitSearchProfile = (profile: SearchReceipt) =>
     console.log(JSON.stringify({ event: "search.profile", at: new Date().toISOString(), ...profile }));
   });
 
-const isTableNotFoundError = (error: unknown): boolean => {
-  const msg = error instanceof Error
-    ? error.message
-    : String((error as { message?: string }).message ?? error);
-  return /not found|does not exist/i.test(msg);
-};
-
 const lexicalSearch = Effect.gen(function* () {
   const routeStarted = performance.now();
   const startedAt = new Date().toISOString();
@@ -415,13 +385,7 @@ const lexicalSearch = Effect.gen(function* () {
     role: params.get("role") ?? undefined,
     providers: parseProviders(params),
     limit: positiveInt(params, "limit", 10),
-  }).pipe(
-    Effect.catchAll((error) =>
-      isTableNotFoundError(error)
-        ? Effect.succeed([] as readonly import("./lancedb").SearchHit[])
-        : Effect.fail(error),
-    ),
-  );
+  });
   const searchMs = Math.round(performance.now() - searchStarted);
   const totalMs = Math.round(performance.now() - routeStarted);
   const receipt: SearchReceipt = {
@@ -449,121 +413,9 @@ const parseProviders = (params: URLSearchParams): readonly string[] | undefined 
   return list.length > 0 ? list : undefined;
 };
 
-const vectorReadyFilter = (params: URLSearchParams): string | undefined => {
-  const projectKey = params.get("projectKey");
-  const role = params.get("role");
-  return messageSearchFilter(
-    {
-      projectKey: projectKey === null || projectKey.trim() === "" ? undefined : projectKey,
-      role: role === null || role.trim() === "" ? undefined : role,
-      providers: parseProviders(params),
-    },
-    VECTOR_READY_FILTER,
-  );
-};
+const semanticSearch = Effect.succeed(semanticDisabled("search/semantic"));
 
-const semanticSearch = Effect.gen(function* () {
-  const routeStarted = performance.now();
-  const startedAt = new Date().toISOString();
-  const search = yield* LanceDb;
-  const embeddings = yield* Embeddings;
-  const params = yield* query;
-  const text = params.get("q") ?? params.get("query");
-  if (text === null || text.trim() === "") {
-    return badRequest("search/semantic", "q is required");
-  }
-  const embedStarted = performance.now();
-  const vector = yield* embeddings.embedText(text);
-  const embedMs = Math.round(performance.now() - embedStarted);
-  const tableName = embeddingProfileSearchTable(embeddings.profile);
-  const searchStarted = performance.now();
-  const matches = yield* search.vectorSearch({
-    tableName,
-    vector,
-    vectorDimension: embeddings.profile.dimensions,
-    limit: positiveInt(params, "limit", 10),
-    filter: vectorReadyFilter(params),
-    select: MESSAGE_SEARCH_COLUMNS,
-  }).pipe(
-    Effect.catchAll((error) =>
-      isTableNotFoundError(error)
-        ? Effect.succeed([] as readonly import("./lancedb").SearchHit[])
-        : Effect.fail(error),
-    ),
-  );
-  const searchMs = Math.round(performance.now() - searchStarted);
-  const totalMs = Math.round(performance.now() - routeStarted);
-  const receipt: SearchReceipt = {
-    route: "search/semantic",
-    mode: "semantic",
-    query: text,
-    limit: positiveInt(params, "limit", 10),
-    statusCode: 200,
-    startedAt,
-    completedAt: new Date().toISOString(),
-    tableName,
-    readinessMs: 0,
-    embedMs,
-    searchMs,
-    totalMs,
-    residualMs: Math.max(0, totalMs - embedMs - searchMs),
-    matches: matches.length,
-  };
-  yield* emitSearchProfile(receipt);
-  return json(ok("search/semantic", { matches, receipt: searchProfileEnabled() ? receipt : undefined }));
-});
-
-const fusionSearch = Effect.gen(function* () {
-  const routeStarted = performance.now();
-  const startedAt = new Date().toISOString();
-  const search = yield* LanceDb;
-  const embeddings = yield* Embeddings;
-  const params = yield* query;
-  const text = params.get("q") ?? params.get("query");
-  if (text === null || text.trim() === "") {
-    return badRequest("search/fusion", "q is required");
-  }
-  const embedStarted = performance.now();
-  const vector = yield* embeddings.embedText(text);
-  const embedMs = Math.round(performance.now() - embedStarted);
-  const tableName = embeddingProfileSearchTable(embeddings.profile);
-  const searchStarted = performance.now();
-  const matches = yield* search.hybridSearch({
-    tableName,
-    query: text,
-    vector,
-    vectorDimension: embeddings.profile.dimensions,
-    limit: positiveInt(params, "limit", 10),
-    filter: vectorReadyFilter(params),
-    select: MESSAGE_SEARCH_COLUMNS,
-  }).pipe(
-    Effect.catchAll((error) =>
-      isTableNotFoundError(error)
-        ? Effect.succeed([] as readonly import("./lancedb").SearchHit[])
-        : Effect.fail(error),
-    ),
-  );
-  const searchMs = Math.round(performance.now() - searchStarted);
-  const totalMs = Math.round(performance.now() - routeStarted);
-  const receipt: SearchReceipt = {
-    route: "search/fusion",
-    mode: "fusion",
-    query: text,
-    limit: positiveInt(params, "limit", 10),
-    statusCode: 200,
-    startedAt,
-    completedAt: new Date().toISOString(),
-    tableName,
-    readinessMs: 0,
-    embedMs,
-    searchMs,
-    totalMs,
-    residualMs: Math.max(0, totalMs - embedMs - searchMs),
-    matches: matches.length,
-  };
-  yield* emitSearchProfile(receipt);
-  return json(ok("search/fusion", { matches, receipt: searchProfileEnabled() ? receipt : undefined }));
-});
+const fusionSearch = Effect.succeed(semanticDisabled("search/fusion"));
 
 const booleanParam = (params: URLSearchParams, name: string, fallback: boolean): boolean => {
   const raw = params.get(name);
@@ -577,32 +429,6 @@ const httpIdleTimeoutSeconds = (): number => {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : 120;
 };
 
-const maintenanceRun = Effect.gen(function* () {
-  const maintenance = yield* SearchMaintenance;
-  const report = yield* maintenance.maintain();
-  return json(ok("maintenance/run", report));
-});
-
-const maintenanceFreshness = Effect.gen(function* () {
-  const maintenance = yield* SearchMaintenance;
-  const params = yield* query;
-  const report = yield* maintenance.reconcileFreshness({
-    limit: positiveInt(params, "limit", 500),
-  });
-  return json(ok("maintenance/freshness", report));
-});
-
-const maintenanceRepair = Effect.gen(function* () {
-  const maintenance = yield* SearchMaintenance;
-  const params = yield* query;
-  const report = yield* maintenance.repairOnce({
-    workerId: params.get("workerId") ?? "http-maintenance",
-    limit: positiveInt(params, "limit", 100),
-    leaseMs: positiveInt(params, "leaseMs", 60_000),
-  });
-  return json(ok("maintenance/repair", report));
-});
-
 const maintenanceReplayEmbeddingCache = Effect.gen(function* () {
   const embeddings = yield* Embeddings;
   const store = yield* LocalStore;
@@ -612,48 +438,6 @@ const maintenanceReplayEmbeddingCache = Effect.gen(function* () {
   });
   const coverage = yield* store.messageVectorCoverage(embeddings.profile.cacheNamespace);
   return json(ok("maintenance/embeddings/replay-cache", { report, coverage }));
-});
-
-const maintenanceMaterializeEmbeddingVectors = Effect.gen(function* () {
-  const embeddings = yield* Embeddings;
-  const store = yield* LocalStore;
-  const queue = yield* DurableQueue;
-  const search = yield* LanceDb;
-  const params = yield* query;
-  const report = yield* embeddings.materializeMissingVectors({
-    limit: positiveInt(params, "limit", 1_000),
-    lanceOffset: nonNegativeInt(params, "lanceOffset", 0),
-  });
-  const coverage = yield* store.messageVectorCoverage(embeddings.profile.cacheNamespace);
-  const queueByKind = yield* queue.statsByKind;
-  const embedMessageQueue = queueByKind.find((stats) => stats.kind === "embed-message") ?? {
-    kind: "embed-message",
-    pending: 0,
-    leased: 0,
-    failed: 0,
-  };
-  const activeEmbedMessageQueue = yield* queue.embedMessageStatsByProfile(embeddings.profile.cacheNamespace);
-  const activeVectorTableName = embeddingProfileSearchTable(embeddings.profile);
-  const activeVectorTable = yield* search.tableStats({ tableName: activeVectorTableName }).pipe(Effect.either);
-  const lanceRowCount = activeVectorTable._tag === "Right" ? activeVectorTable.right.rowCount : undefined;
-  const divergence = {
-    sqliteVectorRows: coverage.vectorRows,
-    lanceRowCount,
-    rowCountMatches: lanceRowCount === coverage.vectorRows,
-    rowCountDelta: lanceRowCount === undefined ? undefined : coverage.vectorRows - lanceRowCount,
-  };
-  return json(ok("maintenance/embeddings/materialize", {
-    report,
-    coverage,
-    queue: {
-      embedMessage: embedMessageQueue,
-      activeEmbedMessage: activeEmbedMessageQueue,
-      activeEmbeddingProfile: embeddings.profile.cacheNamespace,
-      byKind: queueByKind,
-    },
-    embedding: { provider: embeddingProviderFromEnv(), profile: embeddings.profile },
-    lance: { activeVectorTableName, activeVectorTable, divergence },
-  }));
 });
 
 const maintenanceMaterializeSqliteEmbeddingVectors = Effect.gen(function* () {
@@ -759,11 +543,7 @@ const routes = HttpRouter.empty.pipe(
 );
 
 const routesWithMaintenance = routes.pipe(
-  HttpRouter.get("/maintenance/run", maintenanceRun),
-  HttpRouter.get("/maintenance/freshness", maintenanceFreshness),
-  HttpRouter.get("/maintenance/repair", maintenanceRepair),
   HttpRouter.get("/maintenance/embeddings/replay-cache", maintenanceReplayEmbeddingCache),
-  HttpRouter.get("/maintenance/embeddings/materialize", maintenanceMaterializeEmbeddingVectors),
   HttpRouter.get("/maintenance/embeddings/materialize-sqlite", maintenanceMaterializeSqliteEmbeddingVectors),
   HttpRouter.get("/", dashboard),
   HttpRouter.get("*", json({ ok: false, error: { type: "NotFound", message: "No route" } }, { status: 404 })),

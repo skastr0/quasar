@@ -11,7 +11,7 @@ import { fts5QueryForText, positiveInt } from "./fts5";
 
 const SEARCHABLE_ROLES = ["user", "assistant", "reasoning"] as const;
 const DEFAULT_QUERIES = [
-  "sqlite lancedb search readiness",
+  "sqlite fts search readiness",
   "embedding profile vector dimension",
   "tool payloads session search",
 ] as const;

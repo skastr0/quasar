@@ -2,12 +2,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { makeLanceDbLayer } from "../src/lancedb";
 import { afterEach, describe, expect, test } from "bun:test";
-import { Effect, Layer } from "effect";
+import { Effect } from "effect";
 
 import type { MappedSession } from "../src/model";
-import { DerivedSearch, DerivedSearchLive } from "../src/search";
 import { LocalStore, makeLocalStoreLayer } from "../src/store";
 
 const tempDirs: string[] = [];
@@ -78,25 +76,15 @@ const mappedSession = (overrides: { readonly fingerprint?: string; readonly firs
   ],
 });
 
-const seedAndIndex = (sqlite: string, lance: string) => {
-  const dataLayer = Layer.mergeAll(
-    makeLocalStoreLayer(sqlite),
-    makeLanceDbLayer({ dataDir: lance }),
-  );
-  const searchLayer = DerivedSearchLive.pipe(Layer.provide(dataLayer));
-
-  return Effect.runPromise(
+const seed = (sqlite: string) =>
+  Effect.runPromise(
     Effect.scoped(
       Effect.gen(function* () {
         const store = yield* LocalStore;
-        const search = yield* DerivedSearch;
         yield* store.upsertSession(mappedSession());
-        yield* search.indexSession("codex:session-http");
-        yield* search.createLexicalIndex;
-      }).pipe(Effect.provide(Layer.merge(dataLayer, searchLayer))),
+      }).pipe(Effect.provide(makeLocalStoreLayer(sqlite))),
     ),
   );
-};
 
 const waitFor = async (url: string) => {
   const deadline = Date.now() + 5_000;
@@ -116,7 +104,6 @@ describe("HTTP server", () => {
   test("accepts authenticated remote session ingest, skips unchanged fingerprints, and honors force", async () => {
     const dir = tempDir();
     const sqlite = join(dir, "quasar.sqlite");
-    const lance = join(dir, "search.lance");
     const port = 20_000 + Math.floor(Math.random() * 20_000);
     const token = "test-ingest-token";
     const proc = Bun.spawn(["bun", "run", "src/main.ts", "--host", "127.0.0.1", "--port", String(port)], {
@@ -125,7 +112,6 @@ describe("HTTP server", () => {
         ...process.env,
         QUASAR_INGEST_TOKEN: token,
         QUASAR_LOCAL_SQLITE: sqlite,
-        QUASAR_SEARCH_DATA_DIR: lance,
       },
       stdout: "ignore",
       stderr: "ignore",
@@ -154,15 +140,12 @@ describe("HTTP server", () => {
       expect(first.data.outcome.status).toBe("ok");
       expect(first.data.outcome.messagesWritten).toBe(2);
       expect(first.data.outcome.toolCallsWritten).toBe(1);
-      expect(first.data.outcome.jobsEnqueued).toBe(3);
+      expect(first.data.outcome.jobsEnqueued).toBe(2);
       expect(second.data.outcome.status).toBe("skipped");
       expect(forced.data.outcome.status).toBe("ok");
       expect(messages.data.rows.map((row: { text: string }) => row.text)).toEqual(["forced http rewrite", "assistant-only http memory"]);
-      expect(status.data.queue.pending).toBe(3);
-      expect(status.data.lance).toEqual({
-        _tag: "Right",
-        right: "skipped; pass ?lance=true for LanceDB table stats",
-      });
+      expect(status.data.queue.pending).toBe(2);
+      expect(status.data.lance).toBeUndefined();
     } finally {
       proc.kill();
       await proc.exited;
@@ -172,7 +155,6 @@ describe("HTTP server", () => {
   test("remote session ingest fails closed without token and returns bad request for malformed JSON", async () => {
     const dir = tempDir();
     const sqlite = join(dir, "quasar.sqlite");
-    const lance = join(dir, "search.lance");
     const port = 20_000 + Math.floor(Math.random() * 20_000);
     const token = "test-ingest-token";
     const proc = Bun.spawn(["bun", "run", "src/main.ts", "--host", "127.0.0.1", "--port", String(port)], {
@@ -181,7 +163,6 @@ describe("HTTP server", () => {
         ...process.env,
         QUASAR_INGEST_TOKEN: token,
         QUASAR_LOCAL_SQLITE: sqlite,
-        QUASAR_SEARCH_DATA_DIR: lance,
       },
       stdout: "ignore",
       stderr: "ignore",
@@ -244,8 +225,7 @@ describe("HTTP server", () => {
   test("serves local read APIs from SQLite truth", async () => {
     const dir = tempDir();
     const sqlite = join(dir, "quasar.sqlite");
-    const lance = join(dir, "search.lance");
-    await seedAndIndex(sqlite, lance);
+    await seed(sqlite);
 
     const port = 20_000 + Math.floor(Math.random() * 20_000);
     const proc = Bun.spawn(["bun", "run", "src/main.ts", "--host", "127.0.0.1", "--port", String(port)], {
@@ -254,7 +234,6 @@ describe("HTTP server", () => {
         ...process.env,
         QUASAR_SEARCH_PROFILE: "1",
         QUASAR_LOCAL_SQLITE: sqlite,
-        QUASAR_SEARCH_DATA_DIR: lance,
       },
       stdout: "ignore",
       stderr: "ignore",
@@ -275,7 +254,10 @@ describe("HTTP server", () => {
         wrongProviderSearch,
         projectSearch,
         wrongProjectSearch,
-        statusProfile,
+        statusBody,
+        readyBody,
+        semanticBody,
+        fusionBody,
       ] = await Promise.all([
         fetch(`http://127.0.0.1:${port}/projects`).then((response) => response.json()),
         fetch(`http://127.0.0.1:${port}/messages?sessionId=codex%3Asession-http`).then((response) => response.json()),
@@ -289,7 +271,10 @@ describe("HTTP server", () => {
         fetch(`http://127.0.0.1:${port}/search/lexical?q=http&provider=grok`).then((response) => response.json()),
         fetch(`http://127.0.0.1:${port}/search/lexical?q=http&projectKey=project-http`).then((response) => response.json()),
         fetch(`http://127.0.0.1:${port}/search/lexical?q=http&projectKey=project-other`).then((response) => response.json()),
-        fetch(`http://127.0.0.1:${port}/status?lance=true`).then((response) => response.json()),
+        fetch(`http://127.0.0.1:${port}/status`).then((response) => response.json()),
+        fetch(`http://127.0.0.1:${port}/ready`).then(async (response) => [response.status, await response.json()] as const),
+        fetch(`http://127.0.0.1:${port}/search/semantic?q=http`).then(async (response) => [response.status, await response.json()] as const),
+        fetch(`http://127.0.0.1:${port}/search/fusion?q=http`).then(async (response) => [response.status, await response.json()] as const),
       ]);
 
       expect(projects.data.rows.map((row: { projectKey: string }) => row.projectKey)).toEqual(["project-http"]);
@@ -302,11 +287,27 @@ describe("HTTP server", () => {
       expect(search.data.receipt).toMatchObject({ route: "search/lexical", mode: "lexical", query: "hello" });
       expect(typeof search.data.receipt.startedAt).toBe("string");
       expect(typeof search.data.receipt.completedAt).toBe("string");
-      expect(statusProfile.data.lance.activeVectorTableName).not.toBe("messages");
-      expect(statusProfile.data.lance.activeVectorTableName).toStartWith("messages_");
-      expect(statusProfile.data.lance.defaultTable._tag).toBe("Right");
-      expect(statusProfile.data.lance.activeVectorTable._tag).toBe("Right");
-      expect(statusProfile.data.workers.workers).toEqual(["embeddings", "index-repair", "maintenance", "reconcile"]);
+      expect(statusBody.data.lance).toBeUndefined();
+      expect(statusBody.data.workers.workers).toEqual(["embeddings"]);
+      expect(readyBody[0]).toBe(200);
+      expect(readyBody[1]).toMatchObject({
+        ok: true,
+        data: {
+          modes: { lexical: true, semantic: false, fusion: false },
+          reason: "semantic pending vector materialization",
+        },
+      });
+      expect(semanticBody[0]).toBe(503);
+      expect(semanticBody[1]).toEqual({
+        ok: false,
+        route: "search/semantic",
+        error: {
+          type: "SemanticDisabled",
+          message: "semantic search disabled pending vector materialization (QSR-232)",
+        },
+      });
+      expect(fusionBody[0]).toBe(503);
+      expect(fusionBody[1]).toMatchObject({ ok: false, route: "search/fusion", error: { type: "SemanticDisabled" } });
       expect(search.data.matches.map((hit: { row: { text: string } }) => hit.row.text)).toEqual(["hello over http"]);
       expect(roleSearch.data.matches.map((hit: { row: { text: string } }) => hit.row.text)).toEqual(["assistant-only http memory"]);
       expect(providerSearch.data.matches.map((hit: { row: { text: string } }) => hit.row.text).sort()).toEqual([

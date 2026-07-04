@@ -2,8 +2,6 @@ import type { MessageRow } from "./model";
 
 const textEncoder = new TextEncoder();
 
-const UNEMBEDDED_PREFIX = "unembedded:";
-
 export type SearchDocumentKind = "semantic" | "ignored";
 
 export type SearchDocumentReason =
@@ -49,20 +47,6 @@ export const decideSearchDocument = (message: Pick<MessageRow, "role" | "text">)
 
 export const isSemanticSearchDocument = (message: Pick<MessageRow, "role" | "text">): boolean =>
   decideSearchDocument(message).semantic;
-
-export const indexedContentHash = (message: Pick<MessageRow, "contentHash" | "role" | "text">): string => {
-  const decision = decideSearchDocument(message);
-  if (decision.kind === "semantic") return `${UNEMBEDDED_PREFIX}${message.contentHash}`;
-  return message.contentHash;
-};
-
-export const normalizeIndexedContentHash = (value: unknown): string | undefined => {
-  if (typeof value !== "string") return undefined;
-  if (value.startsWith(UNEMBEDDED_PREFIX)) return value.slice(UNEMBEDDED_PREFIX.length);
-  return value;
-};
-
-export const VECTOR_READY_FILTER = "contentHash NOT LIKE 'unembedded:%'";
 
 export const summarizeSearchDocumentPolicy = (messages: readonly Pick<MessageRow, "role" | "text">[]): SearchDocumentPolicyStats => {
   let semanticEligible = 0;
