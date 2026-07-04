@@ -7,7 +7,7 @@ import type { IndexProof } from "./verify";
 import { messageSearchKey, type SearchHit } from "./lancedb";
 import { isSearchableRole, normalizeIndexedContentHash } from "./searchPolicy";
 import { ensureParentDir, sqlitePath } from "./paths";
-import { fts5QueryForText, ftsProjectScopeToken, positiveInt } from "./fts5";
+import { composeScopedFtsQuery, ftsProjectScopeToken, positiveInt } from "./fts5";
 import { decodeFloat16Vector, encodeFloat16Vector, VECTOR_BLOB_ENCODING } from "./vectorBlob";
 
 export class SqliteStoreError extends Schema.TaggedError<SqliteStoreError>()(
@@ -1172,37 +1172,49 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
             }),
           lexicalSearch: ({ query, projectKey, role, providers, limit }) =>
             trySqlite("lexicalSearch", () => {
-              const ftsQuery = fts5QueryForText(query);
+              // The single-provider case narrows the MATCH itself via the
+              // provider scope token (real FTS-index narrowing); a multi-provider
+              // allow-list can't be expressed as one AND-ed token, so it falls
+              // through to the provider IN (...) backstop below instead.
+              const scopedProvider = providers !== undefined && providers.length === 1 ? providers[0] : undefined;
+              const ftsQuery = composeScopedFtsQuery({ query, projectKey, role, provider: scopedProvider });
               if (ftsQuery === undefined) return [];
+              // Redundant backstop predicates: the scope tokens above narrow the
+              // FTS candidate set, but these exact-match column predicates against
+              // the messages TRUTH TABLE remain the authoritative filter.
               const filters = ["messages_fts MATCH ?"];
               const args: Array<string | number> = [ftsQuery];
               if (projectKey !== undefined) {
-                filters.push("project_key = ?");
+                filters.push("m.project_key = ?");
                 args.push(projectKey);
               }
               if (role !== undefined) {
-                filters.push("role = ?");
+                filters.push("m.role = ?");
                 args.push(role);
               }
               if (providers !== undefined && providers.length > 0) {
-                filters.push(`provider IN (${providers.map(() => "?").join(", ")})`);
+                filters.push(`messages_fts.provider IN (${providers.map(() => "?").join(", ")})`);
                 args.push(...providers);
               }
               const rows = db
                 .query(
                   `SELECT
-                    key,
+                    messages_fts.key AS key,
                     bm25(messages_fts) AS rank,
-                    session_id AS sessionId,
-                    seq,
-                    role,
-                    project_key AS projectKey,
-                    provider,
-                    text,
-                    content_hash AS contentHash
+                    m.session_id AS sessionId,
+                    m.seq AS seq,
+                    m.role AS role,
+                    m.project_key AS projectKey,
+                    messages_fts.provider AS provider,
+                    m.text AS text,
+                    m.content_hash AS contentHash
                   FROM messages_fts
+                  JOIN messages AS m
+                    ON m.session_id = messages_fts.session_id
+                   AND m.seq = messages_fts.seq
+                   AND m.role = messages_fts.role
                   WHERE ${filters.join(" AND ")}
-                  ORDER BY rank ASC, key ASC
+                  ORDER BY rank ASC, messages_fts.key ASC
                   LIMIT ?`,
                 )
                 .all(...args, positiveInt(limit, 10)) as Array<{

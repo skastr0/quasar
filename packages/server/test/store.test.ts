@@ -190,9 +190,23 @@ describe("LocalStore", () => {
     const userToken = ftsRoleScopeToken("user");
     const providerToken = ftsProviderScopeToken("codex");
 
+    // The serving path returns the TRUTH TABLE's plain text/contentHash — the
+    // token-prefixed FTS text must never leave the store layer.
     const inserted = await withStore(path, (store) => store.lexicalSearch({ query: "First", limit: 10 }));
-    expect(inserted.map((hit) => hit.row.text)).toEqual([`${projectToken} ${userToken} ${providerToken} First message`]);
-    expect(inserted.map((hit) => hit.row.contentHash)).toEqual(["unembedded:hash-1"]);
+    expect(inserted.map((hit) => hit.row.text)).toEqual(["First message"]);
+    expect(inserted.map((hit) => hit.row.contentHash)).toEqual(["hash-1"]);
+
+    // The trigger still writes scope-token-prefixed text into the raw FTS
+    // column — that's what makes the scoped MATCH above possible.
+    const rawFtsRow = new Database(path);
+    try {
+      const row = rawFtsRow.query("SELECT text FROM messages_fts WHERE key = ?").get(`${sessionId}:1:user`) as
+        | { text: string }
+        | null;
+      expect(row?.text).toBe(`${projectToken} ${userToken} ${providerToken} First message`);
+    } finally {
+      rawFtsRow.close();
+    }
 
     const hostile = await withStore(path, (store) =>
       store.lexicalSearch({ query: '" OR First:message - ()', limit: 10 }),
@@ -226,8 +240,8 @@ describe("LocalStore", () => {
           store.lexicalSearch({ query: "First", limit: 10 }),
         ]),
     );
-    expect(afterUpdate.map((hit) => hit.row.text)).toEqual([`${projectToken} ${userToken} ${providerToken} Updated trigger keyword`]);
-    expect(afterUpdate.map((hit) => hit.row.contentHash)).toEqual(["unembedded:hash-updated"]);
+    expect(afterUpdate.map((hit) => hit.row.text)).toEqual(["Updated trigger keyword"]);
+    expect(afterUpdate.map((hit) => hit.row.contentHash)).toEqual(["hash-updated"]);
     expect(oldText).toEqual([]);
 
     const deleteDb = new Database(path);
@@ -400,9 +414,7 @@ describe("LocalStore", () => {
     const hits = await withStore(path, (store) =>
       store.lexicalSearch({ query: "First", limit: 10, projectKey: hostileProjectKey }),
     );
-    expect(hits.map((hit) => hit.row.text)).toEqual([
-      `${expectedToken} ${ftsRoleScopeToken("user")} ${ftsProviderScopeToken("codex")} First message`,
-    ]);
+    expect(hits.map((hit) => hit.row.text)).toEqual(["First message"]);
   });
 
   test("round-trips host and identity scheme version provenance on read", async () => {
