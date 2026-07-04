@@ -68,6 +68,8 @@
       "providerCalls": 0
     },
     "gates": {
+      "initialSqliteVectorsZero": true,
+      "upsertedReplayableMessages": true,
       "reachedCacheReplayCeiling": true,
       "remainingEqualsUncached": true,
       "staleVectorRowsZero": true,
