@@ -14,7 +14,10 @@ import {
   decideMaterializeLoop,
   emptyMaterializeTotals,
   materializeClosureReceipt,
+  materializeProviders,
   parseMaterializeBatch,
+  requireMaterializeProvider,
+  type MaterializeProvider,
   type MaterializeTotals,
 } from "./materialize-receipt";
 
@@ -406,7 +409,20 @@ const writeJsonAndMaybeOut = (value: unknown): void => {
   writeJson(value);
 };
 
-const materializeEmbeddingVectorsUntilEmpty = async () => {
+const parseMaterializeProviderRequirement = (name: string): MaterializeProvider | undefined => {
+  const raw = arg("--require-provider");
+  if (raw === undefined) return undefined;
+  if ((materializeProviders as readonly string[]).includes(raw)) return raw as MaterializeProvider;
+  rejectInput(name, new CommandInputError("--require-provider must be local or synthetic", {
+    path: "--require-provider",
+    expected: materializeProviders.join("|"),
+    received: raw,
+    hint: "Use --require-provider local for the local ONNX materialization receipt gate.",
+  }));
+  return undefined;
+};
+
+const materializeEmbeddingVectorsUntilEmpty = async (requiredProvider: MaterializeProvider | undefined) => {
   const name = "materialize-embedding-vectors";
   const startedAt = new Date().toISOString();
   const started = performance.now();
@@ -424,6 +440,15 @@ const materializeEmbeddingVectorsUntilEmpty = async () => {
     const parsed = parseMaterializeBatch(body);
     if (!parsed.ok) {
       writeJson(fail(name, parsed.error));
+      process.exitCode = 1;
+      return;
+    }
+    const providerError = requireMaterializeProvider(parsed.receipt, requiredProvider);
+    if (providerError !== undefined) {
+      writeJson(fail(name, new CommandInputError(
+        providerError.message,
+        materializeFailureDetails(providerError.details, batches, totals, lastData),
+      )));
       process.exitCode = 1;
       return;
     }
@@ -469,6 +494,8 @@ const materializeEmbeddingVectorsUntilEmpty = async () => {
 const materializeEmbeddingVectors = async () => {
   const name = "materialize-embedding-vectors";
   if (!(checkInt(name, "--limit", 1) && checkInt(name, "--max-batches", 1))) return;
+  const requiredProvider = parseMaterializeProviderRequirement(name);
+  if (process.exitCode !== undefined) return;
   if (arg("--out") !== undefined && !flag("--until-empty")) {
     rejectInput(name, new CommandInputError("--out requires --until-empty", {
       path: "--out",
@@ -477,8 +504,16 @@ const materializeEmbeddingVectors = async () => {
     }));
     return;
   }
+  if (requiredProvider !== undefined && !flag("--until-empty")) {
+    rejectInput(name, new CommandInputError("--require-provider requires --until-empty", {
+      path: "--require-provider",
+      expected: "use --require-provider only with the parsed materialization loop",
+      hint: "Run materialize-embedding-vectors --until-empty --require-provider local.",
+    }));
+    return;
+  }
   if (flag("--until-empty")) {
-    await materializeEmbeddingVectorsUntilEmpty();
+    await materializeEmbeddingVectorsUntilEmpty(requiredProvider);
   } else {
     await fetchServer(name, "/maintenance/embeddings/materialize", { limit: arg("--limit") });
   }
@@ -651,7 +686,7 @@ switch (command) {
           "freshness [--limit n] [--server url]",
           "repair-index [--limit n] [--lease-ms n] [--server url]",
           "replay-embedding-cache [--limit n] [--server url]",
-          "materialize-embedding-vectors [--limit n] [--until-empty] [--max-batches n] [--out path] [--server url]",
+          "materialize-embedding-vectors [--limit n] [--until-empty] [--max-batches n] [--require-provider local|synthetic] [--out path] [--server url]",
           "workers [--server url]",
           "search --query text [--mode lexical|semantic|fusion] [--project-key key] [--role user|assistant] [--limit n] [--server url]",
           "stats",

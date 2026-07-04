@@ -218,17 +218,20 @@ bun run server:materialize
 ```
 
 By default this writes `docs/proofs/materialization-closure-<timestamp>.json` and
-also prints the same JSON envelope to stdout. Pass `--out` to choose a stable proof
-path:
+also prints the same JSON envelope to stdout. The wrapper requires the active
+embedding provider to be `local` by default, so a legacy Synthetic run cannot be
+mistaken for the SQLite-first materialization receipt. Pass `--out` to choose a
+stable proof path:
 
 ```bash
 bun scripts/server-ops.mjs materialize --out docs/proofs/materialization-closure.json
 ```
 
-The receipt is accepted only when the CLI loop reaches all four gates:
+The receipt is accepted only when the CLI loop reaches all five gates:
 
 - `coverage.vectorlessMessages = 0`
-- `queue.embedMessage.failed = 0`
+- `embedding.provider = local`
+- `queue.embedMessage.failed = 0` for the active embedding profile
 - active Lance row count matches SQLite `message_vectors`
 - the Lance repair scan has completed
 

@@ -43,8 +43,10 @@ if (command === "help" || command === "--help" || command === "-h") {
   process.exit(0);
 }
 
-requireFile(envFile, "copy platform/server/.env.example to platform/server/.env first");
-requireFile(composeFile, "missing server compose file");
+if (command !== "materialize") {
+  requireFile(envFile, "copy platform/server/.env.example to platform/server/.env first");
+  requireFile(composeFile, "missing server compose file");
+}
 
 switch (command) {
   case "deploy":
@@ -130,6 +132,7 @@ function materializeVectors() {
   const serverUrl = optionValue("--server", process.env.QUASAR_SERVER_URL ?? `http://127.0.0.1:${process.env.QUASAR_PUBLISH_PORT ?? "7180"}`);
   const timestamp = new Date().toISOString().replaceAll(":", "-");
   const outPath = optionValue("--out", `docs/proofs/materialization-closure-${timestamp}.json`);
+  const requiredProvider = optionValue("--require-provider", "local");
   const args = [
     "run",
     "packages/cli/src/cli.ts",
@@ -137,6 +140,8 @@ function materializeVectors() {
     "--server",
     serverUrl,
     "--until-empty",
+    "--require-provider",
+    requiredProvider,
     "--out",
     outPath,
   ];

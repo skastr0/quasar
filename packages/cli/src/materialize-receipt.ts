@@ -67,6 +67,7 @@ export interface MaterializeTotals {
 export interface MaterializeBatchReceipt {
   readonly data: unknown;
   readonly counters: MaterializeTotals;
+  readonly activeEmbeddingProvider?: string;
   readonly vectorlessMessages: number;
   readonly vectorRows: number;
   readonly rowCountMatches: boolean;
@@ -156,11 +157,17 @@ export const parseMaterializeBatch = (body: unknown):
     return { ok: false, error: fieldFailure("activeVectorTableName", "string", activeVectorTableName) };
   }
 
+  const activeEmbeddingProvider = recordValue(recordValue(data, "embedding"), "provider");
+  if (activeEmbeddingProvider !== undefined && typeof activeEmbeddingProvider !== "string") {
+    return { ok: false, error: fieldFailure("embedding.provider", "string", activeEmbeddingProvider) };
+  }
+
   return {
     ok: true,
     receipt: {
       data,
       counters,
+      activeEmbeddingProvider,
       vectorlessMessages: vectorlessMessages.value,
       vectorRows: vectorRows.value,
       rowCountMatches: rowCountMatches.value,
@@ -230,7 +237,27 @@ export const decideMaterializeLoop = (receipt: MaterializeBatchReceipt): Materia
   };
 };
 
+export const materializeProviders = ["local", "synthetic"] as const;
+export type MaterializeProvider = (typeof materializeProviders)[number];
+
+export const requireMaterializeProvider = (
+  receipt: MaterializeBatchReceipt,
+  expectedProvider: MaterializeProvider | undefined,
+): MaterializeReceiptError | undefined => {
+  if (expectedProvider === undefined) return undefined;
+  if (receipt.activeEmbeddingProvider === expectedProvider) return undefined;
+  return new MaterializeReceiptError("materialization ran under the wrong embedding provider", {
+    expected: `embedding.provider = ${expectedProvider}`,
+    received: receipt.activeEmbeddingProvider,
+    hint: "Re-run against a server configured with the provider required by the receipt gate.",
+  });
+};
+
 export const materializeClosureReceipt = (receipt: MaterializeBatchReceipt) => ({
+  embedding: {
+    provider: receipt.activeEmbeddingProvider,
+    activeEmbeddingProfile: receipt.activeEmbeddingProfile,
+  },
   coverage: {
     vectorlessMessages: receipt.vectorlessMessages,
     vectorRows: receipt.vectorRows,

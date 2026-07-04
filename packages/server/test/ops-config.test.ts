@@ -43,6 +43,9 @@ describe("server ops config", () => {
     expect(ops).toContain("VACUUM INTO");
     expect(ops).toContain("quasar-truth-backup.tar");
     expect(ops).toContain("materialize-embedding-vectors");
+    expect(ops).toContain('if (command !== "materialize")');
+    expect(ops).toContain('optionValue("--require-provider", "local")');
+    expect(ops).toContain("--require-provider");
     expect(ops).toContain("materialization-closure-");
     expect(ops).toContain("missing value for");
     expect(runbook).toContain("quasar daemon install --interval-seconds 60");
@@ -51,6 +54,7 @@ describe("server ops config", () => {
     expect(runbook).toContain("Avoid the HTTP maintenance endpoint for long optimize runs");
     expect(runbook).toContain("bun run server:lance");
     expect(runbook).toContain("does **not** archive `search.lance` by default");
+    expect(runbook).toContain("embedding.provider = local");
   });
 
   test("server-side history ingestion paths are removed", () => {
