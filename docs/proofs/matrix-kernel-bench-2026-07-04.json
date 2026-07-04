@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-07-04T21:31:53.492Z",
+  "generatedAt": "2026-07-04T22:53:33.870Z",
   "script": "scripts/matrix-kernel-bench.ts",
   "machine": {
     "platform": "darwin",
@@ -27,54 +27,44 @@
     "workerCount": 8
   },
   "generate": {
-    "elapsedMs": 14242,
+    "elapsedMs": 0,
     "dbBytes": 1556361216,
-    "reusedExistingDb": false
+    "reusedExistingDb": true
   },
   "gates": {
     "bootLoad": {
       "limitMs": 5000,
-      "loadMs": 3856.81,
+      "loadMs": 2132.33,
       "rows": 700000,
       "skippedRows": 0,
       "pass": true
     },
     "rssAfterLoad": {
       "limitBytes": 4294967296,
-      "rssBytes": 2340208640,
-      "rssAfterQueriesBytes": 2702721024,
+      "rssBytes": 1456570368,
+      "rssAfterQueriesBytes": 2209464320,
       "pass": true
     },
     "unfilteredScan": {
-      "limitMs": 100,
+      "limitMs": 60,
       "samples": 60,
-      "minMs": 40.33,
-      "medianMs": 46.9,
-      "p95Ms": 53.27,
-      "p99Ms": 55.13,
-      "maxMs": 55.13,
+      "minMs": 46.57,
+      "medianMs": 50.9,
+      "p95Ms": 57.51,
+      "p99Ms": 62.07,
+      "maxMs": 62.07,
       "pass": true
     },
     "filteredScan": {
-      "limitMs": 100,
+      "limitMs": 60,
       "candidates": 70000,
       "candidateFraction": 0.1,
-      "prefilter": {
-        "samples": 60,
-        "minMs": 8.47,
-        "medianMs": 8.89,
-        "p95Ms": 10.56,
-        "p99Ms": 13.18,
-        "maxMs": 13.18
-      },
-      "full": {
-        "samples": 60,
-        "minMs": 27.31,
-        "medianMs": 28.74,
-        "p95Ms": 32.84,
-        "p99Ms": 46.25,
-        "maxMs": 46.25
-      },
+      "samples": 60,
+      "minMs": 9.45,
+      "medianMs": 10.78,
+      "p95Ms": 12.56,
+      "p99Ms": 25.29,
+      "maxMs": 25.29,
       "pass": true
     }
   },
