@@ -30,7 +30,13 @@ services:
       QUASAR_INGEST_TOKEN: ${QUASAR_INGEST_TOKEN:?set QUASAR_INGEST_TOKEN in platform/server/.env for remote ingest writes}
       # Pinned: an embedding provider flip is an explicit receipted cutover, never a deploy side-effect.
       QUASAR_EMBEDDING_PROVIDER: synthetic
-      QUASAR_EMBEDDING_MODEL_CACHE_DIR: ${QUASAR_EMBEDDING_MODEL_CACHE_DIR:-/data/quasar/models}
+      # Defaults to the path the Dockerfile bakes the fp32 query model into
+      # (/app/.model-cache, in the image's own writable layer). Do NOT default
+      # this under /data/quasar: that path is the quasar-data VOLUME, and an
+      # empty/fresh named volume mounted there would shadow the baked model,
+      # forcing a runtime download on every new volume. Override only to
+      # point at a different pre-populated cache.
+      QUASAR_EMBEDDING_MODEL_CACHE_DIR: ${QUASAR_EMBEDDING_MODEL_CACHE_DIR:-/app/.model-cache}
       QUASAR_EMBEDDING_ONNX_DTYPE: ${QUASAR_EMBEDDING_ONNX_DTYPE:-q8}
       QUASAR_EMBEDDING_API_BATCH_SIZE: ${QUASAR_EMBEDDING_API_BATCH_SIZE:-100}
       QUASAR_EMBEDDING_API_CONCURRENCY: ${QUASAR_EMBEDDING_API_CONCURRENCY:-4}
