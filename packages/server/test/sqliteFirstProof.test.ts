@@ -155,6 +155,9 @@ describe("sqlite-first proof helpers", () => {
       ftsFilterRole: "assistant",
       vectorLimit: 10,
       exactScanLimit: 10,
+      exactScanSamples: 3,
+      exactScanKernel: "usearch",
+      exactScanThreads: 1,
     });
 
     expect(report.embeddingCoverage.cachedDocumentHashes).toBe(2);
@@ -169,6 +172,14 @@ describe("sqlite-first proof helpers", () => {
     expect(report.vectors.rowsInserted).toBe(2);
     expect(report.vectors.rowsMissingCache).toBe(1);
     expect(report.exactScan.queryAnchor).toEqual({ sessionId: "s1", seq: 1 });
+    expect(report.exactScan.implementation).toBe("usearch-exact-cosine");
+    expect(report.exactScan.kernel).toMatchObject({
+      package: "usearch",
+      version: "2.25.3",
+      metric: "cosine-similarity",
+      threads: 1,
+    });
+    expect(report.exactScan.samples).toBe(3);
     expect(report.exactScan.rowsScanned).toBe(1);
     expect(report.exactScan.best).toEqual({ sessionId: "s1", seq: 2, score: 0 });
 

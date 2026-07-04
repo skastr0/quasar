@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname } from "node:path";
 import { performance } from "node:perf_hooks";
 
@@ -69,14 +70,28 @@ export interface VectorMaterializationReport {
   readonly materializeElapsedMs: number;
 }
 
+export type ExactScanKernelName = "usearch" | "pure-js";
+
 export interface ExactScanReport {
-  readonly implementation: "pure-js-float32-baseline";
+  readonly implementation: "pure-js-float32-baseline" | "usearch-exact-cosine";
+  readonly kernel: {
+    readonly package?: "usearch";
+    readonly version?: "2.25.3";
+    readonly metric: "cosine-similarity";
+    readonly threads?: number;
+  };
   readonly queryAnchor?: {
     readonly sessionId: string;
     readonly seq: number;
   };
+  readonly samples: number;
   readonly rowsScanned: number;
   readonly elapsedMs: number;
+  readonly minMs: number;
+  readonly medianMs: number;
+  readonly p95Ms: number;
+  readonly p99Ms: number;
+  readonly maxMs: number;
   readonly best?: {
     readonly sessionId: string;
     readonly seq: number;
@@ -130,6 +145,9 @@ export interface SqliteFirstProofOptions {
   readonly ftsFilterRole?: string;
   readonly vectorLimit?: number;
   readonly exactScanLimit?: number;
+  readonly exactScanSamples?: number;
+  readonly exactScanKernel?: ExactScanKernelName;
+  readonly exactScanThreads?: number;
 }
 
 export type SqliteFirstProofErrorCode =
@@ -181,6 +199,44 @@ const timingStats = (values: readonly number[]) => {
     p99Ms: quantile(sorted, 0.99),
     maxMs: sorted[sorted.length - 1] ?? 0,
   };
+};
+
+type UsearchExactSearchResult = {
+  readonly keys: BigUint64Array;
+  readonly distances: Float32Array;
+};
+
+type UsearchKernel = {
+  readonly exactSearch: (
+    dataset: Float32Array,
+    queries: Float32Array,
+    dimensions: number,
+    count: number,
+    metric: unknown,
+    threads?: number,
+  ) => UsearchExactSearchResult;
+  readonly metricCos: unknown;
+};
+
+const requireModule = createRequire(import.meta.url);
+
+const exactScanImplementation = (kernel: ExactScanKernelName): ExactScanReport["implementation"] =>
+  kernel === "usearch" ? "usearch-exact-cosine" : "pure-js-float32-baseline";
+
+const exactScanKernelReport = (
+  kernel: ExactScanKernelName,
+  threads: number,
+): ExactScanReport["kernel"] =>
+  kernel === "usearch"
+    ? { package: "usearch", version: "2.25.3", metric: "cosine-similarity", threads }
+    : { metric: "cosine-similarity" };
+
+const loadUsearchKernel = (): UsearchKernel => {
+  const loaded = requireModule("usearch") as {
+    readonly exactSearch: UsearchKernel["exactSearch"];
+    readonly MetricKind: { readonly Cos: unknown };
+  };
+  return { exactSearch: loaded.exactSearch, metricCos: loaded.MetricKind.Cos };
 };
 
 export const snapshotSqliteDatabase = (sourceDb: string, workDb: string): void => {
@@ -608,9 +664,17 @@ const cosine = (a: Float32Array, aMagnitude: number, b: Float32Array, bMagnitude
 
 export const runExactScanBaseline = (
   db: Database,
-  options: { readonly limit?: number } = {},
+  options: {
+    readonly limit?: number;
+    readonly samples?: number;
+    readonly kernel?: ExactScanKernelName;
+    readonly threads?: number;
+  } = {},
 ): ExactScanReport => {
   const limit = positiveInt(options.limit, 20_000);
+  const samples = positiveInt(options.samples, 1);
+  const kernel = options.kernel ?? "usearch";
+  const threads = positiveInt(options.threads, 1);
   const rows = db.query(`
     SELECT session_id AS sessionId, seq, vector_blob AS vectorBlob, magnitude
     FROM proof_message_vectors
@@ -623,25 +687,89 @@ export const runExactScanBaseline = (
     magnitude: number;
   }>;
   if (rows.length === 0 || rows[0] === undefined) {
-    return { implementation: "pure-js-float32-baseline", rowsScanned: 0, elapsedMs: 0 };
+    return {
+      implementation: exactScanImplementation(kernel),
+      kernel: exactScanKernelReport(kernel, threads),
+      samples: 0,
+      rowsScanned: 0,
+      elapsedMs: 0,
+      minMs: 0,
+      medianMs: 0,
+      p95Ms: 0,
+      p99Ms: 0,
+      maxMs: 0,
+    };
   }
-  const [anchor, ...candidates] = rows;
-  const queryVector = vectorFromBlob(anchor.vectorBlob);
+  const decodedRows = rows.map((row) => ({
+    sessionId: row.sessionId,
+    seq: row.seq,
+    vector: vectorFromBlob(row.vectorBlob),
+    magnitude: row.magnitude,
+  }));
+  const [anchor, ...candidates] = decodedRows;
+  if (anchor === undefined) {
+    return {
+      implementation: exactScanImplementation(kernel),
+      kernel: exactScanKernelReport(kernel, threads),
+      samples: 0,
+      rowsScanned: 0,
+      elapsedMs: 0,
+      minMs: 0,
+      medianMs: 0,
+      p95Ms: 0,
+      p99Ms: 0,
+      maxMs: 0,
+    };
+  }
+  const queryVector = anchor.vector;
   const queryMagnitude = anchor.magnitude;
-  let best: ExactScanReport["best"];
-  const scan = elapsed(() => {
+  const usearchKernel = kernel === "usearch" && candidates.length > 0 ? loadUsearchKernel() : undefined;
+  const dimensions = queryVector.length;
+  const usearchMatrix = usearchKernel === undefined
+    ? undefined
+    : (() => {
+      const matrix = new Float32Array(candidates.length * dimensions);
+      for (let rowIndex = 0; rowIndex < candidates.length; rowIndex += 1) {
+        matrix.set(candidates[rowIndex]!.vector, rowIndex * dimensions);
+      }
+      return matrix;
+    })();
+  const scanPureJsOnce = (): ExactScanReport["best"] => {
+    let best: ExactScanReport["best"];
     for (const row of candidates) {
-      const score = cosine(queryVector, queryMagnitude, vectorFromBlob(row.vectorBlob), row.magnitude);
+      const score = cosine(queryVector, queryMagnitude, row.vector, row.magnitude);
       if (best === undefined || score > best.score) {
         best = { sessionId: row.sessionId, seq: row.seq, score };
       }
     }
-  });
+    return best;
+  };
+  const scanUsearchOnce = (): ExactScanReport["best"] => {
+    if (usearchKernel === undefined || usearchMatrix === undefined || candidates.length === 0) return undefined;
+    const result = usearchKernel.exactSearch(usearchMatrix, queryVector, dimensions, 1, usearchKernel.metricCos, threads);
+    const candidateIndex = Number(result.keys[0]);
+    const candidate = candidates[candidateIndex];
+    if (candidate === undefined) return undefined;
+    const distance = result.distances[0] ?? Number.POSITIVE_INFINITY;
+    return { sessionId: candidate.sessionId, seq: candidate.seq, score: 1 - distance };
+  };
+  const scanOnce = kernel === "usearch" ? scanUsearchOnce : scanPureJsOnce;
+  const timings: number[] = [];
+  let best: ExactScanReport["best"];
+  for (let sample = 0; sample < samples; sample += 1) {
+    const scan = elapsed(scanOnce);
+    timings.push(scan.elapsedMs);
+    if (sample === 0) best = scan.value;
+  }
+  const stats = timingStats(timings);
   return {
-    implementation: "pure-js-float32-baseline",
+    implementation: exactScanImplementation(kernel),
+    kernel: exactScanKernelReport(kernel, threads),
     queryAnchor: { sessionId: anchor.sessionId, seq: anchor.seq },
+    samples,
     rowsScanned: candidates.length,
-    elapsedMs: scan.elapsedMs,
+    elapsedMs: timings[0] ?? 0,
+    ...stats,
     best,
   };
 };
@@ -660,7 +788,12 @@ export const runSqliteFirstProof = (options: SqliteFirstProofOptions): SqliteFir
       filterRole: options.ftsFilterRole,
     });
     const vectors = materializeProofVectors(db, profile, { limit: options.vectorLimit });
-    const exactScan = runExactScanBaseline(db, { limit: options.exactScanLimit ?? options.vectorLimit });
+    const exactScan = runExactScanBaseline(db, {
+      limit: options.exactScanLimit ?? options.vectorLimit,
+      samples: options.exactScanSamples,
+      kernel: options.exactScanKernel,
+      threads: options.exactScanThreads,
+    });
     return {
       generatedAt: new Date().toISOString(),
       sourceDb: options.sourceDb,
