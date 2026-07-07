@@ -64,7 +64,7 @@ describe("enqueueDownstreamJobs", () => {
     const jobs = await withQueue(
       Effect.gen(function* () {
         const queue = yield* DurableQueue;
-        yield* enqueueDownstreamJobs(queue, duplicateContentSession());
+        yield* enqueueDownstreamJobs(queue, duplicateContentSession().messages);
         return yield* leaseEmbedJobs(queue);
       }),
     );
@@ -84,8 +84,8 @@ describe("enqueueDownstreamJobs", () => {
     const jobs = await withQueue(
       Effect.gen(function* () {
         const queue = yield* DurableQueue;
-        yield* enqueueDownstreamJobs(queue, duplicateContentSession());
-        yield* enqueueDownstreamJobs(queue, duplicateContentSession());
+        yield* enqueueDownstreamJobs(queue, duplicateContentSession().messages);
+        yield* enqueueDownstreamJobs(queue, duplicateContentSession().messages);
         return yield* leaseEmbedJobs(queue);
       }),
     );

@@ -104,10 +104,25 @@ export interface SearchHit {
   readonly row: Record<string, unknown>;
 }
 
+/** Row-level result of a session apply. `changedMessages` carries exactly the
+ * inserted+updated message rows so downstream embedding jobs fan out over the
+ * delta, never the whole session. */
+export interface SessionDiffOutcome {
+  readonly messagesInserted: number;
+  readonly messagesUpdated: number;
+  readonly messagesDeleted: number;
+  readonly messagesUnchanged: number;
+  readonly toolCallsInserted: number;
+  readonly toolCallsUpdated: number;
+  readonly toolCallsDeleted: number;
+  readonly toolCallsUnchanged: number;
+  readonly changedMessages: readonly MessageRow[];
+}
+
 export interface LocalStoreService {
   readonly dbPath: string;
   readonly listProjects: (options?: { readonly limit?: number; readonly offset?: number }) => Effect.Effect<readonly ProjectRow[], SqliteStoreError>;
-  readonly upsertSession: (session: MappedSession) => Effect.Effect<void, SqliteStoreError>;
+  readonly upsertSession: (session: MappedSession) => Effect.Effect<SessionDiffOutcome, SqliteStoreError>;
   readonly hasSessionFingerprint: (
     sessionId: string,
     sourceFingerprint: string,
@@ -722,14 +737,143 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
             }));
           }
         };
-        const replaceSession = db.transaction((mapped: MappedSession) => {
+        // --- session diff apply ---
+        // A changed session used to be applied as DELETE-all + reinsert-all in
+        // one synchronous transaction: O(session length) FTS re-tokenization
+        // and vector-trigger churn for what is usually an O(1) append, holding
+        // the event loop for the whole rewrite (the receipted 36.5s ingest
+        // burst that head-of-line blocked a search to 24.4s). The canonical
+        // apply is now a row-level diff: untouched rows are never written,
+        // changed rows go through DELETE+INSERT (the proven AD/AI trigger
+        // pair), and work commits in small chunk transactions with the event
+        // loop yielded between chunks. Clients keep POSTing the full desired
+        // session state; convergence is state-based and idempotent, so a crash
+        // anywhere mid-apply is healed by the next daemon tick re-sending.
+        const INGEST_CHUNK_ROWS = 64;
+        const selectMessageDiffRows = db.prepare(
+          "SELECT seq, role, content_hash AS contentHash, project_key AS projectKey, ts FROM messages WHERE session_id = ?",
+        );
+        const selectToolCallDiffRows = db.prepare(
+          `SELECT id, seq, tool_name AS toolName, status, started_at AS startedAt, completed_at AS completedAt,
+                  project_key AS projectKey, provider,
+                  length(CAST(input_text AS BLOB)) AS inputBytes, length(CAST(output_text AS BLOB)) AS outputBytes
+           FROM tool_calls WHERE session_id = ?`,
+        );
+        const deleteMessageRow = db.prepare("DELETE FROM messages WHERE session_id = ? AND seq = ?");
+        const deleteToolCallRow = db.prepare("DELETE FROM tool_calls WHERE id = ?");
+        const upsertToolCall = db.prepare(
+          `INSERT INTO tool_calls(id, session_id, seq, tool_name, status, input_text, output_text, started_at, completed_at, project_key, provider)
+           VALUES ($id, $sessionId, $seq, $toolName, $status, $inputText, $outputText, $startedAt, $completedAt, $projectKey, $provider)
+           ON CONFLICT(id) DO UPDATE SET session_id = excluded.session_id, seq = excluded.seq, tool_name = excluded.tool_name, status = excluded.status, input_text = excluded.input_text, output_text = excluded.output_text, started_at = excluded.started_at, completed_at = excluded.completed_at, project_key = excluded.project_key, provider = excluded.provider`,
+        );
+        const stampSessionFingerprint = db.prepare(
+          "UPDATE sessions SET source_fingerprint = ? WHERE session_id = ?",
+        );
+
+        interface SessionDiffPlan {
+          readonly messageUpserts: readonly MessageRow[];
+          readonly messageDeleteSeqs: readonly number[];
+          readonly messagesInserted: number;
+          readonly messagesUpdated: number;
+          readonly messagesUnchanged: number;
+          readonly toolCallUpserts: readonly ToolCallRow[];
+          readonly toolCallDeleteIds: readonly string[];
+          readonly toolCallsInserted: number;
+          readonly toolCallsUpdated: number;
+          readonly toolCallsUnchanged: number;
+        }
+
+        const computeSessionDiff = (mapped: MappedSession): SessionDiffPlan => {
+          const existingMessages = selectMessageDiffRows.all(mapped.session.sessionId) as Array<{
+            seq: number; role: string; contentHash: string; projectKey: string; ts: string | null;
+          }>;
+          const existingBySeq = new Map(existingMessages.map((row) => [row.seq, row]));
+          const incomingSeqs = new Set(mapped.messages.map((row) => row.seq));
+          const messageUpserts: MessageRow[] = [];
+          let messagesInserted = 0;
+          let messagesUpdated = 0;
+          let messagesUnchanged = 0;
+          for (const message of mapped.messages) {
+            const existing = existingBySeq.get(message.seq);
+            if (existing === undefined) {
+              messagesInserted += 1;
+              messageUpserts.push(message);
+            } else if (
+              existing.contentHash !== message.contentHash
+              || existing.role !== message.role
+              || existing.projectKey !== message.projectKey
+              || existing.ts !== (message.ts ?? null)
+            ) {
+              messagesUpdated += 1;
+              messageUpserts.push(message);
+            } else {
+              messagesUnchanged += 1;
+            }
+          }
+          const messageDeleteSeqs = existingMessages
+            .filter((row) => !incomingSeqs.has(row.seq))
+            .map((row) => row.seq);
+
+          const existingToolCalls = selectToolCallDiffRows.all(mapped.session.sessionId) as Array<{
+            id: string; seq: number; toolName: string; status: string | null;
+            startedAt: string | null; completedAt: string | null;
+            projectKey: string; provider: string; inputBytes: number; outputBytes: number;
+          }>;
+          const existingById = new Map(existingToolCalls.map((row) => [row.id, row]));
+          const incomingIds = new Set(mapped.toolCalls.map((row) => row.id));
+          const toolCallUpserts: ToolCallRow[] = [];
+          let toolCallsInserted = 0;
+          let toolCallsUpdated = 0;
+          let toolCallsUnchanged = 0;
+          for (const toolCall of mapped.toolCalls) {
+            const existing = existingById.get(toolCall.id);
+            if (existing === undefined) {
+              toolCallsInserted += 1;
+              toolCallUpserts.push(toolCall);
+            } else if (
+              // Byte lengths stand in for the input/output text themselves so
+              // unchanged tool calls never load their (potentially large)
+              // payloads. A same-length in-place content mutation with
+              // identical metadata would slip through; harness tool calls are
+              // append-only in practice, and a mutated session's messages
+              // still carry content hashes that force the session through here.
+              existing.seq !== toolCall.seq
+              || existing.toolName !== toolCall.toolName
+              || existing.status !== (toolCall.status ?? null)
+              || existing.startedAt !== (toolCall.startedAt ?? null)
+              || existing.completedAt !== (toolCall.completedAt ?? null)
+              || existing.projectKey !== toolCall.projectKey
+              || existing.provider !== toolCall.provider
+              || existing.inputBytes !== Buffer.byteLength(toolCall.inputText, "utf8")
+              || existing.outputBytes !== Buffer.byteLength(toolCall.outputText, "utf8")
+            ) {
+              toolCallsUpdated += 1;
+              toolCallUpserts.push(toolCall);
+            } else {
+              toolCallsUnchanged += 1;
+            }
+          }
+          const toolCallDeleteIds = existingToolCalls
+            .filter((row) => !incomingIds.has(row.id))
+            .map((row) => row.id);
+
+          return {
+            messageUpserts, messageDeleteSeqs, messagesInserted, messagesUpdated, messagesUnchanged,
+            toolCallUpserts, toolCallDeleteIds, toolCallsInserted, toolCallsUpdated, toolCallsUnchanged,
+          };
+        };
+
+        // Fingerprint commit ordering: the session row lands first carrying an
+        // `applying:` sentinel and only the final step stamps the real source
+        // fingerprint. A crash mid-apply leaves a fingerprint mismatch, the
+        // daemon re-sends the full session, and the diff converges on the
+        // remainder — no journal or partial-apply bookkeeping needed.
+        const applySessionHead = db.transaction((mapped: MappedSession) => {
           upsertProject.run({
             $projectKey: mapped.project.projectKey,
             $displayName: mapped.project.displayName,
             $rawPath: mapped.project.rawPath ?? null,
           });
-          db.prepare("DELETE FROM messages WHERE session_id = ?").run(mapped.session.sessionId);
-          db.prepare("DELETE FROM tool_calls WHERE session_id = ?").run(mapped.session.sessionId);
           upsertSession.run({
             $sessionId: mapped.session.sessionId,
             $projectKey: mapped.session.projectKey,
@@ -739,14 +883,20 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
             $startedAt: mapped.session.startedAt ?? null,
             $updatedAt: mapped.session.updatedAt ?? null,
             $sourcePath: mapped.session.sourcePath,
-            $sourceFingerprint: mapped.session.sourceFingerprint,
+            $sourceFingerprint: `applying:${mapped.session.sourceFingerprint}`,
             $host: mapped.session.host,
             $identitySchemeVersion: mapped.session.identitySchemeVersion,
             $parentSessionId: mapped.session.parentSessionId ?? null,
             $messageCount: mapped.session.messageCount,
             $toolCallCount: mapped.session.toolCallCount,
           });
-          for (const message of mapped.messages) {
+        });
+        const applyMessageDeleteChunk = db.transaction((sessionId: string, seqs: readonly number[]) => {
+          for (const seq of seqs) deleteMessageRow.run(sessionId, seq);
+        });
+        const applyMessageUpsertChunk = db.transaction((rows: readonly MessageRow[]) => {
+          for (const message of rows) {
+            deleteMessageRow.run(message.sessionId, message.seq);
             insertMessage.run({
               $sessionId: message.sessionId,
               $seq: message.seq,
@@ -758,8 +908,13 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               $projectScopeToken: ftsProjectScopeToken(message.projectKey),
             });
           }
-          for (const toolCall of mapped.toolCalls) {
-            insertToolCall.run({
+        });
+        const applyToolCallDeleteChunk = db.transaction((ids: readonly string[]) => {
+          for (const id of ids) deleteToolCallRow.run(id);
+        });
+        const applyToolCallUpsertChunk = db.transaction((rows: readonly ToolCallRow[]) => {
+          for (const toolCall of rows) {
+            upsertToolCall.run({
               $id: toolCall.id,
               $sessionId: toolCall.sessionId,
               $seq: toolCall.seq,
@@ -775,6 +930,52 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
           }
         });
 
+        const chunked = <A>(rows: readonly A[]): A[][] => {
+          const chunks: A[][] = [];
+          for (let index = 0; index < rows.length; index += INGEST_CHUNK_ROWS) {
+            chunks.push(rows.slice(index, index + INGEST_CHUNK_ROWS));
+          }
+          return chunks;
+        };
+
+        // Effect.sleep (not yieldNow) between chunks: a timer forces a full
+        // event-loop turn, so queued HTTP requests — searches — run between
+        // write transactions instead of waiting out the whole apply.
+        const upsertSessionDiff = (mapped: MappedSession): Effect.Effect<SessionDiffOutcome, SqliteStoreError> =>
+          Effect.gen(function* () {
+            const plan = yield* trySqlite("upsertSession.plan", () => computeSessionDiff(mapped));
+            yield* trySqlite("upsertSession.head", () => applySessionHead(mapped));
+            for (const chunk of chunked(plan.messageDeleteSeqs)) {
+              yield* trySqlite("upsertSession.deleteMessages", () => applyMessageDeleteChunk(mapped.session.sessionId, chunk));
+              yield* Effect.sleep("1 millis");
+            }
+            for (const chunk of chunked(plan.messageUpserts)) {
+              yield* trySqlite("upsertSession.messages", () => applyMessageUpsertChunk(chunk));
+              yield* Effect.sleep("1 millis");
+            }
+            for (const chunk of chunked(plan.toolCallDeleteIds)) {
+              yield* trySqlite("upsertSession.deleteToolCalls", () => applyToolCallDeleteChunk(chunk));
+              yield* Effect.sleep("1 millis");
+            }
+            for (const chunk of chunked(plan.toolCallUpserts)) {
+              yield* trySqlite("upsertSession.toolCalls", () => applyToolCallUpsertChunk(chunk));
+              yield* Effect.sleep("1 millis");
+            }
+            yield* trySqlite("upsertSession.fingerprint", () =>
+              stampSessionFingerprint.run(mapped.session.sourceFingerprint, mapped.session.sessionId));
+            return {
+              messagesInserted: plan.messagesInserted,
+              messagesUpdated: plan.messagesUpdated,
+              messagesDeleted: plan.messageDeleteSeqs.length,
+              messagesUnchanged: plan.messagesUnchanged,
+              toolCallsInserted: plan.toolCallsInserted,
+              toolCallsUpdated: plan.toolCallsUpdated,
+              toolCallsDeleted: plan.toolCallDeleteIds.length,
+              toolCallsUnchanged: plan.toolCallsUnchanged,
+              changedMessages: plan.messageUpserts,
+            };
+          });
+
         return {
           dbPath: path,
           listProjects: (options = {}) =>
@@ -785,7 +986,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                 .query("SELECT project_key AS projectKey, display_name AS displayName, raw_path AS rawPath FROM projects ORDER BY project_key ASC LIMIT ? OFFSET ?")
                 .all(limit, offset) as ProjectRow[];
             }),
-          upsertSession: (session) => trySqlite("upsertSession", () => replaceSession(session)),
+          upsertSession: upsertSessionDiff,
           hasSessionFingerprint: (sessionId, sourceFingerprint) =>
             trySqlite("hasSessionFingerprint", () => {
               const row = db

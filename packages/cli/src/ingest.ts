@@ -108,10 +108,18 @@ export interface SessionIngestOutcome {
   readonly status: SessionIngestStatus;
   readonly diagnostic?: string;
   readonly detail?: string;
+  /** Row-delta counts from the server's diff apply: inserted + updated rows
+   * only; unchanged rows of a re-sent session are never written or counted. */
   readonly messagesWritten: number;
   readonly toolCallsWritten: number;
   readonly jobsEnqueued: number;
   readonly searchDocuments?: SearchDocumentPolicyStats;
+  readonly delta?: {
+    readonly messagesDeleted: number;
+    readonly messagesUnchanged: number;
+    readonly toolCallsDeleted: number;
+    readonly toolCallsUnchanged: number;
+  };
 }
 
 export interface IngestReport {

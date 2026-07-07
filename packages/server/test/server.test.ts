@@ -47,7 +47,10 @@ const mappedSession = (overrides: { readonly fingerprint?: string; readonly firs
       text: overrides.firstText ?? "hello over http",
       ts: "2026-06-18T10:00:30.000Z",
       projectKey: "project-http",
-      contentHash: "hash-http-1",
+      // Content hashes derive from the text in production (mapSession); the
+      // fixture must honor that contract or the diff apply rightly treats a
+      // text mutation with an unchanged hash as an unchanged row.
+      contentHash: `hash-http-1-${(overrides.firstText ?? "hello over http").length}`,
     },
     {
       sessionId: "codex:session-http",
@@ -146,7 +149,10 @@ describe("HTTP server", () => {
       expect(second.data.outcome.status).toBe("skipped");
       expect(forced.data.outcome.status).toBe("ok");
       expect(messages.data.rows.map((row: { text: string }) => row.text)).toEqual(["forced http rewrite", "assistant-only http memory"]);
-      expect(status.data.queue.pending).toBe(2);
+      // 2 jobs from the first ingest + 1 for the forced rewrite's new content
+      // hash (the unchanged row's key dedups; the stale-hash job later no-ops
+      // against the content-hash guard on message_vectors writes).
+      expect(status.data.queue.pending).toBe(3);
       expect(status.data.lance).toBeUndefined();
     } finally {
       proc.kill();
