@@ -13,4 +13,3 @@ logs
 *.tsbuildinfo
 *.sqlite
 *.sqlite-*
-*.lance

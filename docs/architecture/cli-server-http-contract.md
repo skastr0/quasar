@@ -20,7 +20,7 @@ enqueues derived-index work.
 - Server HTTP boundary: `packages/server/src/server.ts`
   (`isMappedSession` validation → `ingestMappedSession`).
 
-The CLI never runs the server's SQLite store, LanceDB search, or server runtime
+The CLI never runs the server's SQLite store, search substrate, or server runtime
 in-process (enforced by `packages/cli/test/package-boundary.test.ts`). The
 server never imports CLI or provider-parser modules (enforced by
 `packages/server/test/boundary.test.ts`).
@@ -88,9 +88,10 @@ role allowlist are locked by `packages/server/test/boundary.test.ts`.
 
 ## Truth vs. derived state
 
-SQLite is the truth store and durable queue. LanceDB (lexical/vector/fusion
-search) is **derived** state, rebuildable entirely from stored sessions: wiping
-the index and replaying `listSessions → indexSession` reconstructs search with
+SQLite is the truth store and durable queue. Search state (FTS5 lexical index,
+`message_vectors`, the resident vector matrix) is **derived**, rebuildable
+entirely from stored sessions: the FTS rebuild migration and
+`rematerialize`/`replay-embedding-cache` paths reconstruct search with
 no re-ingest. This is proven by `packages/server/test/rebuild.test.ts`.
 
 ## Executable contract

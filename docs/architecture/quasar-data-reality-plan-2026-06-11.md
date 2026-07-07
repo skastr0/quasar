@@ -12,7 +12,10 @@ sync-contract/stop-line apparatus.
 
 Agents assess and research sessions for a project via deep session inspection and
 targeted tool-call retrieval in a fast CLI, MCP tools, and a local server. SQLite stores
-the session rows and durable queue. LanceDB owns lexical/vector/fusion search indexes.
+the session rows and durable queue. (2026-06-11 snapshot: the LanceDB search
+substrate described in this document was replaced by SQLite FTS5 plus a resident
+vector matrix on 2026-07-04 — see quasar-first-principles-rearchitecture-2026-07-03.md.
+The corpus measurements and entity model below remain the live evidence.)
 
 ## The data reality (measured 2026-06-11)
 
