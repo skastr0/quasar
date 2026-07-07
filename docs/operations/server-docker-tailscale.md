@@ -5,8 +5,11 @@ This is the operational path for Quasar on the Mac mini.
 - Docker supervises the Effect local server.
 - SQLite in `/data/quasar/quasar.sqlite` is the whole data plane: OLTP truth,
   trigger-maintained FTS (lexical search), and `message_vectors` (embeddings).
-- Semantic/fusion search is disabled pending vector materialization (QSR-232);
-  those routes return an honest 503 `SemanticDisabled`.
+- Semantic/fusion search serves live from a resident f16 vector matrix loaded
+  at boot (exact scan, simsimd kernel). Query embedding runs on a local fp32
+  ONNX model baked into the image (~30s background load; bounded synthetic
+  fallback covers the window). If the process boots with no vectors for the
+  active profile, those routes return an honest 503 `SemanticDisabled`.
 - Client access is through the Tailscale Service hostname assigned to `svc:quasar`.
 - `platform/server/.env` is local-only and must not be committed.
 
@@ -170,7 +173,7 @@ serving surface is read/search only:
 | Project list | `projects` | `GET /projects` | `limit`, `offset` |
 | Session list | `sessions` | `GET /sessions` | `projectKey`, `provider`, `limit`, `offset` |
 | Session read | `messages --session-id <id>` | `GET /messages` | `sessionId`, `limit` |
-| Search | `search --query <text> --mode lexical\|semantic\|fusion` | `GET /search/<mode>` | `q`/`query`, `projectKey`, `role=user\|assistant`, `limit`; `semantic`/`fusion` return 503 `SemanticDisabled` pending QSR-232 |
+| Search | `search --query <text> --mode lexical\|semantic\|fusion` | `GET /search/<mode>` | `q`/`query`, `projectKey`, `role=user\|assistant`, `limit`; all three modes serve live (`semantic`/`fusion` from the resident vector matrix) |
 | Tool-call list | `tool-calls` | `GET /tool-calls` | `sessionId`, `projectKey`, `provider`, `toolName`, `limit`, `offset` |
 | Tool-call read | `tool-call --id <id>` | `GET /tool-call` | `id` |
 | Remote ingest | `ingest --provider all` | `POST /ingest/session` | operator only; set `QUASAR_SERVER_URL` and `QUASAR_INGEST_TOKEN` |
@@ -269,8 +272,8 @@ same image succeeds.
 Install the released CLI on the other machine, point it at the `svc:quasar`
 Tailscale Service hostname, then run ingest. The CLI reads local history folders
 on that machine and POSTs mapped sessions to the Mac mini server. The server is
-still the authority for idempotency, SQLite writes, embedding-cache lookup, and
-LanceDB/index queue draining.
+still the authority for idempotency, SQLite writes (row-level diff applies),
+embedding-cache lookup, and embed-queue draining.
 
 ```bash
 npm install -g @skastr0/quasar-cli

@@ -8,8 +8,9 @@ simple — five previous architectures failed by refusing to believe that.
 Quasar ingests local AI-agent session histories (Claude Code, Codex, OpenCode, Grok,
 Hermes, Antigravity), prunes provider noise, and serves deep session inspection —
 including targeted tool-call retrieval — to agents via a CLI, MCP tools, and a
-local Effect server on the Mac mini, reached over Tailscale. SQLite is the truth store
-and durable queue. LanceDB is the derived lexical/vector/fusion search index.
+local Effect server on the Mac mini, reached over Tailscale. SQLite is the truth store,
+durable queue, and lexical search (FTS5) index. Semantic search is served from a resident
+f16 vector matrix scanned via SIMD (simsimd FFI).
 
 ## The data reality (measured 2026-06-11, full corpus, every row parsed)
 
@@ -30,11 +31,11 @@ data.
 2. **Store at the grain you read.** Rows are turns. Reading a session is a paginated
    index walk in `seq` order. No chunking, compaction, or reconstruction layers.
 3. **Indexing is a separate decision from storing.** `messages` in SQLite is the
-   product text source for search indexing, but SQLite does not own the search index.
-   LanceDB indexing state must be explicit and separately owned. `toolCalls` is the
-   structural surface — full inputs/outputs stored, retrieved by `(projectKey,
-   toolName)` or `(sessionId, seq)`, and **never search-indexed or embedded** by
-   default, so tool payloads cannot pollute session search.
+   product text source for search indexing. Lexical search is trigger-maintained in FTS5.
+   Semantic search uses the resident f16 vector matrix loaded from `message_vectors`.
+   `toolCalls` is the structural surface — full inputs/outputs stored, retrieved by
+   `(projectKey, toolName)` or `(sessionId, seq)`, and **never search-indexed or embedded**
+   by default, so tool payloads cannot pollute session search.
 
 If you find yourself designing byte budgets, ratios, compaction, clamp taxonomies, or
 "robust handling" of oversized data: stop. You are repeating a documented failure
@@ -44,9 +45,10 @@ any shape decision.
 ## Canonical direction
 
 Exactly one implementation direction:
-`docs/architecture/quasar-effect-server-plan-2026-06-18.md`. The measured corpus
-facts and normalized entity model in
-`docs/architecture/quasar-data-reality-plan-2026-06-11.md` remain live evidence.
+`docs/architecture/quasar-effect-server-plan-2026-06-18.md` for the service graph and domain model,
+and `docs/architecture/quasar-first-principles-rearchitecture-2026-07-03.md` for the SQLite FTS5
+and resident f16 vector matrix search substrate. The measured corpus facts and normalized entity
+model in `docs/architecture/quasar-data-reality-plan-2026-06-11.md` remain live evidence.
 
 Work is tracked in Tower (project `quasar`, forge orbit), current migration sequence
 QSR-096..108. Read

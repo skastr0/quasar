@@ -6,20 +6,24 @@ Quasar is a local-first repository for AI agent sessions. It ingests local
 agent histories, normalizes them into session and tool-call rows, and serves
 bounded session inspection through a local Effect server consumed by a CLI and
 agent MCP tools. SQLite is the whole data plane: truth store, durable queue,
-trigger-maintained FTS (lexical search), and message vectors. Semantic/fusion
-search is disabled pending vector materialization (QSR-232).
+trigger-maintained FTS (lexical search), and message vectors. Semantic and
+fusion search serve live from a resident f16 vector matrix (exact scan via a
+simsimd SIMD kernel); query embedding runs on a local fp32 ONNX model baked
+into the server image, with a bounded synthetic-API fallback while it loads.
 
 The single current architecture direction is
-[docs/architecture/quasar-effect-server-plan-2026-06-18.md](docs/architecture/quasar-effect-server-plan-2026-06-18.md).
+[docs/architecture/quasar-first-principles-rearchitecture-2026-07-03.md](docs/architecture/quasar-first-principles-rearchitecture-2026-07-03.md).
 The measured corpus evidence and normalized entity model live in
 [docs/architecture/quasar-data-reality-plan-2026-06-11.md](docs/architecture/quasar-data-reality-plan-2026-06-11.md).
 
 Honest current state: this repository contains provider session parsing,
-normalization, redaction, a CLI, a server package under construction, and
-SQLite FTS lexical search. Adapters exist for the providers with data on a
-real host: Codex, Claude Code, OpenCode, Grok, Hermes, and Antigravity.
-Extraction is read-only; brittle local formats fail soft with diagnostics rather
-than writing to native history.
+normalization, redaction, a CLI, and a server serving all three search modes
+(lexical, semantic, fusion) from SQLite plus the resident vector matrix.
+Adapters exist for the providers with data on a real host: Codex, Claude Code,
+OpenCode, Grok, Kimi, Hermes, and Antigravity. Extraction is read-only; brittle
+local formats fail soft with diagnostics rather than writing to native history.
+Session re-ingest applies row-level diffs, so live sessions cost only their
+delta on each daemon tick and ingest never blocks search.
 
 ## Workspace
 
