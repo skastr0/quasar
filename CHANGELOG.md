@@ -8,6 +8,37 @@ formats may still change.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-07
+
+### Changed
+
+- **SQLite is now the only search engine.** LanceDB, the readiness gate, and the
+  reconcile/index-repair/freshness maintenance workers were deleted (2026-07-04).
+  Lexical search serves from trigger-maintained FTS5 with scope tokens
+  (project/role/provider filters ride inside MATCH); semantic and fusion search
+  serve from a resident f16 vector matrix scanned exactly via a simsimd SIMD
+  kernel. Live receipts: warm p95 lexical/semantic/fusion 6/85/97 ms.
+- Query embedding runs on a local fp32 ONNX model baked into the server image
+  (fp32 pinned after a receipted parity experiment; q8 fails retrieval parity),
+  with a bounded (3s + one retry) synthetic-API fallback while it loads.
+  Document embeddings stay on the synthetic cache namespace.
+- Fusion degrades to lexical-only (`degraded: true`) instead of returning 503
+  when the query embedder is unavailable.
+- **Session re-ingest applies row-level diffs.** A changed session used to be
+  rewritten in full (delete-all + reinsert) inside one synchronous transaction,
+  head-of-line blocking searches for up to tens of seconds and burning constant
+  CPU re-tokenizing live sessions every daemon tick. Applies now write only
+  changed rows in small chunk transactions with the event loop yielded between
+  chunks; the source fingerprint commits last, so interrupted applies converge
+  on the next tick. Ingest outcome counts are now honest row deltas.
+- CLI commands `maintain`, `freshness`, and `repair-index` were removed with
+  the LanceDB maintenance surface; `replay-embedding-cache`,
+  `materialize-embedding-vectors`, and `tui` were added.
+
+### Removed
+
+- `@lancedb/lancedb` and `apache-arrow` dependencies; `QUASAR_SEARCH_DATA_DIR`.
+
 ## [0.2.2] - 2026-06-24
 
 ### Fixed
