@@ -17,7 +17,7 @@
     },
     "packages/cli": {
       "name": "@skastr0/quasar-cli",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "bin": {
         "quasar": "bin/quasar.js",
       },
@@ -31,10 +31,10 @@
         "typescript": "^6.0.3",
       },
       "optionalDependencies": {
-        "@skastr0/quasar-cli-darwin-arm64": "0.3.0",
-        "@skastr0/quasar-cli-darwin-x64": "0.3.0",
-        "@skastr0/quasar-cli-linux-arm64": "0.3.0",
-        "@skastr0/quasar-cli-linux-x64": "0.3.0",
+        "@skastr0/quasar-cli-darwin-arm64": "0.3.1",
+        "@skastr0/quasar-cli-darwin-x64": "0.3.1",
+        "@skastr0/quasar-cli-linux-arm64": "0.3.1",
+        "@skastr0/quasar-cli-linux-x64": "0.3.1",
       },
     },
     "packages/server": {

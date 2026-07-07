@@ -21,6 +21,7 @@ import {
   ClaudeSystemCompactBoundarySchema,
   ClaudeSystemInformationalSchema,
   ClaudeSystemLocalCommandSchema,
+  ClaudeSystemModelRefusalFallbackSchema,
   ClaudeSystemScheduledTaskFireSchema,
   ClaudeSystemStopHookSummarySchema,
   ClaudeSystemTurnDurationSchema,
@@ -404,6 +405,36 @@ describe("QSR-220 system subtype dispatch", () => {
     );
     const d = classifyClaudeRecord(rec, diags);
     expect(d._tag).toBe("drop");
+    expect(diags.some((x) => x.name === "claude.system.decode_failed")).toBe(false);
+  });
+
+  // model_refusal_fallback: emitted when a model's safeguards refuse and the
+  // harness retries on a fallback model. It carries a fixed harness notice plus
+  // refusal/retry telemetry (category, model ids, retracted-message uuids) — no
+  // turn content — so it DECODES then drops with a clean named telemetry reason,
+  // never the false `claude.system.unknown_subtype` it raised before modeling.
+  test("model_refusal_fallback (real shape) -> decodes, drop(telemetry) NOT unknown_subtype", () => {
+    const diags: DecodeDiagnostic[] = [];
+    const rec = fromSchema(
+      ClaudeSystemModelRefusalFallbackSchema,
+      sys("model_refusal_fallback", {
+        content: "Fable 5's safeguards flagged this message.",
+        level: "warning",
+        trigger: "refusal",
+        direction: "retry",
+        originalModel: "claude-fable-5",
+        fallbackModel: "claude-opus-4-8",
+        requestId: "req_synthetic",
+        apiRefusalCategory: "cyber",
+        apiRefusalExplanation: null,
+        retractedMessageUuids: ["uuid-a", "uuid-b"],
+        refusedUserMessageUuid: "uuid-c",
+      }),
+    );
+    const d = classifyClaudeRecord(rec, diags);
+    expect(d._tag).toBe("drop");
+    if (d._tag === "drop") expect(d.reason).toContain("refusal");
+    expect(diags.some((x) => x.name === "claude.system.unknown_subtype")).toBe(false);
     expect(diags.some((x) => x.name === "claude.system.decode_failed")).toBe(false);
   });
 

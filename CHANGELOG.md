@@ -8,6 +8,17 @@ formats may still change.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-07
+
+### Fixed
+
+- Model the Claude `model_refusal_fallback` system record (emitted when a
+  model's safeguards refuse a message and the harness retries on a fallback
+  model). It is refusal/retry telemetry carrying no turn content, so it decodes
+  and drops with a named reason. Previously it hit the fail-closed
+  `claude.system.unknown_subtype` path, which rejected the whole session — the
+  daemon's per-tick exit-1 on affected sessions.
+
 ## [0.3.0] - 2026-07-07
 
 ### Changed
