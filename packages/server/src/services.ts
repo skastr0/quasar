@@ -24,6 +24,21 @@ export interface QueueKindStats extends QueueStats {
   readonly kind: string;
 }
 
+/** Per-class breakdown of a pruneResolvedFailures run. `remainingFailed` is the
+ * failed-job count still in the queue after the prune — genuinely undone work
+ * that must not be hidden. */
+export interface PruneFailedReport {
+  readonly resolvedEmbedMessage: number;
+  readonly orphanedEmbedMessage: number;
+  readonly retiredKind: number;
+  readonly deleted: number;
+  readonly remainingFailed: number;
+}
+
+/** The kinds the current server actively enqueues. A failed job of any other
+ * kind is a fossil from a removed feature and is safe to prune. */
+const LIVE_QUEUE_KINDS = ["embed-message"] as const;
+
 export interface DurableQueueService {
   readonly enqueue: (job: {
     readonly kind: string;
@@ -51,6 +66,22 @@ export interface DurableQueueService {
    * constraint, so removing old completed rows cannot resurrect or duplicate work.
    */
   readonly pruneCompleted: (olderThanIso: string) => Effect.Effect<number, DurableQueueError>;
+  /**
+   * Delete `failed` jobs whose work is provably done, moot, or retired — never a
+   * job that still represents undone work. Three safe classes (the queue and
+   * store share one SQLite file, so completion is checked by direct join):
+   *   - embed-message whose target (sessionId, seq) now HAS a message_vectors
+   *     row: the vector was produced by another path (cache replay / materialize)
+   *     after the job exhausted retries → the tombstone is inert.
+   *   - embed-message whose target message no longer EXISTS: orphaned by a
+   *     re-key or delete → nothing left to embed.
+   *   - jobs of a retired kind the current server never enqueues (e.g.
+   *     index-session, removed with LanceDB): a fossil job type.
+   * An embed-message failure whose message exists but still lacks a vector is
+   * LEFT untouched and stays visible — genuinely undone work is never hidden.
+   * Returns a per-class breakdown plus the failed count that remains.
+   */
+  readonly pruneResolvedFailures: () => Effect.Effect<PruneFailedReport, DurableQueueError>;
   readonly stats: Effect.Effect<QueueStats, DurableQueueError>;
   readonly statsByKind: Effect.Effect<readonly QueueKindStats[], DurableQueueError>;
   readonly embedMessageStatsByProfile: (profile: string) => Effect.Effect<QueueKindStats, DurableQueueError>;
@@ -345,6 +376,67 @@ export const makeDurableQueueLayer = (path = sqlitePath()): Layer.Layer<DurableQ
             queueTry("pruneCompleted", () => {
               const result = db.prepare("DELETE FROM queue_jobs WHERE status = 'completed' AND updated_at <= ?").run(olderThanIso);
               return result.changes;
+            }),
+          pruneResolvedFailures: () =>
+            queueTry("pruneResolvedFailures", () => {
+              const livePlaceholders = LIVE_QUEUE_KINDS.map(() => "?").join(", ");
+              // Count each safe class before deleting, so the report attributes
+              // exactly why each row went. The three predicates are mutually
+              // exclusive (retired-kind rows are not embed-message).
+              const resolvedEmbedMessage = (db.prepare(
+                `SELECT COUNT(*) AS c FROM queue_jobs
+                 WHERE status = 'failed' AND kind = 'embed-message'
+                   AND EXISTS (SELECT 1 FROM message_vectors v
+                     WHERE v.session_id = json_extract(queue_jobs.payload_json, '$.sessionId')
+                       AND v.seq = json_extract(queue_jobs.payload_json, '$.seq'))`,
+              ).get() as { c: number }).c;
+              const orphanedEmbedMessage = (db.prepare(
+                `SELECT COUNT(*) AS c FROM queue_jobs
+                 WHERE status = 'failed' AND kind = 'embed-message'
+                   AND NOT EXISTS (SELECT 1 FROM message_vectors v
+                     WHERE v.session_id = json_extract(queue_jobs.payload_json, '$.sessionId')
+                       AND v.seq = json_extract(queue_jobs.payload_json, '$.seq'))
+                   AND NOT EXISTS (SELECT 1 FROM messages m
+                     WHERE m.session_id = json_extract(queue_jobs.payload_json, '$.sessionId')
+                       AND m.seq = json_extract(queue_jobs.payload_json, '$.seq'))`,
+              ).get() as { c: number }).c;
+              const retiredKind = (db.prepare(
+                `SELECT COUNT(*) AS c FROM queue_jobs
+                 WHERE status = 'failed' AND kind NOT IN (${livePlaceholders})`,
+              ).get(...LIVE_QUEUE_KINDS) as { c: number }).c;
+              const prune = db.transaction(() => {
+                db.prepare(
+                  `DELETE FROM queue_jobs
+                   WHERE status = 'failed' AND kind = 'embed-message'
+                     AND EXISTS (SELECT 1 FROM message_vectors v
+                       WHERE v.session_id = json_extract(queue_jobs.payload_json, '$.sessionId')
+                         AND v.seq = json_extract(queue_jobs.payload_json, '$.seq'))`,
+                ).run();
+                db.prepare(
+                  `DELETE FROM queue_jobs
+                   WHERE status = 'failed' AND kind = 'embed-message'
+                     AND NOT EXISTS (SELECT 1 FROM message_vectors v
+                       WHERE v.session_id = json_extract(queue_jobs.payload_json, '$.sessionId')
+                         AND v.seq = json_extract(queue_jobs.payload_json, '$.seq'))
+                     AND NOT EXISTS (SELECT 1 FROM messages m
+                       WHERE m.session_id = json_extract(queue_jobs.payload_json, '$.sessionId')
+                         AND m.seq = json_extract(queue_jobs.payload_json, '$.seq'))`,
+                ).run();
+                db.prepare(
+                  `DELETE FROM queue_jobs WHERE status = 'failed' AND kind NOT IN (${livePlaceholders})`,
+                ).run(...LIVE_QUEUE_KINDS);
+              });
+              prune();
+              const remainingFailed = (db.prepare(
+                "SELECT COUNT(*) AS c FROM queue_jobs WHERE status = 'failed'",
+              ).get() as { c: number }).c;
+              return {
+                resolvedEmbedMessage,
+                orphanedEmbedMessage,
+                retiredKind,
+                deleted: resolvedEmbedMessage + orphanedEmbedMessage + retiredKind,
+                remainingFailed,
+              };
             }),
           stats: queueTry("stats", () => {
             const byStatus = queueStatsByStatus.all() as Array<{ status: string; count: number }>;
