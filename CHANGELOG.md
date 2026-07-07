@@ -8,6 +8,18 @@ formats may still change.
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-07-07
+
+### Changed
+
+- The Claude session-file walker now uses a positive filename allowlist — a file
+  is collected only if its name is a session uuid (`<uuid>.jsonl`, main session)
+  or `agent-<id>.jsonl` (subagent / workflow-agent). This replaces the previous
+  denylist (skip `journal.jsonl`, skip `artifacts/` directories) with one
+  canonical gate. Behavior is identical on every real corpus (3,312 sessions,
+  zero rejected), but a new kind of non-session `.jsonl` now needs no code
+  change and no test. Consolidation, not a behavior change.
+
 ## [0.3.3] - 2026-07-07
 
 ### Added

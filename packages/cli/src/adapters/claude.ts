@@ -1,4 +1,4 @@
-import { basename, dirname, join, sep } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { existsSync, statSync } from "node:fs";
 
 import { collectAdapterStream, type SessionAdapter } from "./types";
@@ -34,28 +34,28 @@ const projectPathFromClaudeKey = (key: string) =>
   key.startsWith("-") ? key.replace(/^-/, "/").replaceAll("-", "/") : key;
 
 /**
- * Claude transcripts form a TREE and the native session id is POLYMORPHIC by
- * how a file is populated:
- *   - main session file `{project}/{uuid}.jsonl` → the in-record `sessionId`
- *     (its own uuid).
- *   - subagent file `{parent}/subagents/agent-<agentId>.jsonl` and
- *     workflow-agent file
- *     `{parent}/subagents/workflows/wf_<run>/agent-<agentId>.jsonl` → the
- *     in-record `agentId` (NOT the parent sessionId, NOT the filename which
- *     carries an `agent-` prefix).
- *   - `journal.jsonl` files carry only `started`/`result` rows (run manifests,
- *     no conversation) → EXCLUDED entirely; they are not sessions.
- *   - any file under an `artifacts/` directory is a session-produced output
- *     (ledgers, scratch data), NOT a transcript → EXCLUDED. The walker still
- *     recurses into subdirs for first-class `subagents/` session files.
- * Subagent and workflow-agent files are FIRST-CLASS sessions and are always
- * ingested even though they legitimately have no human user turn.
+ * A Claude session file is identified POSITIVELY by its filename — the only two
+ * shapes Claude Code writes:
+ *   - main session `{project}/<uuid>.jsonl` (its own session uuid), and
+ *   - subagent / workflow-agent `.../subagents/[workflows/wf_<run>/]agent-<id>.jsonl`.
+ * Any other `.jsonl` found while recursing `projects/` is simply not matched and
+ * never collected. This is an allowlist, not a set of carve-outs: a new kind of
+ * non-session file needs no code change and no test.
  */
-const isClaudeJournalFile = (path: string) => basename(path) === "journal.jsonl";
+const CLAUDE_MAIN_SESSION_FILE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/i;
+const CLAUDE_AGENT_SESSION_FILE = /^agent-.+\.jsonl$/;
 
-const isClaudeArtifactFile = (path: string) =>
-  path.split(sep).includes("artifacts");
+const isClaudeSessionFile = (path: string) => {
+  const name = basename(path);
+  return CLAUDE_AGENT_SESSION_FILE.test(name) || CLAUDE_MAIN_SESSION_FILE.test(name);
+};
 
+/**
+ * The native session id is POLYMORPHIC by how a file is populated: a subagent /
+ * workflow-agent file keys on the in-record `agentId`; a main session file keys
+ * on the in-record `sessionId`. Subagent and workflow-agent files are
+ * FIRST-CLASS sessions even though they legitimately have no human user turn.
+ */
 const isSubagentFile = (path: string) =>
   parentDirectoryName(path) === "subagents" ||
   dirname(path).includes(`${join("subagents", "workflows")}`) ||
@@ -562,7 +562,7 @@ async function* streamClaude(options: AdapterOptions) {
   const logicalProjectsRoot = join(logicalRoot, "projects");
   const files = collectFiles(
     projectsRoot,
-    (path) => path.endsWith(".jsonl"),
+    isClaudeSessionFile,
     options.limit,
     options.skip,
   );
@@ -572,13 +572,6 @@ async function* streamClaude(options: AdapterOptions) {
   };
   let sessionCount = 0;
   for (const path of files) {
-    // journal.jsonl files are run manifests (only started/result rows), not
-    // sessions — they are excluded from ingest entirely.
-    if (isClaudeJournalFile(path)) continue;
-    // Files under an artifacts/ directory are session-produced outputs, not
-    // transcripts — never a Claude session (verified: no session file lives
-    // under artifacts/). Excluded so they never reach the fail-closed decoder.
-    if (isClaudeArtifactFile(path)) continue;
     const sourcePath = logicalPathFor(path, projectsRoot, logicalProjectsRoot);
     // Stat-level gate: skip unchanged files BEFORE opening them for content read.
     if (options.shouldReadFile !== undefined) {

@@ -89,32 +89,27 @@ describe("T1: discovers sessions under projects/", () => {
     expect(result.sessions[0]!.provider).toBe("claude");
   });
 
-  test("journal.jsonl is excluded", async () => {
+  test("collects only session-shaped files (uuid.jsonl / agent-*.jsonl)", async () => {
+    // The allowlist matches on FILENAME, not directory: any .jsonl whose name is
+    // not a session uuid or an agent-<id> is simply not collected, wherever it
+    // sits. Drop two non-session-named files (in a nested dir, to prove location
+    // is irrelevant) plus a real subagent session; discovery finds the two
+    // session-shaped files and nothing else.
+    const nestedDir = join(projectDir, "aaaa1111-0001-0001-0001-000000000001", "workdir");
+    mkdirSync(nestedDir, { recursive: true });
     writeFileSync(join(projectDir, "journal.jsonl"), line({ started: NOW, type: "started" }));
-    const result = await claudeAdapter.read({
-      machine: MACHINE,
-      now: NOW,
-      roots: { claude: root },
-    });
-    // Still 1, not 2.
-    expect(result.sessions).toHaveLength(1);
-  });
+    writeFileSync(join(nestedDir, "seed-ledger.jsonl"), line({ quote: "x", severityGuess: "major", verified: true }));
+    const subDir = join(projectDir, "subagents");
+    mkdirSync(subDir, { recursive: true });
+    writeFileSync(join(subDir, "agent-abc123def456.jsonl"), subagentRecords("abc123def456"));
 
-  test("files under artifacts/ are excluded (session-produced outputs, not transcripts)", async () => {
-    const artifactsDir = join(projectDir, "aaaa1111-0001-0001-0001-000000000001", "artifacts", "failure-taxonomy");
-    mkdirSync(artifactsDir, { recursive: true });
-    // A ledger of non-session records that would otherwise fail-closed decode.
-    writeFileSync(join(artifactsDir, "seed-ledger.jsonl"), line({ quote: "x", severityGuess: "major", verified: true }));
-    const result = await claudeAdapter.read({
-      machine: MACHINE,
-      now: NOW,
-      roots: { claude: root },
-    });
-    // Still 1 real session; the artifacts ledger never reaches the decoder, so
-    // it produces no session and no diagnostic that references it.
-    expect(result.sessions).toHaveLength(1);
-    expect(result.diagnostics.some((d) => d.message.includes("seed-ledger"))).toBe(false);
-    expect(result.diagnostics.some((d) => d.message.includes("Unmodeled claude record type"))).toBe(false);
+    const result = await claudeAdapter.read({ machine: MACHINE, now: NOW, roots: { claude: root } });
+
+    // Exactly the two session-shaped files; discovery is clean (only the healthy
+    // "available" count diagnostic, no errors).
+    expect(result.sessions).toHaveLength(2);
+    expect(result.diagnostics.every((d) => d.status === "available")).toBe(true);
+    expect(result.diagnostics.some((d) => d.message.includes("Discovered 2 Claude session(s)"))).toBe(true);
   });
 });
 
