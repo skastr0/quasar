@@ -27,7 +27,7 @@ import {
  *                     queue-operation, agent-setting, agent-name
  *   system subtypes : turn_duration, away_summary, stop_hook_summary,
  *                     local_command, compact_boundary, api_error,
- *                     scheduled_task_fire, informational
+ *                     scheduled_task_fire, informational, model_refusal_fallback
  *   attachment subs : deferred_tools_delta, skill_listing, task_reminder,
  *                     queued_command, command_permissions, agent_listing_delta,
  *                     edited_text_file, ultra_effort_enter, ultra_effort_exit,
@@ -197,6 +197,29 @@ export const ClaudeSystemInformationalSchema = Schema.Struct({
   content: Schema.String,
 });
 
+/**
+ * Emitted when a model's safeguards refuse a message and the harness retries on
+ * a fallback model. `content` is a fixed harness notice (not model/user turn
+ * prose); everything else is refusal/retry telemetry — the refusal category,
+ * the original and fallback model ids, and the uuids of the retracted and
+ * refused messages. All fields beyond the discriminator are modeled loosely and
+ * optional: this is opaque telemetry the adapter does not read, and its shape is
+ * owned by the harness. Classified as a named drop alongside `api_error`.
+ */
+export const ClaudeSystemModelRefusalFallbackSchema = Schema.Struct({
+  ...SystemBase,
+  subtype: Schema.Literal("model_refusal_fallback"),
+  trigger: Schema.optional(Schema.NullOr(Schema.String)),
+  direction: Schema.optional(Schema.NullOr(Schema.String)),
+  originalModel: Schema.optional(Schema.NullOr(Schema.String)),
+  fallbackModel: Schema.optional(Schema.NullOr(Schema.String)),
+  requestId: Schema.optional(Schema.NullOr(Schema.String)),
+  apiRefusalCategory: Schema.optional(Schema.NullOr(Schema.String)),
+  apiRefusalExplanation: Schema.optional(Schema.NullOr(Schema.String)),
+  retractedMessageUuids: Schema.optional(Schema.NullOr(Schema.Array(Schema.String))),
+  refusedUserMessageUuid: Schema.optional(Schema.NullOr(Schema.String)),
+});
+
 /** Every modeled system subtype. */
 export type ClaudeSystemSubtype =
   | "turn_duration"
@@ -206,7 +229,8 @@ export type ClaudeSystemSubtype =
   | "compact_boundary"
   | "api_error"
   | "scheduled_task_fire"
-  | "informational";
+  | "informational"
+  | "model_refusal_fallback";
 
 // ---------------------------------------------------------------------------
 // attachment records — discriminated by `attachment.type`
@@ -422,6 +446,7 @@ const SYSTEM_SCHEMA: Record<ClaudeSystemSubtype, Schema.Schema<unknown, unknown>
   api_error: ClaudeSystemApiErrorSchema as unknown as Schema.Schema<unknown, unknown>,
   scheduled_task_fire: ClaudeSystemScheduledTaskFireSchema as unknown as Schema.Schema<unknown, unknown>,
   informational: ClaudeSystemInformationalSchema as unknown as Schema.Schema<unknown, unknown>,
+  model_refusal_fallback: ClaudeSystemModelRefusalFallbackSchema as unknown as Schema.Schema<unknown, unknown>,
 };
 
 /**
@@ -445,6 +470,7 @@ const SYSTEM_VERDICT: Record<
   // no turn content — only transport-error/retry telemetry → CLEAN named drop,
   // NOT a false `claude.system.decode_failed`.
   api_error: { reason: "harness telemetry: provider api error/retry record (no turn content)" },
+  model_refusal_fallback: { reason: "harness telemetry: safeguard refusal + model-fallback retry record (no turn content)" },
 };
 
 /** Validate a bookkeeping record then drop it with a named reason. */
