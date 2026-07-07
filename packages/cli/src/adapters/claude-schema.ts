@@ -23,8 +23,8 @@ import {
  *
  * Inventory grounded against the real root (`~/.claude/projects/**.jsonl`):
  *   top-level types : user, assistant, system, attachment, file-history-snapshot,
- *                     last-prompt, mode, permission-mode, ai-title,
- *                     queue-operation, agent-setting, agent-name
+ *                     last-prompt, mode, permission-mode, ai-title, custom-title,
+ *                     frame-link, queue-operation, agent-setting, agent-name
  *   system subtypes : turn_duration, away_summary, stop_hook_summary,
  *                     local_command, compact_boundary, api_error,
  *                     scheduled_task_fire, informational, model_refusal_fallback
@@ -34,7 +34,8 @@ import {
  *                     file, goal_status, date_change, hook_success, plan_mode,
  *                     plan_mode_exit, plan_mode_reentry, workflow_keyword_request,
  *                     budget_usd, invoked_skills, plan_file_reference,
- *                     compact_file_reference, directory
+ *                     compact_file_reference, directory, nested_memory,
+ *                     structured_output, context_tip
  *   (`journal.jsonl` run-manifest files are excluded upstream — never reach here.)
  *
  * The kinds emitted here are the canonical `SessionEventKind` literals (see
@@ -278,7 +279,10 @@ export type ClaudeAttachmentSubtype =
   | "invoked_skills"
   | "plan_file_reference"
   | "compact_file_reference"
-  | "directory";
+  | "directory"
+  | "nested_memory"
+  | "structured_output"
+  | "context_tip";
 
 /**
  * Per-attachment-subtype verdict: subtypes carrying real user/assistant content
@@ -301,6 +305,11 @@ const ATTACHMENT_VERDICT: Record<
   skill_listing: { kind: "message" },
   invoked_skills: { kind: "message" },
   hook_success: { kind: "message" },
+  // Injected project-memory file (a CLAUDE.md `content` + its path) and captured
+  // structured tool output (`data` + toolUseID) both carry real prose the model
+  // saw → signal as a message, matching the `file` / `plan_file_reference` class.
+  nested_memory: { kind: "message" },
+  structured_output: { kind: "message" },
   // A satisfied goal_status carries a UNIQUE assistant-authored `.reason`
   // synthesis (a multi-paragraph justification of why the goal condition was
   // met) preserved in NO other kept record. It is assistant reasoning, not a
@@ -321,6 +330,8 @@ const ATTACHMENT_VERDICT: Record<
   plan_mode_reentry: { reason: "harness bookkeeping: plan-mode reentry marker" },
   workflow_keyword_request: { reason: "harness bookkeeping: workflow keyword request" },
   budget_usd: { reason: "harness bookkeeping: spend budget snapshot" },
+  // A UI hint the harness injects (a `tip` string), not user/model turn content.
+  context_tip: { reason: "harness bookkeeping: contextual usage tip injection" },
 };
 
 // ---------------------------------------------------------------------------
@@ -382,6 +393,24 @@ export const ClaudeAgentNameSchema = Schema.Struct({
   type: Schema.Literal("agent-name"),
   sessionId: Schema.String,
   agentName: Schema.optional(Schema.NullOr(Schema.String)),
+});
+
+/** A user-set session title. Sibling of ai-title (AI-generated) — a searchable
+ * summary, not conversation prose. */
+export const ClaudeCustomTitleSchema = Schema.Struct({
+  type: Schema.Literal("custom-title"),
+  sessionId: Schema.String,
+  customTitle: Schema.optional(Schema.NullOr(Schema.String)),
+});
+
+/** A link to an artifact/preview frame (`frameUrl` + local `path`). Session UI
+ * state, no conversation content. */
+export const ClaudeFrameLinkSchema = Schema.Struct({
+  type: Schema.Literal("frame-link"),
+  sessionId: Schema.String,
+  path: Schema.optional(Schema.NullOr(Schema.String)),
+  frameUrl: Schema.optional(Schema.NullOr(Schema.String)),
+  timestamp: Schema.optional(Schema.String),
 });
 
 // ---------------------------------------------------------------------------
@@ -622,6 +651,14 @@ export const classifyClaudeRecord = (
         diagnosticName: CLAUDE_BOOKKEEPING_DECODE_FAILED,
         diagnostics,
       });
+    case "custom-title":
+      return decodeOrDrop(ClaudeCustomTitleSchema, record, {
+        kind: "summary" as const,
+        diagnosticName: CLAUDE_BOOKKEEPING_DECODE_FAILED,
+        diagnostics,
+      });
+    case "frame-link":
+      return bookkeepingDrop(ClaudeFrameLinkSchema, record, "session ui state: artifact frame link", diagnostics);
     // Session-scoped bookkeeping carrying no conversation content. Each is
     // schema-validated (so a malformed one is a named drop) then dropped with a
     // named bookkeeping reason — explicit, never an "unknown" pass-through.

@@ -527,6 +527,52 @@ describe("QSR-220 attachment subtype dispatch", () => {
     if (d._tag === "signal") expect(d.kind).toBe("reasoning");
   });
 
+  // Schema drift caught 2026-07-07: Claude Code added three attachment subtypes
+  // and two top-level record types that fail-closed rejected ~137 real sessions.
+  test("attachment nested_memory -> signal(message) [carries CLAUDE.md content]", () => {
+    const rec = {
+      type: "attachment",
+      attachment: { type: "nested_memory", path: "/p/CLAUDE.md", content: "project memory body", displayPath: "p/CLAUDE.md" },
+      ...envelope,
+    };
+    const d = classifyClaudeRecord(rec, []);
+    expect(d._tag === "signal" && d.kind).toBe("message");
+  });
+
+  test("attachment structured_output -> signal(message) [carries tool data]", () => {
+    const rec = {
+      type: "attachment",
+      attachment: { type: "structured_output", data: "{\"proof\":true}", toolUseID: "toolu_x" },
+      ...envelope,
+    };
+    const d = classifyClaudeRecord(rec, []);
+    expect(d._tag === "signal" && d.kind).toBe("message");
+  });
+
+  test("attachment context_tip -> drop(bookkeeping), no unknown diagnostic", () => {
+    const diags: DecodeDiagnostic[] = [];
+    const rec = { type: "attachment", attachment: { type: "context_tip", tip: "use /bg" }, ...envelope };
+    const d = classifyClaudeRecord(rec, diags);
+    expect(d._tag).toBe("drop");
+    if (d._tag === "drop") expect(d.reason).toContain("tip");
+    expect(diags.some((x) => x.name === "claude.attachment.unknown_subtype")).toBe(false);
+  });
+
+  test("custom-title -> signal(summary)", () => {
+    const rec = { type: "custom-title", sessionId: "s", customTitle: "prism session check" };
+    const d = classifyClaudeRecord(rec, []);
+    expect(d._tag === "signal" && d.kind).toBe("summary");
+  });
+
+  test("frame-link -> drop(ui state), no unknown_type diagnostic", () => {
+    const diags: DecodeDiagnostic[] = [];
+    const rec = { type: "frame-link", sessionId: "s", path: "/tmp/x", frameUrl: "https://claude.ai/code/artifact/x", timestamp: NOW };
+    const d = classifyClaudeRecord(rec, diags);
+    expect(d._tag).toBe("drop");
+    if (d._tag === "drop") expect(d.reason).toContain("frame");
+    expect(diags.some((x) => x.name === "claude.unknown_type")).toBe(false);
+  });
+
   test("unmodeled attachment subtype -> drop + named diagnostic (no throw)", () => {
     const diags: DecodeDiagnostic[] = [];
     const d = classifyClaudeRecord(att({ type: "totally_fabricated_attachment" }), diags);

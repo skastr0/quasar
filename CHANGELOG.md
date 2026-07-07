@@ -8,6 +8,21 @@ formats may still change.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-07
+
+### Fixed
+
+- Model five more drifted Claude Code on-disk shapes that fail-closed rejected
+  ~137 real sessions on full re-ingest (a corpus-wide sweep found them; the
+  daemon had surfaced only the two most-recently-touched). Attachments:
+  `nested_memory` (injected CLAUDE.md content) and `structured_output` (captured
+  tool output) signal as messages; `context_tip` drops as a harness tip.
+  Top-level records: `custom-title` signals as a summary (sibling of ai-title);
+  `frame-link` drops as session UI state. Verified against the real session
+  files: previously-failing sessions now ingest, zero unknown-subtype
+  diagnostics. A non-session ledger under an `artifacts/` subdirectory remains
+  correctly rejected (it is not a transcript).
+
 ## [0.3.1] - 2026-07-07
 
 ### Fixed
