@@ -1,0 +1,138 @@
+{
+  "proof": "ingest diff-apply live receipt \u2014 search latency during natural daemon ticks, idle CPU, matrix overwrite rate",
+  "date": "2026-07-07",
+  "commit": "419a09d",
+  "image": "quasar-server:latest 8bf9d29e4f2f (rollback tag: pre-w7-rollback 923d9c7e76ae)",
+  "context": "replaceSession (DELETE-all+reinsert-all, single sync tx) replaced by row-level diff apply in 64-row chunk txs with event-loop yields; embed jobs delta-gated; fingerprint stamped last under an applying: sentinel. Pre-fix live behavior: 36.5s ingest bursts head-of-line blocking searches to 24.4s server-side, /ready outliers 4.7-12.3s, idle CPU 96-157%, ~50 matrix overwrites/min, watermark matrix>sqlite ghost lead (+127).",
+  "method": "360 probes over 180s (2/s, thirds lexical/semantic/fusion, half warm fixed query / half novel uuid queries) against http://127.0.0.1:7180 while the 60s ingest daemon re-applied active sessions (10 session POSTs observed in a 4-min window incl. the multi-thousand-row live session driving this work). Client wall via perf_counter around urllib; server searchMs/embedMs from response receipts.",
+  "latencyDuringIngestTicks": {
+    "lexical": {
+      "warm": {
+        "n": 60,
+        "clientMs": {
+          "p50": 23.5,
+          "p95": 30.9,
+          "max": 36.0
+        },
+        "serverSearchMs": {
+          "p50": 19,
+          "p95": 24,
+          "max": 27
+        }
+      },
+      "novelNoHit": {
+        "n": 60,
+        "clientMs": {
+          "p50": 5.7,
+          "p95": 8.2,
+          "max": 11.1
+        },
+        "serverSearchMs": {
+          "p50": 1,
+          "p95": 2,
+          "max": 2
+        }
+      }
+    },
+    "semantic": {
+      "warm": {
+        "n": 60,
+        "clientMs": {
+          "p50": 95.5,
+          "p95": 111.3,
+          "max": 132.2
+        },
+        "serverSearchMs": {
+          "p50": 91,
+          "p95": 107,
+          "max": 129
+        }
+      },
+      "novel": {
+        "n": 60,
+        "clientMs": {
+          "p50": 151.9,
+          "p95": 196.8,
+          "max": 288.5
+        },
+        "serverSearchMs": {
+          "p50": 98,
+          "p95": 136,
+          "max": 235
+        }
+      }
+    },
+    "fusion": {
+      "warm": {
+        "n": 60,
+        "clientMs": {
+          "p50": 114.6,
+          "p95": 141.0,
+          "max": 146.9
+        },
+        "serverSearchMs": {
+          "p50": 110,
+          "p95": 137,
+          "max": 140
+        }
+      },
+      "novel": {
+        "n": 60,
+        "clientMs": {
+          "p50": 157.9,
+          "p95": 187.1,
+          "max": 216.1
+        },
+        "serverSearchMs": {
+          "p50": 155,
+          "p95": 184,
+          "max": 211
+        }
+      }
+    },
+    "errors": 0,
+    "worstSingleRequestMs": 288.5
+  },
+  "ingestSpansPostFix": "session applies logged at 27-127ms typical; one 7556ms large-delta apply (span covers the whole chunked request; loop yields between chunks, and no concurrent search exceeded 288.5ms \u2014 span duration no longer implies blocking)",
+  "idleCpuBetweenTicks": {
+    "samples": [
+      "2.88%",
+      "0.96%",
+      "0.81%"
+    ],
+    "preFix": "96-157% sustained",
+    "memory": "2.3GiB steady (boot transient peaked 4.03GiB)"
+  },
+  "matrixChurn": {
+    "overwrittenRowsSinceBoot": 0,
+    "preFix": "29,666 over ~2 days (~50/min under active sessions)",
+    "watermark": "matrix 694,256 vs sqlite 694,282 \u2014 matrix trails by 26 (healthy append lag; pre-fix it LED by ~127 ghost slots from vector AD-trigger wipes)"
+  },
+  "localSanity": {
+    "initialApply5000Rows": "623ms chunked",
+    "appendOneReapply": "9.4ms",
+    "noopReapply": "5.3ms"
+  },
+  "gates": {
+    "searchDuringIngestWarmP95Under150ms": {
+      "lexical": 30.9,
+      "semantic": 111.3,
+      "fusion": 141.0,
+      "pass": true
+    },
+    "noMultiSecondStall": {
+      "worstMs": 288.5,
+      "pass": true
+    },
+    "idleCpuUnder15pct": {
+      "value": "0.81-2.88%",
+      "pass": true
+    },
+    "novelClientP95": {
+      "semantic": 196.8,
+      "fusion": 187.1,
+      "note": "embed budget ~60-80ms rides on top of scan; consistent with the pre-existing novel budget line, unrelated to this change"
+    }
+  },
+  "daemonIntervalDecision": "left at 60s \u2014 the interval bump was a mitigation for server-side churn that no longer exists (idle 0.81-2.88% WITH the daemon ticking); remaining client-side re-map cost of the stale 0.2.3 binary is a distribution issue, resolved by the 0.3.0 publish, not by pacing."
+}
