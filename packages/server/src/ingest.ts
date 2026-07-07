@@ -13,22 +13,27 @@ export interface SessionIngestOutcome {
   readonly status: SessionIngestStatus;
   readonly diagnostic?: string;
   readonly detail?: string;
+  /** Row-delta counts: inserted + updated rows only. Unchanged rows of a
+   * re-sent session are never written and never counted. */
   readonly messagesWritten: number;
   readonly toolCallsWritten: number;
   readonly jobsEnqueued: number;
   readonly searchDocuments?: SearchDocumentPolicyStats;
+  readonly delta?: {
+    readonly messagesDeleted: number;
+    readonly messagesUnchanged: number;
+    readonly toolCallsDeleted: number;
+    readonly toolCallsUnchanged: number;
+  };
 }
 
 const EMBEDDING_JOB_MAX_ATTEMPTS = 12;
 
-const searchableMessages = (session: MappedSession): readonly MessageRow[] =>
-  session.messages.filter(isSemanticSearchDocument);
-
-export const enqueueDownstreamJobs = (queue: DurableQueueService, session: MappedSession): Effect.Effect<number, unknown> =>
+export const enqueueDownstreamJobs = (queue: DurableQueueService, rows: readonly MessageRow[]): Effect.Effect<number, unknown> =>
   Effect.gen(function* () {
     const embeddingJobNamespace = embeddingProfileJobNamespace(embeddingProfileFromEnv());
     const embeddingMaxAttempts = EMBEDDING_JOB_MAX_ATTEMPTS;
-    const messages = searchableMessages(session);
+    const messages = rows.filter(isSemanticSearchDocument);
     yield* Effect.forEach(
       messages,
       (message) =>
@@ -73,15 +78,24 @@ export const ingestMappedSession = (
         jobsEnqueued: 0,
       };
     }
-    const jobsEnqueued = yield* store.upsertSession(mapped).pipe(
-      Effect.zipRight(enqueueDownstreamJobs(queue, mapped)),
-    );
+    const diff = yield* store.upsertSession(mapped);
+    // Embedding jobs fan out over the row delta only. `force` keeps its repair
+    // meaning: re-enqueue every searchable message so vectors can be rebuilt
+    // even when no row changed.
+    const embedTargets = options.force === true ? mapped.messages : diff.changedMessages;
+    const jobsEnqueued = yield* enqueueDownstreamJobs(queue, embedTargets);
     return {
       sessionId: mapped.session.sessionId,
       status: "ok" as const,
-      messagesWritten: mapped.messages.length,
-      toolCallsWritten: mapped.toolCalls.length,
+      messagesWritten: diff.messagesInserted + diff.messagesUpdated,
+      toolCallsWritten: diff.toolCallsInserted + diff.toolCallsUpdated,
       jobsEnqueued,
       searchDocuments: summarizeSearchDocumentPolicy(mapped.messages),
+      delta: {
+        messagesDeleted: diff.messagesDeleted,
+        messagesUnchanged: diff.messagesUnchanged,
+        toolCallsDeleted: diff.toolCallsDeleted,
+        toolCallsUnchanged: diff.toolCallsUnchanged,
+      },
     };
   });
