@@ -50,7 +50,7 @@ const command =
   : rawCommand;
 const cliPackage = {
   name: "@skastr0/quasar-cli",
-  version: "0.3.2",
+  version: "0.3.3",
 };
 
 const server = (): string | undefined => arg("--server") ?? configuredServerUrl();
@@ -626,6 +626,10 @@ switch (command) {
     await materializeEmbeddingVectors();
     break;
   }
+  case "prune-dead-letters": {
+    await fetchServer("prune-dead-letters", "/maintenance/queue/prune-resolved-failures");
+    break;
+  }
   case "workers": {
     await fetchServer("workers", "/status");
     break;
@@ -667,6 +671,7 @@ switch (command) {
           "ingest-runs [--status running|completed|failed] [--limit n]",
           "replay-embedding-cache [--limit n] [--server url]",
           "materialize-embedding-vectors [--limit n] [--until-empty] [--max-batches n] [--require-provider local|synthetic] [--out path] [--server url]",
+          "prune-dead-letters [--server url] (delete failed queue jobs whose work is provably done, orphaned, or a retired kind)",
           "workers [--server url]",
           "search --query text [--mode lexical|semantic|fusion] [--project-key key] [--role user|assistant] [--limit n] [--server url]",
           "stats",

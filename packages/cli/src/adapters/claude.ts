@@ -1,4 +1,4 @@
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { existsSync, statSync } from "node:fs";
 
 import { collectAdapterStream, type SessionAdapter } from "./types";
@@ -45,10 +45,16 @@ const projectPathFromClaudeKey = (key: string) =>
  *     carries an `agent-` prefix).
  *   - `journal.jsonl` files carry only `started`/`result` rows (run manifests,
  *     no conversation) → EXCLUDED entirely; they are not sessions.
+ *   - any file under an `artifacts/` directory is a session-produced output
+ *     (ledgers, scratch data), NOT a transcript → EXCLUDED. The walker still
+ *     recurses into subdirs for first-class `subagents/` session files.
  * Subagent and workflow-agent files are FIRST-CLASS sessions and are always
  * ingested even though they legitimately have no human user turn.
  */
 const isClaudeJournalFile = (path: string) => basename(path) === "journal.jsonl";
+
+const isClaudeArtifactFile = (path: string) =>
+  path.split(sep).includes("artifacts");
 
 const isSubagentFile = (path: string) =>
   parentDirectoryName(path) === "subagents" ||
@@ -569,6 +575,10 @@ async function* streamClaude(options: AdapterOptions) {
     // journal.jsonl files are run manifests (only started/result rows), not
     // sessions — they are excluded from ingest entirely.
     if (isClaudeJournalFile(path)) continue;
+    // Files under an artifacts/ directory are session-produced outputs, not
+    // transcripts — never a Claude session (verified: no session file lives
+    // under artifacts/). Excluded so they never reach the fail-closed decoder.
+    if (isClaudeArtifactFile(path)) continue;
     const sourcePath = logicalPathFor(path, projectsRoot, logicalProjectsRoot);
     // Stat-level gate: skip unchanged files BEFORE opening them for content read.
     if (options.shouldReadFile !== undefined) {

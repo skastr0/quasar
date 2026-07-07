@@ -8,6 +8,28 @@ formats may still change.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-07-07
+
+### Added
+
+- `quasar prune-dead-letters` and the server route
+  `GET /maintenance/queue/prune-resolved-failures`: delete `failed` queue jobs
+  whose work is provably done (the target message now has a vector, produced by
+  cache replay/materialize after the job exhausted retries), moot (the target
+  message no longer exists — orphaned by a re-key/delete), or of a retired kind
+  the server no longer enqueues (e.g. `index-session`, removed with LanceDB).
+  A genuinely-undone embed job (message present, still no vector) is never
+  deleted — it stays visible. Returns a per-class breakdown plus the remaining
+  failed count. Fixes the misleading permanent "failed" total in `/status`.
+
+### Fixed
+
+- The Claude adapter no longer descends into `artifacts/` directories. Files a
+  session writes there (ledgers, scratch data) are not transcripts; they were
+  reaching the fail-closed decoder and reporting spurious unknown-record
+  diagnostics. The walker still recurses into `subagents/` for first-class
+  workflow-agent sessions.
+
 ## [0.3.2] - 2026-07-07
 
 ### Fixed

@@ -99,6 +99,23 @@ describe("T1: discovers sessions under projects/", () => {
     // Still 1, not 2.
     expect(result.sessions).toHaveLength(1);
   });
+
+  test("files under artifacts/ are excluded (session-produced outputs, not transcripts)", async () => {
+    const artifactsDir = join(projectDir, "aaaa1111-0001-0001-0001-000000000001", "artifacts", "failure-taxonomy");
+    mkdirSync(artifactsDir, { recursive: true });
+    // A ledger of non-session records that would otherwise fail-closed decode.
+    writeFileSync(join(artifactsDir, "seed-ledger.jsonl"), line({ quote: "x", severityGuess: "major", verified: true }));
+    const result = await claudeAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { claude: root },
+    });
+    // Still 1 real session; the artifacts ledger never reaches the decoder, so
+    // it produces no session and no diagnostic that references it.
+    expect(result.sessions).toHaveLength(1);
+    expect(result.diagnostics.some((d) => d.message.includes("seed-ledger"))).toBe(false);
+    expect(result.diagnostics.some((d) => d.message.includes("Unmodeled claude record type"))).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------

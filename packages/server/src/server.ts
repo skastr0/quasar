@@ -706,6 +706,12 @@ const maintenanceReplayEmbeddingCache = Effect.gen(function* () {
   return json(ok("maintenance/embeddings/replay-cache", { report, coverage }));
 });
 
+const maintenancePruneResolvedFailures = Effect.gen(function* () {
+  const queue = yield* DurableQueue;
+  const report = yield* queue.pruneResolvedFailures();
+  return json(ok("maintenance/queue/prune-resolved-failures", { report }));
+});
+
 const maintenanceMaterializeSqliteEmbeddingVectors = Effect.gen(function* () {
   const embeddings = yield* Embeddings;
   const store = yield* LocalStore;
@@ -811,6 +817,7 @@ const routes = HttpRouter.empty.pipe(
 const routesWithMaintenance = routes.pipe(
   HttpRouter.get("/maintenance/embeddings/replay-cache", maintenanceReplayEmbeddingCache),
   HttpRouter.get("/maintenance/embeddings/materialize-sqlite", maintenanceMaterializeSqliteEmbeddingVectors),
+  HttpRouter.get("/maintenance/queue/prune-resolved-failures", maintenancePruneResolvedFailures),
   HttpRouter.get("/", dashboard),
   HttpRouter.get("*", json({ ok: false, error: { type: "NotFound", message: "No route" } }, { status: 404 })),
 );
