@@ -17,7 +17,7 @@
     },
     "packages/cli": {
       "name": "@skastr0/quasar-cli",
-      "version": "0.2.3",
+      "version": "0.3.0",
       "bin": {
         "quasar": "bin/quasar.js",
       },
@@ -31,10 +31,10 @@
         "typescript": "^6.0.3",
       },
       "optionalDependencies": {
-        "@skastr0/quasar-cli-darwin-arm64": "0.2.3",
-        "@skastr0/quasar-cli-darwin-x64": "0.2.3",
-        "@skastr0/quasar-cli-linux-arm64": "0.2.3",
-        "@skastr0/quasar-cli-linux-x64": "0.2.3",
+        "@skastr0/quasar-cli-darwin-arm64": "0.3.0",
+        "@skastr0/quasar-cli-darwin-x64": "0.3.0",
+        "@skastr0/quasar-cli-linux-arm64": "0.3.0",
+        "@skastr0/quasar-cli-linux-x64": "0.3.0",
       },
     },
     "packages/server": {
@@ -315,14 +315,6 @@
     "@rolldown/pluginutils": ["@rolldown/pluginutils@1.0.1", "", {}, "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw=="],
 
     "@skastr0/quasar-cli": ["@skastr0/quasar-cli@workspace:packages/cli"],
-
-    "@skastr0/quasar-cli-darwin-arm64": ["@skastr0/quasar-cli-darwin-arm64@0.2.3", "", { "os": "darwin", "cpu": "arm64" }, "sha512-aAGdzODDoLGdD77QShm2LQz3C5tpn41uVLjCmldgScZqQ1IwSOgRNvBCbaEgavpv5XCV4DtQefN8VKDZl6rVfA=="],
-
-    "@skastr0/quasar-cli-darwin-x64": ["@skastr0/quasar-cli-darwin-x64@0.2.3", "", { "os": "darwin", "cpu": "x64" }, "sha512-tBxAQLIBxbxboAJIyIqxQs/5xEB8swAVYXCWbTSCM7Lz+Q6QydqKA36ziialDDMSWgtSPCXGVX+lA+ymOujiUA=="],
-
-    "@skastr0/quasar-cli-linux-arm64": ["@skastr0/quasar-cli-linux-arm64@0.2.3", "", { "os": "linux", "cpu": "arm64" }, "sha512-4kjF772vAKLiohdywmeYDY3/6S5LrNzGdwssW9ZSfULYkUGAgyOAY0Gybd5FDdN5FLPvDsENKWXFFKeczXgNYw=="],
-
-    "@skastr0/quasar-cli-linux-x64": ["@skastr0/quasar-cli-linux-x64@0.2.3", "", { "os": "linux", "cpu": "x64" }, "sha512-oGmGHuNnUvm3yc1GKNd61KH9YtyfvB9RHqQm9baQsY9slf8ehuVw90o3wcf4tTf3hbJykdyymJyDjUyHY3sHNw=="],
 
     "@skastr0/quasar-server": ["@skastr0/quasar-server@workspace:packages/server"],
 
