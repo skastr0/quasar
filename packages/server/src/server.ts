@@ -446,7 +446,13 @@ const emitSearchProfile = (profile: SearchReceipt) =>
       totalMs: profile.totalMs,
     });
     if (!searchProfileEnabled()) return;
-    console.log(JSON.stringify({ event: "search.profile", at: new Date().toISOString(), ...profile }));
+    yield* Effect.logInfo("search.profile").pipe(
+      Effect.annotateLogs({
+        event: "search.profile",
+        at: new Date().toISOString(),
+        ...profile,
+      }),
+    );
   });
 
 const lexicalSearch = Effect.gen(function* () {
