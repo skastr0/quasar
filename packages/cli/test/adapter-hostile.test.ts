@@ -33,8 +33,24 @@ afterEach(() => {
 const diagnosticBlob = (diagnostic: AdapterDiagnostic) =>
   `${diagnostic.message}\n${JSON.stringify(diagnostic.details ?? {})}`;
 
+/** Exact diagnostic id present in message or details (not a broad regex). */
 const expectNamedDiagnostic = (diagnostics: readonly AdapterDiagnostic[], name: string) => {
   expect(diagnostics.some((diagnostic) => diagnosticBlob(diagnostic).includes(name))).toBe(true);
+};
+
+/** Exact unknown-record diagnostic ids per line provider (probe-locked). */
+const UNKNOWN_RECORD_DIAGNOSTIC: Record<(typeof lineProviders)[number], string> = {
+  codex: "codex.unknown_record_type",
+  claude: "claude.unknown_type",
+  grok: "grok.record.unknown_type",
+  kimi: "kimi.wire.decode_failed",
+  antigravity: "antigravity.record.decode_failed",
+};
+
+/** Exact unknown-row diagnostic ids per SQLite provider (probe-locked). */
+const UNKNOWN_ROW_DIAGNOSTIC: Record<(typeof sqliteProviders)[number], string> = {
+  opencode: "opencode.part.decode_failed",
+  hermes: "hermes.message.dropped",
 };
 
 const readProvider = async (provider: AdapterProvider, fixture: AdapterFixture) =>
@@ -112,7 +128,7 @@ describe("adapter hostile file/line diagnostics", () => {
       appendText(fixture.primaryPath, `${JSON.stringify({ type: "zztest_unknown", timestamp: "2026-06-11T00:00:00.000Z" })}\n`);
       const result = await readProvider(provider, fixture);
       expect(result.sessions.flatMap((session) => session.events).some((event) => event.kind === "unknown")).toBe(false);
-      expect(result.diagnostics.some((diagnostic) => /unknown|decode_failed|record/.test(diagnosticBlob(diagnostic)))).toBe(true);
+      expectNamedDiagnostic(result.diagnostics, UNKNOWN_RECORD_DIAGNOSTIC[provider]);
     }, 15_000);
   }
 
@@ -140,7 +156,11 @@ describe("adapter hostile file/line diagnostics", () => {
       }
       const result = await readProvider(provider, fixture);
       expect(result.sessions.flatMap((session) => session.events).some((event) => event.kind === "unknown")).toBe(false);
-      expect(result.diagnostics.some((diagnostic) => /unknown|decode_failed|unmapped/.test(diagnosticBlob(diagnostic)))).toBe(true);
+      expectNamedDiagnostic(result.diagnostics, UNKNOWN_ROW_DIAGNOSTIC[provider]);
+      if (provider === "hermes") {
+        // Reason string carries the unmapped role; still exact parent diagnostic id above.
+        expectNamedDiagnostic(result.diagnostics, "hermes.message.unmapped_role:zztest_unknown");
+      }
     }, 15_000);
   }
 

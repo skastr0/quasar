@@ -37,6 +37,34 @@ describe("adapter common boundaries", () => {
     expect(diagnostics[0]!.message).toContain("/fixture/lines.jsonl:2");
   });
 
+  test("readJsonLines distinguishes missing from unreadable even with custom diagnosticName", () => {
+    const missingPath = join(root, "lines-missing.jsonl");
+    const missingDiagnostics: { name: string; message: string }[] = [];
+    expect(readJsonLines(missingPath, {
+      diagnosticName: "test.line.invalid_json",
+      diagnostics: missingDiagnostics,
+      sourcePath: "/fixture/lines-missing.jsonl",
+    })).toEqual([]);
+    expect(missingDiagnostics[0]!.name).toBe("test.line.missing");
+    expect(missingDiagnostics[0]!.message).toContain("(missing)");
+
+    const unreadablePath = join(root, "lines-unreadable.jsonl");
+    writeFileSync(unreadablePath, "{\"ok\":true}\n", "utf8");
+    chmodSync(unreadablePath, 0);
+    try {
+      const unreadableDiagnostics: { name: string; message: string }[] = [];
+      expect(readJsonLines(unreadablePath, {
+        diagnosticName: "test.line.invalid_json",
+        diagnostics: unreadableDiagnostics,
+        sourcePath: "/fixture/lines-unreadable.jsonl",
+      })).toEqual([]);
+      expect(unreadableDiagnostics[0]!.name).toBe("test.line.unreadable");
+      expect(unreadableDiagnostics[0]!.message).toContain("(unreadable)");
+    } finally {
+      chmodSync(unreadablePath, 0o600);
+    }
+  });
+
   test("readJsonFile names invalid JSON without throwing", () => {
     const path = join(root, "file.json");
     writeFileSync(path, "{\"ok\":", "utf8");
@@ -81,7 +109,7 @@ describe("adapter common boundaries", () => {
     }
   });
 
-  test("recordFrom never returns empty object for wrong shape", () => {
+  test("recordFrom returns explicit absence for wrong shape (never empty object)", () => {
     expect(recordFrom({ a: 1 })).toEqual({ a: 1 });
     expect(recordFrom(null)).toBeUndefined();
     expect(recordFrom(undefined)).toBeUndefined();
@@ -89,7 +117,10 @@ describe("adapter common boundaries", () => {
     expect(recordFrom([1, 2])).toBeUndefined();
     const diagnostics: { name: string; message: string }[] = [];
     expect(recordFrom(42, { diagnostics, diagnosticName: "test.record.wrong_shape" })).toBeUndefined();
+    expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]!.name).toBe("test.record.wrong_shape");
+    // without sink: still absence, no invented {}
+    expect(recordFrom(42)).toBeUndefined();
   });
 
   test("numberValue and stringValue use visible Schema decode for optional fields", () => {
@@ -101,14 +132,17 @@ describe("adapter common boundaries", () => {
     expect(stringValue(1)).toBeUndefined();
   });
 
-  test("parseJsonString names parse failure when sink provided", () => {
+  test("parseJsonString returns absence on invalid JSON and names failure when sink provided", () => {
     expect(parseJsonString("{\"a\":1}")).toEqual({ a: 1 });
-    expect(parseJsonString("not-json")).toBe("not-json");
+    // fail-closed: never preserve the original invalid string
+    expect(parseJsonString("not-json")).toBeUndefined();
+    expect(parseJsonString(12)).toBe(12);
     const diagnostics: { name: string; message: string }[] = [];
     expect(parseJsonString("not-json", {
       diagnostics,
       diagnosticName: "test.json.string.invalid",
-    })).toBe("not-json");
+    })).toBeUndefined();
+    expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]!.name).toBe("test.json.string.invalid");
   });
 });
