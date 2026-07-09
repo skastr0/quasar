@@ -13,7 +13,6 @@ import {
   homePath,
   logicalPathFor,
   logicalRootFor,
-  numberValue,
   parentDirectoryName,
   projectSessionNativeValue,
   projectToolPayloadNativeValue,
@@ -336,37 +335,26 @@ const claudeRoleFor = (
   }
 };
 
-/** Prefer schema-normalized camelCase, then snake_case residual (Union fallback). */
-const usageToken = (
-  record: Record<string, unknown>,
-  camel: string,
-  snake: string,
-): number | undefined => numberValue(record[camel]) ?? numberValue(record[snake]);
-
 /**
- * Usage after ClaudeUsageSchema transform is camelCase. Unknown residual shapes
- * may still carry snake_case — both are accepted here.
+ * Usage is fail-closed at classify time (`decodeClaudeUsage`): only schema-
+ * normalized camelCase ClaudeUsage is attached to conversation messages.
+ * No Schema.Unknown residual and no post-decode snake/camel duck-pick.
  */
-const normalizedUsageFromMessage = (
-  message: Record<string, unknown> | undefined,
-): ClaudeUsage | undefined => {
-  if (message === undefined) return undefined;
-  const usage = message.usage;
-  if (usage === null || usage === undefined) return undefined;
-  if (typeof usage !== "object" || Array.isArray(usage)) return undefined;
-  const record = usage as Record<string, unknown>;
-  const inputTokens = usageToken(record, "inputTokens", "input_tokens");
-  const outputTokens = usageToken(record, "outputTokens", "output_tokens");
-  const cacheCreationInputTokens = usageToken(
-    record,
-    "cacheCreationInputTokens",
-    "cache_creation_input_tokens",
-  );
-  const cacheReadInputTokens = usageToken(
-    record,
-    "cacheReadInputTokens",
-    "cache_read_input_tokens",
-  );
+const claudeUsageRecord = (
+  sessionId: SessionId,
+  eventId: string,
+  sequence: number,
+  timestamp: string | undefined,
+  message: { readonly model?: string | null; readonly usage?: ClaudeUsage } | undefined,
+): ClaudeUsageDraft | undefined => {
+  const usage = message?.usage;
+  if (usage === undefined) return undefined;
+  const {
+    inputTokens,
+    outputTokens,
+    cacheCreationInputTokens,
+    cacheReadInputTokens,
+  } = usage;
   if (
     inputTokens === undefined &&
     outputTokens === undefined &&
@@ -375,29 +363,6 @@ const normalizedUsageFromMessage = (
   ) {
     return undefined;
   }
-  return {
-    ...(inputTokens !== undefined ? { inputTokens } : {}),
-    ...(outputTokens !== undefined ? { outputTokens } : {}),
-    ...(cacheCreationInputTokens !== undefined ? { cacheCreationInputTokens } : {}),
-    ...(cacheReadInputTokens !== undefined ? { cacheReadInputTokens } : {}),
-  };
-};
-
-const claudeUsageRecord = (
-  sessionId: SessionId,
-  eventId: string,
-  sequence: number,
-  timestamp: string | undefined,
-  message: Record<string, unknown> | undefined,
-): ClaudeUsageDraft | undefined => {
-  const usage = normalizedUsageFromMessage(message);
-  if (usage === undefined) return undefined;
-  const {
-    inputTokens,
-    outputTokens,
-    cacheCreationInputTokens,
-    cacheReadInputTokens,
-  } = usage;
   return {
     id: usageIdFor(sessionId, eventId, sequence),
     eventId,
@@ -549,6 +514,9 @@ const buildClaudeSessionFromFile = (
         : record.message !== null && typeof record.message === "object"
           ? (record.message as Record<string, unknown>)
           : undefined;
+    // Usage only from schema-normalized conversation.message.usage (fail-closed).
+    const usageMessage =
+      conversation !== undefined ? conversation.message : undefined;
     const content = claudeContentProjection(message, record);
     const nativeEventId =
       conversation !== undefined && typeof conversation.uuid === "string"
@@ -593,7 +561,7 @@ const buildClaudeSessionFromFile = (
       eventId,
       sequence,
       timestamp,
-      message,
+      usageMessage,
     );
     if (usageRecord !== undefined) usageRecords.push(usageRecord);
     const messageRole =
