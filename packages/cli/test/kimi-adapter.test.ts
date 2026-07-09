@@ -1480,3 +1480,137 @@ describe("T12 (QSR-220): KimiWireRecordSchema is a closed fail-closed union", ()
     ).toThrow();
   });
 });
+
+// ===========================================================================
+// Boundary fail-closed: state.json / session_index — never invent `{}`, never
+// silent-skip wrong-shape or missing load-bearing fields without a named diag.
+// ===========================================================================
+describe("kimi boundary fail-closed: state + session_index", () => {
+  const diagnosticBlob = (d: { message: string; details?: unknown }) =>
+    `${d.message}\n${JSON.stringify(d.details ?? {})}`;
+
+  test("wrong-shape state.json emits kimi.state.wrong_shape and yields zero sessions", async () => {
+    const root = join(testRoot, "boundary-state-array");
+    const sessionsDir = join(root, "sessions");
+    const sessionDir = join(sessionsDir, "wd_boundary", "session_state_array");
+    const agentDir = join(sessionDir, "agents", "main");
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(join(sessionDir, "state.json"), "[]\n", "utf8");
+    writeJsonLines(join(agentDir, "wire.jsonl"), [
+      {
+        type: "context.append_message",
+        message: { role: "user", content: [{ type: "text", text: "should not ingest" }] },
+        origin: { kind: "user" },
+        time: 1000,
+      },
+    ]);
+    writeJsonLines(join(root, "session_index.jsonl"), [
+      { sessionId: "session_state_array", sessionDir, workDir: "/tmp/boundary" },
+    ]);
+
+    const result = await kimiAdapter.read({ machine: MACHINE, now: NOW, roots: { kimi: root } });
+    expect(result.sessions).toHaveLength(0);
+    expect(
+      result.diagnostics.some((d) => diagnosticBlob(d).includes("kimi.state.wrong_shape")),
+    ).toBe(true);
+  });
+
+  test("missing state.json emits json.file.missing and yields zero sessions", async () => {
+    const root = join(testRoot, "boundary-state-missing");
+    const sessionsDir = join(root, "sessions");
+    const sessionDir = join(sessionsDir, "wd_boundary", "session_state_missing");
+    const agentDir = join(sessionDir, "agents", "main");
+    mkdirSync(agentDir, { recursive: true });
+    writeJsonLines(join(agentDir, "wire.jsonl"), [
+      {
+        type: "context.append_message",
+        message: { role: "user", content: [{ type: "text", text: "orphan wire" }] },
+        origin: { kind: "user" },
+        time: 1000,
+      },
+    ]);
+    writeJsonLines(join(root, "session_index.jsonl"), [
+      { sessionId: "session_state_missing", sessionDir, workDir: "/tmp/boundary" },
+    ]);
+
+    const result = await kimiAdapter.read({ machine: MACHINE, now: NOW, roots: { kimi: root } });
+    expect(result.sessions).toHaveLength(0);
+    expect(
+      result.diagnostics.some((d) => diagnosticBlob(d).includes("kimi.state.missing")),
+    ).toBe(true);
+  });
+
+  test("session_index entry missing sessionId/sessionDir emits kimi.index.entry.missing_fields", async () => {
+    const root = join(testRoot, "boundary-index-fields");
+    mkdirSync(join(root, "sessions"), { recursive: true });
+    writeJsonLines(join(root, "session_index.jsonl"), [
+      { workDir: "/tmp/only-workdir" },
+      { sessionId: "no_dir" },
+    ]);
+
+    const result = await kimiAdapter.read({ machine: MACHINE, now: NOW, roots: { kimi: root } });
+    expect(result.sessions).toHaveLength(0);
+    const missingFieldCount = result.diagnostics.filter((d) =>
+      diagnosticBlob(d).includes("kimi.index.entry.missing_fields"),
+    ).length;
+    expect(missingFieldCount).toBeGreaterThanOrEqual(2);
+  });
+
+  test("session_index wrong-shape entry emits kimi.index.entry.wrong_shape", async () => {
+    const root = join(testRoot, "boundary-index-shape");
+    mkdirSync(join(root, "sessions"), { recursive: true });
+    writeFileSync(
+      join(root, "session_index.jsonl"),
+      '["not-an-object"]\nnull\n{"sessionId":"x","sessionDir":"/no/such/dir"}\n',
+      "utf8",
+    );
+
+    const result = await kimiAdapter.read({ machine: MACHINE, now: NOW, roots: { kimi: root } });
+    expect(result.sessions).toHaveLength(0);
+    expect(
+      result.diagnostics.some((d) => diagnosticBlob(d).includes("kimi.index.entry.wrong_shape")),
+    ).toBe(true);
+    expect(
+      result.diagnostics.some((d) =>
+        diagnosticBlob(d).includes("kimi.index.entry.session_dir_missing"),
+      ),
+    ).toBe(true);
+  });
+
+  test("state.agents wrong shape emits kimi.state.agents.wrong_shape", async () => {
+    const root = join(testRoot, "boundary-agents-shape");
+    const sessionsDir = join(root, "sessions");
+    const sessionDir = join(sessionsDir, "wd_boundary", "session_agents_shape");
+    const agentDir = join(sessionDir, "agents", "main");
+    mkdirSync(agentDir, { recursive: true });
+    writeJson(join(sessionDir, "state.json"), {
+      createdAt: "2026-05-01T10:00:00.000Z",
+      updatedAt: "2026-05-01T11:00:00.000Z",
+      title: "agents wrong",
+      isCustomTitle: true,
+      agents: ["main"], // array — not a dict
+      custom: {},
+    });
+    writeJsonLines(join(agentDir, "wire.jsonl"), [
+      {
+        type: "context.append_message",
+        message: { role: "user", content: [{ type: "text", text: "via orphan path" }] },
+        origin: { kind: "user" },
+        time: 1000,
+      },
+    ]);
+    writeJsonLines(join(root, "session_index.jsonl"), [
+      { sessionId: "session_agents_shape", sessionDir, workDir: "/tmp/boundary" },
+    ]);
+
+    const result = await kimiAdapter.read({ machine: MACHINE, now: NOW, roots: { kimi: root } });
+    expect(
+      result.diagnostics.some((d) => diagnosticBlob(d).includes("kimi.state.agents.wrong_shape")),
+    ).toBe(true);
+    // Disk orphan still recoverable after agents-dict rejection (named + attributed).
+    expect(result.sessions.length).toBeGreaterThanOrEqual(1);
+    expect(
+      result.diagnostics.some((d) => diagnosticBlob(d).includes("kimi.agent.undeclared_wire")),
+    ).toBe(true);
+  });
+});
