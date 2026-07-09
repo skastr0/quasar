@@ -17,18 +17,21 @@
  * ---------------------------------------------------------------------------
  *
  * Gauges:
+ *   quasar.vector_matrix.ready            // 1 when resident matrix enabled
  *   quasar.vector_matrix.matrix_rows
  *   quasar.vector_matrix.sqlite_rows
- *   quasar.vector_matrix.watermark_drift   // abs(matrix_rows - sqlite_rows)
+ *   quasar.vector_matrix.watermark_drift   // abs(matrix_rows - sqlite_rows); -1 when not ready
  *   quasar.vector_matrix.overwritten_rows  // process-lifetime re-embed count
  *   quasar.vector_matrix.appended_rows
  *   quasar.vector_matrix.dropped_appends
  *   quasar.vector_matrix.overwrite_ratio   // overwritten / (appended+overwritten)
  *
  * watermark_drift:
- *   healthy  — 0 after every boot load and every applyVectorWrites for the
+ *   not ready — matrix empty/disabled: ready=0 and drift=-1 (WATERMARK_DRIFT_NOT_READY).
+ *              Never treat empty-boot 0/0 as healthy lockstep.
+ *   healthy  — ready=1 and drift=0 after boot load / applyVectorWrites for the
  *              active model (matrix and message_vectors stay lockstep).
- *   alert    — any nonzero value. The matrix already logs
+ *   alert    — ready=1 and any nonzero drift. The matrix already logs
  *              vector_matrix.watermark_drift; the gauge makes it pollable on
  *              /status without scraping logs.
  *   critical — drift stays > 0 across successive /status polls for > 60s wall,
@@ -92,15 +95,26 @@ export const embeddingReadinessGauge = Metric.gauge("quasar.embedding.readiness"
   description: "Embedding readiness probe ok (1) / not ok (0)",
 });
 
+/** 1 when the resident matrix is enabled (boot loaded rows), else 0. */
+export const matrixReadyGauge = Metric.gauge("quasar.vector_matrix.ready", {
+  description: "Resident matrix enabled for active model (1) / empty-or-disabled (0)",
+});
 export const matrixRowsGauge = Metric.gauge("quasar.vector_matrix.matrix_rows", {
   description: "Resident matrix row count for the active model",
 });
 export const matrixSqliteRowsGauge = Metric.gauge("quasar.vector_matrix.sqlite_rows", {
   description: "message_vectors row count for the active model (watermark peer)",
 });
+/**
+ * abs(matrix_rows - sqlite_rows) when ready; WATERMARK_DRIFT_NOT_READY (-1)
+ * when the matrix is empty/disabled so zero-drift is never a false healthy signal.
+ */
 export const matrixWatermarkDriftGauge = Metric.gauge("quasar.vector_matrix.watermark_drift", {
-  description: "abs(matrix_rows - sqlite_rows); healthy envelope is 0",
+  description: "abs(matrix_rows - sqlite_rows) when ready; -1 when matrix not ready",
 });
+
+/** Sentinel for watermark_drift when matrix is empty/disabled (not evaluable as lockstep). */
+export const WATERMARK_DRIFT_NOT_READY = -1;
 export const matrixOverwrittenRowsGauge = Metric.gauge("quasar.vector_matrix.overwritten_rows", {
   description: "Process-lifetime in-place re-embeds of existing keys",
 });
@@ -146,6 +160,14 @@ export const syntheticMalformedBodyCounter = Metric.counter(
 export const HEALTHY_ENVELOPE = {
   watermarkDrift: {
     metric: "quasar.vector_matrix.watermark_drift",
+    readyMetric: "quasar.vector_matrix.ready",
+    notReadySentinel: WATERMARK_DRIFT_NOT_READY,
+    /** Drift health is only defined when the resident matrix is enabled. */
+    requires: {
+      metric: "quasar.vector_matrix.ready",
+      value: 1,
+      note: "empty/disabled boot is not healthy lockstep; drift gauge is -1 until ready",
+    },
     healthy: { maxAbs: 0 },
     alert: { minAbs: 1 },
     critical: {
@@ -173,11 +195,31 @@ export const HEALTHY_ENVELOPE = {
 // Numbers match the live serving gates used in proofs/ops:
 //   scan p95 < 60ms, embed p50 < 150 / p95 < 300, warm total < 100ms.
 // These are structured definitions for operators / future pollers — not a
-// live alerter process.
+// live alerter process. Each rule names a concrete Metric.snapshot series
+// (name + optional tags) so it is addressable without free-text guesswork.
+
+/** Selects one series from Metric.snapshot / OTLP export. */
+export type MetricSeriesSelector = {
+  /** Exact Effect Metric name (`pair.metricKey.name`). */
+  readonly name: string;
+  /**
+   * Exact tag match required. Omit for untagged series (global gauges /
+   * counters). When present, every listed tag must appear on the series.
+   */
+  readonly tags?: ReadonlyArray<{ readonly key: string; readonly value: string }>;
+};
+
+export type AlertRulePrecondition = {
+  readonly series: MetricSeriesSelector;
+  readonly statistic: "value" | "count";
+  readonly op: "eq" | "gt" | "gte" | "lt" | "lte";
+  readonly threshold: number;
+};
 
 export type AlertRule = {
   readonly id: string;
-  readonly metric: string;
+  /** Concrete series this rule evaluates (name + optional tags). */
+  readonly series: MetricSeriesSelector;
   readonly description: string;
   readonly statistic: "p50" | "p95" | "value" | "count";
   readonly op: "lt" | "lte" | "gt" | "gte" | "eq";
@@ -185,13 +227,18 @@ export type AlertRule = {
   readonly unit: "ms" | "count" | "ratio" | "flag";
   readonly severity: "alert" | "critical";
   readonly source: string;
+  /** When set, skip evaluation unless the precondition holds (e.g. matrix ready). */
+  readonly when?: AlertRulePrecondition;
 };
+
+/** Semantic mode tag on search stage timers (`recordSearchReceiptMetrics`). */
+const SEMANTIC_MODE_TAGS = [{ key: "mode", value: "semantic" }] as const;
 
 export const ALERT_RULES: readonly AlertRule[] = [
   {
     id: "search.scan.p95",
-    metric: "quasar.search.core",
-    description: "Matrix/lexical scan + assemble p95 under 60ms",
+    series: { name: "quasar.search.core", tags: SEMANTIC_MODE_TAGS },
+    description: "Matrix scan + assemble p95 under 60ms (semantic mode)",
     statistic: "p95",
     op: "lt",
     threshold: 60,
@@ -201,8 +248,8 @@ export const ALERT_RULES: readonly AlertRule[] = [
   },
   {
     id: "search.embed.p50",
-    metric: "quasar.search.embed",
-    description: "Query embed p50 under 150ms (novel / cold cache)",
+    series: { name: "quasar.search.embed", tags: SEMANTIC_MODE_TAGS },
+    description: "Query embed p50 under 150ms (semantic, novel / cold cache)",
     statistic: "p50",
     op: "lt",
     threshold: 150,
@@ -212,8 +259,8 @@ export const ALERT_RULES: readonly AlertRule[] = [
   },
   {
     id: "search.embed.p95",
-    metric: "quasar.search.embed",
-    description: "Query embed p95 under 300ms",
+    series: { name: "quasar.search.embed", tags: SEMANTIC_MODE_TAGS },
+    description: "Query embed p95 under 300ms (semantic mode)",
     statistic: "p95",
     op: "lt",
     threshold: 300,
@@ -223,8 +270,8 @@ export const ALERT_RULES: readonly AlertRule[] = [
   },
   {
     id: "search.warm.total.p95",
-    metric: "quasar.search.total",
-    description: "Warm end-to-end search p95 under 100ms (embed cache hit)",
+    series: { name: "quasar.search.total", tags: SEMANTIC_MODE_TAGS },
+    description: "Warm end-to-end search p95 under 100ms (semantic, embed cache hit)",
     statistic: "p95",
     op: "lt",
     threshold: 100,
@@ -234,18 +281,24 @@ export const ALERT_RULES: readonly AlertRule[] = [
   },
   {
     id: "vector_matrix.watermark_drift",
-    metric: "quasar.vector_matrix.watermark_drift",
-    description: "Matrix/SQLite watermark drift must stay at 0",
+    series: { name: "quasar.vector_matrix.watermark_drift" },
+    description: "Matrix/SQLite watermark drift must stay at 0 when matrix is ready",
     statistic: "value",
     op: "eq",
     threshold: 0,
     unit: "count",
     severity: "alert",
     source: "healthy-envelope watermark_drift.maxAbs=0",
+    when: {
+      series: { name: "quasar.vector_matrix.ready" },
+      statistic: "value",
+      op: "eq",
+      threshold: 1,
+    },
   },
   {
     id: "vector_matrix.dropped_appends",
-    metric: "quasar.vector_matrix.dropped_appends",
+    series: { name: "quasar.vector_matrix.dropped_appends" },
     description: "Capacity-exhausted dropped appends should stay at 0",
     statistic: "value",
     op: "eq",
@@ -253,6 +306,12 @@ export const ALERT_RULES: readonly AlertRule[] = [
     unit: "count",
     severity: "critical",
     source: "capacity guard",
+    when: {
+      series: { name: "quasar.vector_matrix.ready" },
+      statistic: "value",
+      op: "eq",
+      threshold: 1,
+    },
   },
 ] as const;
 
@@ -326,6 +385,14 @@ export const publishQueueGauges = (stats: {
     yield* Metric.set(queueFailedGauge, stats.failed);
   });
 
+/**
+ * Process-local kinds last published as tagged queue gauges. `statsByKind`
+ * only returns kinds with active pending/leased/failed rows — disappeared
+ * kinds must be zeroed so /status does not leave stale non-zero per-kind
+ * gauges from a prior poll.
+ */
+const publishedQueueKinds = new Set<string>();
+
 /** Per-kind pending/leased/failed as tagged gauges (refreshed on /status). */
 export const publishQueueKindGauges = (
   byKind: readonly {
@@ -335,30 +402,29 @@ export const publishQueueKindGauges = (
     readonly failed: number;
   }[],
 ): Effect.Effect<void> =>
-  Effect.forEach(
-    byKind,
-    (row) =>
-      Effect.gen(function* () {
-        yield* Metric.set(
-          Metric.tagged(queuePendingGauge, "kind", row.kind),
-          row.pending,
-        );
-        yield* Metric.set(
-          Metric.tagged(queueLeasedGauge, "kind", row.kind),
-          row.leased,
-        );
-        yield* Metric.set(
-          Metric.tagged(queueFailedGauge, "kind", row.kind),
-          row.failed,
-        );
-      }),
-    { concurrency: 1, discard: true },
-  );
+  Effect.gen(function* () {
+    const activeKinds = new Set(byKind.map((row) => row.kind));
+    for (const kind of publishedQueueKinds) {
+      if (activeKinds.has(kind)) continue;
+      yield* Metric.set(Metric.tagged(queuePendingGauge, "kind", kind), 0);
+      yield* Metric.set(Metric.tagged(queueLeasedGauge, "kind", kind), 0);
+      yield* Metric.set(Metric.tagged(queueFailedGauge, "kind", kind), 0);
+    }
+    publishedQueueKinds.clear();
+    for (const row of byKind) {
+      publishedQueueKinds.add(row.kind);
+      yield* Metric.set(Metric.tagged(queuePendingGauge, "kind", row.kind), row.pending);
+      yield* Metric.set(Metric.tagged(queueLeasedGauge, "kind", row.kind), row.leased);
+      yield* Metric.set(Metric.tagged(queueFailedGauge, "kind", row.kind), row.failed);
+    }
+  });
 
 export const publishEmbeddingReadiness = (ok: boolean): Effect.Effect<void> =>
   Metric.set(embeddingReadinessGauge, ok ? 1 : 0);
 
 export const publishMatrixWatermarkGauges = (status: {
+  /** Resident matrix enabled (boot loaded rows). Required for honest drift. */
+  readonly enabled: boolean;
   readonly rows: number;
   readonly watermark: { readonly matrixRows: number; readonly sqliteRows: number };
   readonly overwrittenRows: number;
@@ -366,11 +432,16 @@ export const publishMatrixWatermarkGauges = (status: {
   readonly droppedAppends: number;
 }): Effect.Effect<void> =>
   Effect.gen(function* () {
+    const ready = status.enabled;
     const matrixRows = status.watermark.matrixRows;
     const sqliteRows = status.watermark.sqliteRows;
-    const drift = Math.abs(matrixRows - sqliteRows);
+    // Empty/disabled matrix must not surface drift=0 as healthy lockstep.
+    const drift = ready
+      ? Math.abs(matrixRows - sqliteRows)
+      : WATERMARK_DRIFT_NOT_READY;
     const totalWrites = status.appendedRows + status.overwrittenRows;
     const ratio = totalWrites === 0 ? 0 : status.overwrittenRows / totalWrites;
+    yield* Metric.set(matrixReadyGauge, ready ? 1 : 0);
     yield* Metric.set(matrixRowsGauge, matrixRows);
     yield* Metric.set(matrixSqliteRowsGauge, sqliteRows);
     yield* Metric.set(matrixWatermarkDriftGauge, drift);
@@ -395,6 +466,22 @@ export type MetricSnapshotEntry = {
   readonly buckets?: ReadonlyArray<readonly [number | null, number]>;
   readonly occurrences?: Record<string, number>;
 };
+
+/** Locate a concrete series in a quasar Metric.snapshot (name + optional tags). */
+export const selectMetricSeries = (
+  snapshot: readonly MetricSnapshotEntry[],
+  series: MetricSeriesSelector,
+): MetricSnapshotEntry | undefined =>
+  snapshot.find((entry) => {
+    if (entry.name !== series.name) return false;
+    const want = series.tags;
+    if (want === undefined || want.length === 0) {
+      return entry.tags.length === 0;
+    }
+    return want.every((tag) =>
+      entry.tags.some((have) => have.key === tag.key && have.value === tag.value),
+    );
+  });
 
 const isQuasarMetric = (name: string): boolean => name.startsWith("quasar.");
 
