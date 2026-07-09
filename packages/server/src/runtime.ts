@@ -1,4 +1,6 @@
-import { Layer, ManagedRuntime } from "effect";
+import { FetchHttpClient } from "@effect/platform";
+import * as Otlp from "@effect/opentelemetry/Otlp";
+import { Effect, Layer, Logger, ManagedRuntime } from "effect";
 
 import { LocalServerConfigLive } from "./config";
 import { makeEmbeddingsLayer } from "./embeddings";
@@ -22,6 +24,22 @@ const WithEmbeddingsLayer = makeEmbeddingsLayer().pipe(Layer.provideMerge(DataSe
 // write through — provideMerge keeps one shared store underneath both.
 const WithVectorMatrixLayer = makeVectorMatrixLayer().pipe(Layer.provideMerge(WithEmbeddingsLayer));
 
-export const AppLayer = WorkerSupervisorLive.pipe(Layer.provideMerge(WithVectorMatrixLayer));
+export const ObservabilityLayer = Layer.unwrapEffect(
+  Effect.sync(() => {
+    const baseUrl = process.env.QUASAR_OTLP_BASE_URL?.trim() || undefined;
+    const otlpLayer = baseUrl === undefined
+      ? Layer.empty
+      : Otlp.layerJson({ baseUrl, resource: { serviceName: "quasar-server" } }).pipe(
+          Layer.provide(FetchHttpClient.layer),
+        );
+
+    return Layer.mergeAll(Logger.json, otlpLayer);
+  }),
+);
+
+export const AppLayer = Layer.mergeAll(
+  WorkerSupervisorLive.pipe(Layer.provideMerge(WithVectorMatrixLayer)),
+  ObservabilityLayer,
+);
 
 export const AppRuntime = ManagedRuntime.make(AppLayer);

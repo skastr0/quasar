@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { performance } from "node:perf_hooks";
-import { Context, Effect, Layer, Schema } from "effect";
+import { Cause, Context, Effect, Layer, Schema } from "effect";
 
 import type { IngestRunRow, MappedSession, MessageRow, ProjectRow, SessionRow, ToolCallRow } from "./model";
 import { ensureParentDir, sqlitePath } from "./paths";
@@ -191,7 +191,7 @@ export interface LocalStoreService {
   /** Register THE (single, canonical) vector-write listener. Listener failures
    * are contained: they log a named diagnostic and never fail the write. */
   readonly registerMessageVectorWriteListener: (
-    listener: (event: MessageVectorWriteEvent) => void,
+    listener: (event: MessageVectorWriteEvent) => Effect.Effect<void>,
   ) => void;
   readonly lexicalSearch: (request: {
     readonly query: string;
@@ -386,9 +386,17 @@ const rebuildMessagesFtsInChunks = (db: Database): number => {
 // (see backfillProjectScopeTokens' NULL-guard and the full DROP+rebuild of
 // messages_fts below), and user_version only advances once every step below
 // has completed. Boot blocks until done.
-const migrateMessagesFtsScopedTokens = (db: Database): void => {
+interface StoreMigrationLog {
+  readonly event: string;
+  readonly at: string;
+  readonly backfilledRows: number;
+  readonly rebuiltRows: number;
+  readonly elapsedMs: number;
+}
+
+const migrateMessagesFtsScopedTokens = (db: Database): StoreMigrationLog | undefined => {
   const { user_version: userVersion } = db.query("PRAGMA user_version").get() as { user_version: number };
-  if (userVersion >= FTS_SCOPED_TOKENS_SCHEMA_VERSION) return;
+  if (userVersion >= FTS_SCOPED_TOKENS_SCHEMA_VERSION) return undefined;
 
   const startedAt = performance.now();
 
@@ -413,16 +421,13 @@ const migrateMessagesFtsScopedTokens = (db: Database): void => {
 
   db.exec(`PRAGMA user_version = ${FTS_SCOPED_TOKENS_SCHEMA_VERSION}`);
 
-  const elapsedMs = Math.round((performance.now() - startedAt) * 100) / 100;
-  console.log(
-    JSON.stringify({
-      event: "store.migrate.fts_scoped_tokens",
-      at: new Date().toISOString(),
-      backfilledRows,
-      rebuiltRows,
-      elapsedMs,
-    }),
-  );
+  return {
+    event: "store.migrate.fts_scoped_tokens",
+    at: new Date().toISOString(),
+    backfilledRows,
+    rebuiltRows,
+    elapsedMs: Math.round((performance.now() - startedAt) * 100) / 100,
+  };
 };
 
 const MESSAGE_VECTORS_MIGRATION_SQL = `
@@ -524,7 +529,7 @@ const migrateMessageVectorsTable = (db: Database): void => {
   `);
 };
 
-const migrate = (db: Database): void => {
+const migrate = (db: Database): readonly StoreMigrationLog[] => {
   db.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = NORMAL;
@@ -626,7 +631,8 @@ const migrate = (db: Database): void => {
   }
   migrateMessageVectorsTable(db);
   db.exec(MESSAGE_VECTORS_MIGRATION_SQL);
-  migrateMessagesFtsScopedTokens(db);
+  const ftsMigration = migrateMessagesFtsScopedTokens(db);
+  return ftsMigration === undefined ? [] : [ftsMigration];
 };
 
 const count = (db: Database, table: string): number =>
@@ -647,12 +653,22 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
       Effect.sync(() => {
         ensureParentDir(path);
         const db = new Database(path, { create: true });
-        migrate(db);
-        return db;
+        const migrationLogs = migrate(db);
+        return { db, migrationLogs };
       }),
-      (db) => Effect.sync(() => db.close()),
+      ({ db }) => Effect.sync(() => db.close()),
     ).pipe(
-      Effect.map((db) => {
+      Effect.tap(({ migrationLogs }) =>
+        Effect.forEach(
+          migrationLogs,
+          (fields) =>
+            Effect.logInfo(fields.event).pipe(
+              Effect.annotateLogs({ ...fields }),
+            ),
+          { discard: true },
+        ),
+      ),
+      Effect.map(({ db }) => {
         const upsertProject = db.prepare(
           `INSERT INTO projects(project_key, display_name, raw_path)
            VALUES ($projectKey, $displayName, $rawPath)
@@ -718,24 +734,26 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
         const countMessageVectorsForModel = db.prepare(
           "SELECT COUNT(*) AS count FROM message_vectors WHERE model = ?",
         );
-        let messageVectorWriteListener: ((event: MessageVectorWriteEvent) => void) | undefined;
-        const notifyMessageVectorWrite = (acceptedRows: readonly MessageVectorUpsert[]): void => {
-          if (messageVectorWriteListener === undefined || acceptedRows.length === 0) return;
+        let messageVectorWriteListener: ((event: MessageVectorWriteEvent) => Effect.Effect<void>) | undefined;
+        const notifyMessageVectorWrite = (acceptedRows: readonly MessageVectorUpsert[]): Effect.Effect<void> => {
+          if (messageVectorWriteListener === undefined || acceptedRows.length === 0) return Effect.void;
           const sqliteRowsByModel: Record<string, number> = {};
           for (const row of acceptedRows) {
             if (sqliteRowsByModel[row.model] === undefined) {
               sqliteRowsByModel[row.model] = (countMessageVectorsForModel.get(row.model) as { count: number }).count;
             }
           }
-          try {
-            messageVectorWriteListener({ rows: acceptedRows, sqliteRowsByModel });
-          } catch (cause) {
-            console.error(JSON.stringify({
-              event: "store.message_vector_write_listener_failed",
-              at: new Date().toISOString(),
-              diagnostic: cause instanceof Error ? cause.message : String(cause),
-            }));
-          }
+          return messageVectorWriteListener({ rows: acceptedRows, sqliteRowsByModel }).pipe(
+            Effect.catchAllCause((cause) =>
+              Effect.logError("store.message_vector_write_listener_failed").pipe(
+                Effect.annotateLogs({
+                  event: "store.message_vector_write_listener_failed",
+                  at: new Date().toISOString(),
+                  diagnostic: Cause.pretty(cause, { renderErrorCause: true }),
+                }),
+              ),
+            ),
+          );
         };
         // --- session diff apply ---
         // A changed session used to be applied as DELETE-all + reinsert-all in
@@ -1097,9 +1115,9 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
             ingestRuns: count(db, "ingest_runs"),
           })),
           upsertMessageVectors: (rows) =>
-            trySqlite("upsertMessageVectors", () => {
-              const acceptedRows = replaceMessageVectors(rows);
-              notifyMessageVectorWrite(acceptedRows);
+            Effect.gen(function* () {
+              const acceptedRows = yield* trySqlite("upsertMessageVectors", () => replaceMessageVectors(rows));
+              yield* notifyMessageVectorWrite(acceptedRows);
               return acceptedRows.length;
             }),
           listMessagesMissingVector: ({ model, limit }) =>

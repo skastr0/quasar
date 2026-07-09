@@ -11,12 +11,20 @@ import { measureEmbeddingParity, runSqliteFirstProof, type SqliteFirstProofRepor
 
 const args = process.argv.slice(2);
 
+const writeStdout = (text: string): void => {
+  process.stdout.write(text);
+};
+
+const writeStderr = (text: string): void => {
+  process.stderr.write(text);
+};
+
 const valueFor = (name: string, fallback?: string): string | undefined => {
   const index = args.lastIndexOf(name);
   if (index === -1) return fallback;
   const value = args[index + 1];
   if (value === undefined || value.startsWith("--")) {
-    console.error(`Missing value for ${name}`);
+    writeStderr(`Missing value for ${name}\n`);
     process.exit(1);
   }
   return value;
@@ -47,7 +55,7 @@ const optionalUnitNumberFor = (name: string): number | undefined => {
 };
 
 const usage = () => {
-  console.log(`Usage:
+  writeStdout(`Usage:
   bun run proof:sqlite-first --source-db /path/to/quasar.sqlite [--work-db /tmp/proof.sqlite] [--out docs/proofs/sqlite-first-proof.json]
 
 Options:
@@ -82,7 +90,7 @@ if (hasFlag("--help")) {
 const sourceDb = valueFor("--source-db");
 if (sourceDb === undefined || sourceDb.trim() === "") {
   usage();
-  console.error("Missing required --source-db");
+  writeStderr("Missing required --source-db\n");
   process.exit(1);
 }
 
@@ -109,13 +117,13 @@ const profile = {
 
 if (paritySample !== undefined && parityThreshold === undefined) {
   usage();
-  console.error("Missing required --parity-threshold for --parity-sample");
+  writeStderr("Missing required --parity-threshold for --parity-sample\n");
   process.exit(1);
 }
 
 if (exactScanKernel !== "usearch" && exactScanKernel !== "pure-js") {
   usage();
-  console.error("Invalid --scan-kernel; expected usearch or pure-js");
+  writeStderr("Invalid --scan-kernel; expected usearch or pure-js\n");
   process.exit(1);
 }
 
@@ -166,4 +174,4 @@ if (paritySample !== undefined && parityThreshold !== undefined) {
 
 mkdirSync(dirname(resolve(outPath)), { recursive: true });
 writeFileSync(outPath, `${JSON.stringify(report, null, 2)}\n`);
-console.log(JSON.stringify({ ok: true, command: "sqlite-first-proof", outPath, workDb: report.workDb }, null, 2));
+writeStdout(`${JSON.stringify({ ok: true, command: "sqlite-first-proof", outPath, workDb: report.workDb }, null, 2)}\n`);
