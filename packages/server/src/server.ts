@@ -14,6 +14,15 @@ import { DerivedSearch } from "./search";
 import { DurableQueue, Embeddings, IngestCoordinator, WorkerSupervisor } from "./services";
 import { LocalStore, type LocalStoreService, type SearchHit } from "./store";
 import { VectorMatrix, type VectorMatrixHit } from "./vectorMatrix";
+import {
+  publishEmbeddingReadiness,
+  publishMatrixWatermarkGauges,
+  publishQueueGauges,
+  publishQueueKindGauges,
+  recordIngestOutcome,
+  recordSearchReceiptMetrics,
+  statusMetricsPayload,
+} from "./metrics";
 
 const json = (value: unknown, options?: { readonly status?: number }) =>
   HttpServerResponse.unsafeJson(value, { status: options?.status });
@@ -212,22 +221,31 @@ const status = Effect.gen(function* () {
     WorkerSupervisor,
     VectorMatrix,
   ]);
-  const [sqlite, queueStats, queueByKind, embeddingStatus, ingestStatus, workerStatus, matrixStatus] = yield* Effect.all([
+  const [sqlite, queueStats, queueByKind, embeddingStatus, embeddingReadiness, ingestStatus, workerStatus, matrixStatus] = yield* Effect.all([
     store.stats.pipe(Effect.either),
     queue.stats,
     queue.statsByKind,
     embeddings.status,
+    embeddings.readiness.pipe(Effect.catchAll(() => Effect.succeed({ ok: false, checkedAt: new Date().toISOString(), reason: "readiness unavailable" }))),
     ingest.status,
     workers.status,
     matrix.status,
   ]);
+  // Refresh live gauges from current service state so /status is self-sufficient
+  // even when OTLP export is off (Metric.snapshot still reflects these).
+  yield* publishQueueGauges(queueStats);
+  yield* publishQueueKindGauges(queueByKind);
+  yield* publishEmbeddingReadiness(embeddingReadiness.ok);
+  yield* publishMatrixWatermarkGauges(matrixStatus);
+  const metrics = yield* statusMetricsPayload();
   return json(ok("status", {
     sqlite,
     queue: { ...queueStats, byKind: queueByKind },
-    embeddings: embeddingStatus,
+    embeddings: { ...embeddingStatus, readiness: embeddingReadiness },
     ingest: ingestStatus,
     workers: workerStatus,
     vectorMatrix: matrixStatus,
+    metrics,
   }));
 });
 
@@ -367,6 +385,10 @@ const ingestSession = Effect.gen(function* () {
       }),
     ),
   );
+  yield* recordIngestOutcome({
+    status: outcome.status,
+    diagnostic: outcome.diagnostic,
+  });
   const status = outcome.status === "failed" ? 500 : 200;
   return json(ok("ingest/session", { outcome }), { status });
 });
@@ -415,7 +437,14 @@ const optionalTraceId: Effect.Effect<string | undefined> = Effect.gen(function* 
 });
 
 const emitSearchProfile = (profile: SearchReceipt) =>
-  Effect.sync(() => {
+  Effect.gen(function* () {
+    yield* recordSearchReceiptMetrics({
+      mode: profile.mode,
+      readinessMs: profile.readinessMs,
+      searchMs: profile.searchMs,
+      embedMs: profile.embedMs,
+      totalMs: profile.totalMs,
+    });
     if (!searchProfileEnabled()) return;
     console.log(JSON.stringify({ event: "search.profile", at: new Date().toISOString(), ...profile }));
   });

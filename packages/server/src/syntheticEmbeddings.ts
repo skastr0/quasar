@@ -1,4 +1,5 @@
 import { Effect, Logger, Schema } from "effect";
+import { recordSyntheticMalformedBody } from "./metrics";
 
 import type { EmbeddingProfile } from "./embeddingProfiles";
 import type { Embedder } from "./embeddings";
@@ -203,6 +204,7 @@ export const makeSyntheticEmbedder = (
               detail: cause.message,
             }),
           );
+          yield* recordSyntheticMalformedBody();
         }
         if (attempt < SYNTHETIC_REQUEST_ATTEMPTS && isRetryableSyntheticFailure(cause)) continue;
         return yield* Effect.fail(cause);
