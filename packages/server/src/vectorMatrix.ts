@@ -417,6 +417,7 @@ export const makeVectorMatrixLayer = (
         }
         if (appended > 0 || overwritten > 0 || sqliteRows !== undefined) {
           yield* publishMatrixWatermarkGauges({
+            enabled: state.enabled,
             rows: state.rowCount,
             watermark: state.watermark,
             overwrittenRows: state.overwrittenRows,
@@ -580,6 +581,15 @@ export const makeVectorMatrixLayer = (
         const total = yield* store.countMessageVectors(model);
         if (total === 0) {
           state.watermark = { matrixRows: 0, sqliteRows: 0, checkedAt: nowIso() };
+          // Honest not-ready gauges: never leave drift at 0/0 as false healthy.
+          yield* publishMatrixWatermarkGauges({
+            enabled: false,
+            rows: 0,
+            watermark: state.watermark,
+            overwrittenRows: state.overwrittenRows,
+            appendedRows: state.appendedRows,
+            droppedAppends: state.droppedAppends,
+          });
           yield* Effect.logInfo("vector_matrix.empty_boot").pipe(
             Effect.annotateLogs({
               event: "vector_matrix.empty_boot",
@@ -638,6 +648,15 @@ export const makeVectorMatrixLayer = (
         }
         state.rowCount = compactHoles(slots, filled);
         if (state.rowCount === 0) {
+          state.watermark = { matrixRows: 0, sqliteRows: total, checkedAt: nowIso() };
+          yield* publishMatrixWatermarkGauges({
+            enabled: false,
+            rows: 0,
+            watermark: state.watermark,
+            overwrittenRows: state.overwrittenRows,
+            appendedRows: state.appendedRows,
+            droppedAppends: state.droppedAppends,
+          });
           yield* Effect.logWarning("vector_matrix.load_empty_after_validation").pipe(
             Effect.annotateLogs({
               event: "vector_matrix.load_empty_after_validation",
@@ -673,6 +692,7 @@ export const makeVectorMatrixLayer = (
           );
         }
         yield* publishMatrixWatermarkGauges({
+          enabled: true,
           rows: state.rowCount,
           watermark: state.watermark,
           overwrittenRows: state.overwrittenRows,

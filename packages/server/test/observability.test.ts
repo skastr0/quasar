@@ -132,6 +132,7 @@ describe("observability metrics", () => {
       recordIngestOutcome,
       recordSearchReceiptMetrics,
       recordSyntheticMalformedBody,
+      selectMetricSeries,
       statusMetricsPayload,
     } = await import("../src/metrics");
 
@@ -152,6 +153,7 @@ describe("observability metrics", () => {
         yield* recordSyntheticMalformedBody();
         yield* publishQueueGauges({ pending: 2, leased: 1, failed: 0 });
         yield* publishMatrixWatermarkGauges({
+          enabled: true,
           rows: 10,
           watermark: { matrixRows: 10, sqliteRows: 10 },
           overwrittenRows: 1,
@@ -171,6 +173,7 @@ describe("observability metrics", () => {
     expect(names.has("quasar.ingest.outcomes")).toBe(true);
     expect(names.has("quasar.ingest.diagnostics")).toBe(true);
     expect(names.has("quasar.queue.pending")).toBe(true);
+    expect(names.has("quasar.vector_matrix.ready")).toBe(true);
     expect(names.has("quasar.vector_matrix.watermark_drift")).toBe(true);
     expect(names.has("quasar.vector_matrix.overwrite_ratio")).toBe(true);
     expect(names.has("quasar.synthetic_embeddings.malformed_body")).toBe(true);
@@ -181,6 +184,11 @@ describe("observability metrics", () => {
     expect(drift?.kind).toBe("gauge");
     expect(drift?.value).toBe(0);
 
+    const ready = payload.snapshot.find(
+      (entry) => entry.name === "quasar.vector_matrix.ready",
+    );
+    expect(ready?.value).toBe(1);
+
     const ratio = payload.snapshot.find(
       (entry) => entry.name === "quasar.vector_matrix.overwrite_ratio",
     );
@@ -188,6 +196,7 @@ describe("observability metrics", () => {
 
     // Healthy envelope + bench-gate alert rules ship with the snapshot payload.
     expect(payload.healthyEnvelope.watermarkDrift.healthy.maxAbs).toBe(0);
+    expect(payload.healthyEnvelope.watermarkDrift.requires.value).toBe(1);
     expect(payload.alertRules.some((rule) => rule.id === "search.scan.p95")).toBe(true);
     expect(payload.alertRules.find((rule) => rule.id === "search.scan.p95")?.threshold).toBe(60);
     expect(payload.alertRules.find((rule) => rule.id === "search.embed.p50")?.threshold).toBe(150);
@@ -196,17 +205,30 @@ describe("observability metrics", () => {
     expect(ALERT_RULES.length).toBeGreaterThanOrEqual(4);
     expect(HEALTHY_ENVELOPE.overwrite.metrics).toContain("quasar.vector_matrix.overwritten_rows");
 
+    // Bench rules address concrete tagged series (evaluable against snapshot).
+    const scanRule = ALERT_RULES.find((rule) => rule.id === "search.scan.p95");
+    expect(scanRule?.series.name).toBe("quasar.search.core");
+    expect(scanRule?.series.tags).toEqual([{ key: "mode", value: "semantic" }]);
+    const selectedCore = selectMetricSeries(payload.snapshot, scanRule!.series);
+    expect(selectedCore?.kind).toBe("histogram");
+    expect((selectedCore?.count ?? 0) >= 1).toBe(true);
+
+    const driftRule = ALERT_RULES.find((rule) => rule.id === "vector_matrix.watermark_drift");
+    expect(driftRule?.when?.series.name).toBe("quasar.vector_matrix.ready");
+    expect(selectMetricSeries(payload.snapshot, driftRule!.series)?.value).toBe(0);
+
     // Metric.timer records Duration inputs; a direct update is still a histogram.
     const core = payload.snapshot.find((entry) => entry.name === "quasar.search.core");
     expect(core?.kind).toBe("histogram");
     expect((core?.count ?? 0) >= 1).toBe(true);
   });
 
-  test("nonzero watermark drift is visible on the gauge", async () => {
+  test("nonzero watermark drift is visible on the gauge when ready", async () => {
     const { Effect } = await import("effect");
     const { publishMatrixWatermarkGauges, quasarMetricSnapshot } = await import("../src/metrics");
     await Effect.runPromise(
       publishMatrixWatermarkGauges({
+        enabled: true,
         rows: 8,
         watermark: { matrixRows: 8, sqliteRows: 10 },
         overwrittenRows: 0,
@@ -217,5 +239,88 @@ describe("observability metrics", () => {
     const snap = await Effect.runPromise(quasarMetricSnapshot());
     const drift = snap.find((entry) => entry.name === "quasar.vector_matrix.watermark_drift");
     expect(drift?.value).toBe(2);
+    const ready = snap.find((entry) => entry.name === "quasar.vector_matrix.ready");
+    expect(ready?.value).toBe(1);
+  });
+
+  test("empty/disabled matrix does not report healthy zero-drift", async () => {
+    const { Effect } = await import("effect");
+    const {
+      HEALTHY_ENVELOPE,
+      WATERMARK_DRIFT_NOT_READY,
+      publishMatrixWatermarkGauges,
+      quasarMetricSnapshot,
+    } = await import("../src/metrics");
+
+    await Effect.runPromise(
+      publishMatrixWatermarkGauges({
+        enabled: false,
+        rows: 0,
+        watermark: { matrixRows: 0, sqliteRows: 0 },
+        overwrittenRows: 0,
+        appendedRows: 0,
+        droppedAppends: 0,
+      }),
+    );
+
+    const snap = await Effect.runPromise(quasarMetricSnapshot());
+    const ready = snap.find((entry) => entry.name === "quasar.vector_matrix.ready");
+    const drift = snap.find((entry) => entry.name === "quasar.vector_matrix.watermark_drift");
+    expect(ready?.value).toBe(0);
+    expect(drift?.value).toBe(WATERMARK_DRIFT_NOT_READY);
+    expect(drift?.value).not.toBe(0);
+    // Envelope refuses to treat not-ready as healthy lockstep.
+    expect(HEALTHY_ENVELOPE.watermarkDrift.notReadySentinel).toBe(WATERMARK_DRIFT_NOT_READY);
+    expect(HEALTHY_ENVELOPE.watermarkDrift.requires.value).toBe(1);
+  });
+
+  test("queue kind gauges zero out kinds that disappear from statsByKind", async () => {
+    const { Effect } = await import("effect");
+    const { publishQueueKindGauges, quasarMetricSnapshot } = await import("../src/metrics");
+
+    const kindTag = (entry: { tags: ReadonlyArray<{ key: string; value: string }> }, kind: string) =>
+      entry.tags.some((tag) => tag.key === "kind" && tag.value === kind);
+
+    await Effect.runPromise(
+      publishQueueKindGauges([
+        { kind: "embed-message", pending: 3, leased: 1, failed: 0 },
+        { kind: "index-session", pending: 2, leased: 0, failed: 1 },
+      ]),
+    );
+
+    let snap = await Effect.runPromise(quasarMetricSnapshot());
+    const pendingEmbed = snap.find(
+      (entry) => entry.name === "quasar.queue.pending" && kindTag(entry, "embed-message"),
+    );
+    const pendingIndex = snap.find(
+      (entry) => entry.name === "quasar.queue.pending" && kindTag(entry, "index-session"),
+    );
+    expect(pendingEmbed?.value).toBe(3);
+    expect(pendingIndex?.value).toBe(2);
+
+    // Only embed-message remains active — index-session must reset to 0.
+    await Effect.runPromise(
+      publishQueueKindGauges([
+        { kind: "embed-message", pending: 1, leased: 0, failed: 0 },
+      ]),
+    );
+
+    snap = await Effect.runPromise(quasarMetricSnapshot());
+    const pendingEmbedAfter = snap.find(
+      (entry) => entry.name === "quasar.queue.pending" && kindTag(entry, "embed-message"),
+    );
+    const pendingIndexAfter = snap.find(
+      (entry) => entry.name === "quasar.queue.pending" && kindTag(entry, "index-session"),
+    );
+    const leasedIndexAfter = snap.find(
+      (entry) => entry.name === "quasar.queue.leased" && kindTag(entry, "index-session"),
+    );
+    const failedIndexAfter = snap.find(
+      (entry) => entry.name === "quasar.queue.failed" && kindTag(entry, "index-session"),
+    );
+    expect(pendingEmbedAfter?.value).toBe(1);
+    expect(pendingIndexAfter?.value).toBe(0);
+    expect(leasedIndexAfter?.value).toBe(0);
+    expect(failedIndexAfter?.value).toBe(0);
   });
 });
