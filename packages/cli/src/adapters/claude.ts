@@ -133,6 +133,7 @@ const claudeStructuredContentProjection = (value: unknown): NativeValue | undefi
   if (Array.isArray(value)) {
     return value.flatMap((item) => {
       const block = recordFrom(item);
+      if (block === undefined) return [];
       const type = typeof block.type === "string" ? block.type : undefined;
       if (type === "text" && typeof block.text === "string") {
         return [{ type, text: block.text } as NativeValue];
@@ -191,6 +192,7 @@ const claudeContentProjection = (
   if (blocks.length > 0) {
     return blocks.flatMap((blockValue) => {
       const block = recordFrom(blockValue);
+      if (block === undefined) return [];
       const type = typeof block.type === "string" ? block.type : undefined;
       if (type === "text" && typeof block.text === "string") {
         return [{ type, text: block.text } as NativeValue];
@@ -260,6 +262,7 @@ const upsertClaudeToolCalls = (
   let eventToolCallId: string | undefined;
   for (const blockValue of blocks) {
     const block = recordFrom(blockValue);
+    if (block === undefined) continue;
     const type = typeof block.type === "string" ? block.type : undefined;
     if (type === "tool_use" && typeof block.id === "string") {
       const id = toolCallIdFor(sessionId, block.id);
@@ -336,7 +339,7 @@ const claudeUsageRecord = (
   message: Record<string, unknown> | undefined,
 ): ClaudeUsageDraft | undefined => {
   const usage = recordFrom(message?.usage);
-  if (Object.keys(usage).length === 0) return undefined;
+  if (usage === undefined || Object.keys(usage).length === 0) return undefined;
   const inputTokens =
     numberValue(usage.input_tokens) ?? numberValue(usage.inputTokens);
   const outputTokens =

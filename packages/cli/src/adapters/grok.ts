@@ -101,13 +101,21 @@ type GrokLineageMap = ReadonlyMap<string, { lineage: GrokLineage; manifestPath: 
  * complete even when the session stream itself is paged, so any child page can
  * resolve its parent.
  */
-const buildGrokLineageMap = (sessionsRoot: string): GrokLineageMap => {
+const buildGrokLineageMap = (
+  sessionsRoot: string,
+  diagnostics?: DecodeDiagnostic[],
+): GrokLineageMap => {
   const manifestPaths = collectFiles(sessionsRoot, (path) =>
     /[/\\]subagents[/\\][^/\\]+[/\\]meta\.json$/.test(path),
   );
   const map = new Map<string, { lineage: GrokLineage; manifestPath: string }>();
   for (const manifestPath of manifestPaths) {
-    const manifest = decodeGrokSubagentManifest(readJsonFile(manifestPath));
+    const raw = readJsonFile(manifestPath, {
+      diagnosticName: "grok.subagent_manifest.invalid_json",
+      diagnostics,
+      sourcePath: manifestPath,
+    });
+    const manifest = decodeGrokSubagentManifest(raw);
     if (manifest === undefined) continue;
     map.set(manifest.child_session_id, {
       lineage: {
@@ -153,9 +161,9 @@ const grokToolName = (record: Record<string, unknown>) => {
   if (typeof record.name === "string" && record.type === undefined) return record.name;
   if (typeof record.name === "string" && String(record.type ?? "").includes("tool")) return record.name;
   const state = recordFrom(record.state);
-  if (typeof state.tool === "string") return state.tool;
+  if (typeof state?.tool === "string") return state.tool;
   const params = recordFrom(record.params);
-  if (typeof params.tool === "string") return params.tool;
+  if (typeof params?.tool === "string") return params.tool;
   return undefined;
 };
 
@@ -174,7 +182,9 @@ const grokNestedContent = (record: Record<string, unknown>): NativeValue | undef
   const direct = contentFields(record);
   if (direct !== undefined) return direct;
   for (const key of ["params", "state", "delta"] as const) {
-    const nested = contentFields(recordFrom(record[key]));
+    const nestedRecord = recordFrom(record[key]);
+    if (nestedRecord === undefined) continue;
+    const nested = contentFields(nestedRecord);
     if (nested !== undefined) return nested;
   }
   return undefined;
@@ -210,13 +220,13 @@ const grokToolCall = (
             : eventId;
   const timestamp = grokTime(record);
   const status =
-    typeof state.status === "string"
+    typeof state?.status === "string"
       ? state.status
       : typeof record.status === "string"
         ? record.status
         : undefined;
-  const input = projectToolPayloadNativeValue(state.input ?? record.input ?? record.args ?? record.params);
-  const output = projectToolPayloadNativeValue(state.output ?? record.output ?? record.result);
+  const input = projectToolPayloadNativeValue(state?.input ?? record.input ?? record.args ?? record.params);
+  const output = projectToolPayloadNativeValue(state?.output ?? record.output ?? record.result);
   return {
     id: scopedId(sessionId, "tool", nativeToolId),
     eventId,
@@ -253,7 +263,7 @@ const grokContentProjection = (record: Record<string, unknown>): NativeValue | u
   if (toolName === undefined) return undefined;
   const state = recordFrom(record.state);
   const status =
-    typeof state.status === "string"
+    typeof state?.status === "string"
       ? state.status
       : typeof record.status === "string"
         ? record.status
@@ -277,7 +287,7 @@ const grokArtifacts = (
     sourcePath: hunkPath,
   }).flatMap(({ value, lineNumber }) => {
     const record = recordFrom(value);
-    if (Object.keys(record).length === 0) return [];
+    if (record === undefined || Object.keys(record).length === 0) return [];
     // Fail-closed classify: an unknown/garbage hunk eventType is a NAMED drop,
     // never a silently-kept artifact.
     if (!isSignal(classifyGrokHunk(value, diagnostics))) return [];
@@ -378,8 +388,8 @@ export const extractGrokProse = (record: Record<string, unknown>): string | unde
   }
   // 2. updates.jsonl: params.update.content
   const params = recordFrom(record.params);
-  const update = recordFrom(params.update);
-  if (update.content !== undefined) {
+  const update = recordFrom(params?.update);
+  if (update?.content !== undefined) {
     const leaf = extractGrokContentLeaf(update.content);
     if (leaf !== undefined) return leaf;
   }
@@ -423,6 +433,7 @@ const grokReasoningText = (record: Record<string, unknown>): string | undefined 
     typeof reasoningField === "string"
       ? recordFrom(parseJsonString(reasoningField))
       : recordFrom(reasoningField);
+  if (reasoningRecord === undefined) return undefined;
   // Try reasoning.summary[*].text first (encrypted reasoning block with plaintext summary)
   if (Array.isArray(reasoningRecord.summary)) {
     const summaryParts: string[] = [];
@@ -457,6 +468,7 @@ const collectAssistantToolCalls = (
   let firstId: string | undefined;
   for (const call of calls) {
     const callRecord = recordFrom(call);
+    if (callRecord === undefined) continue;
     const toolName = grokToolName(callRecord);
     if (toolName === undefined) continue;
     const nativeToolId = stringValue(callRecord.id) ?? eventId;
@@ -741,10 +753,13 @@ const buildGrokSessionFromChatPath = (
 
   const updateEvents = updateLines.flatMap(({ value, lineNumber }, index) => {
     const record = recordFrom(value);
+    if (record === undefined) return [];
     const classified = toClassifyResult(classifyGrokUpdate(value, decodeDiagnostics));
     if (!classified.emit) return [];
-    const subtype = stringValue(recordFrom(recordFrom(record.params).update).sessionUpdate);
-    const innerUpdate = recordFrom(recordFrom(record.params).update);
+    const params = recordFrom(record.params);
+    const innerUpdate = recordFrom(params?.update);
+    if (innerUpdate === undefined) return [];
+    const subtype = stringValue(innerUpdate.sessionUpdate);
     const eventId = eventIdFor(sessionId, index, `updates:${lineNumber}`);
     const toolCallId = collectTool(eventId, innerUpdate);
     const content = grokContentProjection(innerUpdate);
@@ -809,7 +824,8 @@ async function* streamGrok(options: AdapterOptions): AsyncGenerator<AdapterStrea
   const sessionsRoot = join(root, "sessions");
   // Build the complete child -> parent lineage map once, UN-paged, so any paged
   // child session can still resolve its parent's canonical id.
-  const lineageMap = buildGrokLineageMap(sessionsRoot);
+  const lineageDiagnostics: DecodeDiagnostic[] = [];
+  const lineageMap = buildGrokLineageMap(sessionsRoot, lineageDiagnostics);
   const files = collectFiles(
     sessionsRoot,
     (path) => path.endsWith("chat_history.jsonl"),
@@ -818,6 +834,20 @@ async function* streamGrok(options: AdapterOptions): AsyncGenerator<AdapterStrea
   );
   const rootRecord = sourceRoot("grok", grokAdapter.id, sessionsRoot, options.machine, options.now);
   yield { type: "sourceRoot", sourceRoot: rootRecord };
+  for (const diagnostic of lineageDiagnostics) {
+    yield {
+      type: "diagnostic",
+      diagnostic: {
+        adapterId: grokAdapter.id,
+        provider: "grok",
+        status: "error",
+        parserConfidence: "observed",
+        message: `Grok subagent manifest dropped (${diagnostic.name}).`,
+        details: { error: diagnostic.message },
+        rootPath: sessionsRoot,
+      },
+    };
+  }
   let sessionCount = 0;
   for (const chatPath of files) {
     // Stat-level gate on the canonical chat file BEFORE touching any sidecar

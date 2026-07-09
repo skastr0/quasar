@@ -129,41 +129,70 @@ export const homePath = (relative: string) => {
   return home === undefined ? undefined : join(home, relative);
 };
 
-type JsonReadDiagnostic = {
+/** Named diagnostic produced by file/line/field boundary helpers. Same shape as DecodeDiagnostic. */
+export type BoundaryDiagnostic = {
   readonly name: string;
   readonly message: string;
 };
 
-type JsonReadDiagnosticSink = {
-  readonly push: (diagnostic: JsonReadDiagnostic) => void;
+type BoundaryDiagnosticSink = {
+  readonly push: (diagnostic: BoundaryDiagnostic) => void;
 };
 
-type JsonReadOptions = {
+export type JsonReadOptions = {
+  /** Stable base name, e.g. `"claude.line.invalid_json"`. Defaults vary by failure kind. */
   readonly diagnosticName?: string;
-  readonly diagnostics?: JsonReadDiagnosticSink;
+  readonly diagnostics?: BoundaryDiagnosticSink;
   readonly sourcePath?: string;
 };
 
-const pushJsonReadDiagnostic = (
-  options: JsonReadOptions | undefined,
-  message: string,
-) => {
-  const diagnosticName = options?.diagnosticName;
-  if (diagnosticName === undefined || options?.diagnostics === undefined) return;
-  options.diagnostics.push({ name: diagnosticName, message });
+export type FieldReadOptions = {
+  readonly diagnosticName?: string;
+  readonly diagnostics?: BoundaryDiagnosticSink;
 };
 
+/** Failure kind for a single-file JSON read — never collapsed into one opaque undefined. */
+export type JsonFileFailureKind = "missing" | "unreadable" | "invalid_json";
+
+const errorCode = (error: unknown): string | undefined => {
+  if (typeof error !== "object" || error === null) return undefined;
+  const code = (error as { readonly code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
+};
+
+const errorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+const pushBoundaryDiagnostic = (
+  options: { readonly diagnosticName?: string; readonly diagnostics?: BoundaryDiagnosticSink } | undefined,
+  defaultName: string,
+  message: string,
+) => {
+  if (options?.diagnostics === undefined) return;
+  options.diagnostics.push({
+    name: options.diagnosticName ?? defaultName,
+    message,
+  });
+};
+
+/**
+ * Read a JSONL file. Each non-empty line is parsed independently.
+ * Corrupt/torn lines do NOT vanish silently when a diagnostics sink is supplied:
+ * a named diagnostic carries file path + line number, and that line is dropped.
+ * Readable lines still yield. File-open failures yield an empty list + one diagnostic.
+ */
 export const readJsonLines = (path: string, options?: JsonReadOptions) => {
   let contents: string;
   try {
     contents = readFileSync(path, "utf8");
   } catch (error) {
     const sourcePath = options?.sourcePath ?? path;
-    pushJsonReadDiagnostic(
+    const kind = errorCode(error) === "ENOENT" ? "missing" : "unreadable";
+    const name = `json.line.${kind}`;
+    pushBoundaryDiagnostic(
       options,
-      `${options?.diagnosticName ?? "json.line.unreadable"} at ${sourcePath}: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
+      name,
+      `${options?.diagnosticName ?? name} (${kind}) at ${sourcePath}: ${errorMessage(error)}`,
     );
     return [];
   }
@@ -176,27 +205,48 @@ export const readJsonLines = (path: string, options?: JsonReadOptions) => {
         return [{ value: JSON.parse(line) as unknown, lineNumber }];
       } catch (error) {
         const sourcePath = options?.sourcePath ?? path;
-        pushJsonReadDiagnostic(
+        const name = "json.line.invalid";
+        pushBoundaryDiagnostic(
           options,
-          `${options?.diagnosticName ?? "json.line.invalid"} at ${sourcePath}:${lineNumber}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
+          name,
+          `${options?.diagnosticName ?? name} at ${sourcePath}:${lineNumber}: ${errorMessage(error)}`,
         );
         return [];
       }
     });
 };
 
-export const readJsonFile = (path: string, options?: JsonReadOptions) => {
+/**
+ * Read a single JSON file. Failure kinds are distinguished in the diagnostic
+ * name/message: missing (ENOENT), unreadable (permission/IO), invalid_json (parse).
+ * Returns undefined on any failure; callers must not treat all undefined equally —
+ * inspect the diagnostic channel.
+ */
+export const readJsonFile = (path: string, options?: JsonReadOptions): unknown => {
+  let contents: string;
   try {
-    return JSON.parse(readFileSync(path, "utf8")) as unknown;
+    contents = readFileSync(path, "utf8");
   } catch (error) {
     const sourcePath = options?.sourcePath ?? path;
-    pushJsonReadDiagnostic(
+    const kind: JsonFileFailureKind =
+      errorCode(error) === "ENOENT" ? "missing" : "unreadable";
+    const name = `json.file.${kind}`;
+    pushBoundaryDiagnostic(
       options,
-      `${options?.diagnosticName ?? "json.file.invalid"} at ${sourcePath}: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
+      name,
+      `${options?.diagnosticName ?? name} (${kind}) at ${sourcePath}: ${errorMessage(error)}`,
+    );
+    return undefined;
+  }
+  try {
+    return JSON.parse(contents) as unknown;
+  } catch (error) {
+    const sourcePath = options?.sourcePath ?? path;
+    const name = "json.file.invalid_json";
+    pushBoundaryDiagnostic(
+      options,
+      name,
+      `${options?.diagnosticName ?? name} (invalid_json) at ${sourcePath}: ${errorMessage(error)}`,
     );
     return undefined;
   }
@@ -345,27 +395,75 @@ export const compactText = (value: NativeValue | undefined): string | undefined 
   return String(value);
 };
 
-export const recordFrom = (value: unknown): Record<string, unknown> => {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return {};
-  return Option.getOrElse(Schema.decodeUnknownOption(UnknownRecordSchema)(value), () => ({}));
+/**
+ * Narrow unknown to a plain object record. Wrong shape → undefined (never `{}`).
+ * null/undefined absence → undefined without diagnostic.
+ * Present-but-wrong shape (array, string, number, …) with a diagnostics sink → named diagnostic.
+ */
+export const recordFrom = (
+  value: unknown,
+  options?: FieldReadOptions,
+): Record<string, unknown> | undefined => {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    pushBoundaryDiagnostic(
+      options,
+      "record.wrong_shape",
+      `${options?.diagnosticName ?? "record.wrong_shape"}: expected object, got ${
+        Array.isArray(value) ? "array" : typeof value
+      }`,
+    );
+    return undefined;
+  }
+  const decoded = Option.getOrUndefined(Schema.decodeUnknownOption(UnknownRecordSchema)(value));
+  if (decoded === undefined) {
+    pushBoundaryDiagnostic(
+      options,
+      "record.decode_failed",
+      `${options?.diagnosticName ?? "record.decode_failed"}: object failed UnknownRecordSchema decode`,
+    );
+    return undefined;
+  }
+  return decoded;
 };
 
-export const stringValue = (value: unknown) => {
-  const decoded = Option.getOrElse(
-    Schema.decodeUnknownOption(Schema.String)(value),
-    () => undefined as string | undefined,
-  );
+/**
+ * Optional string field peek after a record is in hand. Empty string and
+ * non-string values yield undefined (field absent), via visible Schema decode —
+ * not a silent catch. Wrong type is not a boundary corruption diagnostic;
+ * optional fields are allowed to be missing or mistyped on heterogeneous native records.
+ */
+export const stringValue = (value: unknown): string | undefined => {
+  if (value === null || value === undefined) return undefined;
+  const decoded = Option.getOrUndefined(Schema.decodeUnknownOption(Schema.String)(value));
   return decoded !== undefined && decoded.length > 0 ? decoded : undefined;
 };
 
-export const numberValue = (value: unknown) =>
-  typeof value === "number" && Number.isFinite(value) ? value : undefined;
+/**
+ * Optional finite-number field peek after a record is in hand. Visible Schema
+ * decode + finiteness gate; non-numbers and non-finite values yield undefined.
+ */
+export const numberValue = (value: unknown): number | undefined => {
+  if (value === null || value === undefined) return undefined;
+  const decoded = Option.getOrUndefined(Schema.decodeUnknownOption(Schema.Number)(value));
+  return decoded !== undefined && Number.isFinite(decoded) ? decoded : undefined;
+};
 
-export const parseJsonString = (value: unknown): unknown => {
+/**
+ * Parse a JSON string when the field is dual-format (sometimes JSON, sometimes raw).
+ * Non-strings pass through. Parse failures with a diagnostics sink emit a named
+ * diagnostic and return the original string (not an invented empty structure).
+ */
+export const parseJsonString = (value: unknown, options?: FieldReadOptions): unknown => {
   if (typeof value !== "string") return value;
   try {
     return JSON.parse(value) as unknown;
-  } catch {
+  } catch (error) {
+    pushBoundaryDiagnostic(
+      options,
+      "json.string.invalid",
+      `${options?.diagnosticName ?? "json.string.invalid"}: ${errorMessage(error)}`,
+    );
     return value;
   }
 };

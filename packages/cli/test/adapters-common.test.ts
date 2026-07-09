@@ -10,6 +10,7 @@ import {
   readJsonFile,
   readJsonLines,
   recordFrom,
+  stringValue,
 } from "../src/adapters/common";
 
 const root = mkdtempSync(join(tmpdir(), "quasar-adapters-common-"));
@@ -46,15 +47,49 @@ describe("adapter common boundaries", () => {
       sourcePath: "/fixture/file.json",
     })).toBeUndefined();
     expect(diagnostics[0]!.name).toBe("test.file.invalid_json");
+    expect(diagnostics[0]!.message).toContain("invalid_json");
     expect(diagnostics[0]!.message).toContain("/fixture/file.json");
   });
 
-  test("recordFrom, numberValue, and parseJsonString keep boundary coercion explicit", () => {
+  test("readJsonFile distinguishes missing from unreadable", () => {
+    const missingPath = join(root, "does-not-exist.json");
+    const missingDiagnostics: { name: string; message: string }[] = [];
+    expect(readJsonFile(missingPath, {
+      diagnostics: missingDiagnostics,
+      sourcePath: "/fixture/missing.json",
+    })).toBeUndefined();
+    expect(missingDiagnostics[0]!.name).toBe("json.file.missing");
+    expect(missingDiagnostics[0]!.message).toContain("(missing)");
+  });
+
+  test("recordFrom never returns empty object for wrong shape", () => {
     expect(recordFrom({ a: 1 })).toEqual({ a: 1 });
-    expect(recordFrom(null)).toEqual({});
+    expect(recordFrom(null)).toBeUndefined();
+    expect(recordFrom(undefined)).toBeUndefined();
+    expect(recordFrom("string")).toBeUndefined();
+    expect(recordFrom([1, 2])).toBeUndefined();
+    const diagnostics: { name: string; message: string }[] = [];
+    expect(recordFrom(42, { diagnostics, diagnosticName: "test.record.wrong_shape" })).toBeUndefined();
+    expect(diagnostics[0]!.name).toBe("test.record.wrong_shape");
+  });
+
+  test("numberValue and stringValue use visible Schema decode for optional fields", () => {
     expect(numberValue(3)).toBe(3);
     expect(numberValue(Number.NaN)).toBeUndefined();
+    expect(numberValue("3")).toBeUndefined();
+    expect(stringValue("ok")).toBe("ok");
+    expect(stringValue("")).toBeUndefined();
+    expect(stringValue(1)).toBeUndefined();
+  });
+
+  test("parseJsonString names parse failure when sink provided", () => {
     expect(parseJsonString("{\"a\":1}")).toEqual({ a: 1 });
     expect(parseJsonString("not-json")).toBe("not-json");
+    const diagnostics: { name: string; message: string }[] = [];
+    expect(parseJsonString("not-json", {
+      diagnostics,
+      diagnosticName: "test.json.string.invalid",
+    })).toBe("not-json");
+    expect(diagnostics[0]!.name).toBe("test.json.string.invalid");
   });
 });

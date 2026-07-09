@@ -123,7 +123,7 @@ const firstContentText = (payload: CodexRecord): string | undefined => {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return undefined;
   for (const block of content) {
-    const text = recordFrom(block).text;
+    const text = recordFrom(block)?.text;
     if (typeof text === "string") return text;
   }
   return undefined;
@@ -447,11 +447,11 @@ const codexUsageRecord = (
 ): CodexUsageDraft | undefined => {
   if (payloadTypeFrom(payload) !== "token_count") return undefined;
   const info = recordFrom(payload.info);
-  const nestedTotalUsage = recordFrom(info.total_token_usage);
-  const usage =
-    Object.keys(nestedTotalUsage).length > 0
+  const nestedTotalUsage = recordFrom(info?.total_token_usage);
+  const usage: CodexRecord =
+    nestedTotalUsage !== undefined && Object.keys(nestedTotalUsage).length > 0
       ? nestedTotalUsage
-      : Object.keys(info).length > 0
+      : info !== undefined && Object.keys(info).length > 0
         ? info
         : payload;
   const inputTokens =
@@ -577,11 +577,11 @@ async function* readCodexJsonLines(
 
 const projectPathFromSessionMeta = (value: unknown) => {
   const record = recordFrom(value);
-  if (record.type !== "session_meta") return undefined;
+  if (record?.type !== "session_meta") return undefined;
   const payload = recordFrom(record.payload);
-  return typeof payload.cwd === "string"
+  return typeof payload?.cwd === "string"
     ? payload.cwd
-    : typeof payload.working_dir === "string"
+    : typeof payload?.working_dir === "string"
       ? payload.working_dir
       : undefined;
 };
@@ -627,8 +627,9 @@ const LEGACY_GIT_REMOTE_FIELDS = [
 
 const legacyProjectHintsFromHeader = (value: unknown): CodexLegacyProjectHints => {
   const record = recordFrom(value);
-  if (!isLegacyHeaderRecord(record)) return {};
+  if (record === undefined || !isLegacyHeaderRecord(record)) return {};
   const git = recordFrom(record.git);
+  if (git === undefined) return {};
   const projectPath = firstStringField(git, LEGACY_PROJECT_PATH_FIELDS);
   const gitRemote = firstStringField(git, LEGACY_GIT_REMOTE_FIELDS);
   return {
@@ -650,14 +651,14 @@ const hasLegacyProjectHint = (value: unknown): boolean => {
  */
 const sessionIdFromSessionMeta = (value: unknown): string | undefined => {
   const record = recordFrom(value);
-  if (record.type !== "session_meta") return undefined;
+  if (record?.type !== "session_meta") return undefined;
   const payload = recordFrom(record.payload);
-  return normalizedUuid(payload.id);
+  return normalizedUuid(payload?.id);
 };
 
 const legacySessionIdFromHeader = (value: unknown, path: string): string | undefined => {
   const record = recordFrom(value);
-  if (record.type !== undefined) return undefined;
+  if (record === undefined || record.type !== undefined) return undefined;
   if (!isLegacyHeaderRecord(record)) return undefined;
   if (!hasLegacyProjectHint(value)) return undefined;
   const id = normalizedUuid(record.id);
@@ -705,9 +706,9 @@ export const CODEX_MISSING_NATIVE_SESSION_ID =
 
 const nativeIdDiagnostic = (value: unknown, sourcePath: string) => {
   const record = recordFrom(value);
-  if (record.type === "session_meta") {
+  if (record?.type === "session_meta") {
     const payload = recordFrom(record.payload);
-    if (payload.id !== undefined) {
+    if (payload?.id !== undefined) {
       return {
         name: CODEX_SESSION_META_ID_INVALID,
         message: `${CODEX_SESSION_META_ID_INVALID}: ${sourcePath} has a session_meta.payload.id that is not a UUID; wrote zero rows for this session.`,
@@ -718,7 +719,7 @@ const nativeIdDiagnostic = (value: unknown, sourcePath: string) => {
       message: `${CODEX_MISSING_SESSION_META_ID}: ${sourcePath} has no session_meta.payload.id; wrote zero rows for this session.`,
     };
   }
-  if (record.type === undefined && record.id !== undefined) {
+  if (record !== undefined && record.type === undefined && record.id !== undefined) {
     if (normalizedUuid(record.id) === undefined) {
       return {
         name: CODEX_LEGACY_HEADER_ID_INVALID,
@@ -955,7 +956,7 @@ async function* streamCodexSessionFromFile(
       gitRemote ??= hints.gitRemote;
       continue;
     }
-    if (nativeIdProbe.variant === "legacy_header_v1" && rawRecord.type === "session_meta") {
+    if (nativeIdProbe.variant === "legacy_header_v1" && rawRecord?.type === "session_meta") {
       decodeDiagnostics.push({
         name: CODEX_LEGACY_SESSION_META_IGNORED,
         message: `${CODEX_LEGACY_SESSION_META_IGNORED}: ignored session_meta inside legacy-header rollout at ${sourcePath}:${lineNumber}.`,
@@ -968,7 +969,7 @@ async function* streamCodexSessionFromFile(
     // session_meta is emitted by the unified classifier below (single source),
     // so this block routes its decode failure into a throwaway sink to avoid a
     // duplicate. Lineage is projected ONLY from a successfully decoded record.
-    if (rawRecord.type === "session_meta") {
+    if (rawRecord?.type === "session_meta") {
       const decision = decodeOrDrop(CodexSessionMetaSchema, value, {
         kind: "session_meta" as const,
         diagnosticName: CODEX_SESSION_META_DECODE_FAILED,
