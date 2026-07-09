@@ -151,11 +151,24 @@ const collectAgents = (
   state: Record<string, unknown>,
   diagnostics: DecodeDiagnostic[],
 ): KimiAgent[] => {
-  const agentsRecord = recordFrom(state.agents) ?? {};
+  // Absence of `agents` is legitimate (disk-orphan scan still runs). Present-
+  // but-wrong shape is provider garbage: named diagnostic, no invented `{}`.
+  let agentsRecord: Record<string, unknown> | undefined;
+  if (state.agents === undefined || state.agents === null) {
+    agentsRecord = undefined;
+  } else {
+    agentsRecord = recordFrom(state.agents, {
+      diagnostics,
+      diagnosticName: "kimi.state.agents.wrong_shape",
+    });
+  }
   const agents: KimiAgent[] = [];
   const declared = new Set<string>();
-  for (const id of Object.keys(agentsRecord).sort()) {
-    const meta = recordFrom(agentsRecord[id]);
+  for (const id of Object.keys(agentsRecord ?? {}).sort()) {
+    const meta = recordFrom(agentsRecord?.[id], {
+      diagnostics,
+      diagnosticName: "kimi.state.agent_meta.wrong_shape",
+    });
     const wirePath = join(sessionDir, "agents", id, "wire.jsonl");
     if (!existsSync(wirePath)) continue;
     declared.add(id);
@@ -607,11 +620,22 @@ const buildKimiSessionsFromEntry = (
 ) => {
   const statePath = join(entry.sessionDir, "state.json");
   const stateRaw = readJsonFile(statePath, {
-    diagnosticName: "kimi.state.invalid_json",
+    diagnosticName: "kimi.state",
     diagnostics,
     sourcePath: statePath,
   });
-  const state = recordFrom(stateRaw) ?? {};
+  // Fail closed: missing / unreadable / invalid_json already named by
+  // readJsonFile. Never invent `{}` and continue as if state were present.
+  if (stateRaw === undefined) {
+    return [];
+  }
+  const state = recordFrom(stateRaw, {
+    diagnostics,
+    diagnosticName: "kimi.state.wrong_shape",
+  });
+  if (state === undefined) {
+    return [];
+  }
 
   const isCustomTitle = state.isCustomTitle === true;
   const title = isCustomTitle ? stringValue(state.title) : undefined;
@@ -684,7 +708,7 @@ async function* streamKimi(options: AdapterOptions): AsyncGenerator<AdapterStrea
 
   const decodeDiagnostics: DecodeDiagnostic[] = [];
   const indexLines = readJsonLines(indexPath, {
-    diagnosticName: "kimi.index.invalid_json",
+    diagnosticName: "kimi.index",
     diagnostics: decodeDiagnostics,
     sourcePath: indexPath,
   });
@@ -697,15 +721,38 @@ async function* streamKimi(options: AdapterOptions): AsyncGenerator<AdapterStrea
   let sessionCount = 0;
   let skipped = 0;
 
-  for (const { value } of indexLines) {
-    const entry = recordFrom(value);
+  for (const { value, lineNumber } of indexLines) {
+    // JSON `null` / non-object: name + skip. Never invent `{}` and continue.
+    if (value === null || value === undefined) {
+      decodeDiagnostics.push({
+        name: "kimi.index.entry.wrong_shape",
+        message: `kimi.index.entry.wrong_shape at ${indexPath}:${lineNumber}: expected object entry, got ${value === null ? "null" : "undefined"}`,
+      });
+      continue;
+    }
+    const entry = recordFrom(value, {
+      diagnostics: decodeDiagnostics,
+      diagnosticName: "kimi.index.entry.wrong_shape",
+    });
     if (entry === undefined) continue;
     const sessionId = stringValue(entry.sessionId);
     const sessionDir = stringValue(entry.sessionDir);
     const workDir = stringValue(entry.workDir) ?? "";
 
-    if (sessionId === undefined || sessionDir === undefined) continue;
-    if (!existsSync(sessionDir)) continue;
+    if (sessionId === undefined || sessionDir === undefined) {
+      decodeDiagnostics.push({
+        name: "kimi.index.entry.missing_fields",
+        message: `kimi.index.entry.missing_fields at ${indexPath}:${lineNumber}: sessionId and sessionDir are required`,
+      });
+      continue;
+    }
+    if (!existsSync(sessionDir)) {
+      decodeDiagnostics.push({
+        name: "kimi.index.entry.session_dir_missing",
+        message: `kimi.index.entry.session_dir_missing at ${indexPath}:${lineNumber}: sessionDir=${sessionDir} does not exist`,
+      });
+      continue;
+    }
 
     if (skipped < (options.skip ?? 0)) { skipped++; continue; }
     if (sessionCount >= (options.limit ?? Number.POSITIVE_INFINITY)) break;

@@ -81,8 +81,20 @@ describe("adapter hostile file/line diagnostics", () => {
       chmodSync(fixture.primaryPath, 0);
       try {
         const result = await readProvider(provider, fixture);
-        const expected = provider === "codex" ? "codex.first_record.json.invalid" : `${provider}.line.invalid_json`;
-        expect(result.diagnostics.some((diagnostic) => diagnosticBlob(diagnostic).includes(expected))).toBe(true);
+        // Codex owns its first-record open path; line adapters use common.ts
+        // which must name the kind as unreadable (never mask as invalid_json).
+        const expected =
+          provider === "codex" ? "codex.first_record.json.invalid" : `${provider}.line.unreadable`;
+        expect(
+          result.diagnostics.some((diagnostic) => diagnosticBlob(diagnostic).includes(expected)),
+        ).toBe(true);
+        if (provider !== "codex") {
+          expect(
+            result.diagnostics.some((diagnostic) =>
+              diagnosticBlob(diagnostic).includes(`${provider}.line.invalid_json`),
+            ),
+          ).toBe(false);
+        }
       } finally {
         chmodSync(fixture.primaryPath, 0o600);
       }

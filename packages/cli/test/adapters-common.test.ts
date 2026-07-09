@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -32,6 +32,7 @@ describe("adapter common boundaries", () => {
 
     expect(lines.map((line) => line.lineNumber)).toEqual([1, 3]);
     expect(diagnostics).toHaveLength(1);
+    // custom base + real kind: trailing .invalid_json on the base is stripped then re-applied
     expect(diagnostics[0]!.name).toBe("test.line.invalid_json");
     expect(diagnostics[0]!.message).toContain("/fixture/lines.jsonl:2");
   });
@@ -51,15 +52,33 @@ describe("adapter common boundaries", () => {
     expect(diagnostics[0]!.message).toContain("/fixture/file.json");
   });
 
-  test("readJsonFile distinguishes missing from unreadable", () => {
+  test("readJsonFile distinguishes missing from unreadable even with custom diagnosticName", () => {
     const missingPath = join(root, "does-not-exist.json");
     const missingDiagnostics: { name: string; message: string }[] = [];
+    // Custom name that would previously mask ALL kinds as invalid_json:
     expect(readJsonFile(missingPath, {
+      diagnosticName: "test.file.invalid_json",
       diagnostics: missingDiagnostics,
       sourcePath: "/fixture/missing.json",
     })).toBeUndefined();
-    expect(missingDiagnostics[0]!.name).toBe("json.file.missing");
+    expect(missingDiagnostics[0]!.name).toBe("test.file.missing");
     expect(missingDiagnostics[0]!.message).toContain("(missing)");
+
+    const unreadablePath = join(root, "unreadable.json");
+    writeFileSync(unreadablePath, "{\"ok\":true}\n", "utf8");
+    chmodSync(unreadablePath, 0);
+    try {
+      const unreadableDiagnostics: { name: string; message: string }[] = [];
+      expect(readJsonFile(unreadablePath, {
+        diagnosticName: "test.file.invalid_json",
+        diagnostics: unreadableDiagnostics,
+        sourcePath: "/fixture/unreadable.json",
+      })).toBeUndefined();
+      expect(unreadableDiagnostics[0]!.name).toBe("test.file.unreadable");
+      expect(unreadableDiagnostics[0]!.message).toContain("(unreadable)");
+    } finally {
+      chmodSync(unreadablePath, 0o600);
+    }
   });
 
   test("recordFrom never returns empty object for wrong shape", () => {

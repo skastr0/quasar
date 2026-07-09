@@ -163,23 +163,54 @@ const errorCode = (error: unknown): string | undefined => {
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
+/**
+ * Push a named boundary diagnostic. `name` is authoritative.
+ */
 const pushBoundaryDiagnostic = (
-  options: { readonly diagnosticName?: string; readonly diagnostics?: BoundaryDiagnosticSink } | undefined,
-  defaultName: string,
+  options: { readonly diagnostics?: BoundaryDiagnosticSink } | undefined,
+  name: string,
   message: string,
 ) => {
   if (options?.diagnostics === undefined) return;
-  options.diagnostics.push({
-    name: options.diagnosticName ?? defaultName,
-    message,
-  });
+  options.diagnostics.push({ name, message });
 };
+
+/** Trailing failure-kind suffixes that must never be collapsed by a custom base. */
+const BOUNDARY_KIND_SUFFIXES = [
+  "invalid_json",
+  "invalid",
+  "missing",
+  "unreadable",
+] as const;
+
+/**
+ * Strip a trailing kind suffix from a custom diagnostic base so the real kind
+ * can be re-appended. `"kimi.state.invalid_json"` + kind `missing` → base
+ * `"kimi.state"` → name `"kimi.state.missing"`. Custom bases never mask kind.
+ */
+const boundaryBaseName = (diagnosticName: string | undefined, fallback: string): string => {
+  const raw = diagnosticName ?? fallback;
+  for (const suffix of BOUNDARY_KIND_SUFFIXES) {
+    const token = `.${suffix}`;
+    if (raw.endsWith(token)) return raw.slice(0, -token.length);
+  }
+  return raw;
+};
+
+const boundaryDiagnosticName = (
+  diagnosticName: string | undefined,
+  fallbackBase: string,
+  kind: string,
+): string => `${boundaryBaseName(diagnosticName, fallbackBase)}.${kind}`;
 
 /**
  * Read a JSONL file. Each non-empty line is parsed independently.
  * Corrupt/torn lines do NOT vanish silently when a diagnostics sink is supplied:
  * a named diagnostic carries file path + line number, and that line is dropped.
  * Readable lines still yield. File-open failures yield an empty list + one diagnostic.
+ *
+ * Diagnostic `name` always ends with the failure kind (`missing` / `unreadable` /
+ * `invalid_json`). Optional `diagnosticName` is a base prefix only — never masks kind.
  */
 export const readJsonLines = (path: string, options?: JsonReadOptions) => {
   let contents: string;
@@ -188,11 +219,11 @@ export const readJsonLines = (path: string, options?: JsonReadOptions) => {
   } catch (error) {
     const sourcePath = options?.sourcePath ?? path;
     const kind = errorCode(error) === "ENOENT" ? "missing" : "unreadable";
-    const name = `json.line.${kind}`;
+    const name = boundaryDiagnosticName(options?.diagnosticName, "json.line", kind);
     pushBoundaryDiagnostic(
       options,
       name,
-      `${options?.diagnosticName ?? name} (${kind}) at ${sourcePath}: ${errorMessage(error)}`,
+      `${name} (${kind}) at ${sourcePath}: ${errorMessage(error)}`,
     );
     return [];
   }
@@ -205,11 +236,15 @@ export const readJsonLines = (path: string, options?: JsonReadOptions) => {
         return [{ value: JSON.parse(line) as unknown, lineNumber }];
       } catch (error) {
         const sourcePath = options?.sourcePath ?? path;
-        const name = "json.line.invalid";
+        const name = boundaryDiagnosticName(
+          options?.diagnosticName,
+          "json.line",
+          "invalid_json",
+        );
         pushBoundaryDiagnostic(
           options,
           name,
-          `${options?.diagnosticName ?? name} at ${sourcePath}:${lineNumber}: ${errorMessage(error)}`,
+          `${name} at ${sourcePath}:${lineNumber}: ${errorMessage(error)}`,
         );
         return [];
       }
@@ -217,10 +252,11 @@ export const readJsonLines = (path: string, options?: JsonReadOptions) => {
 };
 
 /**
- * Read a single JSON file. Failure kinds are distinguished in the diagnostic
- * name/message: missing (ENOENT), unreadable (permission/IO), invalid_json (parse).
- * Returns undefined on any failure; callers must not treat all undefined equally —
- * inspect the diagnostic channel.
+ * Read a single JSON file. Failure kinds are always in the diagnostic name:
+ * `<base>.missing` | `<base>.unreadable` | `<base>.invalid_json`.
+ * Optional `diagnosticName` is a base prefix (trailing kind suffixes stripped) —
+ * never masks the computed kind. Returns undefined on any failure; callers must
+ * not treat all undefined equally — inspect the diagnostic channel.
  */
 export const readJsonFile = (path: string, options?: JsonReadOptions): unknown => {
   let contents: string;
@@ -230,11 +266,11 @@ export const readJsonFile = (path: string, options?: JsonReadOptions): unknown =
     const sourcePath = options?.sourcePath ?? path;
     const kind: JsonFileFailureKind =
       errorCode(error) === "ENOENT" ? "missing" : "unreadable";
-    const name = `json.file.${kind}`;
+    const name = boundaryDiagnosticName(options?.diagnosticName, "json.file", kind);
     pushBoundaryDiagnostic(
       options,
       name,
-      `${options?.diagnosticName ?? name} (${kind}) at ${sourcePath}: ${errorMessage(error)}`,
+      `${name} (${kind}) at ${sourcePath}: ${errorMessage(error)}`,
     );
     return undefined;
   }
@@ -242,11 +278,15 @@ export const readJsonFile = (path: string, options?: JsonReadOptions): unknown =
     return JSON.parse(contents) as unknown;
   } catch (error) {
     const sourcePath = options?.sourcePath ?? path;
-    const name = "json.file.invalid_json";
+    const name = boundaryDiagnosticName(
+      options?.diagnosticName,
+      "json.file",
+      "invalid_json",
+    );
     pushBoundaryDiagnostic(
       options,
       name,
-      `${options?.diagnosticName ?? name} (invalid_json) at ${sourcePath}: ${errorMessage(error)}`,
+      `${name} (invalid_json) at ${sourcePath}: ${errorMessage(error)}`,
     );
     return undefined;
   }
@@ -392,21 +432,21 @@ export const recordFrom = (
 ): Record<string, unknown> | undefined => {
   if (value === null || value === undefined) return undefined;
   if (typeof value !== "object" || Array.isArray(value)) {
+    const name = options?.diagnosticName ?? "record.wrong_shape";
     pushBoundaryDiagnostic(
       options,
-      "record.wrong_shape",
-      `${options?.diagnosticName ?? "record.wrong_shape"}: expected object, got ${
-        Array.isArray(value) ? "array" : typeof value
-      }`,
+      name,
+      `${name}: expected object, got ${Array.isArray(value) ? "array" : typeof value}`,
     );
     return undefined;
   }
   const decoded = Option.getOrUndefined(Schema.decodeUnknownOption(UnknownRecordSchema)(value));
   if (decoded === undefined) {
+    const name = options?.diagnosticName ?? "record.decode_failed";
     pushBoundaryDiagnostic(
       options,
-      "record.decode_failed",
-      `${options?.diagnosticName ?? "record.decode_failed"}: object failed UnknownRecordSchema decode`,
+      name,
+      `${name}: object failed UnknownRecordSchema decode`,
     );
     return undefined;
   }
@@ -445,10 +485,11 @@ export const parseJsonString = (value: unknown, options?: FieldReadOptions): unk
   try {
     return JSON.parse(value) as unknown;
   } catch (error) {
+    const name = options?.diagnosticName ?? "json.string.invalid";
     pushBoundaryDiagnostic(
       options,
-      "json.string.invalid",
-      `${options?.diagnosticName ?? "json.string.invalid"}: ${errorMessage(error)}`,
+      name,
+      `${name}: ${errorMessage(error)}`,
     );
     return value;
   }
