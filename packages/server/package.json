@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@effect/opentelemetry": "^0.63.0",
     "@effect/platform": "^0.96.1",
     "@effect/platform-bun": "^0.90.0",
     "@huggingface/transformers": "^4.2.0",

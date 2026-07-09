@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import { Effect, Logger, Schema } from "effect";
 
 import type { EmbeddingProfile } from "./embeddingProfiles";
 import type { Embedder } from "./embeddings";
@@ -25,6 +25,10 @@ export interface SyntheticEmbeddingClientOptions {
   readonly apiKey?: string;
   readonly baseUrl?: string;
   readonly fetch?: typeof fetch;
+}
+
+interface EffectEmbedder {
+  readonly embedManyEffect: (values: readonly string[]) => Effect.Effect<readonly (readonly number[])[], unknown>;
 }
 
 interface SyntheticEmbeddingData {
@@ -102,10 +106,6 @@ const isRetryableSyntheticFailure = (cause: unknown): boolean => {
   return true; // network error / abort (timeout)
 };
 
-const diagnostic = (event: string, fields: Record<string, unknown>): void => {
-  console.error(JSON.stringify({ event, at: new Date().toISOString(), ...fields }));
-};
-
 const embedManyOnce = async (
   profile: EmbeddingProfile,
   options: SyntheticEmbeddingClientOptions,
@@ -171,32 +171,50 @@ const embedManyOnce = async (
   return vectors;
 };
 
-export const makeSyntheticEmbedder = (profile: EmbeddingProfile, options: SyntheticEmbeddingClientOptions = {}): Embedder => ({
-  embedMany: async (values) => {
-    const apiKey = options.apiKey ?? syntheticApiKeyFromEnv();
-    if (apiKey === undefined || apiKey.length === 0) {
-      throw new SyntheticEmbeddingError({
-        operation: "synthetic.embeddings",
-        message: "SYNTHETIC_API_KEY is required for Synthetic embeddings",
-      });
-    }
-    let lastFailure: unknown;
-    for (let attempt = 1; attempt <= SYNTHETIC_REQUEST_ATTEMPTS; attempt += 1) {
-      try {
-        return await embedManyOnce(profile, options, values, apiKey);
-      } catch (cause) {
+export const makeSyntheticEmbedder = (
+  profile: EmbeddingProfile,
+  options: SyntheticEmbeddingClientOptions = {},
+): Embedder & EffectEmbedder => {
+  const embedManyEffect = (values: readonly string[]) =>
+    Effect.gen(function* () {
+      const apiKey = options.apiKey ?? syntheticApiKeyFromEnv();
+      if (apiKey === undefined || apiKey.length === 0) {
+        return yield* Effect.fail(new SyntheticEmbeddingError({
+          operation: "synthetic.embeddings",
+          message: "SYNTHETIC_API_KEY is required for Synthetic embeddings",
+        }));
+      }
+      let lastFailure: unknown;
+      for (let attempt = 1; attempt <= SYNTHETIC_REQUEST_ATTEMPTS; attempt += 1) {
+        const result = yield* Effect.tryPromise({
+          try: () => embedManyOnce(profile, options, values, apiKey),
+          catch: (cause) => cause,
+        }).pipe(Effect.either);
+        if (result._tag === "Right") return result.right;
+        const cause = result.left;
         lastFailure = cause;
         if (cause instanceof SyntheticEmbeddingError && cause.operation === "synthetic.embeddings.decode") {
-          diagnostic("synthetic_embeddings.malformed_body", {
-            attempt,
-            status: cause.status,
-            detail: cause.message,
-          });
+          yield* Effect.logWarning("synthetic_embeddings.malformed_body").pipe(
+            Effect.annotateLogs({
+              event: "synthetic_embeddings.malformed_body",
+              at: new Date().toISOString(),
+              attempt,
+              status: cause.status,
+              detail: cause.message,
+            }),
+          );
         }
         if (attempt < SYNTHETIC_REQUEST_ATTEMPTS && isRetryableSyntheticFailure(cause)) continue;
-        throw cause;
+        return yield* Effect.fail(cause);
       }
-    }
-    throw lastFailure;
-  },
-});
+      return yield* Effect.fail(lastFailure);
+    });
+
+  return {
+    embedManyEffect,
+    embedMany: (values) =>
+      Effect.runPromise(
+        embedManyEffect(values).pipe(Effect.provide(Logger.json)),
+      ),
+  };
+};

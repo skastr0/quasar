@@ -24,7 +24,7 @@ import { Context, Deferred, Effect, Layer, Schema } from "effect";
 import { embeddingProfileFromEnv, type EmbeddingProfile } from "./embeddingProfiles";
 import { LocalStore, type MessageVectorUpsert, type MessageVectorWriteEvent } from "./store";
 import { encodeFloat16Vector, VECTOR_BLOB_ENCODING } from "./vectorBlob";
-import { encodeQueryVectorF16, loadNativeSimsimd, VectorKernelError } from "./vectorKernel";
+import { encodeQueryVectorF16, loadNativeSimsimdEffect, VectorKernelError } from "./vectorKernel";
 
 const LOAD_PAGE_ROWS = 8_192;
 const MAX_TOP_K = 256;
@@ -194,14 +194,6 @@ const growUint32 = (current: Uint32Array, minLength: number): Uint32Array => {
 
 const nowIso = () => new Date().toISOString();
 
-const diagnostic = (event: string, fields: Record<string, unknown>): void => {
-  console.error(JSON.stringify({ event, at: nowIso(), ...fields }));
-};
-
-const info = (event: string, fields: Record<string, unknown>): void => {
-  console.log(JSON.stringify({ event, at: nowIso(), ...fields }));
-};
-
 const workerCountForMachine = (): number => {
   const cores = typeof navigator !== "undefined" ? navigator.hardwareConcurrency : undefined;
   return Math.max(1, Math.min(8, cores ?? 4));
@@ -265,17 +257,25 @@ export const makeVectorMatrixLayer = (
         dict: string[],
         byName: Map<string, number>,
         value: string,
-      ): number => {
+      ): Effect.Effect<number> => {
         const existing = byName.get(value);
-        if (existing !== undefined) return existing;
+        if (existing !== undefined) return Effect.succeed(existing);
         if (dict.length >= U8_DICT_CAPACITY) {
-          diagnostic("vector_matrix.scope_dict_overflow", { kind, value, capacity: U8_DICT_CAPACITY });
-          return U8_DICT_OVERFLOW_CODE;
+          return Effect.logWarning("vector_matrix.scope_dict_overflow").pipe(
+            Effect.annotateLogs({
+              event: "vector_matrix.scope_dict_overflow",
+              at: nowIso(),
+              kind,
+              value,
+              capacity: U8_DICT_CAPACITY,
+            }),
+            Effect.as(U8_DICT_OVERFLOW_CODE),
+          );
         }
         const code = dict.length;
         dict.push(value);
         byName.set(value, code);
-        return code;
+        return Effect.succeed(code);
       };
 
       const internProjectKeyCode = (value: string): number => {
@@ -291,11 +291,12 @@ export const makeVectorMatrixLayer = (
        * be called for every row written into `bytes` (boot pass 2 and every
        * append/overwrite) so the scope arrays never drift from the vector
        * matrix they mask. */
-      const writeScopeCodes = (row: number, provider: string, role: string, projectKey: string): void => {
-        state.providerCodes[row] = internU8Code("provider", state.providerDict, state.providerCodeByName, provider);
-        state.roleCodes[row] = internU8Code("role", state.roleDict, state.roleCodeByName, role);
-        state.projectKeyCodes[row] = internProjectKeyCode(projectKey);
-      };
+      const writeScopeCodes = (row: number, provider: string, role: string, projectKey: string): Effect.Effect<void> =>
+        Effect.gen(function* () {
+          state.providerCodes[row] = yield* internU8Code("provider", state.providerDict, state.providerCodeByName, provider);
+          state.roleCodes[row] = yield* internU8Code("role", state.roleDict, state.roleCodeByName, role);
+          state.projectKeyCodes[row] = internProjectKeyCode(projectKey);
+        });
 
       const indexRow = (sessionId: string, seq: number, row: number): void => {
         let inner = state.rowIndex.get(sessionId);
@@ -332,48 +333,60 @@ export const makeVectorMatrixLayer = (
       };
 
       // --- append path: the store's single vector-write site notifies here ---
-      const applyVectorWrites = (event: MessageVectorWriteEvent): void => {
+      const applyVectorWrites = (event: MessageVectorWriteEvent): Effect.Effect<void> => Effect.gen(function* () {
         if (state.closed || !state.enabled) return;
         let appended = 0;
         let overwritten = 0;
         for (const row of event.rows) {
           if (row.model !== model) continue;
           if (row.vector.length !== dimensions) {
-            diagnostic("vector_matrix.append_rejected", {
-              reason: "dimension_mismatch",
-              expected: dimensions,
-              received: row.vector.length,
-            });
+            yield* Effect.logWarning("vector_matrix.append_rejected").pipe(
+              Effect.annotateLogs({
+                event: "vector_matrix.append_rejected",
+                at: nowIso(),
+                reason: "dimension_mismatch",
+                expected: dimensions,
+                received: row.vector.length,
+              }),
+            );
             continue;
           }
           let blob: Uint8Array;
           try {
             blob = encodeFloat16Vector(row.vector);
           } catch (cause) {
-            diagnostic("vector_matrix.append_rejected", {
-              reason: "non_finite_vector",
-              detail: cause instanceof Error ? cause.message : String(cause),
-            });
+            yield* Effect.logWarning("vector_matrix.append_rejected").pipe(
+              Effect.annotateLogs({
+                event: "vector_matrix.append_rejected",
+                at: nowIso(),
+                reason: "non_finite_vector",
+                detail: cause instanceof Error ? cause.message : String(cause),
+              }),
+            );
             continue;
           }
           const existing = rowFor(row.sessionId, row.seq);
           if (existing !== undefined) {
             writeRowBytes(existing, blob);
-            writeScopeCodes(existing, row.provider, row.role, row.projectKey);
+            yield* writeScopeCodes(existing, row.provider, row.role, row.projectKey);
             overwritten += 1;
             continue;
           }
           if (!ensureRowCapacity(state.rowCount + 1)) {
             state.droppedAppends += 1;
-            diagnostic("vector_matrix.append_dropped", {
-              reason: "capacity_exhausted",
-              rows: state.rowCount,
-              droppedAppends: state.droppedAppends,
-            });
+            yield* Effect.logWarning("vector_matrix.append_dropped").pipe(
+              Effect.annotateLogs({
+                event: "vector_matrix.append_dropped",
+                at: nowIso(),
+                reason: "capacity_exhausted",
+                rows: state.rowCount,
+                droppedAppends: state.droppedAppends,
+              }),
+            );
             continue;
           }
           writeRowBytes(state.rowCount, blob);
-          writeScopeCodes(state.rowCount, row.provider, row.role, row.projectKey);
+          yield* writeScopeCodes(state.rowCount, row.provider, row.role, row.projectKey);
           indexRow(row.sessionId, row.seq, state.rowCount);
           state.rowCount += 1;
           appended += 1;
@@ -384,10 +397,17 @@ export const makeVectorMatrixLayer = (
         if (sqliteRows !== undefined) {
           state.watermark = { matrixRows: state.rowCount, sqliteRows, checkedAt: nowIso() };
           if (sqliteRows !== state.rowCount) {
-            diagnostic("vector_matrix.watermark_drift", { matrixRows: state.rowCount, sqliteRows });
+            yield* Effect.logWarning("vector_matrix.watermark_drift").pipe(
+              Effect.annotateLogs({
+                event: "vector_matrix.watermark_drift",
+                at: nowIso(),
+                matrixRows: state.rowCount,
+                sqliteRows,
+              }),
+            );
           }
         }
-      };
+      });
 
       // --- worker pool ---
       // One chunk per message; a worker that finishes a chunk immediately
@@ -543,10 +563,17 @@ export const makeVectorMatrixLayer = (
         const total = yield* store.countMessageVectors(model);
         if (total === 0) {
           state.watermark = { matrixRows: 0, sqliteRows: 0, checkedAt: nowIso() };
-          info("vector_matrix.empty_boot", { model, dimensions });
+          yield* Effect.logInfo("vector_matrix.empty_boot").pipe(
+            Effect.annotateLogs({
+              event: "vector_matrix.empty_boot",
+              at: nowIso(),
+              model,
+              dimensions,
+            }),
+          );
           return;
         }
-        const native = options.kernel === "js" ? undefined : loadNativeSimsimd();
+        const native = options.kernel === "js" ? undefined : yield* loadNativeSimsimdEffect();
         state.libraryPath = native?.libraryPath ?? null;
         state.kernel = native !== undefined ? "simsimd-ffi" : "js-fallback";
 
@@ -586,7 +613,7 @@ export const makeVectorMatrixLayer = (
               continue;
             }
             writeRowBytes(slot, row.vectorBlob);
-            writeScopeCodes(slot, row.provider, row.role, row.projectKey);
+            yield* writeScopeCodes(slot, row.provider, row.role, row.projectKey);
             filled[slot] = 1;
           }
           if (page.length < LOAD_PAGE_ROWS) break;
@@ -594,7 +621,14 @@ export const makeVectorMatrixLayer = (
         }
         state.rowCount = compactHoles(slots, filled);
         if (state.rowCount === 0) {
-          diagnostic("vector_matrix.load_empty_after_validation", { model, skipped: state.loadSkippedRows });
+          yield* Effect.logWarning("vector_matrix.load_empty_after_validation").pipe(
+            Effect.annotateLogs({
+              event: "vector_matrix.load_empty_after_validation",
+              at: nowIso(),
+              model,
+              skipped: state.loadSkippedRows,
+            }),
+          );
           return;
         }
         yield* Effect.tryPromise({
@@ -611,26 +645,42 @@ export const makeVectorMatrixLayer = (
         const sqliteRows = yield* store.countMessageVectors(model);
         state.watermark = { matrixRows: state.rowCount, sqliteRows, checkedAt: nowIso() };
         if (sqliteRows !== state.rowCount) {
-          diagnostic("vector_matrix.watermark_drift", { matrixRows: state.rowCount, sqliteRows, phase: "boot" });
+          yield* Effect.logWarning("vector_matrix.watermark_drift").pipe(
+            Effect.annotateLogs({
+              event: "vector_matrix.watermark_drift",
+              at: nowIso(),
+              matrixRows: state.rowCount,
+              sqliteRows,
+              phase: "boot",
+            }),
+          );
         }
-        info("vector_matrix.loaded", {
-          model,
-          dimensions,
-          rows: state.rowCount,
-          skippedRows: state.loadSkippedRows,
-          loadMs: state.loadMs,
-          kernel: state.kernel,
-          workers: state.workers.length,
-        });
+        yield* Effect.logInfo("vector_matrix.loaded").pipe(
+          Effect.annotateLogs({
+            event: "vector_matrix.loaded",
+            at: nowIso(),
+            model,
+            dimensions,
+            rows: state.rowCount,
+            skippedRows: state.loadSkippedRows,
+            loadMs: state.loadMs,
+            kernel: state.kernel,
+            workers: state.workers.length,
+          }),
+        );
       }).pipe(
         Effect.catchAll((cause) =>
-          Effect.sync(() => {
-            diagnostic("vector_matrix.load_failed", {
+          Effect.logError("vector_matrix.load_failed").pipe(
+            Effect.annotateLogs({
+              event: "vector_matrix.load_failed",
+              at: nowIso(),
               model,
               detail: cause instanceof Error ? cause.message : JSON.stringify(cause),
-            });
-            terminateWorkers();
-          }),
+            }),
+            Effect.zipRight(Effect.sync(() => {
+              terminateWorkers();
+            })),
+          ),
         ),
         Effect.ensuring(Deferred.succeed(loadedSignal, undefined)),
       );

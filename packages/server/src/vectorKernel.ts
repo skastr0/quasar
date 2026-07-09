@@ -16,6 +16,7 @@
 import { closeSync, existsSync, openSync, readFileSync, readSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { CFunction, dlopen, FFIType, ptr, type Pointer } from "bun:ffi";
+import { Effect } from "effect";
 
 import { float16BitsToFloat32, float32ToFloat16Bits } from "./vectorBlob";
 
@@ -90,6 +91,11 @@ export interface NativeSimsimd {
   readonly cosineDistanceF16: (a: Pointer, b: Pointer, n: number, out: Pointer) => void;
 }
 
+interface NativeSimsimdLoadResult {
+  readonly native: NativeSimsimd | undefined;
+  readonly diagnostic: Record<string, unknown> | undefined;
+}
+
 /** OS-attested fp16 SIMD support, used to repair simsimd's runtime probe
  * where `mrs` system-register reads trap inside VMs (observed under the
  * linux/arm64 container on Apple silicon: /proc/cpuinfo advertises
@@ -155,17 +161,16 @@ export const resolveSimsimdLibraryPath = (): string | undefined => {
   return existsSync(local) ? local : undefined;
 };
 
-/** dlopen the simsimd C ABI and self-check it against the reference on a known
- * pair before trusting it. Returns undefined (with a named diagnostic) when no
- * usable library exists — callers fall back to the reference kernel. */
-export const loadNativeSimsimd = (libraryPath = resolveSimsimdLibraryPath()): NativeSimsimd | undefined => {
+const loadNativeSimsimdResult = (libraryPath = resolveSimsimdLibraryPath()): NativeSimsimdLoadResult => {
   if (libraryPath === undefined) {
-    console.error(JSON.stringify({
-      event: "vector_kernel.native_unavailable",
-      at: new Date().toISOString(),
-      diagnostic: "no simsimd shared library for this platform; run scripts/ensure-simsimd-native.mjs",
-    }));
-    return undefined;
+    return {
+      native: undefined,
+      diagnostic: {
+        event: "vector_kernel.native_unavailable",
+        at: new Date().toISOString(),
+        diagnostic: "no simsimd shared library for this platform; run scripts/ensure-simsimd-native.mjs",
+      },
+    };
   }
   try {
     const library = dlopen(libraryPath, {
@@ -208,20 +213,42 @@ export const loadNativeSimsimd = (libraryPath = resolveSimsimdLibraryPath()): Na
       throw new VectorKernelError(`self-check failed: native=${native} reference=${expected}`);
     }
     return {
-      libraryPath,
-      capabilities: {
-        neon: (capabilities & SIMSIMD_CAP_NEON) !== 0,
-        neonF16: (capabilities & SIMSIMD_CAP_NEON_F16) !== 0,
+      native: {
+        libraryPath,
+        capabilities: {
+          neon: (capabilities & SIMSIMD_CAP_NEON) !== 0,
+          neonF16: (capabilities & SIMSIMD_CAP_NEON_F16) !== 0,
+        },
+        cosineDistanceF16,
       },
-      cosineDistanceF16,
+      diagnostic: undefined,
     };
   } catch (cause) {
-    console.error(JSON.stringify({
-      event: "vector_kernel.native_load_failed",
-      at: new Date().toISOString(),
-      libraryPath,
-      diagnostic: cause instanceof Error ? cause.message : String(cause),
-    }));
-    return undefined;
+    return {
+      native: undefined,
+      diagnostic: {
+        event: "vector_kernel.native_load_failed",
+        at: new Date().toISOString(),
+        libraryPath,
+        diagnostic: cause instanceof Error ? cause.message : String(cause),
+      },
+    };
   }
 };
+
+/** dlopen the simsimd C ABI and self-check it against the reference on a known
+ * pair before trusting it. Returns undefined when no usable library exists —
+ * callers fall back to the reference kernel. */
+export const loadNativeSimsimd = (libraryPath = resolveSimsimdLibraryPath()): NativeSimsimd | undefined =>
+  loadNativeSimsimdResult(libraryPath).native;
+
+export const loadNativeSimsimdEffect = (libraryPath = resolveSimsimdLibraryPath()): Effect.Effect<NativeSimsimd | undefined> =>
+  Effect.gen(function* () {
+    const result = loadNativeSimsimdResult(libraryPath);
+    if (result.diagnostic !== undefined) {
+      yield* Effect.logWarning(result.diagnostic.event).pipe(
+        Effect.annotateLogs(result.diagnostic),
+      );
+    }
+    return result.native;
+  });

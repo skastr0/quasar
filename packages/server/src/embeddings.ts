@@ -36,6 +36,7 @@ export class EmbeddingError extends Schema.TaggedError<EmbeddingError>()(
 
 export interface Embedder {
   readonly embedMany: (values: readonly string[]) => Promise<readonly (readonly number[])[]>;
+  readonly embedManyEffect?: (values: readonly string[]) => Effect.Effect<readonly (readonly number[])[], unknown>;
 }
 
 export interface EmbeddingsLayerOptions {
@@ -189,6 +190,14 @@ const isRetryableEmbeddingCause = (cause: unknown): boolean => {
 const prefixed = (prefix: string | undefined, text: string): string =>
   prefix === undefined || prefix.length === 0 ? text : `${prefix}${text}`;
 
+const runEmbedMany = (embedder: Embedder, values: readonly string[]): Effect.Effect<readonly (readonly number[])[], unknown> =>
+  embedder.embedManyEffect !== undefined
+    ? embedder.embedManyEffect(values)
+    : Effect.tryPromise({
+        try: () => embedder.embedMany(values),
+        catch: (cause) => cause,
+      });
+
 const readinessProbeText = "quasar readiness probe";
 
 const readinessCacheTtlMs = (): number =>
@@ -199,20 +208,17 @@ const probeEmbeddingAvailability = (
   profile: EmbeddingProfile,
 ): Effect.Effect<EmbeddingReadinessStatus, never> =>
   Effect.suspend(() =>
-    Effect.tryPromise({
-      try: async () => {
-        const input = prefixed(profile.queryPrefix, readinessProbeText);
-        const vectors = await embedder.embedMany([input]);
-        const vector = vectors[0];
-        if (vectors.length !== 1 || vector === undefined) {
-          throw new Error("embedder returned no readiness vector");
-        }
-        if (vector.length !== profile.dimensions) {
-          throw new Error(`embedding vector has dimension ${vector.length}; expected ${profile.dimensions}`);
-        }
-        return { ok: true, checkedAt: nowIso() } satisfies EmbeddingReadinessStatus;
-      },
-      catch: (cause) => cause,
+    Effect.gen(function* () {
+      const input = prefixed(profile.queryPrefix, readinessProbeText);
+      const vectors = yield* runEmbedMany(embedder, [input]);
+      const vector = vectors[0];
+      if (vectors.length !== 1 || vector === undefined) {
+        return yield* Effect.fail(new Error("embedder returned no readiness vector"));
+      }
+      if (vector.length !== profile.dimensions) {
+        return yield* Effect.fail(new Error(`embedding vector has dimension ${vector.length}; expected ${profile.dimensions}`));
+      }
+      return { ok: true, checkedAt: nowIso() } satisfies EmbeddingReadinessStatus;
     }).pipe(
       Effect.catchAll((cause) =>
         Effect.succeed({
@@ -280,42 +286,48 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
             yield* Effect.forkScoped(
               Effect.gen(function* () {
                 const started = performance.now();
-                const warm = yield* Effect.tryPromise({
-                  try: () => localQueryPipeline.embedMany([prefixed(profile.queryPrefix, "quasar query embedder warmup")]),
-                  catch: (cause) => cause,
-                }).pipe(Effect.either);
+                const warm = yield* runEmbedMany(
+                  localQueryPipeline,
+                  [prefixed(profile.queryPrefix, "quasar query embedder warmup")],
+                ).pipe(Effect.either);
                 const loadMs = Math.round(performance.now() - started);
                 if (warm._tag === "Left") {
                   queryState.loadFailure = warm.left instanceof Error ? warm.left.message : String(warm.left);
-                  console.error(JSON.stringify({
-                    event: "query_embedder.local_load_failed",
-                    at: nowIso(),
-                    loadMs,
-                    detail: queryState.loadFailure,
-                  }));
+                  yield* Effect.logWarning("query_embedder.local_load_failed").pipe(
+                    Effect.annotateLogs({
+                      event: "query_embedder.local_load_failed",
+                      at: nowIso(),
+                      loadMs,
+                      detail: queryState.loadFailure,
+                    }),
+                  );
                   return;
                 }
                 const vector = warm.right[0];
                 if (vector === undefined || vector.length !== profile.dimensions) {
                   queryState.loadFailure = `local query pipeline warmup returned dimension ${vector?.length ?? "none"}; expected ${profile.dimensions}`;
-                  console.error(JSON.stringify({
-                    event: "query_embedder.local_load_failed",
-                    at: nowIso(),
-                    loadMs,
-                    detail: queryState.loadFailure,
-                  }));
+                  yield* Effect.logWarning("query_embedder.local_load_failed").pipe(
+                    Effect.annotateLogs({
+                      event: "query_embedder.local_load_failed",
+                      at: nowIso(),
+                      loadMs,
+                      detail: queryState.loadFailure,
+                    }),
+                  );
                   return;
                 }
                 queryState.local = localQueryPipeline;
                 queryState.active = "local";
                 queryState.loadedAt = nowIso();
                 queryState.loadMs = loadMs;
-                console.log(JSON.stringify({
-                  event: "query_embedder.local_active",
-                  at: queryState.loadedAt,
-                  dtype: QUERY_EMBEDDING_ONNX_DTYPE,
-                  loadMs,
-                }));
+                yield* Effect.logInfo("query_embedder.local_active").pipe(
+                  Effect.annotateLogs({
+                    event: "query_embedder.local_active",
+                    at: queryState.loadedAt,
+                    dtype: QUERY_EMBEDDING_ONNX_DTYPE,
+                    loadMs,
+                  }),
+                );
               }),
             );
           }
@@ -396,10 +408,7 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
 
           const embedInputsAdaptive: (inputs: readonly string[]) => Effect.Effect<readonly (readonly number[])[], unknown> = (inputs) =>
             Effect.gen(function* () {
-              const result = yield* Effect.tryPromise({
-                try: () => embedder.embedMany(inputs),
-                catch: (cause) => cause,
-              }).pipe(Effect.either);
+              const result = yield* runEmbedMany(embedder, inputs).pipe(Effect.either);
               if (result._tag === "Right") return result.right;
               if (isRetryableEmbeddingCause(result.left) && inputs.length > 1) {
                 const splitAt = Math.ceil(inputs.length / 2);
@@ -451,10 +460,7 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                 const contentHash = contentHashForText(input);
                 const cached = yield* getCached(contentHash);
                 if (cached !== undefined) return cached.vector;
-                const vectors = yield* Effect.tryPromise({
-                  try: () => activeQueryEmbedder().embedMany([input]),
-                  catch: (cause) => cause,
-                });
+                const vectors = yield* runEmbedMany(activeQueryEmbedder(), [input]);
                 const vector = vectors[0];
                 if (vector === undefined) {
                   return yield* Effect.fail(
