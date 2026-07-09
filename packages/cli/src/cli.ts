@@ -50,7 +50,7 @@ const command =
   : rawCommand;
 const cliPackage = {
   name: "@skastr0/quasar-cli",
-  version: "0.3.4",
+  version: "0.3.5",
 };
 
 const server = (): string | undefined => arg("--server") ?? configuredServerUrl();
