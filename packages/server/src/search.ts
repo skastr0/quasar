@@ -25,7 +25,8 @@ export const DerivedSearchLive = Layer.effect(
   Effect.gen(function* () {
     const store = yield* LocalStore;
     return DerivedSearch.of({
-      lexicalSearch: (request) => store.lexicalSearch(request),
+      lexicalSearch: (request) =>
+        store.lexicalSearch(request).pipe(Effect.withSpan("search.lexicalScan")),
     });
   }),
 );

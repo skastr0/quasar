@@ -695,6 +695,8 @@ export const makeVectorMatrixLayer = (
         }),
       );
 
+      // One stage-level span for the whole matrix search — never per-row
+      // inside the scan loop (60ms p95 scan budget).
       const search = (request: VectorMatrixSearchRequest) =>
         Effect.gen(function* () {
           if (!state.enabled || state.sab === undefined) {
@@ -767,7 +769,14 @@ export const makeVectorMatrixLayer = (
             seq: state.seqs[entry.row] ?? 0,
             score: entry.score,
           }));
-        });
+        }).pipe(
+          Effect.withSpan("search.matrixScan", {
+            attributes: {
+              limit: request.limit,
+              filtered: request.projectKey !== undefined || request.role !== undefined || request.providers !== undefined,
+            },
+          }),
+        );
 
       return VectorMatrix.of({
         status: Effect.sync(() => ({

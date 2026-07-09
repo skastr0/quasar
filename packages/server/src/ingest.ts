@@ -98,4 +98,8 @@ export const ingestMappedSession = (
         toolCallsUnchanged: diff.toolCallsUnchanged,
       },
     };
-  });
+  }).pipe(
+    Effect.withSpan("ingest.session", {
+      attributes: { sessionId: mapped.session.sessionId },
+    }),
+  );

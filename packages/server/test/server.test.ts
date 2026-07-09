@@ -298,6 +298,9 @@ describe("HTTP server", () => {
       expect(search.data.receipt).toMatchObject({ route: "search/lexical", mode: "lexical", query: "hello" });
       expect(typeof search.data.receipt.startedAt).toBe("string");
       expect(typeof search.data.receipt.completedAt).toBe("string");
+      // QUASAR_SEARCH_PROFILE=1 → receipt carries the parent span's traceId.
+      expect(typeof search.data.receipt.traceId).toBe("string");
+      expect(search.data.receipt.traceId.length).toBeGreaterThan(0);
       expect(statusBody.data.lance).toBeUndefined();
       expect(statusBody.data.workers.workers).toEqual(["embeddings"]);
       expect(readyBody[0]).toBe(200);
