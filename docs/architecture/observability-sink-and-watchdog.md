@@ -10,11 +10,13 @@ this file is the durable product note — no runtime code depends on it.
 
 - **Default:** off. A normal `bun run server:deploy` does not start a metrics UI
   or OTLP collector.
-- **One enable flag:** `COMPOSE_PROFILES=otel` (see
-  `docs/operations/observability-sink.md`).
+- **Enable (two envs):** `COMPOSE_PROFILES=otel` starts the sink;
+  `QUASAR_OTLP_BASE_URL=http://otel-lgtm:4318` wires server export (see
+  `docs/operations/observability-sink.md`). Profile membership is not inferred
+  from a non-empty `COMPOSE_PROFILES` string.
 - **No product code change to enable.** The server already exports when
-  `QUASAR_OTLP_BASE_URL` is set (`packages/server/src/runtime.ts`); compose sets
-  that URL to the in-network collector when the profile is active.
+  `QUASAR_OTLP_BASE_URL` is set (`packages/server/src/runtime.ts`); compose does
+  not invent that URL — set it explicitly for the in-network collector.
 - **Why this sink:** one container, OTLP/HTTP native, local-first, matches
   Effect `@effect/opentelemetry` `Otlp.layerJson` (no NodeSdk, no extra SDK
   deps). Adequate for Mac mini operator watch; not a claim about multi-tenant

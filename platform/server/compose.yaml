@@ -57,10 +57,12 @@ services:
       SYNTHETIC_API_KEY: ${SYNTHETIC_API_KEY:-}
       SYNTHETIC_OPENAI_BASE_URL: ${SYNTHETIC_OPENAI_BASE_URL:-https://api.synthetic.new/openai/v1}
       # OTLP export is off by default (empty → ObservabilityLayer uses Layer.empty).
-      # ONE enable switch: COMPOSE_PROFILES=otel — when that env is set, compose
-      # defaults this to the in-network collector. Explicit override still wins.
-      # No product code change required to enable the sink.
-      QUASAR_OTLP_BASE_URL: ${QUASAR_OTLP_BASE_URL:-${COMPOSE_PROFILES:+http://otel-lgtm:4318}}
+      # Never auto-fill from COMPOSE_PROFILES: bash ${VAR:+url} fires on any non-empty
+      # string, not only the otel profile token. Enable is two explicit envs:
+      #   COMPOSE_PROFILES=otel  (starts otel-lgtm)
+      #   QUASAR_OTLP_BASE_URL=http://otel-lgtm:4318  (server exports to it)
+      # See docs/operations/observability-sink.md
+      QUASAR_OTLP_BASE_URL: ${QUASAR_OTLP_BASE_URL:-}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:6180/health"]
       interval: 10s
@@ -69,8 +71,8 @@ services:
       retries: 6
 
   # Local observability sink — OPT-IN via compose profile "otel".
-  # Enable with exactly one env: COMPOSE_PROFILES=otel
-  #   COMPOSE_PROFILES=otel bun run server:deploy
+  # Enable (both required):
+  #   COMPOSE_PROFILES=otel QUASAR_OTLP_BASE_URL=http://otel-lgtm:4318 bun run server:deploy
   # Grafana UI: http://localhost:3000 (admin/admin)
   # Explore → Tempo (traces) · Prometheus/Mimir (metrics, quasar.*) · Loki (logs)
   # See docs/operations/observability-sink.md

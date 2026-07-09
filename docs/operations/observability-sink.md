@@ -1,7 +1,7 @@
 # Local observability sink (grafana/otel-lgtm)
 
 Opt-in OTLP collector + Grafana LGTM stack for the Quasar local server.
-**Off by default.** Enabling requires exactly one env flag and no product code change.
+**Off by default.** Enabling requires two explicit envs and no product code change.
 
 ## Decision
 
@@ -9,25 +9,37 @@ Opt-in OTLP collector + Grafana LGTM stack for the Quasar local server.
 | --- | --- |
 | Sink | `grafana/otel-lgtm` (collector + Grafana + Tempo + Mimir/Prometheus + Loki in one container) |
 | Default | **off** — production deploy does not pull or start the sink |
-| Enable | **one env:** `COMPOSE_PROFILES=otel` |
-| Server export | `QUASAR_OTLP_BASE_URL` — empty ⇒ no OTLP layer; profile-on defaults to `http://otel-lgtm:4318` |
+| Enable | `COMPOSE_PROFILES=otel` **and** `QUASAR_OTLP_BASE_URL=http://otel-lgtm:4318` |
+| Server export | `QUASAR_OTLP_BASE_URL` — empty ⇒ no OTLP layer; set ⇒ `Otlp.layerJson` to that base |
 | In-process watch | `/status` always embeds Effect `Metric.snapshot` (works with OTLP off) |
 
-Rejected for this phase: always-on metrics stack; NodeSdk-first exporters; inventing a second export path beyond Effect `Otlp.layerJson`.
+Rejected for this phase: always-on metrics stack; NodeSdk-first exporters; inventing a second export path beyond Effect `Otlp.layerJson`; auto-filling OTLP from any non-empty `COMPOSE_PROFILES` (bash `${VAR:+url}` is not a profile-token check).
 
-## Enable (one flag)
+## Enable
 
 From the repo root, with `platform/server/.env` already configured:
 
 ```bash
-COMPOSE_PROFILES=otel bun run server:deploy
+COMPOSE_PROFILES=otel QUASAR_OTLP_BASE_URL=http://otel-lgtm:4318 bun run server:deploy
 # or without rebuild:
-COMPOSE_PROFILES=otel bun run server:up
+COMPOSE_PROFILES=otel QUASAR_OTLP_BASE_URL=http://otel-lgtm:4318 bun run server:up
 ```
 
-Persistent enable: uncomment `COMPOSE_PROFILES=otel` in `platform/server/.env`.
+Persistent enable: uncomment **both** in `platform/server/.env`:
 
-Disable: unset `COMPOSE_PROFILES` (or remove it from `.env`) and `bun run server:deploy`.
+```bash
+COMPOSE_PROFILES=otel
+QUASAR_OTLP_BASE_URL=http://otel-lgtm:4318
+```
+
+| Env | Role |
+| --- | --- |
+| `COMPOSE_PROFILES=otel` | Starts the profiled `otel-lgtm` service |
+| `QUASAR_OTLP_BASE_URL=…` | Server process exports OTLP (empty = Layer.empty) |
+
+Profile alone starts a collector nothing talks to. OTLP alone points the server at a URL with no in-compose sink. Both are required for the full path.
+
+Disable: remove both from the environment / `.env` and `bun run server:deploy`.
 
 Override OTLP target without code changes:
 
@@ -50,29 +62,28 @@ Compose service name: `otel-lgtm`. Image: `grafana/otel-lgtm:latest`.
 
 ## Server contract (no code change to enable)
 
-- `packages/server/src/runtime.ts` already gates on `QUASAR_OTLP_BASE_URL`: unset/empty → `Layer.empty`; set → `Otlp.layerJson({ baseUrl, resource: { serviceName: "quasar-server" } })`.
-- Compose wires that env when `COMPOSE_PROFILES` is non-empty (default base `http://otel-lgtm:4318`).
+- `packages/server/src/runtime.ts` gates on `QUASAR_OTLP_BASE_URL`: unset/empty → `Layer.empty`; set → `Otlp.layerJson({ baseUrl, resource: { serviceName: "quasar-server" } })`.
+- Compose never invents that URL from `COMPOSE_PROFILES`. Set `QUASAR_OTLP_BASE_URL` explicitly (in-network default: `http://otel-lgtm:4318`).
 - `/status` still returns the local metric snapshot + healthy envelope + alert rule definitions whether or not the sink is running.
 
-## E2E receipt (operator)
+## Operator check (live stack)
 
 When the sink image is available locally:
 
 ```bash
-COMPOSE_PROFILES=otel bun run server:deploy
+COMPOSE_PROFILES=otel QUASAR_OTLP_BASE_URL=http://otel-lgtm:4318 bun run server:deploy
 # wait until Grafana answers
 curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/login
 # exercise a fusion query against the published API, then in Grafana:
 #   Explore → Tempo → search serviceName=quasar-server
-#   Explore → Prometheus → quasar_vector_matrix_watermark_drift (or quasar.* after rename)
+#   Explore → Prometheus → quasar.* series
 bun run server:status   # local snapshot still present without scraping the sink
 ```
 
-Unit-level smoke (no container): compose config + OTLP env gate tests in
+Unit-level smoke (no container pull required if `docker compose config` is available):
 `packages/server/test/ops-config.test.ts` and `packages/server/test/observability.test.ts`.
 
-Full live fusion-trace + watermark-gauge screenshot in Grafana is an operator
-receipt when `grafana/otel-lgtm` is pulled; CI does not require the multi-GB image.
+Live fusion-trace + watermark-gauge screenshot in Grafana is an **operator** check when `grafana/otel-lgtm` is pulled; CI does not require the multi-GB image and does not claim that screenshot as a CI receipt.
 
 ## Compose config smoke
 
@@ -81,8 +92,13 @@ receipt when `grafana/otel-lgtm` is pulled; CI does not require the multi-GB ima
 docker compose --env-file platform/server/.env -f platform/server/compose.yaml config \
   | grep -E 'otel-lgtm|QUASAR_OTLP_BASE_URL' || true
 
-# profile on — service present, OTLP defaults to in-network collector
+# profile on alone — sink present, OTLP still empty (must set base URL)
 COMPOSE_PROFILES=otel docker compose --env-file platform/server/.env \
   -f platform/server/compose.yaml config \
   | grep -E 'otel-lgtm|QUASAR_OTLP_BASE_URL|profiles'
+
+# full enable — sink + wired export
+COMPOSE_PROFILES=otel QUASAR_OTLP_BASE_URL=http://otel-lgtm:4318 \
+  docker compose --env-file platform/server/.env -f platform/server/compose.yaml config \
+  | grep -E 'otel-lgtm|QUASAR_OTLP_BASE_URL'
 ```
