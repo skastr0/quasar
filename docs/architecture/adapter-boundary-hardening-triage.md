@@ -89,3 +89,11 @@ flow through each adapter's existing `AdapterStreamItem` `diagnostic` arm.
   heterogeneous native records after the record layer has accepted the parent.
 - Goldens from the adapter safety-net commit stay byte-stable; hostile suite
   covers line/file corruptions for all seven adapters.
+- **QSR-259 function-size AC residual (honest, not chased):** the large adapter
+  stream/session assemblers (`buildAgentSession` kimi, `streamCodex`,
+  `buildAntigravitySession` / `streamAntigravity`, `streamOpenCode`) remain
+  above ~80 LOC. Move 2 extracted proven source clones (`adapters/source.ts`);
+  Move 3 closed Claude usage fail-open and will continue per-adapter
+  decode-to-domain shrinks in later slices — LOC bars fall out of that work,
+  never from cosmetic splits that risk golden breaks. Server `chunksOf` /
+  `chunked` clones stay out of this glyph estate.

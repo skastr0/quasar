@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import { Either, ParseResult, Schema } from "effect";
 
 import {
   type DecodeDiagnostic,
@@ -144,15 +144,21 @@ export const ClaudeUsageSchema = Schema.transform(
 );
 export type ClaudeUsage = typeof ClaudeUsageSchema.Type;
 
+/**
+ * Message envelope without usage. Usage is decoded separately via
+ * `decodeClaudeUsage` so a bad usage object becomes a named field drop
+ * (`claude.usage.decode_failed`) instead of:
+ *   - Schema.Unknown fail-open (garbage retained on the message), or
+ *   - killing the whole user/assistant record over a telemetry field.
+ */
 const ClaudeMessageSchema = Schema.Struct({
   role: Schema.String,
   content: Schema.Unknown,
   model: Schema.optional(Schema.NullOr(Schema.String)),
-  // Unknown falls through for unmodeled usage shapes; successful decode yields
-  // the normalized ClaudeUsage when the on-disk object matches the transform.
-  usage: Schema.optional(Schema.Union(ClaudeUsageSchema, Schema.Unknown)),
 });
-export type ClaudeMessage = typeof ClaudeMessageSchema.Type;
+export type ClaudeMessage = typeof ClaudeMessageSchema.Type & {
+  readonly usage?: ClaudeUsage;
+};
 
 export const ClaudeUserRecordSchema = Schema.Struct({
   type: Schema.Literal("user"),
@@ -499,9 +505,64 @@ export const CLAUDE_SYSTEM_DECODE_FAILED = "claude.system.decode_failed";
 export const CLAUDE_ATTACHMENT_DECODE_FAILED = "claude.attachment.decode_failed";
 export const CLAUDE_SNAPSHOT_DECODE_FAILED = "claude.file_history_snapshot.decode_failed";
 export const CLAUDE_BOOKKEEPING_DECODE_FAILED = "claude.bookkeeping.decode_failed";
+export const CLAUDE_USAGE_DECODE_FAILED = "claude.usage.decode_failed";
 export const CLAUDE_UNKNOWN_TYPE = "claude.unknown_type";
 export const CLAUDE_UNKNOWN_SYSTEM_SUBTYPE = "claude.system.unknown_subtype";
 export const CLAUDE_UNKNOWN_ATTACHMENT_SUBTYPE = "claude.attachment.unknown_subtype";
+
+/**
+ * Fail-closed usage field decode. Absent/null → undefined (no diagnostic).
+ * Valid object → normalized ClaudeUsage. Invalid present value → named
+ * `claude.usage.decode_failed` diagnostic and undefined (field dropped; parent
+ * conversation record still signals). Never retains raw garbage via Unknown.
+ */
+export const decodeClaudeUsage = (
+  message: unknown,
+  diagnostics?: DecodeDiagnostic[],
+): ClaudeUsage | undefined => {
+  if (message === null || message === undefined || typeof message !== "object") {
+    return undefined;
+  }
+  const raw = message as Record<string, unknown>;
+  if (!("usage" in raw) || raw.usage === undefined || raw.usage === null) {
+    return undefined;
+  }
+  const decoded = Schema.decodeUnknownEither(ClaudeUsageSchema)(raw.usage, {
+    errors: "all",
+  });
+  if (Either.isRight(decoded)) {
+    const usage = decoded.right;
+    // Empty normalized object is still a successful decode of `{}` / all-absent
+    // fields — treat as "no usage row" without a diagnostic.
+    if (
+      usage.inputTokens === undefined &&
+      usage.outputTokens === undefined &&
+      usage.cacheCreationInputTokens === undefined &&
+      usage.cacheReadInputTokens === undefined
+    ) {
+      return undefined;
+    }
+    return usage;
+  }
+  const messageText = ParseResult.TreeFormatter.formatErrorSync(decoded.left);
+  diagnostics?.push({ name: CLAUDE_USAGE_DECODE_FAILED, message: messageText });
+  return undefined;
+};
+
+/** Attach fail-closed usage onto a decoded conversation record. */
+const withDecodedUsage = <T extends { readonly message: ClaudeMessage }>(
+  record: T,
+  raw: unknown,
+  diagnostics?: DecodeDiagnostic[],
+): T => {
+  const rawMessage = recordOf(recordOf(raw).message);
+  const usage = decodeClaudeUsage(rawMessage, diagnostics);
+  if (usage === undefined) return record;
+  return {
+    ...record,
+    message: { ...record.message, usage },
+  };
+};
 
 // ---------------------------------------------------------------------------
 // The kind a successfully-decoded record is signalled under.
@@ -698,7 +759,7 @@ export const classifyClaudeRecord = (
         diagnostics,
       });
       if (decision._tag === "drop") return decision;
-      const r = decision.value as ClaudeUserRecord;
+      const r = withDecodedUsage(decision.value as ClaudeUserRecord, record, diagnostics);
       return { _tag: "signal", kind: claudeMessageKind(r.message.role, r.message.content), value: r };
     }
     case "assistant": {
@@ -708,7 +769,7 @@ export const classifyClaudeRecord = (
         diagnostics,
       });
       if (decision._tag === "drop") return decision;
-      const r = decision.value as ClaudeAssistantRecord;
+      const r = withDecodedUsage(decision.value as ClaudeAssistantRecord, record, diagnostics);
       return { _tag: "signal", kind: claudeMessageKind(r.message.role, r.message.content), value: r };
     }
     case "system":

@@ -26,7 +26,10 @@ import {
   ClaudeSystemStopHookSummarySchema,
   ClaudeSystemTurnDurationSchema,
   ClaudeUserRecordSchema,
+  ClaudeUsageSchema,
+  CLAUDE_USAGE_DECODE_FAILED,
   classifyClaudeRecord,
+  decodeClaudeUsage,
 } from "../src/adapters/claude-schema";
 import type { DecodeDiagnostic } from "../src/adapters/harness-schema";
 
@@ -698,6 +701,73 @@ describe("QSR-220 malformed records -> named diagnostic + drop (no throw)", () =
     const d = classifyClaudeRecord({ type: "user", message: "not-an-object", sessionId: FAB.sessionId }, diags);
     expect(d._tag).toBe("drop");
     expect(diags.some((x) => x.name === "claude.user.decode_failed")).toBe(true);
+  });
+
+  test("assistant with bad usage -> signal message + claude.usage.decode_failed (field drop, not record drop)", () => {
+    const diags: DecodeDiagnostic[] = [];
+    const d = classifyClaudeRecord(
+      {
+        ...envelope,
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: "kept prose",
+          usage: "not-an-object",
+        },
+      },
+      diags,
+    );
+    expect(d._tag).toBe("signal");
+    if (d._tag === "signal") {
+      const message = (d.value as { message: { content: unknown; usage?: unknown } }).message;
+      expect(message.content).toBe("kept prose");
+      expect(message.usage).toBeUndefined();
+    }
+    expect(diags.some((x) => x.name === CLAUDE_USAGE_DECODE_FAILED)).toBe(true);
+  });
+
+  test("assistant with valid snake_case usage -> normalized camelCase, no usage diagnostic", () => {
+    const diags: DecodeDiagnostic[] = [];
+    const d = classifyClaudeRecord(
+      {
+        ...envelope,
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: "ok",
+          usage: {
+            input_tokens: 11,
+            output_tokens: 7,
+            cache_read_input_tokens: 3,
+          },
+        },
+      },
+      diags,
+    );
+    expect(d._tag).toBe("signal");
+    if (d._tag === "signal") {
+      const usage = (d.value as { message: { usage?: { inputTokens?: number; outputTokens?: number; cacheReadInputTokens?: number } } })
+        .message.usage;
+      expect(usage).toEqual({
+        inputTokens: 11,
+        outputTokens: 7,
+        cacheReadInputTokens: 3,
+      });
+    }
+    expect(diags.some((x) => x.name === CLAUDE_USAGE_DECODE_FAILED)).toBe(false);
+  });
+
+  test("decodeClaudeUsage rejects non-object without Unknown pass-through", () => {
+    const diags: DecodeDiagnostic[] = [];
+    expect(decodeClaudeUsage({ usage: [1, 2, 3] }, diags)).toBeUndefined();
+    expect(diags.map((x) => x.name)).toContain(CLAUDE_USAGE_DECODE_FAILED);
+    // Round-trip sanity: schema still normalizes both spellings.
+    const ok = Schema.decodeUnknownSync(ClaudeUsageSchema)({
+      inputTokens: 1,
+      output_tokens: 2,
+    });
+    expect(ok.inputTokens).toBe(1);
+    expect(ok.outputTokens).toBe(2);
   });
 
   test("assistant missing role -> claude.assistant.decode_failed", () => {
