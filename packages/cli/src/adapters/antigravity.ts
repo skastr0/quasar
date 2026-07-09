@@ -1,7 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 
 import { collectAdapterStream, type AdapterStreamItem, type SessionAdapter } from "./types";
 import { AntigravitySessionId } from "../core/identity";
@@ -18,6 +17,7 @@ import {
   sessionIdFor,
   sourceFingerprintFor,
   sourceRoot,
+  sqliteSnapshotForRead,
   type NativeValue,
 } from "./common";
 import { type DecodeDiagnostic, decodeOrDrop, isSignal } from "./harness-schema";
@@ -136,24 +136,6 @@ const terminalPlannerResponseIndices = (
 // ---------------------------------------------------------------------------
 
 /**
- * Copy a sqlite DB (with -wal / -shm) to a temp dir, query it, then clean up.
- * Returns undefined on any error (missing db, sqlite3 not available, etc.).
- */
-const copyDatabaseForRead = (dbPath: string) => {
-  const tempDir = mkdtempSync(join(tmpdir(), "quasar-antigravity-"));
-  const tempDbPath = join(tempDir, "session.db");
-  copyFileSync(dbPath, tempDbPath);
-  for (const suffix of ["-wal", "-shm"]) {
-    const src = `${dbPath}${suffix}`;
-    if (existsSync(src)) copyFileSync(src, `${tempDbPath}${suffix}`);
-  }
-  return {
-    path: tempDbPath,
-    cleanup: () => rmSync(tempDir, { recursive: true, force: true }),
-  };
-};
-
-/**
  * Byte-scan raw bytes from trajectory_metadata_blob for file:/// and git:
  * patterns (stored as plain UTF-8 substrings inside the protobuf blob).
  * Returns the workdir string when found; undefined otherwise.
@@ -182,9 +164,12 @@ const extractWorkdirFromBlob = (raw: Buffer): string | undefined => {
 const readWorkdirFromConversationDb = (uuid: string, conversationsDir: string): string | undefined => {
   const dbPath = join(conversationsDir, `${uuid}.db`);
   if (!existsSync(dbPath)) return undefined;
-  let tempDb: { path: string; cleanup: () => void } | undefined;
+  let tempDb: ReturnType<typeof sqliteSnapshotForRead> | undefined;
   try {
-    tempDb = copyDatabaseForRead(dbPath);
+    tempDb = sqliteSnapshotForRead(dbPath, {
+      label: "antigravity",
+      fileName: "session.db",
+    });
     const hexOutput = execFileSync(
       "sqlite3",
       [tempDb.path, "SELECT hex(data) FROM trajectory_metadata_blob WHERE id='main' LIMIT 1;"],

@@ -82,12 +82,77 @@ const EnvelopeFields = {
 // required so a role-less / message-less impostor is dropped.
 // ---------------------------------------------------------------------------
 
+/**
+ * On-disk usage may use snake_case (Anthropic API) or camelCase (harness
+ * variants). Transform normalizes at decode so the adapter never duck-picks
+ * both spellings post-decode.
+ */
+const ClaudeUsageEncodedSchema = Schema.Struct({
+  input_tokens: Schema.optional(Schema.Number),
+  inputTokens: Schema.optional(Schema.Number),
+  output_tokens: Schema.optional(Schema.Number),
+  outputTokens: Schema.optional(Schema.Number),
+  cache_creation_input_tokens: Schema.optional(Schema.Number),
+  cacheCreationInputTokens: Schema.optional(Schema.Number),
+  cache_read_input_tokens: Schema.optional(Schema.Number),
+  cacheReadInputTokens: Schema.optional(Schema.Number),
+});
+
+export const ClaudeUsageSchema = Schema.transform(
+  ClaudeUsageEncodedSchema,
+  Schema.Struct({
+    inputTokens: Schema.optional(Schema.Number),
+    outputTokens: Schema.optional(Schema.Number),
+    cacheCreationInputTokens: Schema.optional(Schema.Number),
+    cacheReadInputTokens: Schema.optional(Schema.Number),
+  }),
+  {
+    strict: true,
+    decode: (encoded) => ({
+      ...(encoded.input_tokens !== undefined || encoded.inputTokens !== undefined
+        ? { inputTokens: encoded.input_tokens ?? encoded.inputTokens }
+        : {}),
+      ...(encoded.output_tokens !== undefined || encoded.outputTokens !== undefined
+        ? { outputTokens: encoded.output_tokens ?? encoded.outputTokens }
+        : {}),
+      ...(encoded.cache_creation_input_tokens !== undefined ||
+      encoded.cacheCreationInputTokens !== undefined
+        ? {
+            cacheCreationInputTokens:
+              encoded.cache_creation_input_tokens ?? encoded.cacheCreationInputTokens,
+          }
+        : {}),
+      ...(encoded.cache_read_input_tokens !== undefined ||
+      encoded.cacheReadInputTokens !== undefined
+        ? {
+            cacheReadInputTokens:
+              encoded.cache_read_input_tokens ?? encoded.cacheReadInputTokens,
+          }
+        : {}),
+    }),
+    encode: (decoded) => ({
+      ...(decoded.inputTokens !== undefined ? { inputTokens: decoded.inputTokens } : {}),
+      ...(decoded.outputTokens !== undefined ? { outputTokens: decoded.outputTokens } : {}),
+      ...(decoded.cacheCreationInputTokens !== undefined
+        ? { cacheCreationInputTokens: decoded.cacheCreationInputTokens }
+        : {}),
+      ...(decoded.cacheReadInputTokens !== undefined
+        ? { cacheReadInputTokens: decoded.cacheReadInputTokens }
+        : {}),
+    }),
+  },
+);
+export type ClaudeUsage = typeof ClaudeUsageSchema.Type;
+
 const ClaudeMessageSchema = Schema.Struct({
   role: Schema.String,
   content: Schema.Unknown,
   model: Schema.optional(Schema.NullOr(Schema.String)),
-  usage: Schema.optional(Schema.Unknown),
+  // Unknown falls through for unmodeled usage shapes; successful decode yields
+  // the normalized ClaudeUsage when the on-disk object matches the transform.
+  usage: Schema.optional(Schema.Union(ClaudeUsageSchema, Schema.Unknown)),
 });
+export type ClaudeMessage = typeof ClaudeMessageSchema.Type;
 
 export const ClaudeUserRecordSchema = Schema.Struct({
   type: Schema.Literal("user"),
@@ -102,6 +167,17 @@ export const ClaudeAssistantRecordSchema = Schema.Struct({
   ...EnvelopeFields,
 });
 export type ClaudeAssistantRecord = typeof ClaudeAssistantRecordSchema.Type;
+
+/** True when a classifier signal value is a decoded user/assistant conversation record. */
+export const isClaudeConversationRecord = (
+  value: unknown,
+): value is ClaudeUserRecord | ClaudeAssistantRecord =>
+  typeof value === "object" &&
+  value !== null &&
+  "message" in value &&
+  "type" in value &&
+  ((value as { type: unknown }).type === "user" ||
+    (value as { type: unknown }).type === "assistant");
 
 // ---------------------------------------------------------------------------
 // system records — discriminated by `subtype`

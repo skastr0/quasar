@@ -1,6 +1,5 @@
-import { createReadStream, existsSync, readdirSync, statSync, type Stats } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
-import { createInterface } from "node:readline";
 import { Brand } from "effect";
 
 import {
@@ -34,6 +33,7 @@ import {
   sessionIdFor,
   sourceFingerprintFor,
   sourceRoot,
+  streamJsonlRecords,
   usageIdFor,
 } from "./common";
 
@@ -536,7 +536,7 @@ class CodexJsonLineParseError extends Error {
   }
 }
 
-async function* readCodexJsonLines(
+const readCodexJsonLines = (
   path: string,
   options: {
     readonly strict?: boolean;
@@ -544,36 +544,15 @@ async function* readCodexJsonLines(
     readonly diagnosticName?: string;
     readonly sourcePath?: string;
   } = {},
-) {
-  const lines = createInterface({
-    input: createReadStream(path, { encoding: "utf8" }),
-    crlfDelay: Infinity,
+) =>
+  streamJsonlRecords(path, {
+    strict: options.strict,
+    strictError: (filePath, lineNumber, cause) =>
+      new CodexJsonLineParseError(filePath, lineNumber, cause),
+    diagnostics: options.diagnostics,
+    diagnosticName: options.diagnosticName ?? "codex.line.invalid_json",
+    sourcePath: options.sourcePath,
   });
-  let lineNumber = 0;
-  let recordIndex = 0;
-  for await (const line of lines) {
-    lineNumber += 1;
-    if (line.trim().length === 0) continue;
-    try {
-      yield { value: JSON.parse(line) as unknown, lineNumber, recordIndex };
-      recordIndex += 1;
-    } catch (cause) {
-      if (options.strict === true) {
-        throw new CodexJsonLineParseError(path, lineNumber, cause);
-      }
-      if (options.diagnostics !== undefined) {
-        const diagnosticName = options.diagnosticName ?? "codex.line.invalid_json";
-        options.diagnostics.push({
-          name: diagnosticName,
-          message: `${diagnosticName} at ${options.sourcePath ?? path}:${lineNumber}: ${
-            cause instanceof Error ? cause.message : String(cause)
-          }`,
-        });
-      }
-      // Preserve best-effort behavior from readJsonLines.
-    }
-  }
-}
 
 const projectPathFromSessionMeta = (value: unknown) => {
   const record = recordFrom(value);
@@ -799,54 +778,6 @@ const codexSubagentLineage = (meta: CodexSessionMeta): CodexSubagentLineage | un
   };
 };
 
-
-const parseFileWalkInput = (root: string, limit: number | undefined, skip: number | undefined) => {
-  const trimmedRoot = root.trim();
-  if (trimmedRoot.length === 0 || (limit !== undefined && limit <= 0)) return undefined;
-  return {
-    root: trimmedRoot,
-    limit: limit === undefined || !Number.isFinite(limit) ? Number.POSITIVE_INFINITY : Math.floor(limit),
-    skip: skip === undefined || !Number.isFinite(skip) || skip <= 0 ? 0 : Math.floor(skip),
-  };
-};
-
-function* walkFilesWithStats(
-  root: string,
-  predicate: (path: string) => boolean,
-  limit?: number,
-  skip?: number,
-): Generator<{ readonly path: string; readonly stats: Stats }> {
-  const input = parseFileWalkInput(root, limit, skip);
-  if (input === undefined || !existsSync(input.root)) return;
-  const walkInput = input;
-  let matched = 0;
-  let emitted = 0;
-
-  function* visit(path: string): Generator<{ readonly path: string; readonly stats: Stats }> {
-    if (emitted >= walkInput.limit) return;
-    let stats: Stats;
-    try {
-      stats = statSync(path);
-    } catch {
-      return;
-    }
-    if (stats.isDirectory()) {
-      for (const entry of readdirSync(path).sort()) {
-        yield* visit(join(path, entry));
-        if (emitted >= walkInput.limit) return;
-      }
-      return;
-    }
-    if (!predicate(path)) return;
-    if (matched >= walkInput.skip) {
-      emitted += 1;
-      yield { path, stats };
-    }
-    matched += 1;
-  }
-
-  yield* visit(walkInput.root);
-}
 
 const readFirstCodexJsonRecord = async (
   path: string,

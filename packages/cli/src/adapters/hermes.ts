@@ -1,7 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 
 import { Schema } from "effect";
 
@@ -36,6 +35,7 @@ import {
   scopedId,
   sessionIdFor,
   sourceRoot,
+  sqliteSnapshotForRead,
   stringValue,
   type NativeValue,
   usageIdFor,
@@ -98,20 +98,6 @@ const sqliteJson = <A>(dbPath: string, query: string): A[] => {
   } catch {
     return [];
   }
-};
-
-const copyDatabaseForRead = (dbPath: string) => {
-  const tempDir = mkdtempSync(join(tmpdir(), "quasar-hermes-"));
-  const tempDbPath = join(tempDir, basename(dbPath));
-  copyFileSync(dbPath, tempDbPath);
-  for (const suffix of ["-wal", "-shm"]) {
-    const source = `${dbPath}${suffix}`;
-    if (existsSync(source)) copyFileSync(source, `${tempDbPath}${suffix}`);
-  }
-  return {
-    path: tempDbPath,
-    cleanup: () => rmSync(tempDir, { recursive: true, force: true }),
-  };
 };
 
 /** Enumerate all profile-scoped state.db files plus the top-level default. */
@@ -889,9 +875,9 @@ async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStr
       const stat = statSync(dbPath);
       if (!options.shouldReadFile(dbPath, stat)) continue;
     }
-    let tempDb: ReturnType<typeof copyDatabaseForRead>;
+    let tempDb: ReturnType<typeof sqliteSnapshotForRead>;
     try {
-      tempDb = copyDatabaseForRead(dbPath);
+      tempDb = sqliteSnapshotForRead(dbPath, { label: "hermes" });
     } catch (error) {
       yield {
         type: "diagnostic",
