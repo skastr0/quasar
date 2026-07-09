@@ -39,14 +39,23 @@ await act(async () => {
 await settle(latencyMs);
 snap(`SEARCH "${query}"`);
 
-act(() => setup.mockInput.pressTab()); // search -> list focus
-act(() => setup.mockInput.pressEnter()); // open the session transcript reader
+// await act — script is sequential; unawaited act() is a floating promise (TS-CC-01).
+await act(() => {
+  setup.mockInput.pressTab(); // search -> list focus
+});
+await act(() => {
+  setup.mockInput.pressEnter(); // open the session transcript reader
+});
 await settle(latencyMs);
 snap("READER  session transcript");
 
-act(() => setup.mockInput.pressKey("t")); // tool-call forensics
+await act(() => {
+  setup.mockInput.pressKey("t"); // tool-call forensics
+});
 await settle(latencyMs);
 snap("READER  tool-call forensics");
 
-act(() => setup.renderer.destroy());
+await act(() => {
+  setup.renderer.destroy();
+});
 process.exit(0);
