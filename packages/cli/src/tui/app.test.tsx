@@ -191,3 +191,46 @@ test("transcript load rejection surfaces in the header error strip", async () =>
     act(() => setup.renderer.destroy());
   }
 });
+
+test("failed messages for editor path surfaces error and does not exit to editor", async () => {
+  // writeTempFile + onExit({editorFile}) are the success path; both only run
+  // after a successful messages load. Non-ok must surface and stay in the TUI.
+  let exitCalls = 0;
+  let editorExits = 0;
+  let messagesCalls = 0;
+  const client: QuasarClientLike = {
+    search: async () => ({ ok: true, value: [match(0)] }),
+    messages: async () => {
+      messagesCalls += 1;
+      return { ok: false, code: "Network", message: "network down" };
+    },
+    toolCalls: async () => ({ ok: true, value: [] }),
+  };
+  const setup = await testRender(
+    <App
+      options={{}}
+      onExit={(exit) => {
+        exitCalls += 1;
+        if (exit?.editorFile !== undefined) editorExits += 1;
+      }}
+      client={client}
+    />,
+    { width: 120, height: 40 },
+  );
+  try {
+    await act(async () => {
+      await setup.mockInput.typeText("vector");
+    });
+    await settle(setup);
+    act(() => setup.mockInput.pressTab()); // list focus
+    act(() => setup.mockInput.pressKey("e")); // openEditor → messages reload
+    await settle(setup, 200);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("network down");
+    expect(messagesCalls).toBeGreaterThan(0);
+    expect(exitCalls).toBe(0);
+    expect(editorExits).toBe(0);
+  } finally {
+    act(() => setup.renderer.destroy());
+  }
+});
