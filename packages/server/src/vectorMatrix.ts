@@ -25,6 +25,11 @@ import { embeddingProfileFromEnv, type EmbeddingProfile } from "./embeddingProfi
 import { LocalStore, type MessageVectorUpsert, type MessageVectorWriteEvent } from "./store";
 import { encodeFloat16Vector, VECTOR_BLOB_ENCODING } from "./vectorBlob";
 import { encodeQueryVectorF16, loadNativeSimsimdEffect, VectorKernelError } from "./vectorKernel";
+import {
+  publishMatrixWatermarkGauges,
+  recordAppendDropped,
+  recordAppendRejected,
+} from "./metrics";
 
 const LOAD_PAGE_ROWS = 8_192;
 const MAX_TOP_K = 256;
@@ -349,6 +354,7 @@ export const makeVectorMatrixLayer = (
                 received: row.vector.length,
               }),
             );
+            yield* recordAppendRejected();
             continue;
           }
           let blob: Uint8Array;
@@ -363,6 +369,7 @@ export const makeVectorMatrixLayer = (
                 detail: cause instanceof Error ? cause.message : String(cause),
               }),
             );
+            yield* recordAppendRejected();
             continue;
           }
           const existing = rowFor(row.sessionId, row.seq);
@@ -383,6 +390,7 @@ export const makeVectorMatrixLayer = (
                 droppedAppends: state.droppedAppends,
               }),
             );
+            yield* recordAppendDropped();
             continue;
           }
           writeRowBytes(state.rowCount, blob);
@@ -406,6 +414,15 @@ export const makeVectorMatrixLayer = (
               }),
             );
           }
+        }
+        if (appended > 0 || overwritten > 0 || sqliteRows !== undefined) {
+          yield* publishMatrixWatermarkGauges({
+            rows: state.rowCount,
+            watermark: state.watermark,
+            overwrittenRows: state.overwrittenRows,
+            appendedRows: state.appendedRows,
+            droppedAppends: state.droppedAppends,
+          });
         }
       });
 
@@ -655,6 +672,13 @@ export const makeVectorMatrixLayer = (
             }),
           );
         }
+        yield* publishMatrixWatermarkGauges({
+          rows: state.rowCount,
+          watermark: state.watermark,
+          overwrittenRows: state.overwrittenRows,
+          appendedRows: state.appendedRows,
+          droppedAppends: state.droppedAppends,
+        });
         yield* Effect.logInfo("vector_matrix.loaded").pipe(
           Effect.annotateLogs({
             event: "vector_matrix.loaded",
