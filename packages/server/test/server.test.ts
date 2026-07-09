@@ -340,3 +340,81 @@ describe("HTTP server", () => {
     }
   }, 15_000);
 });
+
+describe("SearchReceipt.traceId gates", () => {
+  const spawnServer = (env: Record<string, string>) => {
+    const dir = tempDir();
+    const sqlite = join(dir, "quasar.sqlite");
+    const port = 20_000 + Math.floor(Math.random() * 20_000);
+    const proc = Bun.spawn(["bun", "run", "src/main.ts", "--host", "127.0.0.1", "--port", String(port)], {
+      cwd: join(import.meta.dir, ".."),
+      env: {
+        ...process.env,
+        // Explicitly clear both gates unless the case re-enables them.
+        QUASAR_SEARCH_PROFILE: "",
+        QUASAR_OTLP_BASE_URL: "",
+        QUASAR_LOCAL_SQLITE: sqlite,
+        QUASAR_QUERY_EMBEDDING_PROVIDER: "synthetic",
+        ...env,
+      },
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    return { dir, sqlite, port, proc };
+  };
+
+  const lexicalReceipt = async (port: number) => {
+    const body = await fetch(`http://127.0.0.1:${port}/search/lexical?q=hello`).then((r) => r.json());
+    return body as { ok: boolean; data?: { receipt?: { traceId?: string; mode?: string } } };
+  };
+
+  test("QUASAR_SEARCH_PROFILE=1 puts non-empty traceId on the receipt", async () => {
+    const { sqlite, port, proc } = spawnServer({ QUASAR_SEARCH_PROFILE: "1" });
+    try {
+      await seed(sqlite);
+      await waitFor(`http://127.0.0.1:${port}/health`);
+      const body = await lexicalReceipt(port);
+      expect(body.ok).toBe(true);
+      expect(body.data?.receipt?.mode).toBe("lexical");
+      expect(typeof body.data?.receipt?.traceId).toBe("string");
+      expect((body.data?.receipt?.traceId ?? "").length).toBeGreaterThan(0);
+    } finally {
+      proc.kill();
+      await proc.exited;
+    }
+  }, 15_000);
+
+  test("QUASAR_OTLP_BASE_URL alone puts non-empty traceId on the receipt", async () => {
+    // Point at a dead collector: export may fail, but the gate still enables
+    // receipt + currentSpan.traceId (Layer wiring is independent of export success).
+    const { sqlite, port, proc } = spawnServer({
+      QUASAR_OTLP_BASE_URL: "http://127.0.0.1:9",
+    });
+    try {
+      await seed(sqlite);
+      await waitFor(`http://127.0.0.1:${port}/health`);
+      const body = await lexicalReceipt(port);
+      expect(body.ok).toBe(true);
+      expect(body.data?.receipt?.mode).toBe("lexical");
+      expect(typeof body.data?.receipt?.traceId).toBe("string");
+      expect((body.data?.receipt?.traceId ?? "").length).toBeGreaterThan(0);
+    } finally {
+      proc.kill();
+      await proc.exited;
+    }
+  }, 15_000);
+
+  test("neither SEARCH_PROFILE nor OTLP omits the receipt entirely", async () => {
+    const { sqlite, port, proc } = spawnServer({});
+    try {
+      await seed(sqlite);
+      await waitFor(`http://127.0.0.1:${port}/health`);
+      const body = await lexicalReceipt(port);
+      expect(body.ok).toBe(true);
+      expect(body.data?.receipt).toBeUndefined();
+    } finally {
+      proc.kill();
+      await proc.exited;
+    }
+  }, 15_000);
+});

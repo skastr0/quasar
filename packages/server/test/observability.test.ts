@@ -95,6 +95,21 @@ describe("observability OTLP env gate", () => {
   });
 });
 
+/** Extract Effect.withSpan("…") names from product sources (real wiring, not a free-floating list). */
+const WITH_SPAN_NAME_RE = /Effect\.withSpan\(\s*["']([^"']+)["']/g;
+
+const extractWithSpanNames = (source: string): string[] => {
+  const names: string[] = [];
+  for (const match of source.matchAll(WITH_SPAN_NAME_RE)) {
+    const name = match[1];
+    if (name !== undefined) names.push(name);
+  }
+  return names;
+};
+
+const readServerSrc = (...parts: string[]) =>
+  readFileSync(join(repoRoot, "packages/server/src", ...parts), "utf8");
+
 describe("observability spans", () => {
   test("withSpan parent exposes a native traceId", async () => {
     const traceId = await Effect.runPromise(
@@ -123,10 +138,70 @@ describe("observability spans", () => {
     expect(ids.parent).toBe(ids.child);
   });
 
-  test("stage span names used by search/ingest are distinct stage-level labels", () => {
-    // Contract lock: altitude is stage-level, not per-row. These are the
-    // names wired in handlers / services — keep the set small and stable.
-    const stageNames = [
+  test("optionalTraceId shape mirrors SearchReceipt gate (profile or OTLP)", async () => {
+    // Runtime mirror of packages/server/src/server.ts optionalTraceId:
+    // when receipt is enabled, currentSpan.traceId is a non-empty string.
+    const mirrorOptionalTraceId = (enabled: boolean) =>
+      Effect.gen(function* () {
+        if (!enabled) return undefined as string | undefined;
+        return yield* Effect.currentSpan.pipe(
+          Effect.map((span) => span.traceId),
+          Effect.orElseSucceed(() => undefined as string | undefined),
+        );
+      });
+
+    const off = await Effect.runPromise(mirrorOptionalTraceId(false).pipe(Effect.withSpan("search.lexical")));
+    expect(off).toBeUndefined();
+
+    const on = await Effect.runPromise(mirrorOptionalTraceId(true).pipe(Effect.withSpan("search.lexical")));
+    expect(typeof on).toBe("string");
+    expect((on as string).length).toBeGreaterThan(0);
+    expect(on).not.toBe("native");
+  });
+
+  test("stage span names are asserted from real Effect.withSpan wiring", () => {
+    const wiredSources = {
+      "server.ts": readServerSrc("server.ts"),
+      "search.ts": readServerSrc("search.ts"),
+      "embeddings.ts": readServerSrc("embeddings.ts"),
+      "vectorMatrix.ts": readServerSrc("vectorMatrix.ts"),
+      "ingest.ts": readServerSrc("ingest.ts"),
+      "store.ts": readServerSrc("store.ts"),
+    } as const;
+
+    const byFile = Object.fromEntries(
+      Object.entries(wiredSources).map(([file, source]) => [file, extractWithSpanNames(source)]),
+    ) as Record<keyof typeof wiredSources, string[]>;
+
+    // Parent route spans + readiness/fuse live on the HTTP handlers.
+    expect(byFile["server.ts"]).toEqual(
+      expect.arrayContaining([
+        "search.lexical",
+        "search.semantic",
+        "search.fusion",
+        "search.readiness",
+        "search.rrfFuse",
+      ]),
+    );
+    // Child legs on the services they instrument.
+    expect(byFile["search.ts"]).toContain("search.lexicalScan");
+    expect(byFile["embeddings.ts"]).toContain("search.embedText");
+    expect(byFile["vectorMatrix.ts"]).toContain("search.matrixScan");
+    expect(byFile["ingest.ts"]).toContain("ingest.session");
+    expect(byFile["store.ts"]).toEqual(
+      expect.arrayContaining(["ingest.diffApply", "ingest.chunk", "ingest.diffPlan"]),
+    );
+
+    const allNames = Object.values(byFile).flat();
+    const unique = [...new Set(allNames)].sort();
+    // Contract lock: stage-level only — never invent per-row names.
+    for (const name of unique) {
+      expect(name.includes("row")).toBe(false);
+      expect(name.startsWith("search.") || name.startsWith("ingest.")).toBe(true);
+    }
+
+    // Required stable set (each must appear at least once in product wiring).
+    const required = [
       "search.lexical",
       "search.semantic",
       "search.fusion",
@@ -139,10 +214,38 @@ describe("observability spans", () => {
       "ingest.diffApply",
       "ingest.chunk",
     ] as const;
-    expect(new Set(stageNames).size).toBe(stageNames.length);
-    for (const name of stageNames) {
-      expect(name.includes("row")).toBe(false);
+    for (const name of required) {
+      expect(allNames).toContain(name);
     }
+  });
+
+  test("matrix scan span wraps the whole search, not the per-row filter loop", () => {
+    const source = readServerSrc("vectorMatrix.ts");
+    // Stage altitude: withSpan is on the search effect result, not inside the
+    // `for (let row = 0; row < rowCount; row += 1)` mask loop.
+    const loopMatch = source.match(
+      /for\s*\(\s*let\s+row\s*=\s*0\s*;\s*row\s*<\s*rowCount\s*;\s*row\s*\+=\s*1\s*\)\s*\{[\s\S]*?\n\s*\}/,
+    );
+    expect(loopMatch).not.toBeNull();
+    expect(loopMatch![0]).not.toContain("withSpan");
+
+    const spanSites = [...source.matchAll(/Effect\.withSpan\(\s*["']([^"']+)["']/g)].map((m) => m[1]);
+    expect(spanSites).toEqual(["search.matrixScan"]);
+  });
+
+  test("SearchReceipt.traceId is gated by SEARCH_PROFILE or OTLP base URL in source", () => {
+    const server = readServerSrc("server.ts");
+    // Gate helpers — both paths must enable the receipt (and thus optionalTraceId).
+    expect(server).toContain('process.env.QUASAR_SEARCH_PROFILE === "1"');
+    expect(server).toContain("process.env.QUASAR_OTLP_BASE_URL");
+    expect(server).toMatch(
+      /searchReceiptEnabled\s*=\s*\(\)\s*:\s*boolean\s*=>\s*searchProfileEnabled\(\)\s*\|\|\s*otlpEnabled\(\)/,
+    );
+    expect(server).toContain("optionalTraceId");
+    expect(server).toContain("span.traceId");
+    // Receipt object spreads traceId when present; response omits receipt when gate is off.
+    expect(server).toContain("...(traceId !== undefined ? { traceId } : {})");
+    expect(server).toContain("receipt: searchReceiptEnabled() ? receipt : undefined");
   });
 });
 
