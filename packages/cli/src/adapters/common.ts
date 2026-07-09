@@ -477,8 +477,9 @@ export const numberValue = (value: unknown): number | undefined => {
 
 /**
  * Parse a JSON string when the field is dual-format (sometimes JSON, sometimes raw).
- * Non-strings pass through. Parse failures with a diagnostics sink emit a named
- * diagnostic and return the original string (not an invented empty structure).
+ * Non-strings pass through. Parse failures return explicit absence (`undefined`) —
+ * never the original invalid string (no fail-open preserve). Optional diagnostics
+ * sink emits a named `json.string.invalid` (or custom) diagnostic.
  */
 export const parseJsonString = (value: unknown, options?: FieldReadOptions): unknown => {
   if (typeof value !== "string") return value;
@@ -491,7 +492,7 @@ export const parseJsonString = (value: unknown, options?: FieldReadOptions): unk
       name,
       `${name}: ${errorMessage(error)}`,
     );
-    return value;
+    return undefined;
   }
 };
 

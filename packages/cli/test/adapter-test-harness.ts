@@ -275,6 +275,16 @@ const buildAntigravityFixture = (root: string): AdapterFixture => {
       content: "fixture assistant turn",
     },
   ]);
+  // Deterministic project identity: conversation DB carries file:///fixture/quasar
+  // so goldens never embed host HOME via the unknown-project fallback.
+  const conversationsDir = join(root, "conversations");
+  mkdirSync(conversationsDir, { recursive: true });
+  const workdirBlobHex = Buffer.from("file:///fixture/quasar", "utf8").toString("hex");
+  execFileSync("sqlite3", [
+    join(conversationsDir, `${sessionId}.db`),
+    `create table trajectory_metadata_blob (id text primary key, data blob);
+     insert into trajectory_metadata_blob values ('main', x'${workdirBlobHex}');`,
+  ]);
   return { provider: "antigravity", root, logicalRoot: "/fixture/antigravity", primaryPath };
 };
 
@@ -320,7 +330,14 @@ export const collectStreamItems = async (
 const sortObject = (value: unknown, fixture: AdapterFixture): unknown => {
   if (Array.isArray(value)) return value.map((item) => sortObject(item, fixture));
   if (typeof value === "string") {
-    return value.replaceAll(fixture.root, "<fixture-root>");
+    let text = value.replaceAll(fixture.root, "<fixture-root>");
+    // Guard host leakage: any residual HOME-derived path (unknown-project fallback)
+    // must not land in committed goldens.
+    const home = process.env.HOME;
+    if (home !== undefined && home.length > 0) {
+      text = text.replaceAll(home, "<home>");
+    }
+    return text;
   }
   if (value === null || typeof value !== "object") return value;
   const record = value as Record<string, unknown>;

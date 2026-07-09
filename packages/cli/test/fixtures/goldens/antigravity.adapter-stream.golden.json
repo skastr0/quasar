@@ -21,7 +21,7 @@
           "id": "antigravity:c72403d626d5a091447e25d4c19cc607:event:ff0d5750b25987859e3490de018d6383",
           "kind": "message",
           "machineId": "machine:test",
-          "projectIdentityKey": "path:machine:test:667beeb523312e4aaaaef25bf50be010",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
           "provider": "antigravity",
           "rawReference": {
             "line": 1,
@@ -40,7 +40,7 @@
           "id": "antigravity:c72403d626d5a091447e25d4c19cc607:event:99bf8736a8b3c8c75117ff7cda157ffd",
           "kind": "message",
           "machineId": "machine:test",
-          "projectIdentityKey": "path:machine:test:667beeb523312e4aaaaef25bf50be010",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
           "provider": "antigravity",
           "rawReference": {
             "line": 2,
@@ -60,14 +60,15 @@
       "nativeSessionId": "01900000-0000-7000-8000-000000000061",
       "projectIdentity": {
         "confidence": "low",
-        "displayName": "unknown-project",
-        "normalizedPath": "/Users/guilhermecastro/unknown-project",
-        "projectIdentityKey": "path:machine:test:667beeb523312e4aaaaef25bf50be010",
+        "displayName": "quasar",
+        "normalizedPath": "/fixture/quasar",
+        "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+        "rawPath": "/fixture/quasar",
         "signals": [
           {
             "confidence": "low",
             "kind": "path",
-            "value": "/Users/guilhermecastro/unknown-project"
+            "value": "/fixture/quasar"
           }
         ]
       },

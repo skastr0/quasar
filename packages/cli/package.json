@@ -34,7 +34,8 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:coverage": "bun test --coverage --coverage-reporter=lcov --coverage-dir=coverage",
-    "coverage:pulsar": "bun run test:coverage && pulsar coverage ingest packages/cli/coverage/lcov.info --format lcov .",
+    "coverage:prefix-lcov": "bun -e 'const fs=require(\"node:fs\"); const p=\"coverage/lcov.info\"; let s=fs.readFileSync(p,\"utf8\"); s=s.replace(/^SF:src\\//gm,\"SF:packages/cli/src/\"); if(!s.includes(\"SF:packages/cli/src/adapters/\")){console.error(\"coverage:prefix-lcov: missing packages/cli/src/adapters paths\"); process.exit(1);} if(/^SF:src\\//m.test(s)){console.error(\"coverage:prefix-lcov: residual SF:src/ paths\"); process.exit(1);} fs.writeFileSync(p,s);'",
+    "coverage:pulsar": "bun run test:coverage && bun run coverage:prefix-lcov && pulsar coverage ingest \"$PWD/coverage/lcov.info\" --format lcov \"$(cd ../.. && pwd)\"",
     "goldens:update": "QUASAR_UPDATE_ADAPTER_GOLDENS=1 bun test test/adapter-golden-lock.test.ts",
     "tui:snapshot": "bun scripts/tui-snapshot.tsx"
   },
