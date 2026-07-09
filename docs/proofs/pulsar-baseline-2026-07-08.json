@@ -1,0 +1,6463 @@
+{
+  "observer_semantics": "applicability-aware-readiness-v2",
+  "categories": {
+    "architectural-drift": {
+      "score": 0.278855575152,
+      "signals": {
+        "SHARED-COCHANGE-01-logical-coupling": 1,
+        "TS-AD-01-boundary-violations": 1,
+        "TS-AD-02-circular-dependencies": 1,
+        "TS-AD-03-reexport-depth": 1,
+        "TS-AD-04-boundary-parser-coverage": 0.2592592592592593,
+        "TS-AD-05-boundary-trust-breach": 0.5,
+        "SHARED-11-theory-encoding-index": 1
+      },
+      "signalCount": 7,
+      "applicableSignalCount": 4,
+      "activeSignalIds": [
+        "SHARED-COCHANGE-01-logical-coupling",
+        "TS-AD-01-boundary-violations",
+        "TS-AD-02-circular-dependencies",
+        "TS-AD-03-reexport-depth",
+        "TS-AD-04-boundary-parser-coverage",
+        "TS-AD-05-boundary-trust-breach",
+        "SHARED-11-theory-encoding-index"
+      ],
+      "aggregation": {
+        "strategy": "weighted-mean",
+        "rawScore": 0.6960648148148149,
+        "aggregateScore": 0.6960648148148149,
+        "lowestSignalScore": 0.2592592592592593,
+        "finalScore": 0.278855575152,
+        "shapedByPressure": true,
+        "pressure": {
+          "strategy": "pressure-pnorm-local-max",
+          "p": 4,
+          "meanPressure": 0.303935185185,
+          "pnormPressure": 0.54464424117,
+          "maxLocalPressure": 0.740740740741,
+          "authorityMaxLocalPressure": 0.740740740741,
+          "localPressure": 0.721144424848,
+          "finalPressure": 0.721144424848
+        },
+        "weightTotal": 4,
+        "weights": {
+          "SHARED-COCHANGE-01-logical-coupling": 1,
+          "TS-AD-01-boundary-violations": 1,
+          "TS-AD-02-circular-dependencies": 1,
+          "TS-AD-03-reexport-depth": 1,
+          "TS-AD-04-boundary-parser-coverage": 1,
+          "TS-AD-05-boundary-trust-breach": 1,
+          "SHARED-11-theory-encoding-index": 1
+        }
+      }
+    },
+    "dependency-entropy": {
+      "score": 0.882956155701,
+      "signals": {
+        "TS-DE-01-type-level-coupling": 0.9739837398373984,
+        "TS-DE-02-fan-in-fan-out": 1,
+        "TS-DE-03-propagation-cost": 1,
+        "TS-DE-04-package-dependency-health": 0.825,
+        "TS-DE-05-duplicate-dependency-versions": 0.996996336996337
+      },
+      "signalCount": 5,
+      "applicableSignalCount": 5,
+      "activeSignalIds": [
+        "TS-DE-01-type-level-coupling",
+        "TS-DE-02-fan-in-fan-out",
+        "TS-DE-03-propagation-cost",
+        "TS-DE-04-package-dependency-health",
+        "TS-DE-05-duplicate-dependency-versions"
+      ],
+      "aggregation": {
+        "strategy": "weighted-mean",
+        "rawScore": 0.959196015366747,
+        "aggregateScore": 0.959196015366747,
+        "lowestSignalScore": 0.825,
+        "finalScore": 0.882956155701,
+        "shapedByPressure": true,
+        "pressure": {
+          "strategy": "pressure-pnorm-local-max",
+          "p": 4,
+          "meanPressure": 0.040803984633,
+          "pnormPressure": 0.117043844299,
+          "maxLocalPressure": 0.175,
+          "authorityMaxLocalPressure": 0.175,
+          "localPressure": 0,
+          "finalPressure": 0.117043844299
+        },
+        "weightTotal": 5,
+        "weights": {
+          "TS-DE-01-type-level-coupling": 1,
+          "TS-DE-02-fan-in-fan-out": 1,
+          "TS-DE-03-propagation-cost": 1,
+          "TS-DE-04-package-dependency-health": 1,
+          "TS-DE-05-duplicate-dependency-versions": 1
+        }
+      }
+    },
+    "abstraction-bloat": {
+      "score": 0.725208031552,
+      "signals": {
+        "SHARED-10-domain-construction-control": 1,
+        "TS-AB-01-public-export-surface": 1,
+        "TS-AB-02-unused-exports": 0.7677599999999983,
+        "TS-AB-03-type-indirection-depth": 0.9777777777777777,
+        "TS-AB-04-interface-implementation-ratio": 0.6,
+        "TS-AB-05-generic-proliferation": 1
+      },
+      "signalCount": 6,
+      "applicableSignalCount": 5,
+      "activeSignalIds": [
+        "SHARED-10-domain-construction-control",
+        "TS-AB-01-public-export-surface",
+        "TS-AB-02-unused-exports",
+        "TS-AB-03-type-indirection-depth",
+        "TS-AB-04-interface-implementation-ratio",
+        "TS-AB-05-generic-proliferation"
+      ],
+      "aggregation": {
+        "strategy": "weighted-mean",
+        "rawScore": 0.8691075555555553,
+        "aggregateScore": 0.8691075555555553,
+        "lowestSignalScore": 0.6,
+        "finalScore": 0.725208031552,
+        "shapedByPressure": true,
+        "pressure": {
+          "strategy": "pressure-pnorm-local-max",
+          "p": 4,
+          "meanPressure": 0.130892444444,
+          "pnormPressure": 0.274791968448,
+          "maxLocalPressure": 0.4,
+          "authorityMaxLocalPressure": 0.23224,
+          "localPressure": 0,
+          "finalPressure": 0.274791968448
+        },
+        "weightTotal": 5,
+        "weights": {
+          "SHARED-10-domain-construction-control": 1,
+          "TS-AB-01-public-export-surface": 1,
+          "TS-AB-02-unused-exports": 1,
+          "TS-AB-03-type-indirection-depth": 1,
+          "TS-AB-04-interface-implementation-ratio": 1,
+          "TS-AB-05-generic-proliferation": 1
+        }
+      }
+    },
+    "legibility-decay": {
+      "score": 0.44413001958,
+      "signals": {
+        "TS-LD-01-cyclomatic-complexity": 0.36363636363636365,
+        "TS-LD-02-function-size-distribution": 0.18315018315018317,
+        "TS-LD-03-nesting-depth": 0.9967793880837359,
+        "TS-LD-04-naming-conventions": 1,
+        "TS-LD-05-domain-term-consistency": 1,
+        "TS-LD-06-annotation-coverage": 0.9786921381337252,
+        "TS-LD-07-unsafe-type-erosion": 0.9574087482431107,
+        "TS-LD-08-exhaustiveness-erosion": 0.9090909090909091,
+        "TS-LD-09-error-channel-opacity": 0.5070422535211268
+      },
+      "signalCount": 9,
+      "applicableSignalCount": 7,
+      "activeSignalIds": [
+        "TS-LD-01-cyclomatic-complexity",
+        "TS-LD-02-function-size-distribution",
+        "TS-LD-03-nesting-depth",
+        "TS-LD-04-naming-conventions",
+        "TS-LD-05-domain-term-consistency",
+        "TS-LD-06-annotation-coverage",
+        "TS-LD-07-unsafe-type-erosion",
+        "TS-LD-08-exhaustiveness-erosion",
+        "TS-LD-09-error-channel-opacity"
+      ],
+      "aggregation": {
+        "strategy": "weighted-mean",
+        "rawScore": 0.6993999976941649,
+        "aggregateScore": 0.6993999976941649,
+        "lowestSignalScore": 0.18315018315018317,
+        "finalScore": 0.44413001958,
+        "shapedByPressure": true,
+        "pressure": {
+          "strategy": "pressure-pnorm-local-max",
+          "p": 4,
+          "meanPressure": 0.300600002306,
+          "pnormPressure": 0.55586998042,
+          "maxLocalPressure": 0.81684981685,
+          "authorityMaxLocalPressure": 0,
+          "localPressure": 0,
+          "finalPressure": 0.55586998042
+        },
+        "weightTotal": 7,
+        "weights": {
+          "TS-LD-01-cyclomatic-complexity": 1,
+          "TS-LD-02-function-size-distribution": 1,
+          "TS-LD-03-nesting-depth": 1,
+          "TS-LD-04-naming-conventions": 1,
+          "TS-LD-05-domain-term-consistency": 1,
+          "TS-LD-06-annotation-coverage": 1,
+          "TS-LD-07-unsafe-type-erosion": 1,
+          "TS-LD-08-exhaustiveness-erosion": 1,
+          "TS-LD-09-error-channel-opacity": 1
+        }
+      }
+    },
+    "generated-slop": {
+      "score": 0.657591039872,
+      "signals": {
+        "TS-SL-01-duplication": 0.7823268044976424,
+        "TS-SL-03-suppressions": 1,
+        "TS-SL-04-unfinished-implementations": 1,
+        "TS-SL-05-phantom-tests": 1,
+        "TS-SL-06-confidence-claim-mismatch": 0.9166666666666666,
+        "TS-SL-02-inconsistent-clones": 0.46558385225173315,
+        "SHARED-05-suppression-governance": 1
+      },
+      "signalCount": 7,
+      "applicableSignalCount": 5,
+      "activeSignalIds": [
+        "TS-SL-01-duplication",
+        "TS-SL-03-suppressions",
+        "TS-SL-04-unfinished-implementations",
+        "TS-SL-05-phantom-tests",
+        "TS-SL-06-confidence-claim-mismatch",
+        "TS-SL-02-inconsistent-clones",
+        "SHARED-05-suppression-governance"
+      ],
+      "aggregation": {
+        "strategy": "weighted-mean",
+        "rawScore": 0.8382596261606909,
+        "aggregateScore": 0.8382596261606909,
+        "lowestSignalScore": 0.46558385225173315,
+        "finalScore": 0.657591039872,
+        "shapedByPressure": true,
+        "pressure": {
+          "strategy": "pressure-pnorm-local-max",
+          "p": 4,
+          "meanPressure": 0.161740373839,
+          "pnormPressure": 0.342408960128,
+          "maxLocalPressure": 0.507695340361,
+          "authorityMaxLocalPressure": 0.083333333333,
+          "localPressure": 0,
+          "finalPressure": 0.342408960128
+        },
+        "weightTotal": 5,
+        "weights": {
+          "TS-SL-01-duplication": 1,
+          "TS-SL-03-suppressions": 1,
+          "TS-SL-04-unfinished-implementations": 1,
+          "TS-SL-05-phantom-tests": 1,
+          "TS-SL-06-confidence-claim-mismatch": 1,
+          "TS-SL-02-inconsistent-clones": 1,
+          "SHARED-05-suppression-governance": 1
+        }
+      }
+    },
+    "review-pain": {
+      "score": 0.387989551702,
+      "signals": {
+        "SHARED-02-bus-factor": 1,
+        "SHARED-03-churn-rate": 0.2637835813909951,
+        "SHARED-07-machine-feedback-coverage": 1,
+        "SHARED-09-contract-freshness": 1,
+        "SHARED-COV-01-coverage-facts": 1,
+        "TS-RP-02-pr-size": 1,
+        "TS-RP-01-hotspots": 0.5254695782132067,
+        "SHARED-06-pr-dependency-delta": 1
+      },
+      "signalCount": 8,
+      "applicableSignalCount": 2,
+      "activeSignalIds": [
+        "SHARED-02-bus-factor",
+        "SHARED-03-churn-rate",
+        "SHARED-07-machine-feedback-coverage",
+        "SHARED-09-contract-freshness",
+        "SHARED-COV-01-coverage-facts",
+        "TS-RP-02-pr-size",
+        "TS-RP-01-hotspots",
+        "SHARED-06-pr-dependency-delta"
+      ],
+      "aggregation": {
+        "strategy": "weighted-mean",
+        "rawScore": 0.4248952508119959,
+        "aggregateScore": 0.4248952508119959,
+        "lowestSignalScore": 0.2637835813909951,
+        "finalScore": 0.387989551702,
+        "shapedByPressure": true,
+        "pressure": {
+          "strategy": "pressure-pnorm-local-max",
+          "p": 4,
+          "meanPressure": 0.575104749188,
+          "pnormPressure": 0.612010448298,
+          "maxLocalPressure": 0.699405597679,
+          "authorityMaxLocalPressure": 0,
+          "localPressure": 0,
+          "finalPressure": 0.612010448298
+        },
+        "weightTotal": 2,
+        "weights": {
+          "SHARED-02-bus-factor": 1,
+          "SHARED-03-churn-rate": 1,
+          "SHARED-07-machine-feedback-coverage": 1,
+          "SHARED-09-contract-freshness": 1,
+          "SHARED-COV-01-coverage-facts": 1,
+          "TS-RP-02-pr-size": 1,
+          "TS-RP-01-hotspots": 1,
+          "SHARED-06-pr-dependency-delta": 1
+        }
+      }
+    },
+    "security-risk": {
+      "score": 0.663607353331,
+      "signals": {
+        "TS-SEC-01-dangerous-capability-surface": 0.9432432432432433,
+        "TS-SEC-02-untrusted-boundary-sinks": 1,
+        "TS-SEC-03-secret-material": 0.6
+      },
+      "signalCount": 3,
+      "applicableSignalCount": 2,
+      "activeSignalIds": [
+        "TS-SEC-01-dangerous-capability-surface",
+        "TS-SEC-02-untrusted-boundary-sinks",
+        "TS-SEC-03-secret-material"
+      ],
+      "aggregation": {
+        "strategy": "weighted-mean",
+        "rawScore": 0.7716216216216216,
+        "aggregateScore": 0.7716216216216216,
+        "lowestSignalScore": 0.6,
+        "finalScore": 0.663607353331,
+        "shapedByPressure": true,
+        "pressure": {
+          "strategy": "pressure-pnorm-local-max",
+          "p": 4,
+          "meanPressure": 0.228378378378,
+          "pnormPressure": 0.336392646669,
+          "maxLocalPressure": 0.4,
+          "authorityMaxLocalPressure": 0.4,
+          "localPressure": 0,
+          "finalPressure": 0.336392646669
+        },
+        "weightTotal": 2,
+        "weights": {
+          "TS-SEC-01-dangerous-capability-surface": 1,
+          "TS-SEC-02-untrusted-boundary-sinks": 1,
+          "TS-SEC-03-secret-material": 1
+        }
+      }
+    },
+    "concurrency-safety": {
+      "score": 0.579551792373,
+      "signals": {
+        "TS-CC-01-async-failure-control": 0.5,
+        "TS-CC-02-unbounded-concurrency": 1
+      },
+      "signalCount": 2,
+      "applicableSignalCount": 2,
+      "activeSignalIds": [
+        "TS-CC-01-async-failure-control",
+        "TS-CC-02-unbounded-concurrency"
+      ],
+      "aggregation": {
+        "strategy": "weighted-mean",
+        "rawScore": 0.75,
+        "aggregateScore": 0.75,
+        "lowestSignalScore": 0.5,
+        "finalScore": 0.579551792373,
+        "shapedByPressure": true,
+        "pressure": {
+          "strategy": "pressure-pnorm-local-max",
+          "p": 4,
+          "meanPressure": 0.25,
+          "pnormPressure": 0.420448207627,
+          "maxLocalPressure": 0.5,
+          "authorityMaxLocalPressure": 0.5,
+          "localPressure": 0.142857142857,
+          "finalPressure": 0.420448207627
+        },
+        "weightTotal": 2,
+        "weights": {
+          "TS-CC-01-async-failure-control": 1,
+          "TS-CC-02-unbounded-concurrency": 1
+        }
+      }
+    },
+    "behavior-preservation": {
+      "score": 1,
+      "signals": {
+        "TS-BP-01-public-api-signature-diff": 1
+      },
+      "signalCount": 1,
+      "applicableSignalCount": 0,
+      "activeSignalIds": [
+        "TS-BP-01-public-api-signature-diff"
+      ],
+      "aggregation": {
+        "strategy": "weighted-mean",
+        "rawScore": 1,
+        "aggregateScore": 1,
+        "lowestSignalScore": 1,
+        "finalScore": 1,
+        "shapedByPressure": false,
+        "pressure": {
+          "strategy": "pressure-pnorm-local-max",
+          "p": 4,
+          "meanPressure": 0,
+          "pnormPressure": 0,
+          "maxLocalPressure": 0,
+          "authorityMaxLocalPressure": 0,
+          "localPressure": 0,
+          "finalPressure": 0
+        },
+        "weightTotal": 0,
+        "weights": {
+          "TS-BP-01-public-api-signature-diff": 1
+        }
+      }
+    }
+  },
+  "minimum": {
+    "signal": "TS-LD-02-function-size-distribution",
+    "category": "legibility-decay",
+    "score": 0.18315018315018317,
+    "detail": "Function outlier `buildAgentSession` — 273 LOC; Function outlier `streamCodex` — 137 LOC"
+  },
+  "weighted_mean": 0.5879814365032813,
+  "readiness": {
+    "score": 0.278855575152,
+    "pressure": 0.721144424848,
+    "status": "red",
+    "band": "red",
+    "aggregation": {
+      "strategy": "pressure-pnorm-local-max",
+      "p": 4,
+      "mean_pressure": 0.221690344581,
+      "pnorm_pressure": 0.464304956675,
+      "max_local_pressure": 0.81684981685,
+      "authority_max_local_pressure": 0.740740740741,
+      "local_poison_pressure": 0.721144424848,
+      "hard_gate_pressure": 0,
+      "hard_gate_score_cap": 0.2,
+      "local_warning_threshold": 0.4,
+      "local_poison_threshold": 0.75,
+      "local_warning_gain": 0.75,
+      "dominant_pressure_source": "local_poison",
+      "band_margin": -0.321144424848,
+      "evidence_mean": 0.778309655419,
+      "applicable_signal_count": 32,
+      "ignored_signal_count": 16,
+      "failed_signal_count": 0
+    },
+    "top_pressures": [
+      {
+        "signal_id": "TS-LD-02-function-size-distribution",
+        "category": "legibility-decay",
+        "score": 0.18315018315018317,
+        "raw_pressure": 0.81684981685,
+        "effective_pressure": 0.81684981685,
+        "weight": 1,
+        "confidence": 1,
+        "applicability": "applicable",
+        "poison_authority": false
+      },
+      {
+        "signal_id": "TS-AD-04-boundary-parser-coverage",
+        "category": "architectural-drift",
+        "score": 0.2592592592592593,
+        "raw_pressure": 0.740740740741,
+        "effective_pressure": 0.740740740741,
+        "weight": 1,
+        "confidence": 1,
+        "applicability": "applicable",
+        "poison_authority": true
+      },
+      {
+        "signal_id": "SHARED-03-churn-rate",
+        "category": "review-pain",
+        "score": 0.2637835813909951,
+        "raw_pressure": 0.736216418609,
+        "effective_pressure": 0.699405597679,
+        "weight": 1,
+        "confidence": 0.95,
+        "applicability": "applicable",
+        "poison_authority": false
+      },
+      {
+        "signal_id": "TS-LD-01-cyclomatic-complexity",
+        "category": "legibility-decay",
+        "score": 0.36363636363636365,
+        "raw_pressure": 0.636363636364,
+        "effective_pressure": 0.636363636364,
+        "weight": 1,
+        "confidence": 1,
+        "applicability": "applicable",
+        "poison_authority": false
+      },
+      {
+        "signal_id": "TS-SL-02-inconsistent-clones",
+        "category": "generated-slop",
+        "score": 0.46558385225173315,
+        "raw_pressure": 0.534416147748,
+        "effective_pressure": 0.507695340361,
+        "weight": 1,
+        "confidence": 0.95,
+        "applicability": "applicable",
+        "poison_authority": false
+      },
+      {
+        "signal_id": "TS-CC-01-async-failure-control",
+        "category": "concurrency-safety",
+        "score": 0.5,
+        "raw_pressure": 0.5,
+        "effective_pressure": 0.5,
+        "weight": 1,
+        "confidence": 1,
+        "applicability": "applicable",
+        "poison_authority": true
+      },
+      {
+        "signal_id": "TS-LD-09-error-channel-opacity",
+        "category": "legibility-decay",
+        "score": 0.5070422535211268,
+        "raw_pressure": 0.492957746479,
+        "effective_pressure": 0.492957746479,
+        "weight": 1,
+        "confidence": 1,
+        "applicability": "applicable",
+        "poison_authority": false
+      },
+      {
+        "signal_id": "TS-AD-05-boundary-trust-breach",
+        "category": "architectural-drift",
+        "score": 0.5,
+        "raw_pressure": 0.5,
+        "effective_pressure": 0.475,
+        "weight": 1,
+        "confidence": 0.95,
+        "applicability": "applicable",
+        "poison_authority": false
+      },
+      {
+        "signal_id": "TS-RP-01-hotspots",
+        "category": "review-pain",
+        "score": 0.5254695782132067,
+        "raw_pressure": 0.474530421787,
+        "effective_pressure": 0.450803900697,
+        "weight": 1,
+        "confidence": 0.95,
+        "applicability": "applicable",
+        "poison_authority": false
+      },
+      {
+        "signal_id": "TS-AB-04-interface-implementation-ratio",
+        "category": "abstraction-bloat",
+        "score": 0.6,
+        "raw_pressure": 0.4,
+        "effective_pressure": 0.4,
+        "weight": 1,
+        "confidence": 1,
+        "applicability": "applicable",
+        "poison_authority": false
+      }
+    ]
+  },
+  "hard_gate_status": "pass",
+  "hard_gate_violations": [],
+  "signal_metadata": {
+    "SHARED-CHURN-01-recent-churn": {
+      "applicability": "not_applicable"
+    },
+    "SHARED-CHURN-02-recency-weighted-churn": {
+      "applicability": "not_applicable"
+    },
+    "SHARED-COCHANGE-01-logical-coupling": {
+      "applicability": "not_applicable"
+    },
+    "SHARED-02-bus-factor": {
+      "applicability": "not_applicable"
+    },
+    "SHARED-07-machine-feedback-coverage": {
+      "applicability": "not_applicable"
+    },
+    "SHARED-09-contract-freshness": {
+      "applicability": "insufficient_evidence"
+    },
+    "SHARED-10-domain-construction-control": {
+      "applicability": "insufficient_evidence"
+    },
+    "SHARED-COV-01-coverage-facts": {
+      "applicability": "insufficient_evidence"
+    },
+    "TS-LD-04-naming-conventions": {
+      "applicability": "insufficient_evidence"
+    },
+    "TS-LD-05-domain-term-consistency": {
+      "applicability": "insufficient_evidence"
+    },
+    "TS-AD-01-boundary-violations": {
+      "applicability": "insufficient_evidence"
+    },
+    "TS-SEC-02-untrusted-boundary-sinks": {
+      "applicability": "insufficient_evidence"
+    },
+    "TS-BP-01-public-api-signature-diff": {
+      "applicability": "not_applicable"
+    },
+    "TS-SL-05-phantom-tests": {
+      "applicability": "not_applicable"
+    },
+    "TS-RP-02-pr-size": {
+      "applicability": "not_applicable"
+    },
+    "SHARED-11-theory-encoding-index": {
+      "applicability": "insufficient_evidence"
+    },
+    "SHARED-05-suppression-governance": {
+      "applicability": "not_applicable"
+    },
+    "SHARED-06-pr-dependency-delta": {
+      "applicability": "not_applicable"
+    }
+  },
+  "signal_factors": {
+    "SHARED-02-bus-factor": [
+      {
+        "path": "bus_factor.packages_cli_bin_quasar.js.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0010237044451521908,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_bin_quasar.js.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_bin_quasar.js.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_antigravity-schema.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.006449338004458801,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_antigravity-schema.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_antigravity-schema.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_antigravity.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.012775831475499341,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_antigravity.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_antigravity.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_claude-schema.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.012898676008917602,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_claude-schema.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_claude-schema.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_claude.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.012837253742208473,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_claude.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_claude.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_codex-schema.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.013410528231493699,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_codex-schema.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_codex-schema.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_codex.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.02403658037217344,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_codex.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_codex.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_common.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.015683152099731562,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_common.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_common.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_grok-schema.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.01416806952090632,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_grok-schema.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_grok-schema.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_grok.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.01721870876745985,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_grok.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_grok.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_harness-schema.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.001535556667728286,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_harness-schema.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_harness-schema.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_hermes-schema.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.006367441648846626,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_hermes-schema.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_hermes-schema.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_hermes.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.018815687701897267,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_hermes.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_hermes.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_kimi-schema.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.007923472405477956,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_kimi-schema.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_kimi-schema.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_kimi.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.014782292187997634,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_kimi.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_kimi.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_opencode-schema.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.006306019382137495,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_opencode-schema.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_opencode-schema.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_opencode.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.022275808726511668,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_opencode.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_opencode.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_types.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0019245643568861187,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_types.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_adapters_types.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_cli.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.013512898676008918,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_cli.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_cli.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_core_git-identity.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0020678829792074253,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_core_git-identity.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_core_git-identity.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_core_project-normalization.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0032758542244870105,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_core_project-normalization.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_core_project-normalization.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_core_schemas.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.005876063515173575,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_core_schemas.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_core_schemas.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_ingest.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.008496746894763183,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_ingest.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_ingest.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_map.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0021497793348196005,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_map.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_map.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_materialize-receipt.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0029073206242322216,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_materialize-receipt.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_materialize-receipt.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_model.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0011670230674734974,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_model.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_model.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_tui_actions.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0010441785340552345,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_tui_actions.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_tui_actions.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_tui_app.tsx.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.012693935119887166,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_tui_app.tsx.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_tui_app.tsx.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_tui_entry.tsx.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.001105600800764366,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_tui_entry.tsx.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_tui_entry.tsx.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_tui_format.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0014946084899221984,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_tui_format.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_tui_format.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_tui_keymap.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0027230538241048274,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_tui_keymap.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_tui_keymap.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_tui_quasar-client.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.007206879293871422,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_tui_quasar-client.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_tui_quasar-client.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_tui_query.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0010237044451521908,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_cli_src_tui_query.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_cli_src_tui_query.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_embeddingProfiles.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0021088311570135127,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_server_src_embeddingProfiles.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_embeddingProfiles.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_embeddings.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.015785522544246783,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_server_src_embeddings.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_embeddings.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_fts5.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.001105600800764366,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_server_src_fts5.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_fts5.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_ingest.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0019450384457891624,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_server_src_ingest.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_ingest.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_localOnnxEmbeddings.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0020474088903043816,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_server_src_localOnnxEmbeddings.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_localOnnxEmbeddings.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_model.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0017402975567587242,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_server_src_model.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_model.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_searchPolicy.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0010441785340552345,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_server_src_searchPolicy.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_searchPolicy.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_server.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.015846944810955912,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_server_src_server.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_server.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_services.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.009704718140042768,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_server_src_services.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_services.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_sqliteFirstProof.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.01744392374539333,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_server_src_sqliteFirstProof.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_sqliteFirstProof.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_sqliteFirstProofCli.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.003071113335456572,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_server_src_sqliteFirstProofCli.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_sqliteFirstProofCli.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_store.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.028397561308521772,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_server_src_store.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_store.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_syntheticEmbeddings.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0037262841803539742,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_server_src_syntheticEmbeddings.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_syntheticEmbeddings.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_vectorBlob.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0016174530233404613,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_server_src_vectorBlob.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_vectorBlob.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_vectorKernel.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.004422403203057464,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_server_src_vectorKernel.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_vectorKernel.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_vectorMatrix.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.014249965876518495,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_server_src_vectorMatrix.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_vectorMatrix.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_vectorScanWorker.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0037058100914509305,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_server_src_vectorScanWorker.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_vectorScanWorker.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_workers.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0012693935119887166,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.packages_server_src_workers.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.packages_server_src_workers.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.scripts_matrix-kernel-bench.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0057941671595614,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.scripts_matrix-kernel-bench.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.scripts_matrix-kernel-bench.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.scripts_query-embed-bench.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.002866372446426134,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.scripts_query-embed-bench.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.scripts_query-embed-bench.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.workflows_quasar-council-fill.workflow.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.00155603075663133,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.workflows_quasar-council-fill.workflow.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.workflows_quasar-council-fill.workflow.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.workflows_quasar-disk-amplification-council.workflow.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0031939578688748352,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.workflows_quasar-disk-amplification-council.workflow.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.workflows_quasar-disk-amplification-council.workflow.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.workflows_quasar-hardening-review.workflow.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0011260748896674097,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.workflows_quasar-hardening-review.workflow.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.workflows_quasar-hardening-review.workflow.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.workflows_quasar-ingest-pipeline.workflow.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.003951499158287457,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.workflows_quasar-ingest-pipeline.workflow.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.workflows_quasar-ingest-pipeline.workflow.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.workflows_quasar-killer-council.workflow.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0027844760908139585,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.workflows_quasar-killer-council.workflow.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.workflows_quasar-killer-council.workflow.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.workflows_quasar-lancedb-latency-council.workflow.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0031325356021657037,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.workflows_quasar-lancedb-latency-council.workflow.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.workflows_quasar-lancedb-latency-council.workflow.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.workflows_quasar-lancedb-latency-implementation.workflow.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.008926702761727103,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.workflows_quasar-lancedb-latency-implementation.workflow.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.workflows_quasar-lancedb-latency-implementation.workflow.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.workflows_quasar-productization-plan-council.workflow.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.003439646935711361,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.workflows_quasar-productization-plan-council.workflow.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.workflows_quasar-productization-plan-council.workflow.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.workflows_quasar-search-architecture-council.workflow.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0025183129350743894,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.workflows_quasar-search-architecture-council.workflow.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.workflows_quasar-search-architecture-council.workflow.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.workflows_quasar-tui-product-council.workflow.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0022930979571409073,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.workflows_quasar-tui-product-council.workflow.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.workflows_quasar-tui-product-council.workflow.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.workflows_quasar-tui-review-council.workflow.ts.penalty_weight",
+        "title": "Bus factor penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0020064607124982937,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "bus_factor.workflows_quasar-tui-review-council.workflow.ts.severity",
+        "title": "Bus factor severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "bus_factor.workflows_quasar-tui-review-council.workflow.ts.visible",
+        "title": "Bus factor visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "node_modules/**",
+          "**/node_modules/**",
+          "dist/**",
+          "**/dist/**",
+          ".turbo/**",
+          "**/.turbo/**",
+          "target/**",
+          "**/target/**",
+          ".*/**",
+          "**/.*/**",
+          "example/**",
+          "**/example/**",
+          "examples/**",
+          "**/examples/**",
+          "fixture/**",
+          "**/fixture/**",
+          "fixtures/**",
+          "**/fixtures/**",
+          "sample/**",
+          "**/sample/**",
+          "samples/**",
+          "**/samples/**",
+          "playground/**",
+          "playground-*/**",
+          "playgrounds/**",
+          "**/playground/**",
+          "**/playground-*/**",
+          "**/playgrounds/**",
+          "template/**",
+          "**/template/**",
+          "templates/**",
+          "**/templates/**",
+          "**/_generated/**",
+          "**/generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.gen.mts",
+          "**/*.gen.cts",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/*.generated.mts",
+          "**/*.generated.cts",
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.test.mts",
+          "**/*.test.cts",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/*.spec.mts",
+          "**/*.spec.cts",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/test-support/**",
+          "**/*test-support.ts",
+          "**/*test-support.tsx",
+          "**/*test-support.mts",
+          "**/*test-support.cts",
+          "**/*.test-support.ts",
+          "**/*.test-support.tsx",
+          "**/*.test-support.mts",
+          "**/*.test-support.cts",
+          "**/test-helpers.ts",
+          "**/test-helpers.mts",
+          "**/test-helpers.cts",
+          "**/*test-helpers.ts",
+          "**/*test-helpers.tsx",
+          "**/*test-helpers.mts",
+          "**/*test-helpers.cts",
+          "**/*.test-helpers.ts",
+          "**/*.test-helpers.tsx",
+          "**/*.test-helpers.mts",
+          "**/*.test-helpers.cts",
+          "**/test-mocks.ts",
+          "**/test-mocks.mts",
+          "**/test-mocks.cts",
+          "**/*test-mocks.ts",
+          "**/*test-mocks.tsx",
+          "**/*test-mocks.mts",
+          "**/*test-mocks.cts",
+          "**/*.test-mocks.ts",
+          "**/*.test-mocks.tsx",
+          "**/*.test-mocks.mts",
+          "**/*.test-mocks.cts",
+          "**/test-harness.ts",
+          "**/test-harness.mts",
+          "**/test-harness.cts",
+          "**/*test-harness.ts",
+          "**/*test-harness.tsx",
+          "**/*test-harness.mts",
+          "**/*test-harness.cts",
+          "**/*.test-harness.ts",
+          "**/*.test-harness.tsx",
+          "**/*.test-harness.mts",
+          "**/*.test-harness.cts",
+          "**/happydom.ts",
+          "**/__snapshots__/**",
+          "**/*.snap",
+          "**/*.lock",
+          "**/bun.lock",
+          "**/bun.lockb",
+          "**/package-lock.json",
+          "**/pnpm-lock.yaml",
+          "**/yarn.lock"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.include_extensions",
+        "title": "Config include extensions",
+        "scoreRole": "metadata",
+        "value": [
+          ".ts",
+          ".tsx",
+          ".mts",
+          ".cts",
+          ".js",
+          ".jsx",
+          ".rs"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.max_commits",
+        "title": "Config max commits",
+        "scoreRole": "threshold",
+        "value": 5000,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.min_loc",
+        "title": "Config min loc",
+        "scoreRole": "threshold",
+        "value": 50,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.window_days",
+        "title": "Config window days",
+        "scoreRole": "threshold",
+        "value": 180,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "SHARED-03-churn-rate": [
+      {
+        "path": "churn_rate.cli_src_adapters_antigravity-schema.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0014040999719180005,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_antigravity-schema.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_antigravity-schema.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_antigravity.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.05710006552466536,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_antigravity.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_antigravity.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_claude-schema.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0016381166339043342,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_claude-schema.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_claude-schema.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_claude.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.006552466535617337,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_claude.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_claude.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_codex-schema.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.007020499859590003,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_codex-schema.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_codex-schema.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_codex.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.04399513245343069,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_codex.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_codex.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_common.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.01778526631096134,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_common.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_common.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_grok-schema.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0035102499297950014,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_grok-schema.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_grok-schema.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_grok.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.047739399045212016,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_grok.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_grok.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_hermes-schema.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0009360666479453337,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_hermes-schema.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_hermes-schema.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_hermes.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.04025086586164935,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_hermes.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_hermes.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_kimi-schema.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.004446316577740335,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_kimi-schema.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_kimi-schema.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_kimi.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0938406814565197,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_kimi.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_kimi.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_opencode-schema.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.003042216605822335,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_opencode-schema.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_opencode-schema.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_opencode.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.009828699803426004,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_opencode.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_opencode.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_registry.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.00046803332397266686,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_registry.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_registry.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_types.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.004446316577740335,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_types.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_adapters_types.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_cli.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.08424599831508005,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.cli_src_cli.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_cli.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_client-config.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.002106149957877001,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.cli_src_client-config.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_client-config.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_ingest-report.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.00046803332397266686,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.cli_src_ingest-report.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_ingest-report.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_ingest.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.00748853318356267,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.cli_src_ingest.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_ingest.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_map.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0018721332958906674,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.cli_src_map.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_map.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_model.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.00023401666198633343,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.cli_src_model.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.cli_src_model.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_embeddingProfiles.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.006318449873631003,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.server_src_embeddingProfiles.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_embeddingProfiles.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_embeddings.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.034400449311991016,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.server_src_embeddings.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_embeddings.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_ingest.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.1174763643171394,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.server_src_ingest.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_ingest.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_model.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.00023401666198633343,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.server_src_model.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_model.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_paths.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.00023401666198633343,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.server_src_paths.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_paths.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_runtime.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.002106149957877001,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.server_src_runtime.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_runtime.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_search.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.05546194889076102,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.server_src_search.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_search.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_searchPolicy.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.0032762332678086684,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.server_src_searchPolicy.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_searchPolicy.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_server.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.034166432650004686,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.server_src_server.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_server.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_services.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.003978283253767669,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.server_src_services.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_services.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_store.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.01357296639520734,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.server_src_store.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_store.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_syntheticEmbeddings.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.00023401666198633343,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.server_src_syntheticEmbeddings.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_syntheticEmbeddings.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_workers.ts.penalty_weight",
+        "title": "Churn rate penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.02433773284657868,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "churn_rate.server_src_workers.ts.severity",
+        "title": "Churn rate severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "churn_rate.server_src_workers.ts.visible",
+        "title": "Churn rate visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "node_modules/**",
+          "**/node_modules/**",
+          "dist/**",
+          "**/dist/**",
+          ".turbo/**",
+          "**/.turbo/**",
+          "target/**",
+          "**/target/**",
+          ".*/**",
+          "**/.*/**",
+          "example/**",
+          "**/example/**",
+          "examples/**",
+          "**/examples/**",
+          "fixture/**",
+          "**/fixture/**",
+          "fixtures/**",
+          "**/fixtures/**",
+          "sample/**",
+          "**/sample/**",
+          "samples/**",
+          "**/samples/**",
+          "playground/**",
+          "playground-*/**",
+          "playgrounds/**",
+          "**/playground/**",
+          "**/playground-*/**",
+          "**/playgrounds/**",
+          "template/**",
+          "**/template/**",
+          "templates/**",
+          "**/templates/**",
+          "**/_generated/**",
+          "**/generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.gen.mts",
+          "**/*.gen.cts",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/*.generated.mts",
+          "**/*.generated.cts",
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.test.mts",
+          "**/*.test.cts",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/*.spec.mts",
+          "**/*.spec.cts",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/test-support/**",
+          "**/*test-support.ts",
+          "**/*test-support.tsx",
+          "**/*test-support.mts",
+          "**/*test-support.cts",
+          "**/*.test-support.ts",
+          "**/*.test-support.tsx",
+          "**/*.test-support.mts",
+          "**/*.test-support.cts",
+          "**/test-helpers.ts",
+          "**/test-helpers.mts",
+          "**/test-helpers.cts",
+          "**/*test-helpers.ts",
+          "**/*test-helpers.tsx",
+          "**/*test-helpers.mts",
+          "**/*test-helpers.cts",
+          "**/*.test-helpers.ts",
+          "**/*.test-helpers.tsx",
+          "**/*.test-helpers.mts",
+          "**/*.test-helpers.cts",
+          "**/test-mocks.ts",
+          "**/test-mocks.mts",
+          "**/test-mocks.cts",
+          "**/*test-mocks.ts",
+          "**/*test-mocks.tsx",
+          "**/*test-mocks.mts",
+          "**/*test-mocks.cts",
+          "**/*.test-mocks.ts",
+          "**/*.test-mocks.tsx",
+          "**/*.test-mocks.mts",
+          "**/*.test-mocks.cts",
+          "**/test-harness.ts",
+          "**/test-harness.mts",
+          "**/test-harness.cts",
+          "**/*test-harness.ts",
+          "**/*test-harness.tsx",
+          "**/*test-harness.mts",
+          "**/*test-harness.cts",
+          "**/*.test-harness.ts",
+          "**/*.test-harness.tsx",
+          "**/*.test-harness.mts",
+          "**/*.test-harness.cts",
+          "**/happydom.ts",
+          "**/__snapshots__/**",
+          "**/*.snap",
+          "**/*.lock",
+          "**/bun.lock",
+          "**/bun.lockb",
+          "**/package-lock.json",
+          "**/pnpm-lock.yaml",
+          "**/yarn.lock"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.include_extensions",
+        "title": "Config include extensions",
+        "scoreRole": "metadata",
+        "value": [
+          ".ts",
+          ".tsx",
+          ".mts",
+          ".cts",
+          ".js",
+          ".jsx",
+          ".rs"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.max_mature_commits",
+        "title": "Config max mature commits",
+        "scoreRole": "threshold",
+        "value": 500,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.similarity_threshold",
+        "title": "Config similarity threshold",
+        "scoreRole": "threshold",
+        "value": 0.8,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.window_days",
+        "title": "Config window days",
+        "scoreRole": "threshold",
+        "value": 14,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "SHARED-05-suppression-governance": [
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "SHARED-06-pr-dependency-delta": [
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "SHARED-07-machine-feedback-coverage": [
+      {
+        "path": "config.required_classes",
+        "title": "Config required classes",
+        "scoreRole": "metadata",
+        "value": [
+          "build",
+          "typecheck",
+          "test",
+          "static_analysis"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "SHARED-09-contract-freshness": [
+      {
+        "path": "config.max_weighted_findings",
+        "title": "Config max weighted findings",
+        "scoreRole": "threshold",
+        "value": 8,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "SHARED-10-domain-construction-control": [
+      {
+        "path": "config.include_explicitly_open_diagnostics",
+        "title": "Config include explicitly open diagnostics",
+        "scoreRole": "threshold",
+        "value": true,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.max_weighted_findings",
+        "title": "Config max weighted findings",
+        "scoreRole": "threshold",
+        "value": 8,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "SHARED-11-theory-encoding-index": [
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.warn_threshold",
+        "title": "Config warn threshold",
+        "scoreRole": "threshold",
+        "value": 0.35,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.min_available_factor_weight",
+        "title": "Config min available factor weight",
+        "scoreRole": "threshold",
+        "value": 0.25,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "SHARED-CHURN-01-recent-churn": [
+      {
+        "path": "config.exclude_paths",
+        "title": "Config exclude paths",
+        "scoreRole": "metadata",
+        "value": [
+          "node_modules/",
+          "dist/",
+          ".turbo/",
+          "target/"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.include_extensions",
+        "title": "Config include extensions",
+        "scoreRole": "metadata",
+        "value": [
+          ".ts",
+          ".tsx",
+          ".mts",
+          ".cts",
+          ".js",
+          ".jsx",
+          ".rs"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.max_commits",
+        "title": "Config max commits",
+        "scoreRole": "threshold",
+        "value": 500,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.window_days",
+        "title": "Config window days",
+        "scoreRole": "threshold",
+        "value": 90,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "SHARED-CHURN-02-recency-weighted-churn": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "node_modules/**",
+          "**/node_modules/**",
+          "dist/**",
+          "**/dist/**",
+          ".turbo/**",
+          "**/.turbo/**",
+          "target/**",
+          "**/target/**",
+          ".*/**",
+          "**/.*/**",
+          "example/**",
+          "**/example/**",
+          "examples/**",
+          "**/examples/**",
+          "fixture/**",
+          "**/fixture/**",
+          "fixtures/**",
+          "**/fixtures/**",
+          "sample/**",
+          "**/sample/**",
+          "samples/**",
+          "**/samples/**",
+          "playground/**",
+          "playground-*/**",
+          "playgrounds/**",
+          "**/playground/**",
+          "**/playground-*/**",
+          "**/playgrounds/**",
+          "template/**",
+          "**/template/**",
+          "templates/**",
+          "**/templates/**",
+          "**/_generated/**",
+          "**/generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.gen.mts",
+          "**/*.gen.cts",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/*.generated.mts",
+          "**/*.generated.cts",
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.test.mts",
+          "**/*.test.cts",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/*.spec.mts",
+          "**/*.spec.cts",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/test-support/**",
+          "**/*test-support.ts",
+          "**/*test-support.tsx",
+          "**/*test-support.mts",
+          "**/*test-support.cts",
+          "**/*.test-support.ts",
+          "**/*.test-support.tsx",
+          "**/*.test-support.mts",
+          "**/*.test-support.cts",
+          "**/test-helpers.ts",
+          "**/test-helpers.mts",
+          "**/test-helpers.cts",
+          "**/*test-helpers.ts",
+          "**/*test-helpers.tsx",
+          "**/*test-helpers.mts",
+          "**/*test-helpers.cts",
+          "**/*.test-helpers.ts",
+          "**/*.test-helpers.tsx",
+          "**/*.test-helpers.mts",
+          "**/*.test-helpers.cts",
+          "**/test-mocks.ts",
+          "**/test-mocks.mts",
+          "**/test-mocks.cts",
+          "**/*test-mocks.ts",
+          "**/*test-mocks.tsx",
+          "**/*test-mocks.mts",
+          "**/*test-mocks.cts",
+          "**/*.test-mocks.ts",
+          "**/*.test-mocks.tsx",
+          "**/*.test-mocks.mts",
+          "**/*.test-mocks.cts",
+          "**/test-harness.ts",
+          "**/test-harness.mts",
+          "**/test-harness.cts",
+          "**/*test-harness.ts",
+          "**/*test-harness.tsx",
+          "**/*test-harness.mts",
+          "**/*test-harness.cts",
+          "**/*.test-harness.ts",
+          "**/*.test-harness.tsx",
+          "**/*.test-harness.mts",
+          "**/*.test-harness.cts",
+          "**/happydom.ts",
+          "**/__snapshots__/**",
+          "**/*.snap",
+          "**/*.lock",
+          "**/bun.lock",
+          "**/bun.lockb",
+          "**/package-lock.json",
+          "**/pnpm-lock.yaml",
+          "**/yarn.lock"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.half_life_days",
+        "title": "Config half life days",
+        "scoreRole": "threshold",
+        "value": 14,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.include_extensions",
+        "title": "Config include extensions",
+        "scoreRole": "metadata",
+        "value": [
+          ".ts",
+          ".tsx",
+          ".mts",
+          ".cts",
+          ".js",
+          ".jsx",
+          ".rs"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.max_commits",
+        "title": "Config max commits",
+        "scoreRole": "threshold",
+        "value": 500,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.window_days",
+        "title": "Config window days",
+        "scoreRole": "threshold",
+        "value": 90,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "SHARED-COCHANGE-01-logical-coupling": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "node_modules/**",
+          "**/node_modules/**",
+          "dist/**",
+          "**/dist/**",
+          ".turbo/**",
+          "**/.turbo/**",
+          "target/**",
+          "**/target/**",
+          ".*/**",
+          "**/.*/**",
+          "example/**",
+          "**/example/**",
+          "examples/**",
+          "**/examples/**",
+          "fixture/**",
+          "**/fixture/**",
+          "fixtures/**",
+          "**/fixtures/**",
+          "sample/**",
+          "**/sample/**",
+          "samples/**",
+          "**/samples/**",
+          "playground/**",
+          "playground-*/**",
+          "playgrounds/**",
+          "**/playground/**",
+          "**/playground-*/**",
+          "**/playgrounds/**",
+          "template/**",
+          "**/template/**",
+          "templates/**",
+          "**/templates/**",
+          "**/_generated/**",
+          "**/generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.gen.mts",
+          "**/*.gen.cts",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/*.generated.mts",
+          "**/*.generated.cts",
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.test.mts",
+          "**/*.test.cts",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/*.spec.mts",
+          "**/*.spec.cts",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/test-support/**",
+          "**/*test-support.ts",
+          "**/*test-support.tsx",
+          "**/*test-support.mts",
+          "**/*test-support.cts",
+          "**/*.test-support.ts",
+          "**/*.test-support.tsx",
+          "**/*.test-support.mts",
+          "**/*.test-support.cts",
+          "**/test-helpers.ts",
+          "**/test-helpers.mts",
+          "**/test-helpers.cts",
+          "**/*test-helpers.ts",
+          "**/*test-helpers.tsx",
+          "**/*test-helpers.mts",
+          "**/*test-helpers.cts",
+          "**/*.test-helpers.ts",
+          "**/*.test-helpers.tsx",
+          "**/*.test-helpers.mts",
+          "**/*.test-helpers.cts",
+          "**/test-mocks.ts",
+          "**/test-mocks.mts",
+          "**/test-mocks.cts",
+          "**/*test-mocks.ts",
+          "**/*test-mocks.tsx",
+          "**/*test-mocks.mts",
+          "**/*test-mocks.cts",
+          "**/*.test-mocks.ts",
+          "**/*.test-mocks.tsx",
+          "**/*.test-mocks.mts",
+          "**/*.test-mocks.cts",
+          "**/test-harness.ts",
+          "**/test-harness.mts",
+          "**/test-harness.cts",
+          "**/*test-harness.ts",
+          "**/*test-harness.tsx",
+          "**/*test-harness.mts",
+          "**/*test-harness.cts",
+          "**/*.test-harness.ts",
+          "**/*.test-harness.tsx",
+          "**/*.test-harness.mts",
+          "**/*.test-harness.cts",
+          "**/happydom.ts",
+          "**/__snapshots__/**",
+          "**/*.snap",
+          "**/*.lock",
+          "**/bun.lock",
+          "**/bun.lockb",
+          "**/package-lock.json",
+          "**/pnpm-lock.yaml",
+          "**/yarn.lock"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.include_extensions",
+        "title": "Config include extensions",
+        "scoreRole": "metadata",
+        "value": [
+          ".ts",
+          ".tsx",
+          ".mts",
+          ".cts",
+          ".js",
+          ".jsx",
+          ".rs"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.max_commits",
+        "title": "Config max commits",
+        "scoreRole": "threshold",
+        "value": 500,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.min_co_change_count",
+        "title": "Config min co change count",
+        "scoreRole": "threshold",
+        "value": 2,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.window_days",
+        "title": "Config window days",
+        "scoreRole": "threshold",
+        "value": 90,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "SHARED-COV-01-coverage-facts": [
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-AB-01-public-export-surface": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/docs/**",
+          "**/examples/**",
+          "**/prototypes/**",
+          "**/explorations/**",
+          "**/vendor/**",
+          "**/gen/**",
+          "**/generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/sst-env.d.ts",
+          "**/test-support/**",
+          "**/*test-support.ts",
+          "**/*test-support.tsx",
+          "**/*.test-support.ts",
+          "**/*.test-support.tsx",
+          "**/test-helpers.ts",
+          "**/*test-helpers.ts",
+          "**/*test-helpers.tsx",
+          "**/*.test-helpers.ts",
+          "**/*.test-helpers.tsx",
+          "**/test-mocks.ts",
+          "**/*test-mocks.ts",
+          "**/*test-mocks.tsx",
+          "**/*.test-mocks.ts",
+          "**/*.test-mocks.tsx",
+          "**/test-harness.ts",
+          "**/*test-harness.ts",
+          "**/*test-harness.tsx",
+          "**/*.test-harness.ts",
+          "**/*.test-harness.tsx",
+          "**/happydom.ts",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/.turbo/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.public_export_globs",
+        "title": "Config public export globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/src/index.ts",
+          "**/index.ts"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.surface_threshold",
+        "title": "Config surface threshold",
+        "scoreRole": "threshold",
+        "value": 50,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 5,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-AB-02-unused-exports": [
+      {
+        "path": "config.boundary_rules",
+        "title": "Config boundary rules",
+        "scoreRole": "metadata",
+        "value": [],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/docs/**",
+          "example/**",
+          "**/example/**",
+          "examples/**",
+          "**/examples/**",
+          "fixtures/**",
+          "**/fixtures/**",
+          "playground/**",
+          "playground-*/**",
+          "playgrounds/**",
+          "**/playground/**",
+          "**/playground-*/**",
+          "**/playgrounds/**",
+          "**/_generated/**",
+          "**/generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/prototypes/**",
+          "**/explorations/**",
+          "**/test-support/**",
+          "**/*test-support.ts",
+          "**/*test-support.tsx",
+          "**/*.test-support.ts",
+          "**/*.test-support.tsx",
+          "**/test-helpers.ts",
+          "**/*test-helpers.ts",
+          "**/*test-helpers.tsx",
+          "**/*.test-helpers.ts",
+          "**/*.test-helpers.tsx",
+          "**/test-mocks.ts",
+          "**/*test-mocks.ts",
+          "**/*test-mocks.tsx",
+          "**/*.test-mocks.ts",
+          "**/*.test-mocks.tsx",
+          "**/test-harness.ts",
+          "**/*test-harness.ts",
+          "**/*test-harness.tsx",
+          "**/*.test-harness.ts",
+          "**/*.test-harness.tsx",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/.turbo/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.public_entry_globs",
+        "title": "Config public entry globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/src/index.ts",
+          "**/index.ts",
+          "**/runtime-api.ts",
+          "**/setup-api.ts",
+          "**/*.config.ts",
+          "**/*.config.tsx",
+          "**/*.config.mts",
+          "**/*.config.cts"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 20,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-AB-03-type-indirection-depth": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/*.stories.ts",
+          "**/*.stories.tsx",
+          "**/*.d.ts",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/.turbo/**",
+          "**/vendor/**",
+          "**/gen/**",
+          "**/generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/sst-env.d.ts",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/test-support/**",
+          "**/*test-support.ts",
+          "**/*test-support.tsx",
+          "**/*.test-support.ts",
+          "**/*.test-support.tsx",
+          "**/test-helpers.ts",
+          "**/*test-helpers.ts",
+          "**/*test-helpers.tsx",
+          "**/*.test-helpers.ts",
+          "**/*.test-helpers.tsx",
+          "**/test-mocks.ts",
+          "**/*test-mocks.ts",
+          "**/*test-mocks.tsx",
+          "**/*.test-mocks.ts",
+          "**/*.test-mocks.tsx",
+          "**/test-harness.ts",
+          "**/*test-harness.ts",
+          "**/*test-harness.tsx",
+          "**/*.test-harness.ts",
+          "**/*.test-harness.tsx",
+          "**/happydom.ts"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.max_depth",
+        "title": "Config max depth",
+        "scoreRole": "threshold",
+        "value": 4,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.max_traversal_steps",
+        "title": "Config max traversal steps",
+        "scoreRole": "threshold",
+        "value": 16,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-AB-04-interface-implementation-ratio": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/.turbo/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.min_interface_evidence",
+        "title": "Config min interface evidence",
+        "scoreRole": "threshold",
+        "value": 5,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.public_entry_globs",
+        "title": "Config public entry globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/src/index.ts",
+          "**/index.ts"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.test_globs",
+        "title": "Config test globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.spec.ts",
+          "**/__tests__/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 20,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-AB-05-generic-proliferation": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/*.stories.ts",
+          "**/*.stories.tsx",
+          "**/*.d.ts",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/.turbo/**",
+          "**/vendor/**",
+          "**/gen/**",
+          "**/generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/sst-env.d.ts",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/test-support/**",
+          "**/*test-support.ts",
+          "**/*test-support.tsx",
+          "**/*.test-support.ts",
+          "**/*.test-support.tsx",
+          "**/test-helpers.ts",
+          "**/*test-helpers.ts",
+          "**/*test-helpers.tsx",
+          "**/*.test-helpers.ts",
+          "**/*.test-helpers.tsx",
+          "**/test-mocks.ts",
+          "**/*test-mocks.ts",
+          "**/*test-mocks.tsx",
+          "**/*.test-mocks.ts",
+          "**/*.test-mocks.tsx",
+          "**/test-harness.ts",
+          "**/*test-harness.ts",
+          "**/*test-harness.tsx",
+          "**/*.test-harness.ts",
+          "**/*.test-harness.tsx",
+          "**/happydom.ts"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.max_generic_parameters",
+        "title": "Config max generic parameters",
+        "scoreRole": "threshold",
+        "value": 3,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-AD-01-boundary-violations": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.spec.ts",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/.turbo/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 20,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-AD-02-circular-dependencies": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/*.d.ts",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/gen/**",
+          "**/generated/**",
+          "**/vendor/**",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/.turbo/**",
+          "**/example/**",
+          "**/examples/**",
+          "**/demo/**",
+          "**/demos/**",
+          "**/private-demos/**",
+          "**/sample/**",
+          "**/samples/**",
+          "**/sdk-samples/**",
+          "**/google_samples/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-AD-03-reexport-depth": [
+      {
+        "path": "config.barrel_ratio_threshold",
+        "title": "Config barrel ratio threshold",
+        "scoreRole": "threshold",
+        "value": 0.5,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.chain_threshold",
+        "title": "Config chain threshold",
+        "scoreRole": "threshold",
+        "value": 3,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.spec.ts",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/.turbo/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.index_reexport_threshold",
+        "title": "Config index reexport threshold",
+        "scoreRole": "threshold",
+        "value": 3,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.score_scale",
+        "title": "Config score scale",
+        "scoreRole": "threshold",
+        "value": 3,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-AD-04-boundary-parser-coverage": [
+      {
+        "path": "config.boundary_globs",
+        "title": "Config boundary globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/api/*.ts",
+          "**/api/**/*.ts",
+          "**/routes/*.ts",
+          "**/routes/**/*.ts",
+          "**/handlers/*.ts",
+          "**/handlers/**/*.ts",
+          "**/controllers/*.ts",
+          "**/controllers/**/*.ts",
+          "**/adapters/*.ts",
+          "**/adapters/**/*.ts",
+          "**/src/cli/*.ts",
+          "**/src/cli/**/*.ts",
+          "**/commands/*.ts",
+          "**/commands/**/*.ts",
+          "**/*route.ts",
+          "**/*handler.ts",
+          "**/*controller.ts",
+          "**/*adapter.ts"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/*.d.ts",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/coverage/**",
+          "**/.turbo/**",
+          "**/generated/**",
+          "**/*.generated.ts",
+          "**/*.gen.ts"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.parser_call_patterns",
+        "title": "Config parser call patterns",
+        "scoreRole": "metadata",
+        "value": [
+          "parse",
+          "safeparse",
+          "decode",
+          "decodeunknown",
+          "validate",
+          "assert",
+          "schema",
+          "json.parse"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-AD-05-boundary-trust-breach": [
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.warn_threshold",
+        "title": "Config warn threshold",
+        "scoreRole": "threshold",
+        "value": 0.35,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-BP-01-public-api-signature-diff": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.d.ts",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/build/**",
+          "**/coverage/**",
+          "**/.turbo/**",
+          "**/.pulsar/**",
+          "**/vendor/**",
+          "**/gen/**",
+          "**/generated/**",
+          "**/_generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/fixtures/**",
+          "**/__fixtures__/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.public_entry_globs",
+        "title": "Config public entry globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/src/index.ts",
+          "**/index.ts",
+          "**/*.config.ts",
+          "**/*.config.tsx",
+          "**/*.config.mts",
+          "**/*.config.cts"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-CC-01-async-failure-control": [
+      {
+        "path": "config.async_name_patterns",
+        "title": "Config async name patterns",
+        "scoreRole": "metadata",
+        "value": [
+          "fetch",
+          "request",
+          "mutate",
+          "query",
+          "execute",
+          "load",
+          "save",
+          "send",
+          "publish",
+          "read"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.d.ts",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/build/**",
+          "**/coverage/**",
+          "**/.turbo/**",
+          "**/.pulsar/**",
+          "**/vendor/**",
+          "**/gen/**",
+          "**/generated/**",
+          "**/_generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/fixtures/**",
+          "**/__fixtures__/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-CC-02-unbounded-concurrency": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.d.ts",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/build/**",
+          "**/coverage/**",
+          "**/.turbo/**",
+          "**/.pulsar/**",
+          "**/vendor/**",
+          "**/gen/**",
+          "**/generated/**",
+          "**/_generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/fixtures/**",
+          "**/__fixtures__/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.limiter_name_patterns",
+        "title": "Config limiter name patterns",
+        "scoreRole": "metadata",
+        "value": [
+          "limit",
+          "limiter",
+          "pool",
+          "queue",
+          "pLimit",
+          "concurrency"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-DE-01-type-level-coupling": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/*.d.ts",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/gen/**",
+          "**/generated/**",
+          "**/vendor/**",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/.turbo/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.precise_module_limit",
+        "title": "Config precise module limit",
+        "scoreRole": "threshold",
+        "value": 1000,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "type_coupling.packages_cli_src_adapters_codex.ts.penalty_weight",
+        "title": "Type coupling penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.2,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "type_coupling.packages_cli_src_adapters_codex.ts.severity",
+        "title": "Type coupling severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "type_coupling.packages_cli_src_adapters_codex.ts.visible",
+        "title": "Type coupling visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "type_coupling.packages_cli_src_adapters_common.ts.penalty_weight",
+        "title": "Type coupling penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.8,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "type_coupling.packages_cli_src_adapters_common.ts.severity",
+        "title": "Type coupling severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "type_coupling.packages_cli_src_adapters_common.ts.visible",
+        "title": "Type coupling visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "type_coupling.packages_cli_src_adapters_grok.ts.penalty_weight",
+        "title": "Type coupling penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.3333333333333333,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "type_coupling.packages_cli_src_adapters_grok.ts.severity",
+        "title": "Type coupling severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "type_coupling.packages_cli_src_adapters_grok.ts.visible",
+        "title": "Type coupling visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "type_coupling.packages_cli_src_adapters_hermes.ts.penalty_weight",
+        "title": "Type coupling penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.26666666666666666,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "type_coupling.packages_cli_src_adapters_hermes.ts.severity",
+        "title": "Type coupling severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "type_coupling.packages_cli_src_adapters_hermes.ts.visible",
+        "title": "Type coupling visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "type_coupling.packages_cli_src_adapters_opencode.ts.penalty_weight",
+        "title": "Type coupling penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.5333333333333333,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "type_coupling.packages_cli_src_adapters_opencode.ts.severity",
+        "title": "Type coupling severity",
+        "scoreRole": "metadata",
+        "value": "warn",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "type_coupling.packages_cli_src_adapters_opencode.ts.visible",
+        "title": "Type coupling visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      }
+    ],
+    "TS-DE-02-fan-in-fan-out": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/.turbo/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.hub_fan_in_threshold",
+        "title": "Config hub fan in threshold",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.hub_fan_out_threshold",
+        "title": "Config hub fan out threshold",
+        "scoreRole": "threshold",
+        "value": 5,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-DE-03-propagation-cost": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/.turbo/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.scale",
+        "title": "Config scale",
+        "scoreRole": "threshold",
+        "value": 0.4,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.small_sample_threshold",
+        "title": "Config small sample threshold",
+        "scoreRole": "threshold",
+        "value": 20,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.target",
+        "title": "Config target",
+        "scoreRole": "threshold",
+        "value": 0.3,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-DE-04-package-dependency-health": [
+      {
+        "path": "config.allow_dev_dependency_in_prod",
+        "title": "Config allow dev dependency in prod",
+        "scoreRole": "metadata",
+        "value": [],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.dependency_aliases",
+        "title": "Config dependency aliases",
+        "scoreRole": "metadata",
+        "value": {},
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/.turbo/**",
+          "**/vendor/**",
+          "**/gen/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/sst-env.d.ts",
+          "**/example/**",
+          "**/examples/**",
+          "**/demo/**",
+          "**/demos/**",
+          "**/private-demos/**",
+          "**/sample/**",
+          "**/samples/**",
+          "**/sdk-samples/**",
+          "**/google_samples/**",
+          "**/fixture/**",
+          "**/fixtures/**",
+          "**/template/**",
+          "**/templates/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.test_globs",
+        "title": "Config test globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/*.stories.ts",
+          "**/*.stories.tsx",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/test-support/**",
+          "**/test-utils/**",
+          "**/*test-support.ts",
+          "**/*test-support.tsx",
+          "**/*test-utils.ts",
+          "**/*test-utils.tsx",
+          "**/*.test-utils.ts",
+          "**/*.test-utils.tsx",
+          "**/*.test-support.ts",
+          "**/*.test-support.tsx",
+          "**/test-helpers.ts",
+          "**/*test-helpers.ts",
+          "**/*test-helpers.tsx",
+          "**/*.test-helpers.ts",
+          "**/*.test-helpers.tsx",
+          "**/test-mocks.ts",
+          "**/*test-mocks.ts",
+          "**/*test-mocks.tsx",
+          "**/*.test-mocks.ts",
+          "**/*.test-mocks.tsx",
+          "**/test-harness.ts",
+          "**/*test-harness.ts",
+          "**/*test-harness.tsx",
+          "**/*.test-harness.ts",
+          "**/*.test-harness.tsx",
+          "**/*.config.ts",
+          "**/*.config.tsx",
+          "**/*.config.js",
+          "**/*.config.mjs",
+          "**/*.config.cjs",
+          "**/vite.js",
+          "**/vite.ts",
+          "**/vite.mjs",
+          "**/happydom.ts"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 20,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-DE-05-duplicate-dependency-versions": [
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "duplicate_versions.node-addon-api.penalty_weight",
+        "title": "Dependency version penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.41,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "duplicate_versions.node-addon-api.severity",
+        "title": "Dependency version severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "duplicate_versions.node-addon-api.visible",
+        "title": "Dependency version visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "duplicate_versions.onnxruntime-common.penalty_weight",
+        "title": "Dependency version penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0.41,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "duplicate_versions.onnxruntime-common.severity",
+        "title": "Dependency version severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "duplicate_versions.onnxruntime-common.visible",
+        "title": "Dependency version visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      }
+    ],
+    "TS-LD-01-cyclomatic-complexity": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.spec.ts",
+          "**/node_modules/**",
+          "**/dist/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.max_complexity",
+        "title": "Config max complexity",
+        "scoreRole": "threshold",
+        "value": 20,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-LD-02-function-size-distribution": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/*.stories.ts",
+          "**/*.stories.tsx",
+          "**/*.d.ts",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/.turbo/**",
+          "**/vendor/**",
+          "**/gen/**",
+          "**/generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/sst-env.d.ts",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/test-support/**",
+          "**/*test-support.ts",
+          "**/*test-support.tsx",
+          "**/*.test-support.ts",
+          "**/*.test-support.tsx",
+          "**/test-helpers.ts",
+          "**/*test-helpers.ts",
+          "**/*test-helpers.tsx",
+          "**/*.test-helpers.ts",
+          "**/*.test-helpers.tsx",
+          "**/test-mocks.ts",
+          "**/*test-mocks.ts",
+          "**/*test-mocks.tsx",
+          "**/*.test-mocks.ts",
+          "**/*.test-mocks.tsx",
+          "**/test-harness.ts",
+          "**/*test-harness.ts",
+          "**/*test-harness.tsx",
+          "**/*.test-harness.ts",
+          "**/*.test-harness.tsx",
+          "**/happydom.ts"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.max_file_loc",
+        "title": "Config max file loc",
+        "scoreRole": "threshold",
+        "value": 300,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.max_function_loc",
+        "title": "Config max function loc",
+        "scoreRole": "threshold",
+        "value": 50,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 5,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-LD-03-nesting-depth": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/*.stories.ts",
+          "**/*.stories.tsx",
+          "**/*.d.ts",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/.turbo/**",
+          "**/vendor/**",
+          "**/gen/**",
+          "**/generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/sst-env.d.ts",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/test-support/**",
+          "**/*test-support.ts",
+          "**/*test-support.tsx",
+          "**/*.test-support.ts",
+          "**/*.test-support.tsx",
+          "**/test-helpers.ts",
+          "**/*test-helpers.ts",
+          "**/*test-helpers.tsx",
+          "**/*.test-helpers.ts",
+          "**/*.test-helpers.tsx",
+          "**/test-mocks.ts",
+          "**/*test-mocks.ts",
+          "**/*test-mocks.tsx",
+          "**/*.test-mocks.ts",
+          "**/*.test-mocks.tsx",
+          "**/test-harness.ts",
+          "**/*test-harness.ts",
+          "**/*test-harness.tsx",
+          "**/*.test-harness.ts",
+          "**/*.test-harness.tsx",
+          "**/happydom.ts"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.max_nesting",
+        "title": "Config max nesting",
+        "scoreRole": "threshold",
+        "value": 4,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-LD-04-naming-conventions": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.spec.ts",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/.turbo/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 20,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-LD-05-domain-term-consistency": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.spec.ts",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/.turbo/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 20,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-LD-06-annotation-coverage": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/*.stories.ts",
+          "**/*.stories.tsx",
+          "**/*.d.ts",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/.turbo/**",
+          "**/.pi/**",
+          "**/vendor/**",
+          "**/gen/**",
+          "**/generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/sst-env.d.ts",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/test-support/**",
+          "**/*test-support.ts",
+          "**/*test-support.tsx",
+          "**/*.test-support.ts",
+          "**/*.test-support.tsx",
+          "**/test-helpers.ts",
+          "**/*test-helpers.ts",
+          "**/*test-helpers.tsx",
+          "**/*.test-helpers.ts",
+          "**/*.test-helpers.tsx",
+          "**/test-mocks.ts",
+          "**/*test-mocks.ts",
+          "**/*test-mocks.tsx",
+          "**/*.test-mocks.ts",
+          "**/*.test-mocks.tsx",
+          "**/test-harness.ts",
+          "**/*test-harness.ts",
+          "**/*test-harness.tsx",
+          "**/*.test-harness.ts",
+          "**/*.test-harness.tsx",
+          "**/happydom.ts"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-LD-07-unsafe-type-erosion": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/*.stories.ts",
+          "**/*.stories.tsx",
+          "**/*.d.ts",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/build/**",
+          "**/coverage/**",
+          "**/.turbo/**",
+          "**/vendor/**",
+          "**/gen/**",
+          "**/generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/test-support/**",
+          "**/*test-support.ts",
+          "**/*test-support.tsx",
+          "**/*.test-support.ts",
+          "**/*.test-support.tsx",
+          "**/test-helpers.ts",
+          "**/*test-helpers.ts",
+          "**/*test-helpers.tsx",
+          "**/*.test-helpers.ts",
+          "**/*.test-helpers.tsx",
+          "**/test-mocks.ts",
+          "**/*test-mocks.ts",
+          "**/*test-mocks.tsx",
+          "**/*.test-mocks.ts",
+          "**/*.test-mocks.tsx",
+          "**/test-harness.ts",
+          "**/*test-harness.ts",
+          "**/*test-harness.tsx",
+          "**/*.test-harness.ts",
+          "**/*.test-harness.tsx",
+          "**/happydom.ts"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.max_boundary_weighted_unsafe",
+        "title": "Config max boundary weighted unsafe",
+        "scoreRole": "weight",
+        "value": 48,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.max_weighted_unsafe_per_kloc",
+        "title": "Config max weighted unsafe per kloc",
+        "scoreRole": "weight",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-LD-08-exhaustiveness-erosion": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/*.stories.ts",
+          "**/*.stories.tsx",
+          "**/*.d.ts",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/coverage/**",
+          "**/.turbo/**",
+          "**/.pi/**",
+          "**/vendor/**",
+          "**/gen/**",
+          "**/generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/sst-env.d.ts",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/test-support/**",
+          "**/*test-support.ts",
+          "**/*test-support.tsx",
+          "**/*.test-support.ts",
+          "**/*.test-support.tsx",
+          "**/test-helpers.ts",
+          "**/*test-helpers.ts",
+          "**/*test-helpers.tsx",
+          "**/*.test-helpers.ts",
+          "**/*.test-helpers.tsx",
+          "**/test-mocks.ts",
+          "**/*test-mocks.ts",
+          "**/*test-mocks.tsx",
+          "**/*.test-mocks.ts",
+          "**/*.test-mocks.tsx",
+          "**/test-harness.ts",
+          "**/*test-harness.ts",
+          "**/*test-harness.tsx",
+          "**/*.test-harness.ts",
+          "**/*.test-harness.tsx",
+          "**/happydom.ts"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.min_case_clauses",
+        "title": "Config min case clauses",
+        "scoreRole": "threshold",
+        "value": 2,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-LD-09-error-channel-opacity": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/*.stories.ts",
+          "**/*.stories.tsx",
+          "**/*.d.ts",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/build/**",
+          "**/coverage/**",
+          "**/.turbo/**",
+          "**/.pi/**",
+          "**/vendor/**",
+          "**/gen/**",
+          "**/generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/sst-env.d.ts",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/test-support/**",
+          "**/test-utils/**",
+          "**/*test-support.ts",
+          "**/*test-support.tsx",
+          "**/*.test-support.ts",
+          "**/*.test-support.tsx",
+          "**/*test-utils.ts",
+          "**/*test-utils.tsx",
+          "**/test-helpers.ts",
+          "**/*test-helpers.ts",
+          "**/*test-helpers.tsx",
+          "**/*.test-helpers.ts",
+          "**/*.test-helpers.tsx",
+          "**/test-mocks.ts",
+          "**/*test-mocks.ts",
+          "**/*test-mocks.tsx",
+          "**/*.test-mocks.ts",
+          "**/*.test-mocks.tsx",
+          "**/test-harness.ts",
+          "**/*test-harness.ts",
+          "**/*test-harness.tsx",
+          "**/*.test-harness.ts",
+          "**/*.test-harness.tsx",
+          "**/happydom.ts",
+          "**/fixtures/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.expected_failure_name_patterns",
+        "title": "Config expected failure name patterns",
+        "scoreRole": "metadata",
+        "value": [
+          "parse",
+          "decode",
+          "load",
+          "fetch",
+          "read",
+          "write",
+          "request",
+          "validate",
+          "resolve"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.max_boundary_weighted_opacity",
+        "title": "Config max boundary weighted opacity",
+        "scoreRole": "weight",
+        "value": 36,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.max_weighted_opacity_per_kloc",
+        "title": "Config max weighted opacity per kloc",
+        "scoreRole": "weight",
+        "value": 18,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-RP-01-hotspots": [
+      {
+        "path": "config.min_churn",
+        "title": "Config min churn",
+        "scoreRole": "threshold",
+        "value": 2,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.min_complexity",
+        "title": "Config min complexity",
+        "scoreRole": "threshold",
+        "value": 5,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.peer_percentile_floor",
+        "title": "Config peer percentile floor",
+        "scoreRole": "threshold",
+        "value": 0.5,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.threshold_softness",
+        "title": "Config threshold softness",
+        "scoreRole": "threshold",
+        "value": 0.5,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.top_n",
+        "title": "Config top n",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-RP-02-pr-size": [
+      {
+        "path": "config.boundary_rules",
+        "title": "Config boundary rules",
+        "scoreRole": "metadata",
+        "value": [],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/.turbo/**",
+          "**/gen/**",
+          "**/generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.large_pr_budget",
+        "title": "Config large pr budget",
+        "scoreRole": "threshold",
+        "value": 500,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.medium_pr_budget",
+        "title": "Config medium pr budget",
+        "scoreRole": "threshold",
+        "value": 300,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.small_pr_budget",
+        "title": "Config small pr budget",
+        "scoreRole": "threshold",
+        "value": 100,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.test_globs",
+        "title": "Config test globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.spec.ts",
+          "**/__tests__/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "pr_size.penalty_weight",
+        "title": "PR size penalty_weight",
+        "scoreRole": "penalty",
+        "value": 0,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "pr_size.severity",
+        "title": "PR size severity",
+        "scoreRole": "metadata",
+        "value": "info",
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "pr_size.visible",
+        "title": "PR size visible",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      }
+    ],
+    "TS-SEC-01-dangerous-capability-surface": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.d.ts",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/build/**",
+          "**/coverage/**",
+          "**/.turbo/**",
+          "**/.pulsar/**",
+          "**/vendor/**",
+          "**/gen/**",
+          "**/generated/**",
+          "**/_generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/fixtures/**",
+          "**/__fixtures__/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.review_route_weight",
+        "title": "Config review route weight",
+        "scoreRole": "weight",
+        "value": 0,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-SEC-02-untrusted-boundary-sinks": [
+      {
+        "path": "config.boundary_globs",
+        "title": "Config boundary globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/api/*.ts",
+          "**/api/**/*.ts",
+          "**/routes/*.ts",
+          "**/routes/**/*.ts",
+          "**/handlers/*.ts",
+          "**/handlers/**/*.ts",
+          "**/controllers/*.ts",
+          "**/controllers/**/*.ts",
+          "**/*route.ts",
+          "**/*handler.ts",
+          "**/*controller.ts"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.d.ts",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/build/**",
+          "**/coverage/**",
+          "**/.turbo/**",
+          "**/.pulsar/**",
+          "**/vendor/**",
+          "**/gen/**",
+          "**/generated/**",
+          "**/_generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/fixtures/**",
+          "**/__fixtures__/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.parser_call_patterns",
+        "title": "Config parser call patterns",
+        "scoreRole": "metadata",
+        "value": [
+          "parse",
+          "safeparse",
+          "decode",
+          "decodeunknown",
+          "validate",
+          "assert",
+          "schema"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-SEC-03-secret-material": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.d.ts",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/build/**",
+          "**/coverage/**",
+          "**/.turbo/**",
+          "**/.pulsar/**",
+          "**/vendor/**",
+          "**/gen/**",
+          "**/generated/**",
+          "**/_generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/fixtures/**",
+          "**/__fixtures__/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.min_entropy",
+        "title": "Config min entropy",
+        "scoreRole": "threshold",
+        "value": 3.5,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.min_secret_length",
+        "title": "Config min secret length",
+        "scoreRole": "threshold",
+        "value": 20,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-SL-01-duplication": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/.turbo/**",
+          "**/vendor/**",
+          "**/gen/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/sst-env.d.ts",
+          "example/**",
+          "**/example/**",
+          "examples/**",
+          "**/examples/**",
+          "fixture/**",
+          "**/fixture/**",
+          "fixtures/**",
+          "**/fixtures/**",
+          "sample/**",
+          "**/sample/**",
+          "samples/**",
+          "**/samples/**",
+          "sdk-samples/**",
+          "**/sdk-samples/**",
+          "playground/**",
+          "playground-*/**",
+          "playgrounds/**",
+          "template/**",
+          "**/template/**",
+          "templates/**",
+          "**/templates/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.min_tokens",
+        "title": "Config min tokens",
+        "scoreRole": "threshold",
+        "value": 12,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.test_globs",
+        "title": "Config test globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/*.stories.ts",
+          "**/*.stories.tsx",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/test-support/**",
+          "**/*test-support.ts",
+          "**/*test-support.tsx",
+          "**/*.test-support.ts",
+          "**/*.test-support.tsx",
+          "**/test-helpers.ts",
+          "**/*test-helpers.ts",
+          "**/*test-helpers.tsx",
+          "**/*.test-helpers.ts",
+          "**/*.test-helpers.tsx",
+          "**/test-mocks.ts",
+          "**/*test-mocks.ts",
+          "**/*test-mocks.tsx",
+          "**/*.test-mocks.ts",
+          "**/*.test-mocks.tsx",
+          "**/test-harness.ts",
+          "**/*test-harness.ts",
+          "**/*test-harness.tsx",
+          "**/*.test-harness.ts",
+          "**/*.test-harness.tsx",
+          "**/happydom.ts"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-SL-02-inconsistent-clones": [
+      {
+        "path": "analysis.analyzed_groups",
+        "title": "Analyzed groups",
+        "value": 8,
+        "source": "computed",
+        "affectsScore": true,
+        "scoreRole": "evidence"
+      },
+      {
+        "path": "analysis.candidate_groups",
+        "title": "Candidate groups",
+        "value": 13,
+        "source": "computed",
+        "affectsScore": true,
+        "scoreRole": "evidence"
+      },
+      {
+        "path": "analysis.limit_hit",
+        "title": "Analysis limit hit",
+        "value": true,
+        "source": "computed",
+        "affectsScore": true,
+        "scoreRole": "score-cap"
+      },
+      {
+        "path": "config.analysis_limit_score_cap",
+        "title": "Analysis limit score cap",
+        "value": 0.95,
+        "source": "signal-default",
+        "affectsScore": true,
+        "scoreRole": "score-cap"
+      },
+      {
+        "path": "config.divergence_threshold",
+        "title": "Config divergence threshold",
+        "scoreRole": "threshold",
+        "value": 0.5,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.max_groups_analyzed",
+        "title": "Config max groups analyzed",
+        "scoreRole": "threshold",
+        "value": 8,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.max_members_per_group",
+        "title": "Config max members per group",
+        "scoreRole": "threshold",
+        "value": 16,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.min_window_days",
+        "title": "Config min window days",
+        "scoreRole": "threshold",
+        "value": 30,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-SL-03-suppressions": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/.turbo/**",
+          "**/vendor/**",
+          "**/gen/**",
+          "**/_generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/Generated.ts",
+          "**/Generated.tsx",
+          "**/generated/**",
+          "**/*.d.ts",
+          "**/sst-env.d.ts",
+          "docs/**",
+          "**/docs/**",
+          "example/**",
+          "**/example/**",
+          "examples/**",
+          "**/examples/**",
+          "demo/**",
+          "**/demo/**",
+          "demos/**",
+          "**/demos/**",
+          "private-demos/**",
+          "**/private-demos/**",
+          "fixture/**",
+          "**/fixture/**",
+          "fixtures/**",
+          "**/fixtures/**",
+          "playground/**",
+          "playground-*/**",
+          "playgrounds/**",
+          "sample/**",
+          "**/sample/**",
+          "samples/**",
+          "**/samples/**",
+          "sdk-samples/**",
+          "**/sdk-samples/**",
+          "google_samples/**",
+          "**/google_samples/**",
+          "template/**",
+          "**/template/**",
+          "templates/**",
+          "**/templates/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.test_globs",
+        "title": "Config test globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/*.stories.ts",
+          "**/*.stories.tsx",
+          "**/*.tst.ts",
+          "**/*.tst.tsx",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/dtslint/**",
+          "**/test-support/**",
+          "**/*test-support.ts",
+          "**/*test-support.tsx",
+          "**/*.test-support.ts",
+          "**/*.test-support.tsx",
+          "**/test-helpers.ts",
+          "**/*test-helpers.ts",
+          "**/*test-helpers.tsx",
+          "**/*.test-helpers.ts",
+          "**/*.test-helpers.tsx",
+          "**/*test_helpers.ts",
+          "**/*test_helpers.tsx",
+          "**/*.test_helpers.ts",
+          "**/*.test_helpers.tsx",
+          "**/test-mocks.ts",
+          "**/*test-mocks.ts",
+          "**/*test-mocks.tsx",
+          "**/*.test-mocks.ts",
+          "**/*.test-mocks.tsx",
+          "**/test-harness.ts",
+          "**/*test-harness.ts",
+          "**/*test-harness.tsx",
+          "**/*.test-harness.ts",
+          "**/*.test-harness.tsx",
+          "**/happydom.ts"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 20,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-SL-04-unfinished-implementations": [
+      {
+        "path": "budget.expected_clean_function_ratio",
+        "title": "Expected clean function ratio",
+        "scoreRole": "threshold",
+        "value": 0.01,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "budget.expected_clean_min_functions",
+        "title": "Expected clean minimum functions",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "computed",
+        "affectsScore": true
+      },
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/.turbo/**",
+          "**/vendor/**",
+          "**/gen/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/.storybook/**",
+          "**/sst-env.d.ts",
+          "example/**",
+          "**/example/**",
+          "examples/**",
+          "**/examples/**",
+          "demo/**",
+          "**/demo/**",
+          "demos/**",
+          "**/demos/**",
+          "private-demos/**",
+          "**/private-demos/**",
+          "fixture/**",
+          "**/fixture/**",
+          "fixtures/**",
+          "**/fixtures/**",
+          "sample/**",
+          "**/sample/**",
+          "samples/**",
+          "**/samples/**",
+          "spec/**",
+          "**/spec/**",
+          "specs/**",
+          "**/specs/**",
+          "sdk-samples/**",
+          "**/sdk-samples/**",
+          "template/**",
+          "**/template/**",
+          "templates/**",
+          "**/templates/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.hard_gate_production",
+        "title": "Config hard gate production",
+        "scoreRole": "threshold",
+        "value": true,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.include_test_stubs",
+        "title": "Config include test stubs",
+        "scoreRole": "threshold",
+        "value": false,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "config.test_globs",
+        "title": "Config test globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/*.stories.ts",
+          "**/*.stories.tsx",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/test-support/**",
+          "**/test-helpers/**",
+          "**/test-mocks/**",
+          "**/test-harness/**",
+          "**/*test-support.ts",
+          "**/*test-support.tsx",
+          "**/*.test-support.ts",
+          "**/*.test-support.tsx",
+          "**/test-helpers.ts",
+          "**/*test-helpers.ts",
+          "**/*test-helpers.tsx",
+          "**/*.test-helpers.ts",
+          "**/*.test-helpers.tsx",
+          "**/test-mocks.ts",
+          "**/*mock.ts",
+          "**/*mock.tsx",
+          "**/mock*.ts",
+          "**/mock*.tsx",
+          "**/*test-mocks.ts",
+          "**/*test-mocks.tsx",
+          "**/*mocks.ts",
+          "**/*mocks.tsx",
+          "**/*.test-mocks.ts",
+          "**/*.test-mocks.tsx",
+          "**/test-harness.ts",
+          "**/*harness.ts",
+          "**/*harness.tsx",
+          "**/*test-harness.ts",
+          "**/*test-harness.tsx",
+          "**/*.harness.ts",
+          "**/*.harness.tsx",
+          "**/*.test-harness.ts",
+          "**/*.test-harness.tsx",
+          "**/test-runtime.ts",
+          "**/*test-runtime.ts",
+          "**/*test-runtime.tsx",
+          "**/*.test-runtime.ts",
+          "**/*.test-runtime.tsx",
+          "**/*test-runtime*.ts",
+          "**/*test-runtime*.tsx",
+          "**/happydom.ts"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 20,
+        "source": "signal-default",
+        "affectsScore": true
+      },
+      {
+        "path": "filtering.include_test_stubs",
+        "title": "Include test stubs",
+        "scoreRole": "metadata",
+        "value": false,
+        "source": "computed",
+        "affectsScore": false
+      },
+      {
+        "path": "filtering.production_only_score",
+        "title": "Production-only score pressure",
+        "scoreRole": "metadata",
+        "value": true,
+        "source": "computed",
+        "affectsScore": false
+      }
+    ],
+    "TS-SL-05-phantom-tests": [
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.d.ts",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/build/**",
+          "**/coverage/**",
+          "**/.turbo/**",
+          "**/.pulsar/**",
+          "**/vendor/**",
+          "**/gen/**",
+          "**/generated/**",
+          "**/_generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.test_globs",
+        "title": "Config test globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/fixtures/**",
+          "**/__fixtures__/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ],
+    "TS-SL-06-confidence-claim-mismatch": [
+      {
+        "path": "config.claim_name_patterns",
+        "title": "Config claim name patterns",
+        "scoreRole": "metadata",
+        "value": [
+          "validate",
+          "parse",
+          "assert",
+          "ensure",
+          "is[A-Z]",
+          "has[A-Z]"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.exclude_globs",
+        "title": "Config exclude globs",
+        "scoreRole": "metadata",
+        "value": [
+          "**/*.d.ts",
+          "**/node_modules/**",
+          "**/dist/**",
+          "**/build/**",
+          "**/coverage/**",
+          "**/.turbo/**",
+          "**/.pulsar/**",
+          "**/vendor/**",
+          "**/gen/**",
+          "**/generated/**",
+          "**/_generated/**",
+          "**/*.gen.ts",
+          "**/*.gen.tsx",
+          "**/*.generated.ts",
+          "**/*.generated.tsx",
+          "**/*.test.ts",
+          "**/*.test.tsx",
+          "**/*.spec.ts",
+          "**/*.spec.tsx",
+          "**/__tests__/**",
+          "**/test/**",
+          "**/tests/**",
+          "**/fixtures/**",
+          "**/__fixtures__/**"
+        ],
+        "source": "signal-default",
+        "affectsScore": false
+      },
+      {
+        "path": "config.top_n_diagnostics",
+        "title": "Config top n diagnostics",
+        "scoreRole": "threshold",
+        "value": 10,
+        "source": "signal-default",
+        "affectsScore": true
+      }
+    ]
+  },
+  "vector": {
+    "id": "all-defaults",
+    "source": "fallback",
+    "trust_boundary": "built-in-defaults",
+    "source_label": "built-in defaults"
+  }
+}
