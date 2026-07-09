@@ -391,9 +391,28 @@ interface SearchReceipt {
   /** True only for search/fusion when the semantic leg failed and the route
    * degraded to lexical-only rather than 503ing the whole request. */
   readonly degraded?: boolean;
+  /** Present when QUASAR_SEARCH_PROFILE=1 or QUASAR_OTLP_BASE_URL is set —
+   * links this receipt to the Effect/OTLP parent span for the request. */
+  readonly traceId?: string;
 }
 
 const searchProfileEnabled = (): boolean => process.env.QUASAR_SEARCH_PROFILE === "1";
+
+const otlpEnabled = (): boolean => {
+  const baseUrl = process.env.QUASAR_OTLP_BASE_URL?.trim();
+  return baseUrl !== undefined && baseUrl !== "";
+};
+
+/** Receipt (and its traceId) ships when profiling or OTLP export is on. */
+const searchReceiptEnabled = (): boolean => searchProfileEnabled() || otlpEnabled();
+
+const optionalTraceId: Effect.Effect<string | undefined> = Effect.gen(function* () {
+  if (!searchReceiptEnabled()) return undefined;
+  return yield* Effect.currentSpan.pipe(
+    Effect.map((span) => span.traceId),
+    Effect.orElseSucceed(() => undefined as string | undefined),
+  );
+});
 
 const emitSearchProfile = (profile: SearchReceipt) =>
   Effect.sync(() => {
@@ -410,21 +429,23 @@ const lexicalSearch = Effect.gen(function* () {
   if (text === null || text.trim() === "") {
     return badRequest("search/lexical", "q is required");
   }
+  const limit = positiveInt(params, "limit", 10);
   const searchStarted = performance.now();
   const matches = yield* search.lexicalSearch({
     query: text,
     projectKey: params.get("projectKey") ?? undefined,
     role: params.get("role") ?? undefined,
     providers: parseProviders(params),
-    limit: positiveInt(params, "limit", 10),
+    limit,
   });
   const searchMs = Math.round(performance.now() - searchStarted);
   const totalMs = Math.round(performance.now() - routeStarted);
+  const traceId = yield* optionalTraceId;
   const receipt: SearchReceipt = {
     route: "search/lexical",
     mode: "lexical",
     query: text,
-    limit: positiveInt(params, "limit", 10),
+    limit,
     statusCode: 200,
     startedAt,
     completedAt: new Date().toISOString(),
@@ -433,10 +454,11 @@ const lexicalSearch = Effect.gen(function* () {
     totalMs,
     residualMs: Math.max(0, totalMs - searchMs),
     matches: matches.length,
+    ...(traceId !== undefined ? { traceId } : {}),
   };
   yield* emitSearchProfile(receipt);
-  return json(ok("search/lexical", { matches, receipt: searchProfileEnabled() ? receipt : undefined }));
-});
+  return json(ok("search/lexical", { matches, receipt: searchReceiptEnabled() ? receipt : undefined }));
+}).pipe(Effect.withSpan("search.lexical"));
 
 const parseProviders = (params: URLSearchParams): readonly string[] | undefined => {
   const raw = params.get("provider");
@@ -522,7 +544,9 @@ const semanticSearch = Effect.gen(function* () {
   const routeStarted = performance.now();
   const startedAt = new Date().toISOString();
   const matrix = yield* VectorMatrix;
-  const matrixStatus = yield* matrix.status;
+  const readinessStarted = performance.now();
+  const matrixStatus = yield* matrix.status.pipe(Effect.withSpan("search.readiness"));
+  const readinessMs = Math.round(performance.now() - readinessStarted);
   if (!matrixStatus.enabled) return semanticDisabled("search/semantic");
   const params = yield* query;
   const text = params.get("q") ?? params.get("query");
@@ -552,6 +576,7 @@ const semanticSearch = Effect.gen(function* () {
     );
   }
   const totalMs = Math.round(performance.now() - routeStarted);
+  const traceId = yield* optionalTraceId;
   const receipt: SearchReceipt = {
     route: "search/semantic",
     mode: "semantic",
@@ -560,16 +585,17 @@ const semanticSearch = Effect.gen(function* () {
     statusCode: 200,
     startedAt,
     completedAt: new Date().toISOString(),
-    readinessMs: 0,
+    readinessMs,
     searchMs: outcome.right.searchMs,
     totalMs,
-    residualMs: Math.max(0, totalMs - outcome.right.searchMs - outcome.right.embedMs),
+    residualMs: Math.max(0, totalMs - outcome.right.searchMs - outcome.right.embedMs - readinessMs),
     matches: outcome.right.matches.length,
     embedMs: outcome.right.embedMs,
+    ...(traceId !== undefined ? { traceId } : {}),
   };
   yield* emitSearchProfile(receipt);
-  return json(ok("search/semantic", { matches: outcome.right.matches, receipt: searchProfileEnabled() ? receipt : undefined }));
-});
+  return json(ok("search/semantic", { matches: outcome.right.matches, receipt: searchReceiptEnabled() ? receipt : undefined }));
+}).pipe(Effect.withSpan("search.semantic"));
 
 // Reciprocal-rank fusion over the lexical and semantic lists: constant k, no
 // tuning knobs in this slice. Ranks are 0-based positions in each list.
@@ -603,7 +629,9 @@ const fusionSearch = Effect.gen(function* () {
   const routeStarted = performance.now();
   const startedAt = new Date().toISOString();
   const matrix = yield* VectorMatrix;
-  const matrixStatus = yield* matrix.status;
+  const readinessStarted = performance.now();
+  const matrixStatus = yield* matrix.status.pipe(Effect.withSpan("search.readiness"));
+  const readinessMs = Math.round(performance.now() - readinessStarted);
   if (!matrixStatus.enabled) return semanticDisabled("search/fusion");
   const params = yield* query;
   const text = params.get("q") ?? params.get("query");
@@ -652,10 +680,13 @@ const fusionSearch = Effect.gen(function* () {
     semanticMatches = semanticOutcome.right.matches;
     embedMs = semanticOutcome.right.embedMs;
   }
-  const matches = fuseByReciprocalRank(lexicalHits, semanticMatches, limit);
+  const matches = yield* Effect.sync(() => fuseByReciprocalRank(lexicalHits, semanticMatches, limit)).pipe(
+    Effect.withSpan("search.rrfFuse"),
+  );
   const searchMs = Math.round(performance.now() - searchStarted);
   const totalMs = Math.round(performance.now() - routeStarted);
   const degraded = degradedReason !== undefined;
+  const traceId = yield* optionalTraceId;
   const receipt: SearchReceipt = {
     route: "search/fusion",
     mode: "fusion",
@@ -664,13 +695,14 @@ const fusionSearch = Effect.gen(function* () {
     statusCode: 200,
     startedAt,
     completedAt: new Date().toISOString(),
-    readinessMs: 0,
+    readinessMs,
     searchMs,
     totalMs,
-    residualMs: Math.max(0, totalMs - searchMs),
+    residualMs: Math.max(0, totalMs - searchMs - readinessMs),
     matches: matches.length,
     embedMs,
     degraded: degraded || undefined,
+    ...(traceId !== undefined ? { traceId } : {}),
   };
   yield* emitSearchProfile(receipt);
   return json(
@@ -678,10 +710,10 @@ const fusionSearch = Effect.gen(function* () {
       matches,
       degraded: degraded || undefined,
       degradedReason,
-      receipt: searchProfileEnabled() ? receipt : undefined,
+      receipt: searchReceiptEnabled() ? receipt : undefined,
     }),
   );
-});
+}).pipe(Effect.withSpan("search.fusion"));
 
 const booleanParam = (params: URLSearchParams, name: string, fallback: boolean): boolean => {
   const raw = params.get(name);

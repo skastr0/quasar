@@ -472,7 +472,7 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                 }
                 const row = yield* putCached({ contentHash, text: input, vector });
                 return row.vector;
-              }),
+              }).pipe(Effect.withSpan("search.embedText")),
             getCached,
             putCached,
             processBatch: ({ workerId, limit, leaseMs, now = nowIso() }) =>

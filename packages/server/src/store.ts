@@ -959,28 +959,52 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
         // Effect.sleep (not yieldNow) between chunks: a timer forces a full
         // event-loop turn, so queued HTTP requests — searches — run between
         // write transactions instead of waiting out the whole apply.
+        // Stage-level spans only (per-session apply + per-chunk transactions) —
+        // never per-row inside a chunk.
         const upsertSessionDiff = (mapped: MappedSession): Effect.Effect<SessionDiffOutcome, SqliteStoreError> =>
           Effect.gen(function* () {
-            const plan = yield* trySqlite("upsertSession.plan", () => computeSessionDiff(mapped));
-            yield* trySqlite("upsertSession.head", () => applySessionHead(mapped));
+            const plan = yield* trySqlite("upsertSession.plan", () => computeSessionDiff(mapped)).pipe(
+              Effect.withSpan("ingest.diffPlan"),
+            );
+            yield* trySqlite("upsertSession.head", () => applySessionHead(mapped)).pipe(
+              Effect.withSpan("ingest.diffHead"),
+            );
             for (const chunk of chunked(plan.messageDeleteSeqs)) {
-              yield* trySqlite("upsertSession.deleteMessages", () => applyMessageDeleteChunk(mapped.session.sessionId, chunk));
+              yield* trySqlite("upsertSession.deleteMessages", () => applyMessageDeleteChunk(mapped.session.sessionId, chunk)).pipe(
+                Effect.withSpan("ingest.chunk", {
+                  attributes: { kind: "messageDelete", rows: chunk.length },
+                }),
+              );
               yield* Effect.sleep("1 millis");
             }
             for (const chunk of chunked(plan.messageUpserts)) {
-              yield* trySqlite("upsertSession.messages", () => applyMessageUpsertChunk(chunk));
+              yield* trySqlite("upsertSession.messages", () => applyMessageUpsertChunk(chunk)).pipe(
+                Effect.withSpan("ingest.chunk", {
+                  attributes: { kind: "messageUpsert", rows: chunk.length },
+                }),
+              );
               yield* Effect.sleep("1 millis");
             }
             for (const chunk of chunked(plan.toolCallDeleteIds)) {
-              yield* trySqlite("upsertSession.deleteToolCalls", () => applyToolCallDeleteChunk(chunk));
+              yield* trySqlite("upsertSession.deleteToolCalls", () => applyToolCallDeleteChunk(chunk)).pipe(
+                Effect.withSpan("ingest.chunk", {
+                  attributes: { kind: "toolCallDelete", rows: chunk.length },
+                }),
+              );
               yield* Effect.sleep("1 millis");
             }
             for (const chunk of chunked(plan.toolCallUpserts)) {
-              yield* trySqlite("upsertSession.toolCalls", () => applyToolCallUpsertChunk(chunk));
+              yield* trySqlite("upsertSession.toolCalls", () => applyToolCallUpsertChunk(chunk)).pipe(
+                Effect.withSpan("ingest.chunk", {
+                  attributes: { kind: "toolCallUpsert", rows: chunk.length },
+                }),
+              );
               yield* Effect.sleep("1 millis");
             }
             yield* trySqlite("upsertSession.fingerprint", () =>
-              stampSessionFingerprint.run(mapped.session.sourceFingerprint, mapped.session.sessionId));
+              stampSessionFingerprint.run(mapped.session.sourceFingerprint, mapped.session.sessionId)).pipe(
+              Effect.withSpan("ingest.diffFingerprint"),
+            );
             return {
               messagesInserted: plan.messagesInserted,
               messagesUpdated: plan.messagesUpdated,
@@ -992,7 +1016,11 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               toolCallsUnchanged: plan.toolCallsUnchanged,
               changedMessages: plan.messageUpserts,
             };
-          });
+          }).pipe(
+            Effect.withSpan("ingest.diffApply", {
+              attributes: { sessionId: mapped.session.sessionId },
+            }),
+          );
 
         return {
           dbPath: path,

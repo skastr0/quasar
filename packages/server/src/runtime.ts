@@ -37,9 +37,12 @@ export const ObservabilityLayer = Layer.unwrapEffect(
   }),
 );
 
-export const AppLayer = Layer.mergeAll(
-  WorkerSupervisorLive.pipe(Layer.provideMerge(WithVectorMatrixLayer)),
-  ObservabilityLayer,
+// Observability is the base, not a sibling: layer-construction / forkScoped
+// diagnostics from the service graph must run under Logger.json (and OTLP
+// when configured). provideMerge builds Observability first, then the services.
+export const AppLayer = WorkerSupervisorLive.pipe(
+  Layer.provideMerge(WithVectorMatrixLayer),
+  Layer.provideMerge(ObservabilityLayer),
 );
 
 export const AppRuntime = ManagedRuntime.make(AppLayer);
