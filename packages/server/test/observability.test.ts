@@ -1,10 +1,75 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
+
+const repoRoot = join(import.meta.dir, "..", "..", "..");
 
 /**
  * Stage-level span altitude and receipt traceId wiring.
  * Live warm-p95 re-receipt is deferred (no matrix + OTLP collector in unit CI).
  */
+describe("observability OTLP env gate", () => {
+  test("runtime gates Otlp.layerJson on QUASAR_OTLP_BASE_URL only", () => {
+    const runtime = readFileSync(join(repoRoot, "packages/server/src/runtime.ts"), "utf8");
+    expect(runtime).toContain("QUASAR_OTLP_BASE_URL");
+    expect(runtime).toContain("Otlp.layerJson");
+    expect(runtime).toContain("Layer.empty");
+    expect(runtime).toContain('serviceName: "quasar-server"');
+    // Empty/unset → no OTLP; set → export. No second enable flag in product code.
+    expect(runtime).not.toContain("COMPOSE_PROFILES");
+    expect(runtime).not.toContain("otel-lgtm");
+  });
+
+  test("compose profile off leaves OTLP base empty; profile on defaults collector URL", () => {
+    const composeFile = join(repoRoot, "platform/server/compose.yaml");
+    // Minimal env file — do not load platform/server/.env (secrets must not
+    // appear in test failure dumps).
+    const tmpEnv = join(repoRoot, "packages/server/test/.tmp-compose-otel.env");
+    Bun.write(
+      tmpEnv,
+      [
+        "QUASAR_INGEST_TOKEN=test-token-for-compose-config-only",
+        "QUASAR_PUBLISH_HOST=127.0.0.1",
+        "QUASAR_PUBLISH_PORT=7180",
+        "",
+      ].join("\n"),
+    );
+    const runConfig = (profiles: string | undefined) => {
+      const env: Record<string, string | undefined> = { ...process.env };
+      if (profiles === undefined) delete env.COMPOSE_PROFILES;
+      else env.COMPOSE_PROFILES = profiles;
+      return Bun.spawnSync(
+        ["docker", "compose", "--env-file", tmpEnv, "-f", composeFile, "config"],
+        { env, stdout: "pipe", stderr: "pipe" },
+      );
+    };
+
+    try {
+      const off = runConfig(undefined);
+      expect(off.exitCode).toBe(0);
+      const offText = off.stdout.toString();
+      // Profiled image is not part of the rendered project when profile is off.
+      expect(offText).not.toContain("grafana/otel-lgtm");
+      expect(offText).toContain('QUASAR_OTLP_BASE_URL: ""');
+
+      const on = runConfig("otel");
+      expect(on.exitCode).toBe(0);
+      const onText = on.stdout.toString();
+      expect(onText).toContain("grafana/otel-lgtm");
+      expect(onText).toContain("http://otel-lgtm:4318");
+      expect(onText).toMatch(/profiles:[\s\S]*otel/);
+    } finally {
+      try {
+        Bun.spawnSync(["rm", "-f", tmpEnv]);
+      } catch {
+        // ignore cleanup failures
+      }
+    }
+  });
+});
+
 describe("observability spans", () => {
   test("withSpan parent exposes a native traceId", async () => {
     const traceId = await Effect.runPromise(

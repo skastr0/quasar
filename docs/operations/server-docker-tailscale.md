@@ -12,6 +12,10 @@ This is the operational path for Quasar on the Mac mini.
   active profile, those routes return an honest 503 `SemanticDisabled`.
 - Client access is through the Tailscale Service hostname assigned to `svc:quasar`.
 - `platform/server/.env` is local-only and must not be committed.
+- Optional local OTLP sink (`grafana/otel-lgtm`) is an **opt-in compose profile**
+  — off by default. Enable with `COMPOSE_PROFILES=otel` only; see
+  `docs/operations/observability-sink.md` and
+  `docs/architecture/observability-sink-and-watchdog.md`.
 
 ## One-time setup
 

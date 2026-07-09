@@ -19,6 +19,12 @@ services:
       - "${QUASAR_PUBLISH_HOST:-0.0.0.0}:${QUASAR_PUBLISH_PORT:-7180}:6180"
     volumes:
       - quasar-data:/data/quasar
+    # Optional local OTLP sink (grafana/otel-lgtm). Off unless COMPOSE_PROFILES=otel.
+    # required: false keeps default deploys free of the profiled service.
+    depends_on:
+      otel-lgtm:
+        condition: service_started
+        required: false
     environment:
       NODE_ENV: production
       QUASAR_HOME: /data/quasar
@@ -50,12 +56,34 @@ services:
       QUASAR_EMBEDDING_CACHE_NAMESPACE: ${QUASAR_EMBEDDING_CACHE_NAMESPACE:-}
       SYNTHETIC_API_KEY: ${SYNTHETIC_API_KEY:-}
       SYNTHETIC_OPENAI_BASE_URL: ${SYNTHETIC_OPENAI_BASE_URL:-https://api.synthetic.new/openai/v1}
+      # OTLP export is off by default (empty → ObservabilityLayer uses Layer.empty).
+      # ONE enable switch: COMPOSE_PROFILES=otel — when that env is set, compose
+      # defaults this to the in-network collector. Explicit override still wins.
+      # No product code change required to enable the sink.
+      QUASAR_OTLP_BASE_URL: ${QUASAR_OTLP_BASE_URL:-${COMPOSE_PROFILES:+http://otel-lgtm:4318}}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:6180/health"]
       interval: 10s
       timeout: 10s
       start_period: 10s
       retries: 6
+
+  # Local observability sink — OPT-IN via compose profile "otel".
+  # Enable with exactly one env: COMPOSE_PROFILES=otel
+  #   COMPOSE_PROFILES=otel bun run server:deploy
+  # Grafana UI: http://localhost:3000 (admin/admin)
+  # Explore → Tempo (traces) · Prometheus/Mimir (metrics, quasar.*) · Loki (logs)
+  # See docs/operations/observability-sink.md
+  otel-lgtm:
+    image: grafana/otel-lgtm:latest
+    profiles: ["otel"]
+    restart: unless-stopped
+    ports:
+      # Grafana UI. Override if host 3000 is taken.
+      - "${QUASAR_OTEL_GRAFANA_PORT:-3000}:3000"
+      # Host OTLP/HTTP for non-compose processes; in-compose server uses
+      # http://otel-lgtm:4318 on the compose network without needing this publish.
+      - "${QUASAR_OTEL_OTLP_HTTP_PORT:-4318}:4318"
 
 volumes:
   quasar-data:
