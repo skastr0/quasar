@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 
 import { Option, Schema } from "effect";
@@ -324,35 +324,21 @@ const projectNativeValue = (value: unknown): NativeValue | undefined => {
   return entries.length === 0 ? undefined : Object.fromEntries(entries);
 };
 
-export const collectFiles = (
-  root: string,
-  predicate: (path: string) => boolean,
-  limit: number = Number.POSITIVE_INFINITY,
-  skip: number = 0,
-) => {
-  const input = parseCollectFilesInput(root, limit, skip);
-  if (input === undefined) return [];
-  const files: string[] = [];
-  let matched = 0;
-  const visit = (path: string) => {
-    if (files.length >= input.limit) return;
-    let stat;
-    try {
-      stat = statSync(path);
-    } catch {
-      return;
-    }
-    if (stat.isDirectory()) {
-      for (const entry of readdirSync(path).sort()) visit(join(path, entry));
-      return;
-    }
-    if (!predicate(path)) return;
-    if (matched >= input.skip) files.push(path);
-    matched += 1;
-  };
-  if (existsSync(input.root)) visit(input.root);
-  return files;
-};
+/** File discovery with skip/limit — canonical implementation lives in source.ts. */
+export { walkFiles as collectFiles } from "./source";
+export {
+  walkFiles,
+  walkFilesWithStats,
+  streamJsonlRecords,
+  sqliteSnapshotForRead,
+} from "./source";
+export type {
+  StreamJsonlOptions,
+  StreamJsonlRecord,
+  SqliteSnapshot,
+  SqliteSnapshotOptions,
+  WalkFilesOptions,
+} from "./source";
 
 /** Detects machinery-only envelopes: objects that project to only having a
  * `type` field or similar machinery metadata. These should not appear on the
@@ -941,16 +927,6 @@ export const sessionIdFor = (
 ): SessionId => `${provider}:${stableWideHash(nativeSessionId)}` as SessionId;
 
 export const parentDirectoryName = (path: string) => basename(dirname(path));
-
-const parseCollectFilesInput = (root: string, limit: number, skip: number) => {
-  const trimmedRoot = root.trim();
-  if (trimmedRoot.length === 0 || limit <= 0) return undefined;
-  return {
-    root: trimmedRoot,
-    limit: Number.isFinite(limit) ? Math.floor(limit) : Number.POSITIVE_INFINITY,
-    skip: Number.isFinite(skip) && skip > 0 ? Math.floor(skip) : 0,
-  };
-};
 
 const parseBuildSessionArgs = (args: BuildSessionArgs) => {
   if (args.nativeSessionId.trim().length === 0) {

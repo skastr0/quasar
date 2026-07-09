@@ -1,5 +1,4 @@
-import { copyFileSync, existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { execFileSync } from "node:child_process";
 
@@ -25,6 +24,7 @@ import {
   scopedId,
   sessionIdFor,
   sourceRoot,
+  sqliteSnapshotForRead,
   stringValue,
   type NativeValue,
   usageIdFor,
@@ -456,50 +456,35 @@ const partContentProjection = (part: ClassifiedPart): NativeValue | undefined =>
 };
 
 /**
- * Extract the plain-text content from classified parts in part order.
- * - type === "text" → the part's own .text field
- * - tool/artifact/machinery parts → no text contribution
- * Blank strings are skipped. Returns undefined when no non-blank text exists.
- * This is the canonical contentText source for assistant message events; it
- * never JSON-serialises the content envelope. Reasoning parts are excluded
- * here — they surface as a separate kind="reasoning"/role="thinking" event
- * via partsReasoningText so they are role-filterable in the search index.
+ * Collect non-blank `.text` from signal parts of a given on-disk type, in part
+ * order. Shared by content (`text`) and reasoning (`reasoning`) extractors —
+ * they differ only in which part type is kept.
  */
-const partsContentText = (parts: ClassifiedPart[]): string | undefined => {
+const partsTextByType = (
+  parts: ClassifiedPart[],
+  type: "text" | "reasoning",
+): string | undefined => {
   const texts: string[] = [];
   for (const part of parts) {
     if (!isSignalPart(part)) continue;
     const value = part.decision.value;
-    if (value.type === "text") {
-      const t = value.text;
-      if (typeof t === "string" && t.trim().length > 0) texts.push(t);
-    }
+    if (value.type !== type) continue;
+    const t = value.text;
+    if (typeof t === "string" && t.trim().length > 0) texts.push(t);
   }
-  if (texts.length > 0) return texts.join("\n\n");
-  return undefined;
+  return texts.length > 0 ? texts.join("\n\n") : undefined;
 };
 
+/** Canonical contentText for assistant message events (never JSON-serialises). */
+const partsContentText = (parts: ClassifiedPart[]): string | undefined =>
+  partsTextByType(parts, "text");
+
 /**
- * Extract reasoning prose from classified parts in part order.
- * - type === "reasoning" with non-blank .text → collected
- * - Encrypted-reasoning stubs (empty .text) → skipped
- * Returns undefined when no non-blank reasoning text exists.
- * The result is emitted as a separate kind="reasoning"/role="thinking" event
- * so reasoning is independently searchable and role-filterable.
+ * Reasoning prose as a separate kind="reasoning"/role="thinking" event so it is
+ * independently searchable and role-filterable. Encrypted stubs (empty text) skip.
  */
-const partsReasoningText = (parts: ClassifiedPart[]): string | undefined => {
-  const texts: string[] = [];
-  for (const part of parts) {
-    if (!isSignalPart(part)) continue;
-    const value = part.decision.value;
-    if (value.type === "reasoning") {
-      const t = value.text;
-      if (typeof t === "string" && t.trim().length > 0) texts.push(t);
-    }
-  }
-  if (texts.length > 0) return texts.join("\n\n");
-  return undefined;
-};
+const partsReasoningText = (parts: ClassifiedPart[]): string | undefined =>
+  partsTextByType(parts, "reasoning");
 
 const messageContentProjection = (
   data: Record<string, NativeValue | undefined>,
@@ -880,20 +865,6 @@ const buildOpenCodeSessionCli = (
     diagnostics,
   );
 
-const copyDatabaseForRead = (dbPath: string) => {
-  const tempDir = mkdtempSync(join(tmpdir(), "quasar-opencode-"));
-  const tempDbPath = join(tempDir, "opencode.db");
-  copyFileSync(dbPath, tempDbPath);
-  for (const suffix of ["-wal", "-shm"]) {
-    const source = `${dbPath}${suffix}`;
-    if (existsSync(source)) copyFileSync(source, `${tempDbPath}${suffix}`);
-  }
-  return {
-    path: tempDbPath,
-    cleanup: () => rmSync(tempDir, { recursive: true, force: true }),
-  };
-};
-
 const opencodeDbPath = (root: string | undefined) => {
   if (root === undefined) return undefined;
   try {
@@ -999,9 +970,12 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
     const stat = statSync(dbPath);
     if (!options.shouldReadFile(dbPath, stat)) return;
   }
-  let tempDb: ReturnType<typeof copyDatabaseForRead>;
+  let tempDb: ReturnType<typeof sqliteSnapshotForRead>;
   try {
-    tempDb = copyDatabaseForRead(dbPath);
+    tempDb = sqliteSnapshotForRead(dbPath, {
+      label: "opencode",
+      fileName: "opencode.db",
+    });
   } catch (error) {
     yield {
       type: "diagnostic",

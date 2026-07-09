@@ -27,7 +27,12 @@ import {
   usageIdFor,
 } from "./common";
 import { type DecodeDiagnostic, isSignal } from "./harness-schema";
-import { classifyClaudeRecord, type ClaudeKind } from "./claude-schema";
+import {
+  classifyClaudeRecord,
+  isClaudeConversationRecord,
+  type ClaudeKind,
+  type ClaudeUsage,
+} from "./claude-schema";
 import type { SessionRole } from "../core/schemas";
 
 const projectPathFromClaudeKey = (key: string) =>
@@ -331,6 +336,53 @@ const claudeRoleFor = (
   }
 };
 
+/** Prefer schema-normalized camelCase, then snake_case residual (Union fallback). */
+const usageToken = (
+  record: Record<string, unknown>,
+  camel: string,
+  snake: string,
+): number | undefined => numberValue(record[camel]) ?? numberValue(record[snake]);
+
+/**
+ * Usage after ClaudeUsageSchema transform is camelCase. Unknown residual shapes
+ * may still carry snake_case — both are accepted here.
+ */
+const normalizedUsageFromMessage = (
+  message: Record<string, unknown> | undefined,
+): ClaudeUsage | undefined => {
+  if (message === undefined) return undefined;
+  const usage = message.usage;
+  if (usage === null || usage === undefined) return undefined;
+  if (typeof usage !== "object" || Array.isArray(usage)) return undefined;
+  const record = usage as Record<string, unknown>;
+  const inputTokens = usageToken(record, "inputTokens", "input_tokens");
+  const outputTokens = usageToken(record, "outputTokens", "output_tokens");
+  const cacheCreationInputTokens = usageToken(
+    record,
+    "cacheCreationInputTokens",
+    "cache_creation_input_tokens",
+  );
+  const cacheReadInputTokens = usageToken(
+    record,
+    "cacheReadInputTokens",
+    "cache_read_input_tokens",
+  );
+  if (
+    inputTokens === undefined &&
+    outputTokens === undefined &&
+    cacheCreationInputTokens === undefined &&
+    cacheReadInputTokens === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(cacheCreationInputTokens !== undefined ? { cacheCreationInputTokens } : {}),
+    ...(cacheReadInputTokens !== undefined ? { cacheReadInputTokens } : {}),
+  };
+};
+
 const claudeUsageRecord = (
   sessionId: SessionId,
   eventId: string,
@@ -338,17 +390,14 @@ const claudeUsageRecord = (
   timestamp: string | undefined,
   message: Record<string, unknown> | undefined,
 ): ClaudeUsageDraft | undefined => {
-  const usage = recordFrom(message?.usage);
-  if (usage === undefined || Object.keys(usage).length === 0) return undefined;
-  const inputTokens =
-    numberValue(usage.input_tokens) ?? numberValue(usage.inputTokens);
-  const outputTokens =
-    numberValue(usage.output_tokens) ?? numberValue(usage.outputTokens);
-  const cacheCreationInputTokens =
-    numberValue(usage.cache_creation_input_tokens) ??
-    numberValue(usage.cacheCreationInputTokens);
-  const cacheReadInputTokens =
-    numberValue(usage.cache_read_input_tokens) ?? numberValue(usage.cacheReadInputTokens);
+  const usage = normalizedUsageFromMessage(message);
+  if (usage === undefined) return undefined;
+  const {
+    inputTokens,
+    outputTokens,
+    cacheCreationInputTokens,
+    cacheReadInputTokens,
+  } = usage;
   return {
     id: usageIdFor(sessionId, eventId, sequence),
     eventId,
@@ -359,7 +408,12 @@ const claudeUsageRecord = (
     outputTokens,
     cacheCreationInputTokens,
     cacheReadInputTokens,
-    totalTokens: sumNumbers([inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens]),
+    totalTokens: sumNumbers([
+      inputTokens,
+      outputTokens,
+      cacheCreationInputTokens,
+      cacheReadInputTokens,
+    ]),
   };
 };
 
@@ -483,15 +537,33 @@ const buildClaudeSessionFromFile = (
     // tool-call, no usage, and no lineage entry.
     if (!isSignal(decision)) continue;
     const kind = decision.kind;
+    // Move 3: prefer schema-decoded conversation fields over re-peeking the raw
+    // record. Non-conversation signals (system/attachment/snapshot/…) still use
+    // the raw record for any residual projection.
+    const conversation = isClaudeConversationRecord(decision.value)
+      ? decision.value
+      : undefined;
     const message =
-      record.message !== null && typeof record.message === "object"
-        ? (record.message as Record<string, unknown>)
-        : undefined;
+      conversation !== undefined
+        ? (conversation.message as unknown as Record<string, unknown>)
+        : record.message !== null && typeof record.message === "object"
+          ? (record.message as Record<string, unknown>)
+          : undefined;
     const content = claudeContentProjection(message, record);
-    const nativeEventId = typeof record.uuid === "string" ? record.uuid : undefined;
+    const nativeEventId =
+      conversation !== undefined && typeof conversation.uuid === "string"
+        ? conversation.uuid
+        : typeof record.uuid === "string"
+          ? record.uuid
+          : undefined;
     const eventId = eventIdFor(sessionId, sequence, nativeEventId ?? lineNumber);
     if (nativeEventId !== undefined) nativeUuidToEventId.set(nativeEventId, eventId);
-    const parentUuid = typeof record.parentUuid === "string" ? record.parentUuid : undefined;
+    const parentUuid =
+      conversation !== undefined && typeof conversation.parentUuid === "string"
+        ? conversation.parentUuid
+        : typeof record.parentUuid === "string"
+          ? record.parentUuid
+          : undefined;
     if (parentUuid !== undefined) {
       const parentEventId = resolveKeptAncestorEventId(parentUuid);
       parentEdges.push({
@@ -503,7 +575,11 @@ const buildClaudeSessionFromFile = (
       });
     }
     const timestamp =
-      typeof record.timestamp === "string" ? record.timestamp : undefined;
+      conversation !== undefined && typeof conversation.timestamp === "string"
+        ? conversation.timestamp
+        : typeof record.timestamp === "string"
+          ? record.timestamp
+          : undefined;
     const blocks = contentArray(message);
     const toolCallId = upsertClaudeToolCalls(
       toolCallsById,
@@ -520,6 +596,12 @@ const buildClaudeSessionFromFile = (
       message,
     );
     if (usageRecord !== undefined) usageRecords.push(usageRecord);
+    const messageRole =
+      conversation !== undefined
+        ? conversation.message.role
+        : typeof message?.role === "string"
+          ? message.role
+          : undefined;
     events.push({
       id: eventId,
       nativeEventId,
@@ -527,7 +609,7 @@ const buildClaudeSessionFromFile = (
         parentUuid === undefined ? undefined : resolveKeptAncestorEventId(parentUuid) ?? parentUuid,
       sequence,
       timestamp,
-      role: claudeRoleFor(kind, typeof message?.role === "string" ? message.role : undefined),
+      role: claudeRoleFor(kind, messageRole),
       kind,
       contentText: compactText(content),
       contentSource: content,
