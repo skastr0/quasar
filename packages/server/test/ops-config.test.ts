@@ -81,6 +81,36 @@ describe("server ops config", () => {
     expect(existsSync(join(repoRoot, "scripts/install-server-sync.mjs"))).toBe(false);
   });
 
+  test("otel-lgtm is an opt-in compose profile with one-flag enable", () => {
+    const compose = readFileSync(join(repoRoot, "platform/server/compose.yaml"), "utf8");
+    const envExample = readFileSync(join(repoRoot, "platform/server/.env.example"), "utf8");
+    const sinkDoc = readFileSync(join(repoRoot, "docs/operations/observability-sink.md"), "utf8");
+    const watchdogDoc = readFileSync(
+      join(repoRoot, "docs/architecture/observability-sink-and-watchdog.md"),
+      "utf8",
+    );
+    const runbook = readFileSync(join(repoRoot, "docs/operations/server-docker-tailscale.md"), "utf8");
+
+    // Profile-gated service (not in the default service graph).
+    expect(compose).toContain("grafana/otel-lgtm");
+    expect(compose).toContain('profiles: ["otel"]');
+    expect(compose).toContain("required: false");
+    // ONE enable env: COMPOSE_PROFILES=otel → default OTLP base to in-network collector.
+    expect(compose).toContain(
+      "QUASAR_OTLP_BASE_URL: ${QUASAR_OTLP_BASE_URL:-${COMPOSE_PROFILES:+http://otel-lgtm:4318}}",
+    );
+    // No product code path invents a second enable flag.
+    expect(envExample).toContain("COMPOSE_PROFILES=otel");
+    expect(envExample).toContain("OFF by default");
+    expect(sinkDoc).toContain("COMPOSE_PROFILES=otel");
+    expect(sinkDoc).toContain("http://localhost:3000");
+    expect(sinkDoc).toContain("quasar-server");
+    expect(watchdogDoc).toContain("opt-in");
+    expect(watchdogDoc).toContain("separate process");
+    expect(watchdogDoc).toContain("Supersession");
+    expect(runbook).toContain("COMPOSE_PROFILES=otel");
+  });
+
   test("runbook documents the agent-facing server tool contract", () => {
     const cli = readFileSync(join(repoRoot, "packages/cli/src/cli.ts"), "utf8");
     const clientConfig = readFileSync(join(repoRoot, "packages/cli/src/client-config.ts"), "utf8");
