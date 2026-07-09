@@ -81,7 +81,7 @@ describe("server ops config", () => {
     expect(existsSync(join(repoRoot, "scripts/install-server-sync.mjs"))).toBe(false);
   });
 
-  test("otel-lgtm is an opt-in compose profile with one-flag enable", () => {
+  test("otel-lgtm is an opt-in compose profile; OTLP base is explicit only", () => {
     const compose = readFileSync(join(repoRoot, "platform/server/compose.yaml"), "utf8");
     const envExample = readFileSync(join(repoRoot, "platform/server/.env.example"), "utf8");
     const sinkDoc = readFileSync(join(repoRoot, "docs/operations/observability-sink.md"), "utf8");
@@ -95,20 +95,23 @@ describe("server ops config", () => {
     expect(compose).toContain("grafana/otel-lgtm");
     expect(compose).toContain('profiles: ["otel"]');
     expect(compose).toContain("required: false");
-    // ONE enable env: COMPOSE_PROFILES=otel → default OTLP base to in-network collector.
-    expect(compose).toContain(
-      "QUASAR_OTLP_BASE_URL: ${QUASAR_OTLP_BASE_URL:-${COMPOSE_PROFILES:+http://otel-lgtm:4318}}",
-    );
-    // No product code path invents a second enable flag.
+    // OTLP base is explicit only — never ${COMPOSE_PROFILES:+…} (fires on any non-empty).
+    expect(compose).toContain("QUASAR_OTLP_BASE_URL: ${QUASAR_OTLP_BASE_URL:-}");
+    expect(compose).not.toContain("COMPOSE_PROFILES:+");
+    expect(compose).not.toContain("${COMPOSE_PROFILES:");
+    // Enable docs list both envs.
     expect(envExample).toContain("COMPOSE_PROFILES=otel");
+    expect(envExample).toContain("QUASAR_OTLP_BASE_URL=http://otel-lgtm:4318");
     expect(envExample).toContain("OFF by default");
     expect(sinkDoc).toContain("COMPOSE_PROFILES=otel");
+    expect(sinkDoc).toContain("QUASAR_OTLP_BASE_URL=http://otel-lgtm:4318");
     expect(sinkDoc).toContain("http://localhost:3000");
     expect(sinkDoc).toContain("quasar-server");
     expect(watchdogDoc).toContain("opt-in");
     expect(watchdogDoc).toContain("separate process");
     expect(watchdogDoc).toContain("Supersession");
     expect(runbook).toContain("COMPOSE_PROFILES=otel");
+    expect(runbook).toContain("QUASAR_OTLP_BASE_URL=http://otel-lgtm:4318");
   });
 
   test("runbook documents the agent-facing server tool contract", () => {

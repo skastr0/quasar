@@ -13,7 +13,8 @@ This is the operational path for Quasar on the Mac mini.
 - Client access is through the Tailscale Service hostname assigned to `svc:quasar`.
 - `platform/server/.env` is local-only and must not be committed.
 - Optional local OTLP sink (`grafana/otel-lgtm`) is an **opt-in compose profile**
-  — off by default. Enable with `COMPOSE_PROFILES=otel` only; see
+  — off by default. Enable with `COMPOSE_PROFILES=otel` **and**
+  `QUASAR_OTLP_BASE_URL=http://otel-lgtm:4318`; see
   `docs/operations/observability-sink.md` and
   `docs/architecture/observability-sink-and-watchdog.md`.
 

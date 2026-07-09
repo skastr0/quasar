@@ -22,7 +22,7 @@ describe("observability OTLP env gate", () => {
     expect(runtime).not.toContain("otel-lgtm");
   });
 
-  test("compose profile off leaves OTLP base empty; profile on defaults collector URL", () => {
+  test("compose OTLP base stays empty unless QUASAR_OTLP_BASE_URL is set", () => {
     const composeFile = join(repoRoot, "platform/server/compose.yaml");
     // Minimal env file — do not load platform/server/.env (secrets must not
     // appear in test failure dumps).
@@ -36,10 +36,15 @@ describe("observability OTLP env gate", () => {
         "",
       ].join("\n"),
     );
-    const runConfig = (profiles: string | undefined) => {
+    const runConfig = (opts: {
+      profiles?: string;
+      otlpBaseUrl?: string;
+    } = {}) => {
       const env: Record<string, string | undefined> = { ...process.env };
-      if (profiles === undefined) delete env.COMPOSE_PROFILES;
-      else env.COMPOSE_PROFILES = profiles;
+      delete env.COMPOSE_PROFILES;
+      delete env.QUASAR_OTLP_BASE_URL;
+      if (opts.profiles !== undefined) env.COMPOSE_PROFILES = opts.profiles;
+      if (opts.otlpBaseUrl !== undefined) env.QUASAR_OTLP_BASE_URL = opts.otlpBaseUrl;
       return Bun.spawnSync(
         ["docker", "compose", "--env-file", tmpEnv, "-f", composeFile, "config"],
         { env, stdout: "pipe", stderr: "pipe" },
@@ -47,19 +52,39 @@ describe("observability OTLP env gate", () => {
     };
 
     try {
-      const off = runConfig(undefined);
+      const off = runConfig();
       expect(off.exitCode).toBe(0);
       const offText = off.stdout.toString();
       // Profiled image is not part of the rendered project when profile is off.
       expect(offText).not.toContain("grafana/otel-lgtm");
       expect(offText).toContain('QUASAR_OTLP_BASE_URL: ""');
 
-      const on = runConfig("otel");
-      expect(on.exitCode).toBe(0);
-      const onText = on.stdout.toString();
-      expect(onText).toContain("grafana/otel-lgtm");
-      expect(onText).toContain("http://otel-lgtm:4318");
-      expect(onText).toMatch(/profiles:[\s\S]*otel/);
+      // Profile on alone starts the sink but does NOT invent the OTLP URL.
+      const profileOnly = runConfig({ profiles: "otel" });
+      expect(profileOnly.exitCode).toBe(0);
+      const profileOnlyText = profileOnly.stdout.toString();
+      expect(profileOnlyText).toContain("grafana/otel-lgtm");
+      expect(profileOnlyText).toContain('QUASAR_OTLP_BASE_URL: ""');
+      expect(profileOnlyText).not.toContain("http://otel-lgtm:4318");
+      expect(profileOnlyText).toMatch(/profiles:[\s\S]*otel/);
+
+      // Non-otel COMPOSE_PROFILES must not wire OTLP (the old ${:+} bug).
+      const otherProfile = runConfig({ profiles: "debug" });
+      expect(otherProfile.exitCode).toBe(0);
+      const otherText = otherProfile.stdout.toString();
+      expect(otherText).not.toContain("grafana/otel-lgtm");
+      expect(otherText).toContain('QUASAR_OTLP_BASE_URL: ""');
+      expect(otherText).not.toContain("http://otel-lgtm:4318");
+
+      // Full enable: profile + explicit base URL.
+      const full = runConfig({
+        profiles: "otel",
+        otlpBaseUrl: "http://otel-lgtm:4318",
+      });
+      expect(full.exitCode).toBe(0);
+      const fullText = full.stdout.toString();
+      expect(fullText).toContain("grafana/otel-lgtm");
+      expect(fullText).toContain("http://otel-lgtm:4318");
     } finally {
       try {
         Bun.spawnSync(["rm", "-f", tmpEnv]);
