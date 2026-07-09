@@ -493,7 +493,12 @@ export const App = ({
       let loaded: readonly MessageRow[] = live.reader?.sessionId === sessionId ? live.transcript : [];
       if (loaded.length === 0) {
         const r = await client.messages(sessionId, { limit: 8000 });
-        loaded = r.ok ? r.value : [];
+        if (!r.ok) {
+          // Never hand the user an empty/stale editor on a failed load.
+          setError(r.message);
+          return;
+        }
+        loaded = r.value;
       }
       const file = writeTempFile(sessionId, transcriptToText(sessionId, loaded));
       onExit({ editorFile: file, editor: editorCommand() });
