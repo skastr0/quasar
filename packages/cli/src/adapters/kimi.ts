@@ -115,7 +115,7 @@ const messageContentText = (msg: KimiAppendMessageRecord): string | undefined =>
   const content = msg.message.content ?? [];
   const textParts = content
     .map((c) => recordFrom(c))
-    .flatMap((c) => (typeof c.text === "string" ? [c.text] : []));
+    .flatMap((c) => (c !== undefined && typeof c.text === "string" ? [c.text] : []));
   return textParts.length > 0 ? textParts.join(" ") : undefined;
 };
 
@@ -151,7 +151,7 @@ const collectAgents = (
   state: Record<string, unknown>,
   diagnostics: DecodeDiagnostic[],
 ): KimiAgent[] => {
-  const agentsRecord = recordFrom(state.agents);
+  const agentsRecord = recordFrom(state.agents) ?? {};
   const agents: KimiAgent[] = [];
   const declared = new Set<string>();
   for (const id of Object.keys(agentsRecord).sort()) {
@@ -161,8 +161,8 @@ const collectAgents = (
     declared.add(id);
     agents.push({
       id,
-      type: stringValue(meta.type),
-      parentAgentId: stringValue(meta.parentAgentId),
+      type: stringValue(meta?.type),
+      parentAgentId: stringValue(meta?.parentAgentId),
       wirePath,
     });
   }
@@ -467,9 +467,9 @@ const buildAgentSession = (
         const ev = loop.event.type === "tool.result" ? loop.event : undefined;
         const toolCallId = ev?.toolCallId;
         const resultRecord = recordFrom(ev?.result);
-        const output = projectToolPayloadNativeValue(resultRecord.output ?? ev?.result);
+        const output = projectToolPayloadNativeValue(resultRecord?.output ?? ev?.result);
         const contentText =
-          typeof resultRecord.output === "string"
+          typeof resultRecord?.output === "string"
             ? compactText(resultRecord.output)
             : undefined;
 
@@ -611,7 +611,7 @@ const buildKimiSessionsFromEntry = (
     diagnostics,
     sourcePath: statePath,
   });
-  const state = recordFrom(stateRaw);
+  const state = recordFrom(stateRaw) ?? {};
 
   const isCustomTitle = state.isCustomTitle === true;
   const title = isCustomTitle ? stringValue(state.title) : undefined;
@@ -699,6 +699,7 @@ async function* streamKimi(options: AdapterOptions): AsyncGenerator<AdapterStrea
 
   for (const { value } of indexLines) {
     const entry = recordFrom(value);
+    if (entry === undefined) continue;
     const sessionId = stringValue(entry.sessionId);
     const sessionDir = stringValue(entry.sessionDir);
     const workDir = stringValue(entry.workDir) ?? "";

@@ -402,7 +402,7 @@ const parseMessageData = (message: OpenCodeMessageRow) => {
 
 const summaryMetadata = (value: unknown): NativeValue | undefined => {
   const summary = recordFrom(value);
-  if (Object.keys(summary).length === 0) return undefined;
+  if (summary === undefined || Object.keys(summary).length === 0) return undefined;
   const allowed = new Set(["text", "content", "message", "title"]);
   return Object.fromEntries(
     Object.entries(summary)
@@ -561,7 +561,7 @@ const collectToolCalls = (
 
 const dateFromNestedTime = (value: unknown, key: string) => {
   const time = recordFrom(value);
-  const millis = numberValue(time[key]);
+  const millis = numberValue(time?.[key]);
   return millis === undefined ? undefined : new Date(millis).toISOString();
 };
 
@@ -572,15 +572,15 @@ const usageFromMessage = (
   data: Record<string, NativeValue | undefined>,
 ): OpenCodeUsageDraft | undefined => {
   const tokens = recordFrom(data.tokens);
-  const hasTokens = Object.keys(tokens).length > 0;
+  const hasTokens = tokens !== undefined && Object.keys(tokens).length > 0;
   const cost = numberValue(data.cost);
   if (!hasTokens && cost === undefined) return undefined;
-  const cache = recordFrom(tokens.cache);
-  const inputTokens = numberValue(tokens.input);
-  const outputTokens = numberValue(tokens.output);
-  const reasoningTokens = numberValue(tokens.reasoning);
+  const cache = recordFrom(tokens?.cache);
+  const inputTokens = numberValue(tokens?.input);
+  const outputTokens = numberValue(tokens?.output);
+  const reasoningTokens = numberValue(tokens?.reasoning);
   const totalTokens =
-    numberValue(tokens.total) ?? sumNumbers([inputTokens, outputTokens, reasoningTokens]);
+    numberValue(tokens?.total) ?? sumNumbers([inputTokens, outputTokens, reasoningTokens]);
   return {
     id: usageIdFor(sessionId, eventId, index),
     eventId,
@@ -590,8 +590,8 @@ const usageFromMessage = (
     inputTokens,
     outputTokens,
     reasoningTokens,
-    cacheCreationInputTokens: numberValue(cache.write),
-    cacheReadInputTokens: numberValue(cache.read),
+    cacheCreationInputTokens: numberValue(cache?.write),
+    cacheReadInputTokens: numberValue(cache?.read),
     totalTokens,
     cost,
   };
@@ -655,7 +655,7 @@ const eventFromMessage = (
   // so no content surfaces (a JSON dump of the envelope is not a turn).
   const contentRecord = recordFrom(content);
   const hasTurnContent =
-    contentRecord.content !== undefined || contentRecord.parts !== undefined;
+    contentRecord?.content !== undefined || contentRecord?.parts !== undefined;
   // A turn is a tool_call iff a part was classified as a tool invocation.
   const isToolTurn = parts.some((part) => {
     const kind = partKind(part);
@@ -669,8 +669,8 @@ const eventFromMessage = (
   // carries a bare string in data.content/data.text with no part rows.
   const textOnlyContentText = hasTurnContent
     ? (partsContentText(parts) ??
-        compactText(contentRecord.content as NativeValue | undefined) ??
-        compactText(contentRecord.text as NativeValue | undefined))
+        compactText(contentRecord?.content as NativeValue | undefined) ??
+        compactText(contentRecord?.text as NativeValue | undefined))
     : undefined;
   const mainEvent = {
     id: eventId,
