@@ -1,0 +1,164 @@
+[
+  {
+    "sourceRoot": {
+      "adapterId": "hermes-state-sqlite",
+      "discoveredAt": "2026-06-11T00:00:00.000Z",
+      "machineId": "machine:test",
+      "provider": "hermes",
+      "rootPath": "/fixture/hermes"
+    },
+    "type": "sourceRoot"
+  },
+  {
+    "fingerprint": {
+      "mtimeMs": "<mtimeMs>",
+      "size": 2
+    },
+    "session": {
+      "agentName": "hermes",
+      "artifacts": [],
+      "events": [
+        {
+          "agentName": "hermes",
+          "contentBlocks": [
+            {
+              "id": "hermes:55717f63609a33c4d6a3ab09aecdb942:block:43458c0a4b4e9621316d7a7836507b57",
+              "kind": "text",
+              "metadata": {
+                "nativeType": "text"
+              },
+              "sequence": 0,
+              "text": "fixture user turn"
+            }
+          ],
+          "contentText": "fixture user turn",
+          "id": "hermes:55717f63609a33c4d6a3ab09aecdb942:event:921bce3f5e9889def1f58e856e7d5994",
+          "kind": "message",
+          "machineId": "machine:test",
+          "nativeEventId": "1",
+          "projectIdentityKey": "project:profile:hermes",
+          "provider": "hermes",
+          "rawReference": {
+            "nativeType": "message",
+            "rowId": "1",
+            "sourcePath": "/fixture/hermes/state.db",
+            "table": "messages"
+          },
+          "role": "user",
+          "sequence": 0,
+          "sessionId": "hermes:55717f63609a33c4d6a3ab09aecdb942",
+          "timestamp": "1970-01-01T00:16:40.000Z"
+        },
+        {
+          "agentName": "hermes",
+          "contentBlocks": [
+            {
+              "id": "hermes:55717f63609a33c4d6a3ab09aecdb942:block:02eb677f41b5e7348a8936a9f9bf6c06",
+              "kind": "text",
+              "metadata": {
+                "nativeType": "text"
+              },
+              "sequence": 0,
+              "text": "fixture assistant turn"
+            }
+          ],
+          "contentText": "fixture assistant turn",
+          "id": "hermes:55717f63609a33c4d6a3ab09aecdb942:event:c208471f3f2d6f9e0e64a5a91d683d90",
+          "kind": "tool_result",
+          "machineId": "machine:test",
+          "nativeEventId": "2",
+          "projectIdentityKey": "project:profile:hermes",
+          "provider": "hermes",
+          "rawReference": {
+            "nativeType": "message",
+            "rowId": "2",
+            "sourcePath": "/fixture/hermes/state.db",
+            "table": "messages"
+          },
+          "role": "tool",
+          "sequence": 1,
+          "sessionId": "hermes:55717f63609a33c4d6a3ab09aecdb942",
+          "timestamp": "1970-01-01T00:16:41.000Z",
+          "toolCallId": "hermes:55717f63609a33c4d6a3ab09aecdb942:tool:e672f46e6755b891470176643ccb0ec7"
+        }
+      ],
+      "host": "test-host",
+      "id": "hermes:55717f63609a33c4d6a3ab09aecdb942",
+      "identitySchemeVersion": 1,
+      "machineId": "machine:test",
+      "nativeProjectKey": "/fixture/quasar",
+      "nativeSessionId": "20260101_000000_00000061",
+      "projectIdentity": {
+        "confidence": "explicit",
+        "displayName": "profile:hermes",
+        "normalizedPath": "/fixture/quasar",
+        "projectIdentityKey": "project:profile:hermes",
+        "rawPath": "/fixture/quasar",
+        "signals": [
+          {
+            "confidence": "explicit",
+            "kind": "explicit",
+            "value": "profile:hermes"
+          }
+        ]
+      },
+      "provider": "hermes",
+      "sessionEdges": [],
+      "sourcePath": "/fixture/hermes/state.db",
+      "sourceRoot": "/fixture/hermes",
+      "startedAt": "1970-01-01T00:16:40.000Z",
+      "title": "Fixture Hermes Session",
+      "toolCalls": [
+        {
+          "agentName": "hermes",
+          "completedAt": "1970-01-01T00:16:41.000Z",
+          "eventId": "hermes:55717f63609a33c4d6a3ab09aecdb942:event:c208471f3f2d6f9e0e64a5a91d683d90",
+          "id": "hermes:55717f63609a33c4d6a3ab09aecdb942:tool:e672f46e6755b891470176643ccb0ec7",
+          "machineId": "machine:test",
+          "output": "fixture assistant turn",
+          "projectIdentityKey": "project:profile:hermes",
+          "provider": "hermes",
+          "sessionId": "hermes:55717f63609a33c4d6a3ab09aecdb942",
+          "status": "completed",
+          "toolName": "bash"
+        }
+      ],
+      "usageRecords": [
+        {
+          "agentName": "hermes",
+          "cacheCreationInputTokens": 0,
+          "cacheReadInputTokens": 0,
+          "id": "hermes:55717f63609a33c4d6a3ab09aecdb942:usage:30b43b3723d489ca4082b1d1c7520b14",
+          "inputTokens": 0,
+          "machineId": "machine:test",
+          "outputTokens": 0,
+          "projectIdentityKey": "project:profile:hermes",
+          "provider": "hermes",
+          "reasoningTokens": 0,
+          "sessionId": "hermes:55717f63609a33c4d6a3ab09aecdb942",
+          "timestamp": "1970-01-01T00:16:40.000Z",
+          "totalTokens": 0
+        }
+      ]
+    },
+    "sourceUnit": {
+      "adapterId": "hermes-state-sqlite",
+      "physicalPath": "<fixture-root>/state.db",
+      "provider": "hermes",
+      "rootPath": "/fixture/hermes",
+      "sourcePath": "/fixture/hermes/state.db"
+    },
+    "type": "session"
+  },
+  {
+    "diagnostic": {
+      "adapterId": "hermes-state-sqlite",
+      "message": "Discovered 1 Hermes session(s) across 1 profile database(s).",
+      "parserConfidence": "documented",
+      "provider": "hermes",
+      "rootPath": "/fixture/hermes",
+      "status": "available"
+    },
+    "type": "diagnostic"
+  }
+]

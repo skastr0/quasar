@@ -1,0 +1,265 @@
+[
+  {
+    "sourceRoot": {
+      "adapterId": "codex-local-jsonl",
+      "discoveredAt": "2026-06-11T00:00:00.000Z",
+      "machineId": "machine:test",
+      "provider": "codex",
+      "rootPath": "/fixture/codex/sessions"
+    },
+    "type": "sourceRoot"
+  },
+  {
+    "sourceRoot": {
+      "adapterId": "codex-local-jsonl",
+      "discoveredAt": "2026-06-11T00:00:00.000Z",
+      "machineId": "machine:test",
+      "provider": "codex",
+      "rootPath": "/fixture/codex/archived_sessions"
+    },
+    "type": "sourceRoot"
+  },
+  {
+    "session": {
+      "agentName": "codex",
+      "artifactCount": 0,
+      "artifacts": [],
+      "contentBlockCount": 5,
+      "eventCount": 5,
+      "events": [
+        {
+          "agentName": "codex",
+          "contentBlocks": [
+            {
+              "id": "codex:067912ce9780ebb9a39923340bdc170f:block:b2d3524a78ccac8fb75552b8027d1b4d",
+              "kind": "text",
+              "metadata": {
+                "nativeId": "0fab0000-fab0-7fab-8fab-000000000061",
+                "nativeType": "session_meta"
+              },
+              "sequence": 0,
+              "text": "{\"id\":\"0fab0000-fab0-7fab-8fab-000000000061\",\"timestamp\":\"2026-06-11T00:00:00.000Z\",\"cwd\":\"/fixture/quasar\",\"originator\":\"fixture\",\"cli_version\":\"0.0.0-fixture\",\"type\":\"session_meta\"}"
+            }
+          ],
+          "contentText": "{\"id\":\"0fab0000-fab0-7fab-8fab-000000000061\",\"timestamp\":\"2026-06-11T00:00:00.000Z\",\"cwd\":\"/fixture/quasar\",\"originator\":\"fixture\",\"cli_version\":\"0.0.0-fixture\",\"type\":\"session_meta\"}",
+          "id": "codex:067912ce9780ebb9a39923340bdc170f:event:0dc5da4a375507917be5aa0c3ed96a0b",
+          "kind": "system",
+          "machineId": "machine:test",
+          "nativeEventId": "0fab0000-fab0-7fab-8fab-000000000061",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "codex",
+          "rawReference": {
+            "line": 1,
+            "nativeType": "session_meta.session_meta",
+            "sourcePath": "/fixture/codex/sessions/2026/06/11/rollout-2026-06-11T00-00-00-0fab0000-fab0-7fab-8fab-000000000061.jsonl"
+          },
+          "role": "system",
+          "sequence": 0,
+          "sessionId": "codex:067912ce9780ebb9a39923340bdc170f",
+          "timestamp": "2026-06-11T00:00:00.000Z"
+        },
+        {
+          "agentName": "codex",
+          "contentBlocks": [
+            {
+              "id": "codex:067912ce9780ebb9a39923340bdc170f:block:59d65475e3695cd8d8d01ed781328d52",
+              "kind": "text",
+              "metadata": {
+                "nativeType": "input_text"
+              },
+              "sequence": 0,
+              "text": "fixture user turn"
+            }
+          ],
+          "contentText": "fixture user turn",
+          "id": "codex:067912ce9780ebb9a39923340bdc170f:event:0ba3cee31bf356fe5004c33553e7b050",
+          "kind": "message",
+          "machineId": "machine:test",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "codex",
+          "rawReference": {
+            "line": 2,
+            "nativeType": "response_item.message",
+            "sourcePath": "/fixture/codex/sessions/2026/06/11/rollout-2026-06-11T00-00-00-0fab0000-fab0-7fab-8fab-000000000061.jsonl"
+          },
+          "role": "user",
+          "sequence": 1,
+          "sessionId": "codex:067912ce9780ebb9a39923340bdc170f",
+          "timestamp": "2026-06-11T00:00:00.000Z"
+        },
+        {
+          "agentName": "codex",
+          "contentBlocks": [
+            {
+              "id": "codex:067912ce9780ebb9a39923340bdc170f:block:8127abf0d8931989cc49b86a7c3f6463",
+              "kind": "text",
+              "metadata": {
+                "callId": "fixture-call",
+                "name": "bash",
+                "nativeType": "function_call"
+              },
+              "sequence": 0,
+              "text": "{\"type\":\"function_call\",\"call_id\":\"fixture-call\",\"name\":\"bash\",\"arguments\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}"
+            }
+          ],
+          "contentText": "{\"type\":\"function_call\",\"call_id\":\"fixture-call\",\"name\":\"bash\",\"arguments\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}",
+          "id": "codex:067912ce9780ebb9a39923340bdc170f:event:895362bcb640979f5874293e658c7271",
+          "kind": "tool_call",
+          "machineId": "machine:test",
+          "nativeEventId": "fixture-call",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "codex",
+          "rawReference": {
+            "line": 3,
+            "nativeType": "response_item.function_call",
+            "sourcePath": "/fixture/codex/sessions/2026/06/11/rollout-2026-06-11T00-00-00-0fab0000-fab0-7fab-8fab-000000000061.jsonl"
+          },
+          "role": "assistant",
+          "sequence": 2,
+          "sessionId": "codex:067912ce9780ebb9a39923340bdc170f",
+          "timestamp": "2026-06-11T00:00:00.000Z",
+          "toolCallId": "codex:067912ce9780ebb9a39923340bdc170f:tool:d60ac7ea33f1915dfe558558183a2303"
+        },
+        {
+          "agentName": "codex",
+          "contentBlocks": [
+            {
+              "id": "codex:067912ce9780ebb9a39923340bdc170f:block:42523ee77c5e80469873107d54d73074",
+              "kind": "text",
+              "metadata": {
+                "callId": "fixture-call",
+                "nativeType": "function_call_output"
+              },
+              "sequence": 0,
+              "text": "{\"type\":\"function_call_output\",\"call_id\":\"fixture-call\",\"output\":\"/fixture/quasar\"}"
+            }
+          ],
+          "contentText": "{\"type\":\"function_call_output\",\"call_id\":\"fixture-call\",\"output\":\"/fixture/quasar\"}",
+          "id": "codex:067912ce9780ebb9a39923340bdc170f:event:7cd13c77ce0e4e2405381a59f60b3556",
+          "kind": "tool_result",
+          "machineId": "machine:test",
+          "nativeEventId": "fixture-call",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "codex",
+          "rawReference": {
+            "line": 4,
+            "nativeType": "response_item.function_call_output",
+            "sourcePath": "/fixture/codex/sessions/2026/06/11/rollout-2026-06-11T00-00-00-0fab0000-fab0-7fab-8fab-000000000061.jsonl"
+          },
+          "role": "tool",
+          "sequence": 3,
+          "sessionId": "codex:067912ce9780ebb9a39923340bdc170f",
+          "timestamp": "2026-06-11T00:00:00.000Z",
+          "toolCallId": "codex:067912ce9780ebb9a39923340bdc170f:tool:d60ac7ea33f1915dfe558558183a2303"
+        },
+        {
+          "agentName": "codex",
+          "contentBlocks": [
+            {
+              "id": "codex:067912ce9780ebb9a39923340bdc170f:block:b5599cfdf816bffc41d58e1f1fa627d6",
+              "kind": "text",
+              "metadata": {
+                "nativeType": "output_text"
+              },
+              "sequence": 0,
+              "text": "fixture assistant turn"
+            }
+          ],
+          "contentText": "fixture assistant turn",
+          "id": "codex:067912ce9780ebb9a39923340bdc170f:event:ebea502d55433e90d016bdb350d24436",
+          "kind": "message",
+          "machineId": "machine:test",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "codex",
+          "rawReference": {
+            "line": 5,
+            "nativeType": "response_item.message",
+            "sourcePath": "/fixture/codex/sessions/2026/06/11/rollout-2026-06-11T00-00-00-0fab0000-fab0-7fab-8fab-000000000061.jsonl"
+          },
+          "role": "assistant",
+          "sequence": 4,
+          "sessionId": "codex:067912ce9780ebb9a39923340bdc170f",
+          "timestamp": "2026-06-11T00:00:00.000Z"
+        }
+      ],
+      "host": "test-host",
+      "id": "codex:067912ce9780ebb9a39923340bdc170f",
+      "identitySchemeVersion": 1,
+      "machineId": "machine:test",
+      "nativeProjectKey": "/fixture/quasar",
+      "nativeSessionId": "0fab0000-fab0-7fab-8fab-000000000061",
+      "projectIdentity": {
+        "confidence": "low",
+        "displayName": "quasar",
+        "normalizedPath": "/fixture/quasar",
+        "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+        "rawPath": "/fixture/quasar",
+        "signals": [
+          {
+            "confidence": "low",
+            "kind": "path",
+            "value": "/fixture/quasar"
+          }
+        ]
+      },
+      "provider": "codex",
+      "sessionEdgeCount": 1,
+      "sessionEdges": [
+        {
+          "agentName": "codex",
+          "fromEventId": "codex:067912ce9780ebb9a39923340bdc170f:event:895362bcb640979f5874293e658c7271",
+          "id": "codex:067912ce9780ebb9a39923340bdc170f:edge:2ee31b51466d678442e596ef2696008a",
+          "kind": "tool_result_for",
+          "machineId": "machine:test",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "codex",
+          "sessionId": "codex:067912ce9780ebb9a39923340bdc170f",
+          "toEventId": "codex:067912ce9780ebb9a39923340bdc170f:event:7cd13c77ce0e4e2405381a59f60b3556"
+        }
+      ],
+      "sourcePath": "/fixture/codex/sessions/2026/06/11/rollout-2026-06-11T00-00-00-0fab0000-fab0-7fab-8fab-000000000061.jsonl",
+      "sourceRoot": "/fixture/codex/sessions",
+      "toolCallCount": 1,
+      "toolCalls": [
+        {
+          "agentName": "codex",
+          "completedAt": "2026-06-11T00:00:00.000Z",
+          "eventId": "codex:067912ce9780ebb9a39923340bdc170f:event:895362bcb640979f5874293e658c7271",
+          "id": "codex:067912ce9780ebb9a39923340bdc170f:tool:d60ac7ea33f1915dfe558558183a2303",
+          "input": {
+            "cmd": "pwd"
+          },
+          "machineId": "machine:test",
+          "output": "/fixture/quasar",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "codex",
+          "sessionId": "codex:067912ce9780ebb9a39923340bdc170f",
+          "startedAt": "2026-06-11T00:00:00.000Z",
+          "status": "completed",
+          "toolName": "bash"
+        }
+      ],
+      "usageRecordCount": 0,
+      "usageRecords": []
+    },
+    "sourceUnit": {
+      "adapterId": "codex-local-jsonl",
+      "physicalPath": "<fixture-root>/sessions/2026/06/11/rollout-2026-06-11T00-00-00-0fab0000-fab0-7fab-8fab-000000000061.jsonl",
+      "provider": "codex",
+      "rootPath": "/fixture/codex/sessions",
+      "sourcePath": "/fixture/codex/sessions/2026/06/11/rollout-2026-06-11T00-00-00-0fab0000-fab0-7fab-8fab-000000000061.jsonl"
+    },
+    "type": "session"
+  },
+  {
+    "diagnostic": {
+      "adapterId": "codex-local-jsonl",
+      "message": "Discovered 1 Codex session(s); variants legacy_header_v1=0, session_meta_v2=1.",
+      "parserConfidence": "documented",
+      "provider": "codex",
+      "rootPath": "/fixture/codex/sessions",
+      "status": "available"
+    },
+    "type": "diagnostic"
+  }
+]

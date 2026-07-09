@@ -1,0 +1,107 @@
+[
+  {
+    "sourceRoot": {
+      "adapterId": "kimi-code-session-folder",
+      "discoveredAt": "2026-06-11T00:00:00.000Z",
+      "machineId": "machine:test",
+      "provider": "kimi",
+      "rootPath": "<fixture-root>/sessions"
+    },
+    "type": "sourceRoot"
+  },
+  {
+    "session": {
+      "agentName": "kimi-code",
+      "artifacts": [],
+      "events": [
+        {
+          "agentName": "kimi-code",
+          "contentBlocks": [],
+          "contentText": "fixture user turn",
+          "id": "kimi:28ea89d550b9357ab9397417fc15afc4:event:a12c2cd6e0c707311cadec68da0ff363",
+          "kind": "message",
+          "machineId": "machine:test",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "kimi",
+          "rawReference": {
+            "agentId": "main",
+            "line": 1,
+            "nativeType": "context.append_message",
+            "sourcePath": "<fixture-root>/sessions/fixture-quasar/session_fixture061/agents/main/wire.jsonl"
+          },
+          "role": "user",
+          "sequence": 0,
+          "sessionId": "kimi:28ea89d550b9357ab9397417fc15afc4",
+          "timestamp": "1970-01-01T00:00:01.000Z"
+        },
+        {
+          "agentName": "kimi-code",
+          "contentBlocks": [],
+          "contentText": "fixture assistant turn",
+          "id": "kimi:28ea89d550b9357ab9397417fc15afc4:event:c79f3e6cc57edc17a631e6927c92dcdd",
+          "kind": "preamble",
+          "machineId": "machine:test",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "kimi",
+          "rawReference": {
+            "agentId": "main",
+            "line": 2,
+            "nativeType": "context.append_message",
+            "sourcePath": "<fixture-root>/sessions/fixture-quasar/session_fixture061/agents/main/wire.jsonl"
+          },
+          "role": "system",
+          "sequence": 1,
+          "sessionId": "kimi:28ea89d550b9357ab9397417fc15afc4",
+          "timestamp": "1970-01-01T00:00:01.001Z"
+        }
+      ],
+      "host": "test-host",
+      "id": "kimi:28ea89d550b9357ab9397417fc15afc4",
+      "identitySchemeVersion": 1,
+      "machineId": "machine:test",
+      "nativeSessionId": "session_fixture061",
+      "projectIdentity": {
+        "confidence": "low",
+        "displayName": "quasar",
+        "normalizedPath": "/fixture/quasar",
+        "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+        "rawPath": "/fixture/quasar",
+        "signals": [
+          {
+            "confidence": "low",
+            "kind": "path",
+            "value": "/fixture/quasar"
+          }
+        ]
+      },
+      "provider": "kimi",
+      "sessionEdges": [],
+      "sourcePath": "<fixture-root>/sessions/fixture-quasar/session_fixture061/agents/main",
+      "sourceRoot": "<fixture-root>/sessions",
+      "startedAt": "2026-06-11T00:00:00.000Z",
+      "title": "Fixture Kimi Session",
+      "toolCalls": [],
+      "updatedAt": "2026-06-11T00:00:00.000Z",
+      "usageRecords": []
+    },
+    "sourceUnit": {
+      "adapterId": "kimi-code-session-folder",
+      "physicalPath": "<fixture-root>/sessions/fixture-quasar/session_fixture061/state.json",
+      "provider": "kimi",
+      "rootPath": "<fixture-root>/sessions",
+      "sourcePath": "<fixture-root>/sessions/fixture-quasar/session_fixture061/agents/main"
+    },
+    "type": "session"
+  },
+  {
+    "diagnostic": {
+      "adapterId": "kimi-code-session-folder",
+      "message": "Discovered 1 Kimi Code session(s).",
+      "parserConfidence": "observed",
+      "provider": "kimi",
+      "rootPath": "<fixture-root>/sessions",
+      "status": "available"
+    },
+    "type": "diagnostic"
+  }
+]

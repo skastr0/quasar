@@ -248,7 +248,8 @@ const unsupportedRuntimeResult = (dbPath: string) => ({
       status: "unsupported" as const,
       parserConfidence: "observed" as const,
       rootPath: dbPath,
-      message: "OpenCode SQLite import requires Bun's sqlite runtime.",
+      message: "OpenCode SQLite database could not be read.",
+      details: { diagnostic: "opencode.sqlite.unreadable", sourcePath: dbPath },
     },
   ],
 });
@@ -348,7 +349,10 @@ const readPartsByMessageCli = (
 
 const sqliteJson = <A>(dbPath: string, query: string): A[] => {
   try {
-    const output = execFileSync("sqlite3", ["-json", dbPath, query], { encoding: "utf8" });
+    const output = execFileSync("sqlite3", ["-json", dbPath, query], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
     return output.trim().length === 0 ? [] : (JSON.parse(output) as A[]);
   } catch {
     return [];
@@ -995,7 +999,27 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
     const stat = statSync(dbPath);
     if (!options.shouldReadFile(dbPath, stat)) return;
   }
-  const tempDb = copyDatabaseForRead(dbPath);
+  let tempDb: ReturnType<typeof copyDatabaseForRead>;
+  try {
+    tempDb = copyDatabaseForRead(dbPath);
+  } catch (error) {
+    yield {
+      type: "diagnostic",
+      diagnostic: {
+        adapterId: opencodeAdapter.id,
+        provider: "opencode" as const,
+        status: "unsupported" as const,
+        parserConfidence: "observed" as const,
+        rootPath: logicalDbPath ?? dbPath,
+        message: "OpenCode SQLite database could not be copied for reading.",
+        details: {
+          diagnostic: "opencode.sqlite.unreadable",
+          error: error instanceof Error ? error.message : String(error),
+        },
+      },
+    };
+    return;
+  }
   const db = await maybeDatabase(tempDb.path);
   if (db === undefined) {
     try {
@@ -1068,10 +1092,30 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
     // Fail-closed decode: a malformed session row becomes a named diagnostic
     // and is dropped from the window — it never aborts the file.
     const decodeDiagnostics: DecodeDiagnostic[] = [];
-    const sessionRows = decodeSessionRows(
-      readSessionRows(db, options.limit, options.skip),
-      decodeDiagnostics,
-    );
+    let sessionRows: OpenCodeSessionRow[];
+    try {
+      sessionRows = decodeSessionRows(
+        readSessionRows(db, options.limit, options.skip),
+        decodeDiagnostics,
+      );
+    } catch (error) {
+      yield {
+        type: "diagnostic",
+        diagnostic: {
+          adapterId: opencodeAdapter.id,
+          provider: "opencode" as const,
+          status: "unsupported" as const,
+          parserConfidence: "observed" as const,
+          rootPath: logicalDbPath ?? dbPath,
+          message: "OpenCode SQLite database could not be read.",
+          details: {
+            diagnostic: "opencode.sqlite.unreadable",
+            error: error instanceof Error ? error.message : String(error),
+          },
+        },
+      };
+      return;
+    }
     for (const sessionEntry of sessionRows) {
       if (await skipOpenCodeSession(options, sessionEntry, logicalDbPath ?? dbPath)) continue;
       const session = buildOpenCodeSession(

@@ -1,0 +1,101 @@
+[
+  {
+    "sourceRoot": {
+      "adapterId": "antigravity-cli-brain-jsonl",
+      "discoveredAt": "2026-06-11T00:00:00.000Z",
+      "machineId": "machine:test",
+      "provider": "antigravity",
+      "rootPath": "<fixture-root>/brain"
+    },
+    "type": "sourceRoot"
+  },
+  {
+    "session": {
+      "agentName": "antigravity-cli",
+      "artifacts": [],
+      "events": [
+        {
+          "agentName": "antigravity-cli",
+          "contentBlocks": [],
+          "contentText": "fixture user turn",
+          "id": "antigravity:c72403d626d5a091447e25d4c19cc607:event:ff0d5750b25987859e3490de018d6383",
+          "kind": "message",
+          "machineId": "machine:test",
+          "projectIdentityKey": "path:machine:test:667beeb523312e4aaaaef25bf50be010",
+          "provider": "antigravity",
+          "rawReference": {
+            "line": 1,
+            "nativeType": "USER_INPUT",
+            "sourcePath": "<fixture-root>/brain/01900000-0000-7000-8000-000000000061/.system_generated/logs/transcript_full.jsonl"
+          },
+          "role": "user",
+          "sequence": 0,
+          "sessionId": "antigravity:c72403d626d5a091447e25d4c19cc607",
+          "timestamp": "2026-06-11T00:00:00.000Z"
+        },
+        {
+          "agentName": "antigravity-cli",
+          "contentBlocks": [],
+          "contentText": "fixture assistant turn",
+          "id": "antigravity:c72403d626d5a091447e25d4c19cc607:event:99bf8736a8b3c8c75117ff7cda157ffd",
+          "kind": "message",
+          "machineId": "machine:test",
+          "projectIdentityKey": "path:machine:test:667beeb523312e4aaaaef25bf50be010",
+          "provider": "antigravity",
+          "rawReference": {
+            "line": 2,
+            "nativeType": "PLANNER_RESPONSE",
+            "sourcePath": "<fixture-root>/brain/01900000-0000-7000-8000-000000000061/.system_generated/logs/transcript_full.jsonl"
+          },
+          "role": "assistant",
+          "sequence": 1,
+          "sessionId": "antigravity:c72403d626d5a091447e25d4c19cc607",
+          "timestamp": "2026-06-11T00:00:00.000Z"
+        }
+      ],
+      "host": "test-host",
+      "id": "antigravity:c72403d626d5a091447e25d4c19cc607",
+      "identitySchemeVersion": 1,
+      "machineId": "machine:test",
+      "nativeSessionId": "01900000-0000-7000-8000-000000000061",
+      "projectIdentity": {
+        "confidence": "low",
+        "displayName": "unknown-project",
+        "normalizedPath": "/Users/guilhermecastro/unknown-project",
+        "projectIdentityKey": "path:machine:test:667beeb523312e4aaaaef25bf50be010",
+        "signals": [
+          {
+            "confidence": "low",
+            "kind": "path",
+            "value": "/Users/guilhermecastro/unknown-project"
+          }
+        ]
+      },
+      "provider": "antigravity",
+      "sessionEdges": [],
+      "sourcePath": "<fixture-root>/brain/01900000-0000-7000-8000-000000000061",
+      "sourceRoot": "<fixture-root>/brain",
+      "toolCalls": [],
+      "usageRecords": []
+    },
+    "sourceUnit": {
+      "adapterId": "antigravity-cli-brain-jsonl",
+      "physicalPath": "<fixture-root>/brain/01900000-0000-7000-8000-000000000061/.system_generated/logs/transcript_full.jsonl",
+      "provider": "antigravity",
+      "rootPath": "<fixture-root>/brain",
+      "sourcePath": "<fixture-root>/brain/01900000-0000-7000-8000-000000000061"
+    },
+    "type": "session"
+  },
+  {
+    "diagnostic": {
+      "adapterId": "antigravity-cli-brain-jsonl",
+      "message": "Discovered 1 Antigravity CLI session(s).",
+      "parserConfidence": "observed",
+      "provider": "antigravity",
+      "rootPath": "<fixture-root>/brain",
+      "status": "available"
+    },
+    "type": "diagnostic"
+  }
+]

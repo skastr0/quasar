@@ -1,0 +1,30 @@
+{
+  "generatedAt": "2026-07-09T00:00:00.000Z",
+  "command": "bun run --cwd packages/cli test:coverage; pulsar coverage ingest packages/cli/coverage/lcov.info --format lcov .",
+  "scope": "packages/cli/src/adapters including common.ts",
+  "total": {
+    "lines": { "covered": 6663, "total": 7451, "pct": 89.42 },
+    "functions": { "covered": 349, "total": 394, "pct": 88.58 },
+    "branches": { "covered": 0, "total": 0, "pct": 100 }
+  },
+  "files": [
+    { "file": "packages/cli/src/adapters/antigravity-schema.ts", "lines": { "covered": 133, "total": 140, "pct": 95 }, "functions": { "covered": 9, "total": 9, "pct": 100 }, "branches": { "covered": 0, "total": 0, "pct": 100 } },
+    { "file": "packages/cli/src/adapters/antigravity.ts", "lines": { "covered": 405, "total": 428, "pct": 94.63 }, "functions": { "covered": 18, "total": 19, "pct": 94.74 }, "branches": { "covered": 0, "total": 0, "pct": 100 } },
+    { "file": "packages/cli/src/adapters/claude-schema.ts", "lines": { "covered": 401, "total": 401, "pct": 100 }, "functions": { "covered": 10, "total": 10, "pct": 100 }, "branches": { "covered": 0, "total": 0, "pct": 100 } },
+    { "file": "packages/cli/src/adapters/claude.ts", "lines": { "covered": 326, "total": 512, "pct": 63.67 }, "functions": { "covered": 18, "total": 22, "pct": 81.82 }, "branches": { "covered": 0, "total": 0, "pct": 100 } },
+    { "file": "packages/cli/src/adapters/codex-schema.ts", "lines": { "covered": 436, "total": 437, "pct": 99.77 }, "functions": { "covered": 10, "total": 10, "pct": 100 }, "branches": { "covered": 0, "total": 0, "pct": 100 } },
+    { "file": "packages/cli/src/adapters/codex.ts", "lines": { "covered": 878, "total": 924, "pct": 95.02 }, "functions": { "covered": 53, "total": 57, "pct": 92.98 }, "branches": { "covered": 0, "total": 0, "pct": 100 } },
+    { "file": "packages/cli/src/adapters/common.ts", "lines": { "covered": 560, "total": 638, "pct": 87.77 }, "functions": { "covered": 56, "total": 64, "pct": 87.5 }, "branches": { "covered": 0, "total": 0, "pct": 100 } },
+    { "file": "packages/cli/src/adapters/grok-schema.ts", "lines": { "covered": 489, "total": 491, "pct": 99.59 }, "functions": { "covered": 12, "total": 12, "pct": 100 }, "branches": { "covered": 0, "total": 0, "pct": 100 } },
+    { "file": "packages/cli/src/adapters/grok.ts", "lines": { "covered": 616, "total": 679, "pct": 90.72 }, "functions": { "covered": 35, "total": 36, "pct": 97.22 }, "branches": { "covered": 0, "total": 0, "pct": 100 } },
+    { "file": "packages/cli/src/adapters/harness-schema.ts", "lines": { "covered": 24, "total": 24, "pct": 100 }, "functions": { "covered": 4, "total": 4, "pct": 100 }, "branches": { "covered": 0, "total": 0, "pct": 100 } },
+    { "file": "packages/cli/src/adapters/hermes-schema.ts", "lines": { "covered": 149, "total": 149, "pct": 100 }, "functions": { "covered": 7, "total": 7, "pct": 100 }, "branches": { "covered": 0, "total": 0, "pct": 100 } },
+    { "file": "packages/cli/src/adapters/hermes.ts", "lines": { "covered": 597, "total": 722, "pct": 82.69 }, "functions": { "covered": 39, "total": 49, "pct": 79.59 }, "branches": { "covered": 0, "total": 0, "pct": 100 } },
+    { "file": "packages/cli/src/adapters/kimi-schema.ts", "lines": { "covered": 280, "total": 281, "pct": 99.64 }, "functions": { "covered": 3, "total": 3, "pct": 100 }, "branches": { "covered": 0, "total": 0, "pct": 100 } },
+    { "file": "packages/cli/src/adapters/kimi.ts", "lines": { "covered": 496, "total": 542, "pct": 91.51 }, "functions": { "covered": 14, "total": 15, "pct": 93.33 }, "branches": { "covered": 0, "total": 0, "pct": 100 } },
+    { "file": "packages/cli/src/adapters/opencode-schema.ts", "lines": { "covered": 173, "total": 173, "pct": 100 }, "functions": { "covered": 6, "total": 6, "pct": 100 }, "branches": { "covered": 0, "total": 0, "pct": 100 } },
+    { "file": "packages/cli/src/adapters/opencode.ts", "lines": { "covered": 669, "total": 879, "pct": 76.11 }, "functions": { "covered": 52, "total": 68, "pct": 76.47 }, "branches": { "covered": 0, "total": 0, "pct": 100 } },
+    { "file": "packages/cli/src/adapters/registry.ts", "lines": { "covered": 19, "total": 19, "pct": 100 }, "functions": { "covered": 1, "total": 1, "pct": 100 }, "branches": { "covered": 0, "total": 0, "pct": 100 } },
+    { "file": "packages/cli/src/adapters/types.ts", "lines": { "covered": 12, "total": 12, "pct": 100 }, "functions": { "covered": 2, "total": 2, "pct": 100 }, "branches": { "covered": 0, "total": 0, "pct": 100 } }
+  ]
+}

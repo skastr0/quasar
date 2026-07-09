@@ -224,9 +224,14 @@ const collectLineageFromTranscript = (
   parentUuid: string,
   transcriptPath: string,
   into: Map<string, AntigravityChildLineage>,
+  diagnostics?: DecodeDiagnostic[],
 ) => {
   let pendingRoles: SubagentRole[] = [];
-  for (const { value } of readJsonLines(transcriptPath)) {
+  for (const { value } of readJsonLines(transcriptPath, diagnostics === undefined ? undefined : {
+    diagnosticName: "antigravity.line.invalid_json",
+    diagnostics,
+    sourcePath: transcriptPath,
+  })) {
     const decision = decodeOrDrop(AntigravityRecordSchema, value, {
       kind: "record" as const,
       diagnosticName: "antigravity.record.decode_failed",
@@ -263,13 +268,14 @@ const buildLineageMap = (
   brainRoot: string,
   uuids: readonly string[],
   transcriptPathFor: (uuid: string) => string,
+  diagnostics?: DecodeDiagnostic[],
 ): AntigravityLineageMap => {
   const map = new Map<string, AntigravityChildLineage>();
   for (const uuid of uuids) {
     const transcriptPath = transcriptPathFor(uuid);
     if (!existsSync(transcriptPath)) continue;
     try {
-      collectLineageFromTranscript(uuid, transcriptPath, map);
+      collectLineageFromTranscript(uuid, transcriptPath, map, diagnostics);
     } catch {
       // Lineage is best-effort: a single unreadable transcript never aborts the
       // whole map. The session still ingests; it just lacks a parent link.
@@ -294,7 +300,17 @@ const buildAntigravitySession = (
   const sourcePath = join(brainRoot, uuid);
   const nativeSessionId = AntigravitySessionId(uuid);
   const sessionId = sessionIdFor("antigravity", nativeSessionId);
-  const lines = readJsonLines(transcriptPath);
+  const lines = readJsonLines(transcriptPath, {
+    diagnosticName: "antigravity.line.invalid_json",
+    diagnostics,
+    sourcePath: transcriptPath,
+  });
+  if (lines.length === 0) {
+    diagnostics.push({
+      name: "antigravity.file.empty",
+      message: `antigravity.file.empty for ${transcriptPath}: no parseable JSON records found.`,
+    });
+  }
   const toolCallsById = new Map<string, AntigravityToolCallDraft>();
   const eventDrafts: AntigravityEventDraft[] = [];
 

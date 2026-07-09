@@ -1,0 +1,160 @@
+[
+  {
+    "sourceRoot": {
+      "adapterId": "opencode-sqlite",
+      "discoveredAt": "2026-06-11T00:00:00.000Z",
+      "machineId": "machine:test",
+      "provider": "opencode",
+      "rootPath": "/fixture/opencode"
+    },
+    "type": "sourceRoot"
+  },
+  {
+    "fingerprint": {
+      "mtimeMs": "<mtimeMs>"
+    },
+    "session": {
+      "agentName": "opencode",
+      "artifacts": [],
+      "events": [
+        {
+          "agentName": "opencode",
+          "contentBlocks": [
+            {
+              "id": "opencode:bde655f6dd084eb1390da46c0cb8197f:block:c54872bccc8790eb6fc1d9d6de298495",
+              "kind": "text",
+              "metadata": {
+                "nativeType": "text"
+              },
+              "sequence": 0,
+              "text": "fixture user turn"
+            }
+          ],
+          "contentText": "fixture user turn",
+          "id": "opencode:bde655f6dd084eb1390da46c0cb8197f:event:26325d07e71d2b3439232e0d49022ac2",
+          "kind": "message",
+          "machineId": "machine:test",
+          "nativeEventId": "msg_user",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "opencode",
+          "rawReference": {
+            "nativeType": "message",
+            "rawBytes": 36,
+            "rowId": "msg_user",
+            "sourcePath": "/fixture/opencode/opencode.db",
+            "table": "message"
+          },
+          "role": "user",
+          "sequence": 0,
+          "sessionId": "opencode:bde655f6dd084eb1390da46c0cb8197f",
+          "timestamp": "1970-01-01T00:00:00.001Z"
+        },
+        {
+          "agentName": "opencode",
+          "contentBlocks": [
+            {
+              "id": "opencode:bde655f6dd084eb1390da46c0cb8197f:block:56a650c50b92bd6677781a2face01ac0",
+              "kind": "text",
+              "metadata": {
+                "nativeType": "text"
+              },
+              "sequence": 0,
+              "text": "fixture assistant turn"
+            },
+            {
+              "id": "opencode:bde655f6dd084eb1390da46c0cb8197f:block:92a8edd0079078837b7a5f12b0dde275",
+              "kind": "text",
+              "metadata": {
+                "callId": "call-fixture",
+                "nativeType": "tool_use",
+                "toolName": "bash"
+              },
+              "sequence": 1,
+              "text": "{\"type\":\"tool\",\"toolName\":\"bash\",\"callID\":\"call-fixture\"}"
+            }
+          ],
+          "contentText": "fixture assistant turn",
+          "id": "opencode:bde655f6dd084eb1390da46c0cb8197f:event:6ddf798f3965edbe6ed20871d1eac180",
+          "kind": "tool_call",
+          "machineId": "machine:test",
+          "nativeEventId": "msg_assistant",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "opencode",
+          "rawReference": {
+            "nativeType": "message",
+            "rawBytes": 41,
+            "rowId": "msg_assistant",
+            "sourcePath": "/fixture/opencode/opencode.db",
+            "table": "message"
+          },
+          "role": "assistant",
+          "sequence": 1,
+          "sessionId": "opencode:bde655f6dd084eb1390da46c0cb8197f",
+          "timestamp": "1970-01-01T00:00:00.002Z"
+        }
+      ],
+      "host": "test-host",
+      "id": "opencode:bde655f6dd084eb1390da46c0cb8197f",
+      "identitySchemeVersion": 1,
+      "machineId": "machine:test",
+      "nativeProjectKey": "/fixture/quasar",
+      "nativeSessionId": "ses_fixture061",
+      "projectIdentity": {
+        "confidence": "low",
+        "displayName": "quasar",
+        "normalizedPath": "/fixture/quasar",
+        "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+        "rawPath": "/fixture/quasar",
+        "signals": [
+          {
+            "confidence": "low",
+            "kind": "path",
+            "value": "/fixture/quasar"
+          }
+        ]
+      },
+      "provider": "opencode",
+      "sessionEdges": [],
+      "sourcePath": "/fixture/opencode/opencode.db",
+      "sourceRoot": "/fixture/opencode",
+      "title": "fixture session",
+      "toolCalls": [
+        {
+          "agentName": "opencode",
+          "eventId": "opencode:bde655f6dd084eb1390da46c0cb8197f:event:6ddf798f3965edbe6ed20871d1eac180",
+          "id": "opencode:bde655f6dd084eb1390da46c0cb8197f:tool:b48fd4e8ce8066473b913ab21b5ac5c9",
+          "input": {
+            "cmd": "pwd"
+          },
+          "machineId": "machine:test",
+          "output": "/fixture/quasar",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "opencode",
+          "sessionId": "opencode:bde655f6dd084eb1390da46c0cb8197f",
+          "status": "completed",
+          "toolName": "bash"
+        }
+      ],
+      "usageRecords": []
+    },
+    "sourceUnit": {
+      "adapterId": "opencode-sqlite",
+      "physicalPath": "<fixture-root>/opencode.db",
+      "provider": "opencode",
+      "rootPath": "/fixture/opencode",
+      "sourcePath": "/fixture/opencode/opencode.db"
+    },
+    "type": "session"
+  },
+  {
+    "diagnostic": {
+      "adapterId": "opencode-sqlite",
+      "message": "Discovered 1 OpenCode session(s).",
+      "parserConfidence": "observed",
+      "provider": "opencode",
+      "rootPath": "/fixture/opencode/opencode.db",
+      "status": "available"
+    },
+    "type": "diagnostic"
+  }
+]
