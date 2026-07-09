@@ -538,7 +538,12 @@ class CodexJsonLineParseError extends Error {
 
 async function* readCodexJsonLines(
   path: string,
-  options: { readonly strict?: boolean } = {},
+  options: {
+    readonly strict?: boolean;
+    readonly diagnostics?: DecodeDiagnostic[];
+    readonly diagnosticName?: string;
+    readonly sourcePath?: string;
+  } = {},
 ) {
   const lines = createInterface({
     input: createReadStream(path, { encoding: "utf8" }),
@@ -555,6 +560,15 @@ async function* readCodexJsonLines(
     } catch (cause) {
       if (options.strict === true) {
         throw new CodexJsonLineParseError(path, lineNumber, cause);
+      }
+      if (options.diagnostics !== undefined) {
+        const diagnosticName = options.diagnosticName ?? "codex.line.invalid_json";
+        options.diagnostics.push({
+          name: diagnosticName,
+          message: `${diagnosticName} at ${options.sourcePath ?? path}:${lineNumber}: ${
+            cause instanceof Error ? cause.message : String(cause)
+          }`,
+        });
       }
       // Preserve best-effort behavior from readJsonLines.
     }
@@ -930,6 +944,9 @@ async function* streamCodexSessionFromFile(
 
   for await (const { value, lineNumber, recordIndex } of readCodexJsonLines(path, {
     strict: parseOptions.strictJsonLines,
+    diagnostics: decodeDiagnostics,
+    diagnosticName: "codex.line.invalid_json",
+    sourcePath,
   })) {
     const rawRecord = recordFrom(value);
     if (nativeIdProbe.variant === "legacy_header_v1" && recordIndex === 0) {

@@ -229,9 +229,19 @@ const collectAgentLineEvents = (
 ): AgentLineEvent[] => {
   let lines: { value: unknown; lineNumber: number }[];
   try {
-    lines = readJsonLines(agent.wirePath);
+    lines = readJsonLines(agent.wirePath, {
+      diagnosticName: "kimi.line.invalid_json",
+      diagnostics,
+      sourcePath: agent.wirePath,
+    });
   } catch {
     return [];
+  }
+  if (lines.length === 0) {
+    diagnostics.push({
+      name: "kimi.file.empty",
+      message: `kimi.file.empty for ${agent.wirePath}: no parseable JSON records found.`,
+    });
   }
   const result: AgentLineEvent[] = [];
   for (const { value, lineNumber } of lines) {
@@ -595,7 +605,12 @@ const buildKimiSessionsFromEntry = (
   options: AdapterOptions,
   diagnostics: DecodeDiagnostic[],
 ) => {
-  const stateRaw = readJsonFile(join(entry.sessionDir, "state.json"));
+  const statePath = join(entry.sessionDir, "state.json");
+  const stateRaw = readJsonFile(statePath, {
+    diagnosticName: "kimi.state.invalid_json",
+    diagnostics,
+    sourcePath: statePath,
+  });
   const state = recordFrom(stateRaw);
 
   const isCustomTitle = state.isCustomTitle === true;
@@ -667,10 +682,20 @@ async function* streamKimi(options: AdapterOptions): AsyncGenerator<AdapterStrea
   const rootRecord = sourceRoot("kimi", kimiAdapter.id, sessionsRoot, options.machine, options.now);
   yield { type: "sourceRoot", sourceRoot: rootRecord };
 
-  const indexLines = readJsonLines(indexPath);
+  const decodeDiagnostics: DecodeDiagnostic[] = [];
+  const indexLines = readJsonLines(indexPath, {
+    diagnosticName: "kimi.index.invalid_json",
+    diagnostics: decodeDiagnostics,
+    sourcePath: indexPath,
+  });
+  if (indexLines.length === 0) {
+    decodeDiagnostics.push({
+      name: "kimi.index.empty",
+      message: `kimi.index.empty for ${indexPath}: no parseable JSON records found.`,
+    });
+  }
   let sessionCount = 0;
   let skipped = 0;
-  const decodeDiagnostics: DecodeDiagnostic[] = [];
 
   for (const { value } of indexLines) {
     const entry = recordFrom(value);

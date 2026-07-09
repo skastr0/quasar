@@ -129,8 +129,44 @@ export const homePath = (relative: string) => {
   return home === undefined ? undefined : join(home, relative);
 };
 
-export const readJsonLines = (path: string) => {
-  const contents = readFileSync(path, "utf8");
+type JsonReadDiagnostic = {
+  readonly name: string;
+  readonly message: string;
+};
+
+type JsonReadDiagnosticSink = {
+  readonly push: (diagnostic: JsonReadDiagnostic) => void;
+};
+
+type JsonReadOptions = {
+  readonly diagnosticName?: string;
+  readonly diagnostics?: JsonReadDiagnosticSink;
+  readonly sourcePath?: string;
+};
+
+const pushJsonReadDiagnostic = (
+  options: JsonReadOptions | undefined,
+  message: string,
+) => {
+  const diagnosticName = options?.diagnosticName;
+  if (diagnosticName === undefined || options?.diagnostics === undefined) return;
+  options.diagnostics.push({ name: diagnosticName, message });
+};
+
+export const readJsonLines = (path: string, options?: JsonReadOptions) => {
+  let contents: string;
+  try {
+    contents = readFileSync(path, "utf8");
+  } catch (error) {
+    const sourcePath = options?.sourcePath ?? path;
+    pushJsonReadDiagnostic(
+      options,
+      `${options?.diagnosticName ?? "json.line.unreadable"} at ${sourcePath}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return [];
+  }
   return contents
     .split(/\r?\n/)
     .map((line, index) => ({ line, lineNumber: index + 1 }))
@@ -138,16 +174,30 @@ export const readJsonLines = (path: string) => {
     .flatMap(({ line, lineNumber }) => {
       try {
         return [{ value: JSON.parse(line) as unknown, lineNumber }];
-      } catch {
+      } catch (error) {
+        const sourcePath = options?.sourcePath ?? path;
+        pushJsonReadDiagnostic(
+          options,
+          `${options?.diagnosticName ?? "json.line.invalid"} at ${sourcePath}:${lineNumber}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
         return [];
       }
     });
 };
 
-export const readJsonFile = (path: string) => {
+export const readJsonFile = (path: string, options?: JsonReadOptions) => {
   try {
     return JSON.parse(readFileSync(path, "utf8")) as unknown;
-  } catch {
+  } catch (error) {
+    const sourcePath = options?.sourcePath ?? path;
+    pushJsonReadDiagnostic(
+      options,
+      `${options?.diagnosticName ?? "json.file.invalid"} at ${sourcePath}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
     return undefined;
   }
 };

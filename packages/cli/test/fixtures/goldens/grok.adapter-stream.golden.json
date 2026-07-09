@@ -1,0 +1,162 @@
+[
+  {
+    "sourceRoot": {
+      "adapterId": "grok-session-folder",
+      "discoveredAt": "2026-06-11T00:00:00.000Z",
+      "machineId": "machine:test",
+      "provider": "grok",
+      "rootPath": "<fixture-root>/sessions"
+    },
+    "type": "sourceRoot"
+  },
+  {
+    "fingerprint": {
+      "mtimeMs": "<mtimeMs>",
+      "size": 445
+    },
+    "session": {
+      "agentName": "grok-build",
+      "artifacts": [],
+      "events": [
+        {
+          "agentName": "grok-build",
+          "contentBlocks": [],
+          "contentText": "fixture user turn",
+          "id": "grok:c72403d626d5a091447e25d4c19cc607:event:3d1b58e3c60ad06a0a4ce4590a779e78",
+          "kind": "message",
+          "machineId": "machine:test",
+          "nativeEventId": "grok-user-1",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "grok",
+          "rawReference": {
+            "line": 1,
+            "nativeType": "user",
+            "sourcePath": "<fixture-root>/sessions/%2Ffixture%2Fquasar/01900000-0000-7000-8000-000000000061/chat_history.jsonl"
+          },
+          "role": "user",
+          "sequence": 0,
+          "sessionId": "grok:c72403d626d5a091447e25d4c19cc607",
+          "timestamp": "2026-06-11T00:00:00.000Z"
+        },
+        {
+          "agentName": "grok-build",
+          "contentBlocks": [],
+          "contentText": "fixture assistant turn",
+          "id": "grok:c72403d626d5a091447e25d4c19cc607:event:017efe79670c94421d1e202baf8d2854",
+          "kind": "tool_call",
+          "machineId": "machine:test",
+          "nativeEventId": "grok-assistant-1",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "grok",
+          "rawReference": {
+            "line": 2,
+            "nativeType": "assistant",
+            "sourcePath": "<fixture-root>/sessions/%2Ffixture%2Fquasar/01900000-0000-7000-8000-000000000061/chat_history.jsonl"
+          },
+          "role": "assistant",
+          "sequence": 1,
+          "sessionId": "grok:c72403d626d5a091447e25d4c19cc607",
+          "timestamp": "2026-06-11T00:00:00.000Z",
+          "toolCallId": "grok:c72403d626d5a091447e25d4c19cc607:tool:e672f46e6755b891470176643ccb0ec7"
+        },
+        {
+          "agentName": "grok-build",
+          "contentBlocks": [],
+          "contentText": "/fixture/quasar",
+          "id": "grok:c72403d626d5a091447e25d4c19cc607:event:95d40bfc2ef40f21e72ca936b93a044b",
+          "kind": "tool_result",
+          "machineId": "machine:test",
+          "nativeEventId": "grok-tool-1",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "grok",
+          "rawReference": {
+            "line": 3,
+            "nativeType": "tool_result",
+            "sourcePath": "<fixture-root>/sessions/%2Ffixture%2Fquasar/01900000-0000-7000-8000-000000000061/chat_history.jsonl"
+          },
+          "role": "tool",
+          "sequence": 2,
+          "sessionId": "grok:c72403d626d5a091447e25d4c19cc607",
+          "timestamp": "2026-06-11T00:00:00.000Z",
+          "toolCallId": "grok:c72403d626d5a091447e25d4c19cc607:tool:e672f46e6755b891470176643ccb0ec7"
+        }
+      ],
+      "host": "test-host",
+      "id": "grok:c72403d626d5a091447e25d4c19cc607",
+      "identitySchemeVersion": 1,
+      "machineId": "machine:test",
+      "nativeProjectKey": "%2Ffixture%2Fquasar",
+      "nativeSessionId": "01900000-0000-7000-8000-000000000061",
+      "projectIdentity": {
+        "confidence": "low",
+        "displayName": "quasar",
+        "normalizedPath": "/fixture/quasar",
+        "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+        "rawPath": "/fixture/quasar",
+        "signals": [
+          {
+            "confidence": "low",
+            "kind": "path",
+            "value": "/fixture/quasar"
+          }
+        ]
+      },
+      "provider": "grok",
+      "sessionEdges": [
+        {
+          "agentName": "grok-build",
+          "fromEventId": "grok:c72403d626d5a091447e25d4c19cc607:event:017efe79670c94421d1e202baf8d2854",
+          "id": "grok:c72403d626d5a091447e25d4c19cc607:edge:9335d23eb319aacb7702cf0ca3ac8bd1",
+          "kind": "tool_result_for",
+          "machineId": "machine:test",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "grok",
+          "sessionId": "grok:c72403d626d5a091447e25d4c19cc607",
+          "toEventId": "grok:c72403d626d5a091447e25d4c19cc607:event:95d40bfc2ef40f21e72ca936b93a044b"
+        }
+      ],
+      "sourcePath": "<fixture-root>/sessions/%2Ffixture%2Fquasar/01900000-0000-7000-8000-000000000061",
+      "sourceRoot": "<fixture-root>/sessions",
+      "title": "Fixture Grok Session",
+      "toolCalls": [
+        {
+          "agentName": "grok-build",
+          "completedAt": "2026-06-11T00:00:00.000Z",
+          "eventId": "grok:c72403d626d5a091447e25d4c19cc607:event:017efe79670c94421d1e202baf8d2854",
+          "id": "grok:c72403d626d5a091447e25d4c19cc607:tool:e672f46e6755b891470176643ccb0ec7",
+          "input": {
+            "cmd": "pwd"
+          },
+          "machineId": "machine:test",
+          "output": "/fixture/quasar",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "grok",
+          "sessionId": "grok:c72403d626d5a091447e25d4c19cc607",
+          "startedAt": "2026-06-11T00:00:00.000Z",
+          "status": "completed",
+          "toolName": "bash"
+        }
+      ],
+      "usageRecords": []
+    },
+    "sourceUnit": {
+      "adapterId": "grok-session-folder",
+      "physicalPath": "<fixture-root>/sessions/%2Ffixture%2Fquasar/01900000-0000-7000-8000-000000000061/chat_history.jsonl",
+      "provider": "grok",
+      "rootPath": "<fixture-root>/sessions",
+      "sourcePath": "<fixture-root>/sessions/%2Ffixture%2Fquasar/01900000-0000-7000-8000-000000000061"
+    },
+    "type": "session"
+  },
+  {
+    "diagnostic": {
+      "adapterId": "grok-session-folder",
+      "message": "Discovered 1 Grok session(s).",
+      "parserConfidence": "observed",
+      "provider": "grok",
+      "rootPath": "<fixture-root>/sessions",
+      "status": "available"
+    },
+    "type": "diagnostic"
+  }
+]

@@ -33,6 +33,9 @@
     "pack:dry-run": "npm pack --dry-run",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
+    "test:coverage": "bun test --coverage --coverage-reporter=lcov --coverage-dir=coverage",
+    "coverage:pulsar": "bun run test:coverage && pulsar coverage ingest packages/cli/coverage/lcov.info --format lcov .",
+    "goldens:update": "QUASAR_UPDATE_ADAPTER_GOLDENS=1 bun test test/adapter-golden-lock.test.ts",
     "tui:snapshot": "bun scripts/tui-snapshot.tsx"
   },
   "optionalDependencies": {

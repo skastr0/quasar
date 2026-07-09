@@ -373,7 +373,18 @@ const buildClaudeSessionFromFile = (
   logicalProjectsRoot: string,
   options: AdapterOptions,
 ) => {
-  const lines = readJsonLines(path);
+  const diagnostics: DecodeDiagnostic[] = [];
+  const lines = readJsonLines(path, {
+    diagnosticName: "claude.line.invalid_json",
+    diagnostics,
+    sourcePath,
+  });
+  if (lines.length === 0) {
+    diagnostics.push({
+      name: "claude.file.empty",
+      message: `claude.file.empty for ${sourcePath}: no parseable JSON records found.`,
+    });
+  }
   const records = lines.map(({ value }) =>
     typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {},
   );
@@ -452,7 +463,6 @@ const buildClaudeSessionFromFile = (
   // accumulates a NAMED diagnostic on any malformed/unmodeled record. The
   // boundary doctrine: a contract breach is a named diagnostic + a dropped
   // record, never a throw and never a silent "unknown" pass-through.
-  const diagnostics: DecodeDiagnostic[] = [];
   // Sequencing is over KEPT (signal) events only, so dropped bookkeeping does
   // not leave gaps or claim event ids in the lineage map.
   let sequence = 0;

@@ -1,0 +1,143 @@
+[
+  {
+    "sourceRoot": {
+      "adapterId": "claude-code-project-jsonl",
+      "discoveredAt": "2026-06-11T00:00:00.000Z",
+      "machineId": "machine:test",
+      "provider": "claude",
+      "rootPath": "/fixture/claude/projects"
+    },
+    "type": "sourceRoot"
+  },
+  {
+    "session": {
+      "agentName": "claude-code",
+      "artifacts": [],
+      "events": [
+        {
+          "agentName": "claude-code",
+          "contentBlocks": [
+            {
+              "id": "claude:4980eb7414fea43b17e657564499befd:block:9926ad811422618263c8e12386086d3c",
+              "kind": "text",
+              "metadata": {
+                "nativeType": "text"
+              },
+              "sequence": 0,
+              "text": "fixture user turn"
+            }
+          ],
+          "contentText": "fixture user turn",
+          "id": "claude:4980eb7414fea43b17e657564499befd:event:8aed0bac3c917db1bf3f8efe9e622eeb",
+          "kind": "message",
+          "machineId": "machine:test",
+          "nativeEventId": "claude-user-1",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "claude",
+          "rawReference": {
+            "line": 1,
+            "nativeType": "user",
+            "sourcePath": "/fixture/claude/projects/-fixture-quasar/aaaa1111-0001-4001-8001-000000000061.jsonl"
+          },
+          "role": "user",
+          "sequence": 0,
+          "sessionId": "claude:4980eb7414fea43b17e657564499befd",
+          "timestamp": "2026-06-11T00:00:00.000Z"
+        },
+        {
+          "agentName": "claude-code",
+          "contentBlocks": [
+            {
+              "id": "claude:4980eb7414fea43b17e657564499befd:block:b62738ab5292fb1ca6520b91ebd2c992",
+              "kind": "text",
+              "metadata": {
+                "nativeType": "text"
+              },
+              "sequence": 0,
+              "text": "fixture assistant turn"
+            }
+          ],
+          "contentText": "fixture assistant turn",
+          "id": "claude:4980eb7414fea43b17e657564499befd:event:9c30f0cc969b643fbdbc520a0fa0a17d",
+          "kind": "message",
+          "machineId": "machine:test",
+          "nativeEventId": "claude-assistant-1",
+          "parentEventId": "claude:4980eb7414fea43b17e657564499befd:event:8aed0bac3c917db1bf3f8efe9e622eeb",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "claude",
+          "rawReference": {
+            "line": 2,
+            "nativeType": "assistant",
+            "sourcePath": "/fixture/claude/projects/-fixture-quasar/aaaa1111-0001-4001-8001-000000000061.jsonl"
+          },
+          "role": "assistant",
+          "sequence": 1,
+          "sessionId": "claude:4980eb7414fea43b17e657564499befd",
+          "timestamp": "2026-06-11T00:00:00.000Z"
+        }
+      ],
+      "host": "test-host",
+      "id": "claude:4980eb7414fea43b17e657564499befd",
+      "identitySchemeVersion": 1,
+      "machineId": "machine:test",
+      "nativeProjectKey": "-fixture-quasar",
+      "nativeSessionId": "aaaa1111-0001-4001-8001-000000000061",
+      "projectIdentity": {
+        "confidence": "low",
+        "displayName": "quasar",
+        "normalizedPath": "/fixture/quasar",
+        "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+        "rawPath": "/fixture/quasar",
+        "signals": [
+          {
+            "confidence": "low",
+            "kind": "path",
+            "value": "/fixture/quasar"
+          }
+        ]
+      },
+      "provider": "claude",
+      "sessionEdges": [
+        {
+          "agentName": "claude-code",
+          "fromEventId": "claude:4980eb7414fea43b17e657564499befd:event:8aed0bac3c917db1bf3f8efe9e622eeb",
+          "id": "claude:4980eb7414fea43b17e657564499befd:edge:3e905de1444a93c4b6732ce78f98d95a",
+          "kind": "parent",
+          "machineId": "machine:test",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "claude",
+          "rawReference": {
+            "line": 2,
+            "nativeType": "parentUuid",
+            "sourcePath": "/fixture/claude/projects/-fixture-quasar/aaaa1111-0001-4001-8001-000000000061.jsonl"
+          },
+          "sessionId": "claude:4980eb7414fea43b17e657564499befd",
+          "toEventId": "claude:4980eb7414fea43b17e657564499befd:event:9c30f0cc969b643fbdbc520a0fa0a17d"
+        }
+      ],
+      "sourcePath": "/fixture/claude/projects/-fixture-quasar/aaaa1111-0001-4001-8001-000000000061.jsonl",
+      "sourceRoot": "/fixture/claude/projects",
+      "toolCalls": [],
+      "usageRecords": []
+    },
+    "sourceUnit": {
+      "adapterId": "claude-code-project-jsonl",
+      "physicalPath": "<fixture-root>/projects/-fixture-quasar/aaaa1111-0001-4001-8001-000000000061.jsonl",
+      "provider": "claude",
+      "rootPath": "/fixture/claude/projects",
+      "sourcePath": "/fixture/claude/projects/-fixture-quasar/aaaa1111-0001-4001-8001-000000000061.jsonl"
+    },
+    "type": "session"
+  },
+  {
+    "diagnostic": {
+      "adapterId": "claude-code-project-jsonl",
+      "message": "Discovered 1 Claude session(s).",
+      "parserConfidence": "observed",
+      "provider": "claude",
+      "rootPath": "/fixture/claude/projects",
+      "status": "available"
+    },
+    "type": "diagnostic"
+  }
+]

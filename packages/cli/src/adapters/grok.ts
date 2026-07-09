@@ -271,7 +271,11 @@ const grokArtifacts = (
   hunkPath: string,
   diagnostics: DecodeDiagnostic[],
 ) =>
-  readJsonLines(hunkPath).flatMap(({ value, lineNumber }) => {
+  readJsonLines(hunkPath, {
+    diagnosticName: "grok.line.invalid_json",
+    diagnostics,
+    sourcePath: hunkPath,
+  }).flatMap(({ value, lineNumber }) => {
     const record = recordFrom(value);
     if (Object.keys(record).length === 0) return [];
     // Fail-closed classify: an unknown/garbage hunk eventType is a NAMED drop,
@@ -519,14 +523,38 @@ const buildGrokSessionFromChatPath = (
   const projectPath = decodeProjectPath(projectKey);
   // A missing summary.json is simple absence, not garbage: only a PRESENT but
   // malformed summary is a named decode failure.
-  const summaryRaw = readJsonFile(join(sessionDir, "summary.json"));
+  const summaryPath = join(sessionDir, "summary.json");
+  const summaryRaw = existsSync(summaryPath)
+    ? readJsonFile(summaryPath, {
+        diagnosticName: "grok.summary.invalid_json",
+        diagnostics: decodeDiagnostics,
+        sourcePath: summaryPath,
+      })
+    : undefined;
   const summary: Record<string, unknown> =
     summaryRaw === undefined || summaryRaw === null
       ? {}
       : ((decodeGrokSummary(summaryRaw, decodeDiagnostics) as Record<string, unknown> | undefined) ??
         {});
-  const chatLines = readJsonLines(chatPath);
-  const readOptionalLines = (path: string) => (existsSync(path) ? readJsonLines(path) : []);
+  const chatLines = readJsonLines(chatPath, {
+    diagnosticName: "grok.line.invalid_json",
+    diagnostics: decodeDiagnostics,
+    sourcePath: chatPath,
+  });
+  if (chatLines.length === 0) {
+    decodeDiagnostics.push({
+      name: "grok.file.empty",
+      message: `grok.file.empty for ${chatPath}: no parseable JSON records found.`,
+    });
+  }
+  const readOptionalLines = (path: string) =>
+    existsSync(path)
+      ? readJsonLines(path, {
+          diagnosticName: "grok.line.invalid_json",
+          diagnostics: decodeDiagnostics,
+          sourcePath: path,
+        })
+      : [];
   const eventLines = readOptionalLines(join(sessionDir, "events.jsonl"));
   const updateLines = readOptionalLines(join(sessionDir, "updates.jsonl"));
   const hunkPath = join(sessionDir, "hunk_records.jsonl");
@@ -836,7 +864,10 @@ async function* streamGrok(options: AdapterOptions): AsyncGenerator<AdapterStrea
     // (`grok.drop.*`) are expected and accumulate into the diagnostics sink but
     // do not raise an error. Ingest already continued (the session was emitted).
     const hardFailures = decodeDiagnostics.filter(
-      (d) => d.name === GROK_DECODE_FAILED || d.name === GROK_UNKNOWN_TYPE,
+      (d) =>
+        d.name === GROK_DECODE_FAILED ||
+        d.name === GROK_UNKNOWN_TYPE ||
+        (d.name.startsWith("grok.") && !d.name.startsWith("grok.drop.")),
     );
     if (hardFailures.length > 0) {
       yield {

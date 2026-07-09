@@ -90,7 +90,10 @@ const sql = (value: string) => `'${value.replaceAll("'", "''")}'`;
 
 const sqliteJson = <A>(dbPath: string, query: string): A[] => {
   try {
-    const output = execFileSync("sqlite3", ["-json", dbPath, query], { encoding: "utf8" });
+    const output = execFileSync("sqlite3", ["-json", dbPath, query], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
     return output.trim().length === 0 ? [] : (JSON.parse(output) as A[]);
   } catch {
     return [];
@@ -886,20 +889,40 @@ async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStr
       const stat = statSync(dbPath);
       if (!options.shouldReadFile(dbPath, stat)) continue;
     }
-    const tempDb = copyDatabaseForRead(dbPath);
+    let tempDb: ReturnType<typeof copyDatabaseForRead>;
+    try {
+      tempDb = copyDatabaseForRead(dbPath);
+    } catch (error) {
+      yield {
+        type: "diagnostic",
+        diagnostic: {
+          adapterId: hermesAdapter.id,
+          provider: "hermes" as const,
+          status: "unsupported" as const,
+          parserConfidence: "documented" as const,
+          rootPath: logicalDbPath,
+          message: `Hermes state.db for profile '${profileName}' could not be copied for reading.`,
+          details: {
+            diagnostic: "hermes.sqlite.unreadable",
+            error: error instanceof Error ? error.message : String(error),
+          },
+        },
+      };
+      continue;
+    }
     const db = await maybeDatabase(tempDb.path);
     let profileSessionCount = 0;
     // Named decode diagnostics for malformed rows in THIS profile's db. Drops
     // are accumulated here and surfaced as a single attributable diagnostic so a
     // garbage row never aborts the file and never coerces silently.
     const decodeDiagnostics: DecodeDiagnostic[] = [];
-    // Raw, unvalidated readers — identical window, just two transports.
-    const rawSessionRows = db === undefined
-      ? readSessionRowsCli(tempDb.path, options.limit, options.skip)
-      : readSessionRows(db, options.limit, options.skip);
-    const rawMessageRows = (sessionId: string): HermesRawRow[] =>
-      db === undefined ? readMessageRowsCli(tempDb.path, sessionId) : readMessageRows(db, sessionId);
     try {
+      // Raw, unvalidated readers — identical window, just two transports.
+      const rawSessionRows = db === undefined
+        ? readSessionRowsCli(tempDb.path, options.limit, options.skip)
+        : readSessionRows(db, options.limit, options.skip);
+      const rawMessageRows = (sessionId: string): HermesRawRow[] =>
+        db === undefined ? readMessageRowsCli(tempDb.path, sessionId) : readMessageRows(db, sessionId);
       for (const sessionEntry of decodeSessionRows(rawSessionRows, decodeDiagnostics)) {
         const messageRows = decodeMessageRows(rawMessageRows(sessionEntry.id), decodeDiagnostics);
         if (await skipHermesSession(options, sessionEntry, messageRows, logicalDbPath)) continue;
@@ -951,7 +974,10 @@ async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStr
           parserConfidence: "documented" as const,
           rootPath: logicalDbPath,
           message: `Hermes state.db for profile '${profileName}' did not match the documented sessions/messages schema.`,
-          details: { error: error instanceof Error ? error.message : String(error) },
+          details: {
+            diagnostic: "hermes.sqlite.unreadable",
+            error: error instanceof Error ? error.message : String(error),
+          },
         },
       };
     } finally {
