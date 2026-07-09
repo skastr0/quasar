@@ -167,3 +167,27 @@ test("cycling to a not-ready mode silently falls back to lexical with ~", async 
     act(() => setup.renderer.destroy());
   }
 });
+
+test("transcript load rejection surfaces in the header error strip", async () => {
+  const client: QuasarClientLike = {
+    search: async () => ({ ok: true, value: [match(0)] }),
+    messages: async () => {
+      throw new Error("session fetch exploded");
+    },
+    toolCalls: async () => ({ ok: true, value: [] }),
+  };
+  const setup = await render(client);
+  try {
+    await act(async () => {
+      await setup.mockInput.typeText("vector");
+    });
+    await settle(setup);
+    act(() => setup.mockInput.pressTab());
+    act(() => setup.mockInput.pressEnter());
+    await settle(setup, 150);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("session fetch exploded");
+  } finally {
+    act(() => setup.renderer.destroy());
+  }
+});

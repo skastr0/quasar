@@ -32,6 +32,25 @@ const DEBOUNCE_MS = 200;
 const nextMode = (mode: SearchMode): SearchMode =>
   SEARCH_MODES[(SEARCH_MODES.indexOf(mode) + 1) % SEARCH_MODES.length]!;
 
+const errorMessage = (err: unknown, fallback: string): string =>
+  err instanceof Error && err.message.trim() !== "" ? err.message : fallback;
+
+/**
+ * Fire-and-forget under an active opentui renderer: in-process `await` starves
+ * libuv poll (see quasar-client). Attach rejection routing so floating failures
+ * hit the TUI error surface instead of dying silent.
+ */
+const routeAsync = <T,>(
+  promise: Promise<T>,
+  onOk: (value: T) => void,
+  onFail: (message: string) => void,
+  fallback: string,
+): void => {
+  void promise.then(onOk).catch((err: unknown) => {
+    onFail(errorMessage(err, fallback));
+  });
+};
+
 // ───────────────────────────────────────────────────────────── presentational
 
 const Header = ({
@@ -362,39 +381,52 @@ export const App = ({
     const controller = new AbortController();
     setLoading(true);
     const timer = setTimeout(() => {
-      void (async () => {
-        const run = (m: SearchMode) =>
-          client.search(parsed.text, m, {
-            limit: SEARCH_LIMIT,
-            projectKey: parsed.projectKey,
-            provider: parsed.provider,
-            role: parsed.role,
-            signal: controller.signal,
-          });
-        let res = await run(mode);
-        let eff = mode;
-        let fell = false;
-        if (!res.ok && res.code === "SearchIndexNotReady" && mode !== "lexical") {
-          res = await run("lexical");
-          eff = "lexical";
-          fell = true;
-        }
-        if (controller.signal.aborted) return;
-        setLoading(false);
-        setEffectiveMode(eff);
-        setFellBack(fell);
-        if (res.ok) {
-          // Keep the selection on the same match across refinements when possible.
-          const prevKey = liveRef.current.results[liveRef.current.selected]?.key;
-          const keptIdx = prevKey ? res.value.findIndex((m) => m.key === prevKey) : -1;
-          setResults(res.value);
-          setSelected(keptIdx >= 0 ? keptIdx : 0);
-          setError(null);
-        } else {
+      // Intentionally unawaited — routeAsync attaches failure routing (no hang).
+      routeAsync(
+        (async () => {
+          const run = (m: SearchMode) =>
+            client.search(parsed.text, m, {
+              limit: SEARCH_LIMIT,
+              projectKey: parsed.projectKey,
+              provider: parsed.provider,
+              role: parsed.role,
+              signal: controller.signal,
+            });
+          let res = await run(mode);
+          let eff = mode;
+          let fell = false;
+          if (!res.ok && res.code === "SearchIndexNotReady" && mode !== "lexical") {
+            res = await run("lexical");
+            eff = "lexical";
+            fell = true;
+          }
+          return { res, eff, fell } as const;
+        })(),
+        ({ res, eff, fell }) => {
+          if (controller.signal.aborted) return;
+          setLoading(false);
+          setEffectiveMode(eff);
+          setFellBack(fell);
+          if (res.ok) {
+            // Keep the selection on the same match across refinements when possible.
+            const prevKey = liveRef.current.results[liveRef.current.selected]?.key;
+            const keptIdx = prevKey ? res.value.findIndex((m) => m.key === prevKey) : -1;
+            setResults(res.value);
+            setSelected(keptIdx >= 0 ? keptIdx : 0);
+            setError(null);
+          } else {
+            setResults([]);
+            setError(res.code === "SearchIndexNotReady" ? "index reconciling — retry shortly" : res.message);
+          }
+        },
+        (message) => {
+          if (controller.signal.aborted) return;
+          setLoading(false);
           setResults([]);
-          setError(res.code === "SearchIndexNotReady" ? "index reconciling — retry shortly" : res.message);
-        }
-      })();
+          setError(message);
+        },
+        "search failed",
+      );
     }, DEBOUNCE_MS);
     return () => {
       controller.abort();
@@ -403,6 +435,7 @@ export const App = ({
   }, [query, mode, client]);
 
   // Load a transcript when the reader opens on a session.
+  // Intentionally unawaited under opentui — see routeAsync.
   useEffect(() => {
     if (client === null || reader === null) return;
     if (reader.kind !== "transcript") return;
@@ -410,11 +443,20 @@ export const App = ({
     matchRefs.current = new Map();
     matchPos.current = 0;
     setTranscript([]);
-    void client.messages(reader.sessionId, { limit: 4000, signal: controller.signal }).then((res) => {
-      if (controller.signal.aborted) return;
-      setTranscript(res.ok ? res.value : []);
-      if (!res.ok) setError(res.message);
-    });
+    routeAsync(
+      client.messages(reader.sessionId, { limit: 4000, signal: controller.signal }),
+      (res) => {
+        if (controller.signal.aborted) return;
+        setTranscript(res.ok ? res.value : []);
+        if (!res.ok) setError(res.message);
+      },
+      (message) => {
+        if (controller.signal.aborted) return;
+        setTranscript([]);
+        setError(message);
+      },
+      "transcript load failed",
+    );
     return () => controller.abort();
   }, [reader, client]);
 
@@ -423,7 +465,23 @@ export const App = ({
       if (client === null) return;
       setTools([]);
       setToolSel(0);
-      void client.toolCalls({ sessionId, limit: 500 }).then((res) => setTools(res.ok ? res.value : []));
+      // Intentionally unawaited under opentui — see routeAsync.
+      routeAsync(
+        client.toolCalls({ sessionId, limit: 500 }),
+        (res) => {
+          if (res.ok) {
+            setTools(res.value);
+            return;
+          }
+          setTools([]);
+          setError(res.message);
+        },
+        (message) => {
+          setTools([]);
+          setError(message);
+        },
+        "tool-call load failed",
+      );
     },
     [client],
   );
@@ -529,10 +587,16 @@ export const App = ({
         case "cycleMode":
           setMode((m) => nextMode(m));
           break;
-        case "openEditor":
-          if (s.reader) void exitToEditor(s.reader.sessionId);
-          else if (sel) void exitToEditor(sel.sessionId);
+        case "openEditor": {
+          const sessionId = s.reader?.sessionId ?? sel?.sessionId;
+          if (sessionId) {
+            // Intentionally unawaited under opentui — rejection → toast, not hang.
+            void exitToEditor(sessionId).catch((err: unknown) => {
+              flash(errorMessage(err, "open editor failed"));
+            });
+          }
           break;
+        }
         case "yankKey":
           if (sel) flash(copyToClipboard(`${sel.sessionId}:${sel.seq}:${sel.role}`) ? "yanked key" : "no clipboard");
           break;
