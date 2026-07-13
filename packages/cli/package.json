@@ -1,6 +1,6 @@
 {
   "name": "@skastr0/quasar-cli",
-  "version": "0.3.5",
+  "version": "0.4.0",
   "description": "Command line importer and client for Quasar AI agent sessions.",
   "license": "MIT",
   "type": "module",
@@ -40,10 +40,10 @@
     "tui:snapshot": "bun scripts/tui-snapshot.tsx"
   },
   "optionalDependencies": {
-    "@skastr0/quasar-cli-darwin-arm64": "0.3.5",
-    "@skastr0/quasar-cli-darwin-x64": "0.3.5",
-    "@skastr0/quasar-cli-linux-arm64": "0.3.5",
-    "@skastr0/quasar-cli-linux-x64": "0.3.5"
+    "@skastr0/quasar-cli-darwin-arm64": "0.4.0",
+    "@skastr0/quasar-cli-darwin-x64": "0.4.0",
+    "@skastr0/quasar-cli-linux-arm64": "0.4.0",
+    "@skastr0/quasar-cli-linux-x64": "0.4.0"
   },
   "devDependencies": {
     "@opentui/core": "0.4.1",
