@@ -29,6 +29,18 @@ export const KimiSessionId = Brand.nominal<KimiSessionId>();
 export type AntigravitySessionId = string & Brand.Brand<"AntigravitySessionId">;
 export const AntigravitySessionId = Brand.nominal<AntigravitySessionId>();
 
+export type OmpSessionId = string & Brand.Brand<"OmpSessionId">;
+export const OmpSessionId = Brand.nominal<OmpSessionId>();
+
+export type PiSessionId = string & Brand.Brand<"PiSessionId">;
+export const PiSessionId = Brand.nominal<PiSessionId>();
+
+export type CursorSessionId = string & Brand.Brand<"CursorSessionId">;
+export const CursorSessionId = Brand.nominal<CursorSessionId>();
+
+export type DevinSessionId = string & Brand.Brand<"DevinSessionId">;
+export const DevinSessionId = Brand.nominal<DevinSessionId>();
+
 /**
  * The union of every harness-native session id. `sessionIdFor` accepts only a
  * value of this union, so a bare `string` does not type-check as input.
@@ -40,6 +52,10 @@ export type NativeSessionId =
   | OpenCodeSessionId
   | HermesSessionId
   | KimiSessionId
+  | OmpSessionId
+  | PiSessionId
+  | CursorSessionId
+  | DevinSessionId
   | AntigravitySessionId;
 
 /**

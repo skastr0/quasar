@@ -5,13 +5,16 @@ import { join } from "node:path";
 import { afterAll, describe, expect, test } from "bun:test";
 
 import {
+  buildSession,
   numberValue,
   parseJsonString,
   readJsonFile,
   readJsonLines,
   recordFrom,
+  sessionIdFor,
   stringValue,
 } from "../src/adapters/common";
+import { ClaudeSessionId } from "../src/core/identity";
 
 const root = mkdtempSync(join(tmpdir(), "quasar-adapters-common-"));
 
@@ -144,5 +147,133 @@ describe("adapter common boundaries", () => {
     })).toBeUndefined();
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]!.name).toBe("test.json.string.invalid");
+  });
+
+  test("buildSession redacts explicit content blocks without collapsing formatting", () => {
+    const nativeSessionId = "common-content-block-redaction";
+    const sessionId = sessionIdFor("claude", ClaudeSessionId(nativeSessionId));
+    const secret = "should-not-leak";
+    const text = `Text line one
+  Bearer ${secret}
+Text line three`;
+    const markdown = `# Exact heading
+
+\`\`\`ts
+const authorization = "Bearer ${secret}";
+\`\`\``;
+    const thinking = `First thought
+  Bearer ${secret}
+
+Final thought`;
+
+    const session = buildSession({
+      provider: "claude",
+      agentName: "claude",
+      machine: {
+        machineId: "machine:common-content-block-redaction",
+        hostname: "test-host",
+        platform: "darwin",
+      },
+      sessionId,
+      nativeSessionId,
+      nativeProjectKey: "common:test",
+      sourceRoot: "/fixtures",
+      sourcePath: "/fixtures/session.jsonl",
+      events: [
+        {
+          id: `${sessionId}:event:explicit-blocks`,
+          sequence: 0,
+          role: "assistant",
+          kind: "reasoning",
+          contentText: `Search line one
+Bearer ${secret}
+Search line three`,
+          contentBlocks: [
+            {
+              id: "block:text",
+              sequence: 0,
+              kind: "text",
+              text,
+            },
+            {
+              id: "block:markdown",
+              sequence: 1,
+              kind: "markdown",
+              markdown,
+              metadata: {
+                nested: {
+                  apiKey: secret,
+                  note: `Bearer ${secret}`,
+                },
+              },
+            },
+            {
+              id: "block:thinking",
+              sequence: 2,
+              kind: "thinking",
+              thinking,
+            },
+            {
+              id: "block:json",
+              sequence: 3,
+              kind: "json",
+              value: {
+                nested: [
+                  { password: secret },
+                  { note: `Bearer ${secret}` },
+                ],
+              },
+            },
+          ],
+          rawReference: {
+            sourcePath: "/fixtures/session.jsonl",
+            line: 1,
+          },
+        },
+      ],
+    });
+
+    expect(session.events[0]!.contentText).toBe(
+      "Search line one Bearer [redacted] Search line three",
+    );
+    expect(session.events[0]!.contentBlocks).toEqual([
+      {
+        id: "block:text",
+        sequence: 0,
+        kind: "text",
+        text: "Text line one\n  Bearer [redacted]\nText line three",
+      },
+      {
+        id: "block:markdown",
+        sequence: 1,
+        kind: "markdown",
+        markdown:
+          '# Exact heading\n\n```ts\nconst authorization = "Bearer [redacted]";\n```',
+        metadata: {
+          nested: {
+            apiKey: "[redacted]",
+            note: "Bearer [redacted]",
+          },
+        },
+      },
+      {
+        id: "block:thinking",
+        sequence: 2,
+        kind: "thinking",
+        thinking: "First thought\n  Bearer [redacted]\n\nFinal thought",
+      },
+      {
+        id: "block:json",
+        sequence: 3,
+        kind: "json",
+        value: {
+          nested: [
+            { password: "[redacted]" },
+            { note: "Bearer [redacted]" },
+          ],
+        },
+      },
+    ]);
+    expect(JSON.stringify(session.events[0]!.contentBlocks)).not.toContain(secret);
   });
 });

@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { stableAdapters } from "../src/adapters/registry";
@@ -288,6 +289,387 @@ const buildAntigravityFixture = (root: string): AdapterFixture => {
   return { provider: "antigravity", root, logicalRoot: "/fixture/antigravity", primaryPath };
 };
 
+const buildOmpFixture = (root: string): AdapterFixture => {
+  const sessionId = "01900000-0000-7000-8000-000000000061";
+  const dir = join(root, "-fixture-quasar");
+  mkdirSync(dir, { recursive: true });
+  const primaryPath = join(dir, "main.jsonl");
+  writeJsonLines(primaryPath, [
+    {
+      type: "title",
+      v: 1,
+      title: "Fixture OMP Session",
+      source: "user",
+      updatedAt: NOW,
+      pad: " ".repeat(80),
+    },
+    {
+      type: "session",
+      version: 3,
+      id: sessionId,
+      timestamp: NOW,
+      cwd: "/fixture/quasar",
+    },
+    {
+      type: "message",
+      id: "omp-user-1",
+      parentId: null,
+      timestamp: NOW,
+      message: {
+        role: "user",
+        content: [{ type: "text", text: "fixture user turn" }],
+        timestamp: Date.parse(NOW),
+      },
+    },
+    {
+      type: "message",
+      id: "omp-assistant-1",
+      parentId: "omp-user-1",
+      timestamp: NOW,
+      message: {
+        role: "assistant",
+        content: [
+          { type: "text", text: "fixture assistant turn" },
+          {
+            type: "toolCall",
+            id: "fixture-call",
+            name: "bash",
+            arguments: { cmd: "pwd" },
+          },
+        ],
+        api: "fixture-api",
+        provider: "fixture-provider",
+        model: "fixture-model",
+        usage: {
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 2,
+          cost: { total: 0 },
+        },
+        stopReason: "toolUse",
+        timestamp: Date.parse(NOW),
+      },
+    },
+    {
+      type: "message",
+      id: "omp-result-1",
+      parentId: "omp-assistant-1",
+      timestamp: NOW,
+      message: {
+        role: "toolResult",
+        toolCallId: "fixture-call",
+        toolName: "bash",
+        content: [{ type: "text", text: "/fixture/quasar" }],
+        isError: false,
+        timestamp: Date.parse(NOW),
+      },
+    },
+  ]);
+  return { provider: "omp", root, logicalRoot: "/fixture/omp", primaryPath };
+};
+
+const buildPiFixture = (root: string): AdapterFixture => {
+  const dir = join(root, "--fixture-quasar--");
+  mkdirSync(dir, { recursive: true });
+  const primaryPath = join(dir, "fixture.jsonl");
+  writeJsonLines(primaryPath, [
+    {
+      type: "session",
+      version: 3,
+      id: "pi-fixture061",
+      timestamp: NOW,
+      cwd: "/fixture/quasar",
+    },
+    {
+      type: "message",
+      id: "pi-user-1",
+      parentId: null,
+      timestamp: NOW,
+      message: {
+        role: "user",
+        content: [{ type: "text", text: "fixture user turn" }],
+        timestamp: Date.parse(NOW),
+      },
+    },
+    {
+      type: "message",
+      id: "pi-assistant-1",
+      parentId: "pi-user-1",
+      timestamp: NOW,
+      message: {
+        role: "assistant",
+        content: [
+          { type: "text", text: "fixture assistant turn" },
+          {
+            type: "toolCall",
+            id: "fixture-call",
+            name: "bash",
+            arguments: { cmd: "pwd" },
+          },
+        ],
+        api: "fixture-api",
+        provider: "fixture-provider",
+        model: "fixture-model",
+        usage: {
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 2,
+          cost: { total: 0 },
+        },
+        stopReason: "toolUse",
+        timestamp: Date.parse(NOW),
+      },
+    },
+    {
+      type: "message",
+      id: "pi-result-1",
+      parentId: "pi-assistant-1",
+      timestamp: NOW,
+      message: {
+        role: "toolResult",
+        toolCallId: "fixture-call",
+        toolName: "bash",
+        content: [{ type: "text", text: "/fixture/quasar" }],
+        isError: false,
+        timestamp: Date.parse(NOW),
+      },
+    },
+  ]);
+  return { provider: "pi", root, logicalRoot: "/fixture/pi", primaryPath };
+};
+
+const encodeCursorVarint = (value: number): Buffer => {
+  const bytes: number[] = [];
+  let remaining = value;
+  do {
+    let byte = remaining & 0x7f;
+    remaining = Math.floor(remaining / 128);
+    if (remaining > 0) byte |= 0x80;
+    bytes.push(byte);
+  } while (remaining > 0);
+  return Buffer.from(bytes);
+};
+
+const cursorFieldBytes = (fieldNumber: number, value: Uint8Array): Buffer =>
+  Buffer.concat([
+    encodeCursorVarint((fieldNumber << 3) | 2),
+    encodeCursorVarint(value.length),
+    Buffer.from(value),
+  ]);
+
+const cursorBlob = (value: unknown) => {
+  const bytes = Buffer.from(JSON.stringify(value), "utf8");
+  return {
+    bytes,
+    id: createHash("sha256").update(bytes).digest("hex"),
+    reference: createHash("sha256").update(bytes).digest(),
+  };
+};
+
+const buildCursorFixture = (root: string): AdapterFixture => {
+  const sessionId = "8fd16ca4-4dfa-4fea-8c37-4df7c63c5577";
+  const cwd = "/fixture/quasar";
+  const workspace = createHash("md5").update(cwd).digest("hex");
+  const dir = join(root, "chats", workspace, sessionId);
+  mkdirSync(dir, { recursive: true });
+  const primaryPath = join(dir, "store.db");
+  const user = cursorBlob({
+    role: "user",
+    content: [{ type: "text", text: "fixture user turn" }],
+  });
+  const assistant = cursorBlob({
+    role: "assistant",
+    id: "cursor-assistant-1",
+    content: [
+      {
+        type: "tool-call",
+        toolCallId: "fixture-call",
+        toolName: "bash",
+        args: { cmd: "pwd" },
+      },
+      { type: "text", text: "fixture assistant turn" },
+    ],
+    providerOptions: { cursor: { modelName: "fixture-model" } },
+  });
+  const result = cursorBlob({
+    role: "tool",
+    id: "cursor-tool-1",
+    content: [{
+      type: "tool-result",
+      toolCallId: "fixture-call",
+      toolName: "bash",
+      result: "/fixture/quasar",
+    }],
+    providerOptions: {
+      cursor: {
+        highLevelToolCallResult: {
+          isError: false,
+          output: "/fixture/quasar",
+        },
+      },
+    },
+  });
+  const rootBytes = Buffer.concat([
+    cursorFieldBytes(1, user.reference),
+    cursorFieldBytes(1, assistant.reference),
+    cursorFieldBytes(1, result.reference),
+  ]);
+  const rootId = createHash("sha256").update(rootBytes).digest("hex");
+  const createdAt = Date.parse(NOW);
+  const metadata = Buffer.from(JSON.stringify({
+    agentId: sessionId,
+    latestRootBlobId: rootId,
+    name: "Fixture Cursor Session",
+    createdAt,
+    mode: "default",
+    isRunEverything: false,
+    approvalMode: "default",
+    lastUsedModel: "fixture-model",
+  }), "utf8").toString("hex");
+  execFileSync("sqlite3", [primaryPath, `
+pragma user_version = 1;
+create table blobs (id text primary key, data blob);
+create table meta (key text primary key, value text);
+insert into blobs values ('${user.id}', x'${user.bytes.toString("hex")}');
+insert into blobs values ('${assistant.id}', x'${assistant.bytes.toString("hex")}');
+insert into blobs values ('${result.id}', x'${result.bytes.toString("hex")}');
+insert into blobs values ('${rootId}', x'${rootBytes.toString("hex")}');
+insert into meta values ('0', '${metadata}');
+`]);
+  const metaPath = join(dir, "meta.json");
+  writeFileSync(metaPath, JSON.stringify({
+    schemaVersion: 1,
+    createdAtMs: createdAt,
+    hasConversation: true,
+    title: "Fixture Cursor Session",
+    updatedAtMs: createdAt + 1_000,
+    cwd,
+  }), "utf8");
+  const deterministicMtime = new Date(createdAt + 1_000);
+  utimesSync(primaryPath, deterministicMtime, deterministicMtime);
+  utimesSync(metaPath, deterministicMtime, deterministicMtime);
+  return { provider: "cursor", root, logicalRoot: "/fixture/cursor", primaryPath };
+};
+
+export const rewriteCursorFixtureUserMessage = (
+  fixture: AdapterFixture,
+  message: unknown,
+) => {
+  if (fixture.provider !== "cursor") {
+    throw new Error(`Expected cursor fixture, received ${fixture.provider}`);
+  }
+  const oldUserId = execFileSync("sqlite3", [
+    fixture.primaryPath,
+    "select id from blobs where cast(data as text) like '%fixture user turn%' limit 1;",
+  ], { encoding: "utf8" }).trim();
+  const metadataHex = execFileSync("sqlite3", [
+    fixture.primaryPath,
+    "select value from meta where key = '0';",
+  ], { encoding: "utf8" }).trim();
+  const metadata = JSON.parse(Buffer.from(metadataHex, "hex").toString("utf8")) as {
+    latestRootBlobId: string;
+    [key: string]: unknown;
+  };
+  const rootHex = execFileSync("sqlite3", [
+    fixture.primaryPath,
+    `select hex(data) from blobs where id = '${metadata.latestRootBlobId}';`,
+  ], { encoding: "utf8" }).trim();
+  const rootBytes = Buffer.from(rootHex, "hex");
+  const oldReference = Buffer.from(oldUserId, "hex");
+  const referenceOffset = rootBytes.indexOf(oldReference);
+  if (referenceOffset < 0) {
+    throw new Error("Cursor fixture root does not reference its user message");
+  }
+
+  const replacement = cursorBlob(message);
+  replacement.reference.copy(rootBytes, referenceOffset);
+  const replacementRootId = createHash("sha256").update(rootBytes).digest("hex");
+  const replacementMetadata = Buffer.from(JSON.stringify({
+    ...metadata,
+    latestRootBlobId: replacementRootId,
+  }), "utf8").toString("hex");
+  execFileSync("sqlite3", [fixture.primaryPath, `
+begin;
+insert into blobs values ('${replacement.id}', x'${replacement.bytes.toString("hex")}');
+insert into blobs values ('${replacementRootId}', x'${rootBytes.toString("hex")}');
+update meta set value = '${replacementMetadata}' where key = '0';
+commit;
+`]);
+};
+
+const buildDevinFixture = (root: string): AdapterFixture => {
+  mkdirSync(root, { recursive: true });
+  const primaryPath = join(root, "sessions.db");
+  const createdAt = Math.floor(Date.parse(NOW) / 1_000);
+  const metadata = {
+    created_at: NOW,
+    telemetry: {},
+    finish_reason: null,
+    is_user_input: null,
+    metrics: null,
+    num_tokens: null,
+    request_id: null,
+  };
+  const user = JSON.stringify({
+    message_id: "devin-user-1",
+    role: "user",
+    content: "fixture user turn",
+    metadata,
+  }).replaceAll("'", "''");
+  const assistant = JSON.stringify({
+    message_id: "devin-assistant-1",
+    role: "assistant",
+    content: "fixture assistant turn",
+    metadata: {
+      ...metadata,
+      generation_model: "fixture-model",
+      started_generation_at: NOW,
+    },
+    tool_calls: [],
+  }).replaceAll("'", "''");
+  execFileSync("sqlite3", [primaryPath, `
+create table sessions (
+  id text primary key,
+  working_directory text not null,
+  backend_type text not null,
+  model text not null,
+  agent_mode text not null,
+  created_at integer not null,
+  last_activity_at integer not null,
+  title text,
+  main_chain_id integer,
+  shell_last_seen_index integer not null,
+  cogs_json text,
+  workspace_dirs text,
+  hidden integer not null,
+  metadata text
+);
+create table message_nodes (
+  row_id integer primary key autoincrement,
+  session_id text not null,
+  node_id integer not null,
+  parent_node_id integer,
+  chat_message text not null,
+  created_at integer not null,
+  metadata text,
+  unique(session_id, node_id)
+);
+insert into sessions values (
+  'devin-fixture061', '/fixture/quasar', 'Windsurf', 'fixture-model', 'normal',
+  ${createdAt}, ${createdAt + 2}, 'Fixture Devin Session', 2, 0, null, null, 0, null
+);
+insert into message_nodes (session_id, node_id, parent_node_id, chat_message, created_at, metadata)
+values ('devin-fixture061', 1, null, '${user}', ${createdAt}, 'null');
+insert into message_nodes (session_id, node_id, parent_node_id, chat_message, created_at, metadata)
+values ('devin-fixture061', 2, 1, '${assistant}', ${createdAt + 1}, 'null');
+`]);
+  return { provider: "devin", root, logicalRoot: "/fixture/devin", primaryPath };
+};
+
 export const buildFixtureFor = (provider: AdapterProvider, root: string): AdapterFixture => {
   switch (provider) {
     case "codex":
@@ -304,6 +686,14 @@ export const buildFixtureFor = (provider: AdapterProvider, root: string): Adapte
       return buildKimiFixture(root);
     case "antigravity":
       return buildAntigravityFixture(root);
+    case "omp":
+      return buildOmpFixture(root);
+    case "pi":
+      return buildPiFixture(root);
+    case "cursor":
+      return buildCursorFixture(root);
+    case "devin":
+      return buildDevinFixture(root);
   }
 };
 

@@ -12,9 +12,9 @@ import {
   adapterFor,
   appendText,
   buildFixtureFor,
+  rewriteCursorFixtureUserMessage,
   type AdapterFixture,
   type AdapterProvider,
-  writeJsonLines,
 } from "./adapter-test-harness";
 
 const tempRoots: string[] = [];
@@ -94,6 +94,55 @@ insert into messages (session_id, role, content, timestamp) values ('20260101_00
             : { type: "USER_INPUT", created_at: "2026-06-11T00:00:00.000Z" },
       )}\n`);
       return;
+    case "omp":
+      appendText(fixture.primaryPath, `${JSON.stringify(
+        mutation === "unknown_type"
+          ? { type: "zztest_unknown", id: "omp-mut-unknown", parentId: null, timestamp: "2026-06-11T00:00:00.000Z" }
+          : mutation === "wrong_type"
+            ? { type: "message", id: "omp-mut-wrong", parentId: null, timestamp: "2026-06-11T00:00:00.000Z", message: { role: "assistant", content: 5 } }
+            : { type: "message", id: "omp-mut-missing", parentId: null, timestamp: "2026-06-11T00:00:00.000Z" },
+      )}\n`);
+      return;
+    case "pi":
+      appendText(fixture.primaryPath, `${JSON.stringify(
+        mutation === "unknown_type"
+          ? { type: "zztest_unknown", id: "pi-mut-unknown", parentId: null, timestamp: "2026-06-11T00:00:00.000Z" }
+          : mutation === "wrong_type"
+            ? { type: "message", id: "pi-mut-wrong", parentId: null, timestamp: "2026-06-11T00:00:00.000Z", message: { role: "assistant", content: 5 } }
+            : { type: "message", id: "pi-mut-missing", parentId: null, timestamp: "2026-06-11T00:00:00.000Z" },
+      )}\n`);
+      return;
+    case "cursor": {
+      const mutated = mutation === "unknown_type"
+        ? { role: "user", content: [{ type: "zztest_unknown" }] }
+        : mutation === "wrong_type"
+          ? { role: "user", content: [{ type: "text", text: 5 }] }
+          : { role: "user", content: [{ type: "text" }] };
+      rewriteCursorFixtureUserMessage(fixture, mutated);
+      return;
+    }
+    case "devin": {
+      const metadata = {
+        created_at: "2026-06-11T00:00:00.000Z",
+        telemetry: {},
+        finish_reason: null,
+        is_user_input: null,
+        metrics: null,
+        num_tokens: null,
+        request_id: null,
+      };
+      const mutated = mutation === "unknown_type"
+        ? { message_id: "devin-mut-unknown", role: "zztest_unknown", content: "x", metadata }
+        : mutation === "wrong_type"
+          ? { message_id: "devin-mut-wrong", role: 5, content: "x", metadata }
+          : { message_id: "devin-mut-missing", content: "x", metadata };
+      execFileSync("sqlite3", [fixture.primaryPath, `
+update message_nodes
+set chat_message = '${sql(JSON.stringify(mutated))}'
+where session_id = 'devin-fixture061' and node_id = 1;
+`]);
+      return;
+    }
   }
 };
 

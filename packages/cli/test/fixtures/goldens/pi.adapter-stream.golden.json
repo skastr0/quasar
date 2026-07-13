@@ -1,0 +1,193 @@
+[
+  {
+    "sourceRoot": {
+      "adapterId": "pi-local-jsonl",
+      "discoveredAt": "2026-06-11T00:00:00.000Z",
+      "machineId": "machine:test",
+      "provider": "pi",
+      "rootPath": "/fixture/pi"
+    },
+    "type": "sourceRoot"
+  },
+  {
+    "fingerprint": {
+      "mtimeMs": "<mtimeMs>",
+      "size": 1083
+    },
+    "session": {
+      "agentName": "Pi CLI",
+      "artifacts": [],
+      "events": [
+        {
+          "agentName": "Pi CLI",
+          "contentBlocks": [
+            {
+              "id": "pi:d4724bfa84bc0b1375e2a878d08f89e1:block:4b287a7f7175b548bbb87be1af30d6e2",
+              "kind": "text",
+              "sequence": 0,
+              "text": "fixture user turn"
+            }
+          ],
+          "contentText": "fixture user turn",
+          "id": "pi:d4724bfa84bc0b1375e2a878d08f89e1:event:29021f894f7c66c8b62c2d73170d735a",
+          "kind": "message",
+          "machineId": "machine:test",
+          "nativeEventId": "pi-user-1:0",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "pi",
+          "rawReference": {
+            "line": 2,
+            "nativeType": "message",
+            "rawBytes": 197,
+            "sourcePath": "/fixture/pi/--fixture-quasar--/fixture.jsonl"
+          },
+          "role": "user",
+          "sequence": 0,
+          "sessionId": "pi:d4724bfa84bc0b1375e2a878d08f89e1",
+          "timestamp": "2026-06-11T00:00:00.000Z"
+        },
+        {
+          "agentName": "Pi CLI",
+          "contentBlocks": [
+            {
+              "id": "pi:d4724bfa84bc0b1375e2a878d08f89e1:block:9f7720c2436cfdd9225b56f8d3c43a57",
+              "kind": "text",
+              "sequence": 0,
+              "text": "/fixture/quasar"
+            }
+          ],
+          "id": "pi:d4724bfa84bc0b1375e2a878d08f89e1:event:e25af6be04c91b1bcc1093f02c6bc36d",
+          "kind": "tool_result",
+          "machineId": "machine:test",
+          "nativeEventId": "pi-result-1:0",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "pi",
+          "rawReference": {
+            "line": 4,
+            "nativeType": "message",
+            "rawBytes": 277,
+            "sourcePath": "/fixture/pi/--fixture-quasar--/fixture.jsonl"
+          },
+          "role": "tool",
+          "sequence": 1,
+          "sessionId": "pi:d4724bfa84bc0b1375e2a878d08f89e1",
+          "timestamp": "2026-06-11T00:00:00.000Z",
+          "toolCallId": "pi:d4724bfa84bc0b1375e2a878d08f89e1:tool:d60ac7ea33f1915dfe558558183a2303"
+        }
+      ],
+      "host": "test-host",
+      "id": "pi:d4724bfa84bc0b1375e2a878d08f89e1",
+      "identitySchemeVersion": 1,
+      "machineId": "machine:test",
+      "nativeProjectKey": "/fixture/quasar",
+      "nativeSessionId": "pi-fixture061",
+      "projectIdentity": {
+        "confidence": "low",
+        "displayName": "quasar",
+        "normalizedPath": "/fixture/quasar",
+        "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+        "rawPath": "/fixture/quasar",
+        "signals": [
+          {
+            "confidence": "low",
+            "kind": "path",
+            "value": "/fixture/quasar"
+          }
+        ]
+      },
+      "provider": "pi",
+      "sessionEdges": [],
+      "sourcePath": "/fixture/pi/--fixture-quasar--/fixture.jsonl",
+      "sourceRoot": "/fixture/pi",
+      "startedAt": "2026-06-11T00:00:00.000Z",
+      "toolCalls": [
+        {
+          "agentName": "Pi CLI",
+          "completedAt": "2026-06-11T00:00:00.000Z",
+          "eventId": "pi:d4724bfa84bc0b1375e2a878d08f89e1:event:e25af6be04c91b1bcc1093f02c6bc36d",
+          "id": "pi:d4724bfa84bc0b1375e2a878d08f89e1:tool:d60ac7ea33f1915dfe558558183a2303",
+          "machineId": "machine:test",
+          "output": {
+            "content": [
+              {
+                "text": "/fixture/quasar",
+                "type": "text"
+              }
+            ]
+          },
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "pi",
+          "sessionId": "pi:d4724bfa84bc0b1375e2a878d08f89e1",
+          "status": "completed",
+          "toolName": "bash"
+        }
+      ],
+      "updatedAt": "2026-06-11T00:00:00.000Z",
+      "usageRecords": []
+    },
+    "sourceUnit": {
+      "adapterId": "pi-local-jsonl",
+      "physicalPath": "<fixture-root>/--fixture-quasar--/fixture.jsonl",
+      "provider": "pi",
+      "rootPath": "/fixture/pi",
+      "sourcePath": "/fixture/pi/--fixture-quasar--/fixture.jsonl"
+    },
+    "type": "session"
+  },
+  {
+    "diagnostic": {
+      "adapterId": "pi-local-jsonl",
+      "details": {
+        "diagnostic": "pi.message.decode_failed",
+        "sourcePath": "/fixture/pi/--fixture-quasar--/fixture.jsonl"
+      },
+      "message": "{ readonly type: \"message\"; readonly id: string; readonly parentId: string | null; readonly timestamp: string; readonly message: { readonly role: \"user\"; readonly content: string | ReadonlyArray<{ readonly type: \"text\"; readonly text: string; readonly textSignature?: string | undefined } | { readonly type: \"image\"; readonly data: string; readonly mimeType: string }>; readonly timestamp: number } | { readonly role: \"assistant\"; readonly content: ReadonlyArray<{ readonly type: \"text\"; readonly text: string; readonly textSignature?: string | undefined } | { readonly type: \"thinking\"; readonly thinking: string; readonly thinkingSignature?: string | undefined; readonly redacted?: boolean | undefined } | { readonly type: \"toolCall\"; readonly id: string; readonly name: string; readonly arguments: { readonly [x: string]: unknown }; readonly thoughtSignature?: string | undefined }>; readonly api: string; readonly provider: string; readonly model: string; readonly responseModel?: string | undefined; readonly responseId?: string | undefined; readonly diagnostics?: unknown | undefined; readonly usage: { readonly input: { number | filter }; readonly output: { number | filter }; readonly cacheRead: { number | filter }; readonly cacheWrite: { number | filter }; readonly totalTokens: { number | filter }; readonly cost: { readonly input: { number | filter }; readonly output: { number | filter }; readonly cacheRead: { number | filter }; readonly cacheWrite: { number | filter }; readonly total: { number | filter } } }; readonly stopReason: \"stop\" | \"length\" | \"toolUse\" | \"error\" | \"aborted\"; readonly errorMessage?: string | undefined; readonly timestamp: number } | { readonly role: \"toolResult\"; readonly toolCallId: string; readonly toolName: string; readonly content: ReadonlyArray<{ readonly type: \"text\"; readonly text: string; readonly textSignature?: string | undefined } | { readonly type: \"image\"; readonly data: string; readonly mimeType: string }>; readonly details?: unknown | undefined; readonly isError: boolean; readonly timestamp: number } | { readonly role: \"bashExecution\"; readonly command: string; readonly output: string; readonly exitCode?: number | undefined; readonly cancelled: boolean; readonly truncated: boolean; readonly fullOutputPath?: string | undefined; readonly timestamp: number; readonly excludeFromContext?: boolean | undefined } | { readonly role: \"custom\"; readonly customType: string; readonly content: string | ReadonlyArray<{ readonly type: \"text\"; readonly text: string; readonly textSignature?: string | undefined } | { readonly type: \"image\"; readonly data: string; readonly mimeType: string }>; readonly display: boolean; readonly details?: unknown | undefined; readonly timestamp: number } | { readonly role: \"hookMessage\"; readonly customType: string; readonly content: string | ReadonlyArray<{ readonly type: \"text\"; readonly text: string; readonly textSignature?: string | undefined } | { readonly type: \"image\"; readonly data: string; readonly mimeType: string }>; readonly display: boolean; readonly details?: unknown | undefined; readonly timestamp: number } | { readonly role: \"branchSummary\"; readonly summary: string; readonly fromId: string; readonly timestamp: number } | { readonly role: \"compactionSummary\"; readonly summary: string; readonly tokensBefore: number; readonly timestamp: number } } | { readonly type: \"thinking_level_change\"; readonly id: string; readonly parentId: string | null; readonly timestamp: string; readonly thinkingLevel: string } | { readonly type: \"model_change\"; readonly id: string; readonly parentId: string | null; readonly timestamp: string; readonly provider: string; readonly modelId: string } | { readonly type: \"compaction\"; readonly id: string; readonly parentId: string | null; readonly timestamp: string; readonly summary: string; readonly firstKeptEntryId: string; readonly tokensBefore: number; readonly details?: unknown | undefined; readonly fromHook?: boolean | undefined } | { readonly type: \"branch_summary\"; readonly id: string; readonly parentId: string | null; readonly timestamp: string; readonly fromId: string; readonly summary: string; readonly details?: unknown | undefined; readonly fromHook?: boolean | undefined } | { readonly type: \"custom\"; readonly id: string; readonly parentId: string | null; readonly timestamp: string; readonly customType: string; readonly data?: unknown | undefined } | { readonly type: \"custom_message\"; readonly id: string; readonly parentId: string | null; readonly timestamp: string; readonly customType: string; readonly content: string | ReadonlyArray<{ readonly type: \"text\"; readonly text: string; readonly textSignature?: string | undefined } | { readonly type: \"image\"; readonly data: string; readonly mimeType: string }>; readonly details?: unknown | undefined; readonly display: boolean } | { readonly type: \"label\"; readonly id: string; readonly parentId: string | null; readonly timestamp: string; readonly targetId: string; readonly label?: string | undefined } | { readonly type: \"session_info\"; readonly id: string; readonly parentId: string | null; readonly timestamp: string; readonly name?: string | undefined }\n└─ { readonly type: \"message\"; readonly id: string; readonly parentId: string | null; readonly timestamp: string; readonly message: { readonly role: \"user\"; readonly content: string | ReadonlyArray<{ readonly type: \"text\"; readonly text: string; readonly textSignature?: string | undefined } | { readonly type: \"image\"; readonly data: string; readonly mimeType: string }>; readonly timestamp: number } | { readonly role: \"assistant\"; readonly content: ReadonlyArray<{ readonly type: \"text\"; readonly text: string; readonly textSignature?: string | undefined } | { readonly type: \"thinking\"; readonly thinking: string; readonly thinkingSignature?: string | undefined; readonly redacted?: boolean | undefined } | { readonly type: \"toolCall\"; readonly id: string; readonly name: string; readonly arguments: { readonly [x: string]: unknown }; readonly thoughtSignature?: string | undefined }>; readonly api: string; readonly provider: string; readonly model: string; readonly responseModel?: string | undefined; readonly responseId?: string | undefined; readonly diagnostics?: unknown | undefined; readonly usage: { readonly input: { number | filter }; readonly output: { number | filter }; readonly cacheRead: { number | filter }; readonly cacheWrite: { number | filter }; readonly totalTokens: { number | filter }; readonly cost: { readonly input: { number | filter }; readonly output: { number | filter }; readonly cacheRead: { number | filter }; readonly cacheWrite: { number | filter }; readonly total: { number | filter } } }; readonly stopReason: \"stop\" | \"length\" | \"toolUse\" | \"error\" | \"aborted\"; readonly errorMessage?: string | undefined; readonly timestamp: number } | { readonly role: \"toolResult\"; readonly toolCallId: string; readonly toolName: string; readonly content: ReadonlyArray<{ readonly type: \"text\"; readonly text: string; readonly textSignature?: string | undefined } | { readonly type: \"image\"; readonly data: string; readonly mimeType: string }>; readonly details?: unknown | undefined; readonly isError: boolean; readonly timestamp: number } | { readonly role: \"bashExecution\"; readonly command: string; readonly output: string; readonly exitCode?: number | undefined; readonly cancelled: boolean; readonly truncated: boolean; readonly fullOutputPath?: string | undefined; readonly timestamp: number; readonly excludeFromContext?: boolean | undefined } | { readonly role: \"custom\"; readonly customType: string; readonly content: string | ReadonlyArray<{ readonly type: \"text\"; readonly text: string; readonly textSignature?: string | undefined } | { readonly type: \"image\"; readonly data: string; readonly mimeType: string }>; readonly display: boolean; readonly details?: unknown | undefined; readonly timestamp: number } | { readonly role: \"hookMessage\"; readonly customType: string; readonly content: string | ReadonlyArray<{ readonly type: \"text\"; readonly text: string; readonly textSignature?: string | undefined } | { readonly type: \"image\"; readonly data: string; readonly mimeType: string }>; readonly display: boolean; readonly details?: unknown | undefined; readonly timestamp: number } | { readonly role: \"branchSummary\"; readonly summary: string; readonly fromId: string; readonly timestamp: number } | { readonly role: \"compactionSummary\"; readonly summary: string; readonly tokensBefore: number; readonly timestamp: number } }\n   └─ [\"message\"]\n      └─ { readonly role: \"user\"; readonly content: string | ReadonlyArray<{ readonly type: \"text\"; readonly text: string; readonly textSignature?: string | undefined } | { readonly type: \"image\"; readonly data: string; readonly mimeType: string }>; readonly timestamp: number } | { readonly role: \"assistant\"; readonly content: ReadonlyArray<{ readonly type: \"text\"; readonly text: string; readonly textSignature?: string | undefined } | { readonly type: \"thinking\"; readonly thinking: string; readonly thinkingSignature?: string | undefined; readonly redacted?: boolean | undefined } | { readonly type: \"toolCall\"; readonly id: string; readonly name: string; readonly arguments: { readonly [x: string]: unknown }; readonly thoughtSignature?: string | undefined }>; readonly api: string; readonly provider: string; readonly model: string; readonly responseModel?: string | undefined; readonly responseId?: string | undefined; readonly diagnostics?: unknown | undefined; readonly usage: { readonly input: { number | filter }; readonly output: { number | filter }; readonly cacheRead: { number | filter }; readonly cacheWrite: { number | filter }; readonly totalTokens: { number | filter }; readonly cost: { readonly input: { number | filter }; readonly output: { number | filter }; readonly cacheRead: { number | filter }; readonly cacheWrite: { number | filter }; readonly total: { number | filter } } }; readonly stopReason: \"stop\" | \"length\" | \"toolUse\" | \"error\" | \"aborted\"; readonly errorMessage?: string | undefined; readonly timestamp: number } | { readonly role: \"toolResult\"; readonly toolCallId: string; readonly toolName: string; readonly content: ReadonlyArray<{ readonly type: \"text\"; readonly text: string; readonly textSignature?: string | undefined } | { readonly type: \"image\"; readonly data: string; readonly mimeType: string }>; readonly details?: unknown | undefined; readonly isError: boolean; readonly timestamp: number } | { readonly role: \"bashExecution\"; readonly command: string; readonly output: string; readonly exitCode?: number | undefined; readonly cancelled: boolean; readonly truncated: boolean; readonly fullOutputPath?: string | undefined; readonly timestamp: number; readonly excludeFromContext?: boolean | undefined } | { readonly role: \"custom\"; readonly customType: string; readonly content: string | ReadonlyArray<{ readonly type: \"text\"; readonly text: string; readonly textSignature?: string | undefined } | { readonly type: \"image\"; readonly data: string; readonly mimeType: string }>; readonly display: boolean; readonly details?: unknown | undefined; readonly timestamp: number } | { readonly role: \"hookMessage\"; readonly customType: string; readonly content: string | ReadonlyArray<{ readonly type: \"text\"; readonly text: string; readonly textSignature?: string | undefined } | { readonly type: \"image\"; readonly data: string; readonly mimeType: string }>; readonly display: boolean; readonly details?: unknown | undefined; readonly timestamp: number } | { readonly role: \"branchSummary\"; readonly summary: string; readonly fromId: string; readonly timestamp: number } | { readonly role: \"compactionSummary\"; readonly summary: string; readonly tokensBefore: number; readonly timestamp: number }\n         └─ { readonly role: \"assistant\"; readonly content: ReadonlyArray<{ readonly type: \"text\"; readonly text: string; readonly textSignature?: string | undefined } | { readonly type: \"thinking\"; readonly thinking: string; readonly thinkingSignature?: string | undefined; readonly redacted?: boolean | undefined } | { readonly type: \"toolCall\"; readonly id: string; readonly name: string; readonly arguments: { readonly [x: string]: unknown }; readonly thoughtSignature?: string | undefined }>; readonly api: string; readonly provider: string; readonly model: string; readonly responseModel?: string | undefined; readonly responseId?: string | undefined; readonly diagnostics?: unknown | undefined; readonly usage: { readonly input: { number | filter }; readonly output: { number | filter }; readonly cacheRead: { number | filter }; readonly cacheWrite: { number | filter }; readonly totalTokens: { number | filter }; readonly cost: { readonly input: { number | filter }; readonly output: { number | filter }; readonly cacheRead: { number | filter }; readonly cacheWrite: { number | filter }; readonly total: { number | filter } } }; readonly stopReason: \"stop\" | \"length\" | \"toolUse\" | \"error\" | \"aborted\"; readonly errorMessage?: string | undefined; readonly timestamp: number }\n            └─ [\"usage\"]\n               └─ { readonly input: { number | filter }; readonly output: { number | filter }; readonly cacheRead: { number | filter }; readonly cacheWrite: { number | filter }; readonly totalTokens: { number | filter }; readonly cost: { readonly input: { number | filter }; readonly output: { number | filter }; readonly cacheRead: { number | filter }; readonly cacheWrite: { number | filter }; readonly total: { number | filter } } }\n                  └─ [\"cost\"]\n                     └─ { readonly input: { number | filter }; readonly output: { number | filter }; readonly cacheRead: { number | filter }; readonly cacheWrite: { number | filter }; readonly total: { number | filter } }\n                        ├─ [\"input\"]\n                        │  └─ is missing\n                        ├─ [\"output\"]\n                        │  └─ is missing\n                        ├─ [\"cacheRead\"]\n                        │  └─ is missing\n                        └─ [\"cacheWrite\"]\n                           └─ is missing",
+      "parserConfidence": "documented",
+      "provider": "pi",
+      "rootPath": "/fixture/pi",
+      "status": "unsupported"
+    },
+    "type": "diagnostic"
+  },
+  {
+    "diagnostic": {
+      "adapterId": "pi-local-jsonl",
+      "details": {
+        "diagnostic": "pi.tool_call.missing",
+        "sourcePath": "/fixture/pi/--fixture-quasar--/fixture.jsonl"
+      },
+      "message": "Tool result without call fixture-call at /fixture/pi/--fixture-quasar--/fixture.jsonl:4",
+      "parserConfidence": "documented",
+      "provider": "pi",
+      "rootPath": "/fixture/pi",
+      "status": "unsupported"
+    },
+    "type": "diagnostic"
+  },
+  {
+    "diagnostic": {
+      "adapterId": "pi-local-jsonl",
+      "details": {
+        "diagnostic": "pi.parent.missing",
+        "sourcePath": "/fixture/pi/--fixture-quasar--/fixture.jsonl"
+      },
+      "message": "Missing parent pi-assistant-1 for pi-result-1 at /fixture/pi/--fixture-quasar--/fixture.jsonl:4",
+      "parserConfidence": "documented",
+      "provider": "pi",
+      "rootPath": "/fixture/pi",
+      "status": "unsupported"
+    },
+    "type": "diagnostic"
+  },
+  {
+    "diagnostic": {
+      "adapterId": "pi-local-jsonl",
+      "message": "Discovered 1 Pi session(s).",
+      "parserConfidence": "documented",
+      "provider": "pi",
+      "rootPath": "<fixture-root>",
+      "status": "available"
+    },
+    "type": "diagnostic"
+  }
+]

@@ -5,17 +5,19 @@ import { execFileSync } from "node:child_process";
 
 import { afterEach, describe, expect, test } from "bun:test";
 
+import { stableAdapters } from "../src/adapters/registry";
 import type { AdapterDiagnostic } from "../src/core/schemas";
 import {
   adapterFor,
   appendText,
   buildFixtureFor,
+  rewriteCursorFixtureUserMessage,
   type AdapterFixture,
   type AdapterProvider,
 } from "./adapter-test-harness";
 
-const lineProviders = ["codex", "claude", "grok", "kimi", "antigravity"] as const;
-const sqliteProviders = ["opencode", "hermes"] as const;
+const lineProviders = ["codex", "claude", "grok", "kimi", "antigravity", "omp", "pi"] as const;
+const sqliteProviders = ["opencode", "hermes", "cursor", "devin"] as const;
 const allProviders = [...lineProviders, ...sqliteProviders] as const;
 const tempRoots: string[] = [];
 
@@ -45,14 +47,24 @@ const UNKNOWN_RECORD_DIAGNOSTIC: Record<(typeof lineProviders)[number], string> 
   grok: "grok.record.unknown_type",
   kimi: "kimi.wire.decode_failed",
   antigravity: "antigravity.record.decode_failed",
+  omp: "omp.record.unknown_type",
+  pi: "pi.entry.unknown_type",
 };
 
 /** Exact unknown-row diagnostic ids per SQLite provider (probe-locked). */
 const UNKNOWN_ROW_DIAGNOSTIC: Record<(typeof sqliteProviders)[number], string> = {
   opencode: "opencode.part.decode_failed",
   hermes: "hermes.message.dropped",
+  cursor: "cursor.block.unknown_type",
+  devin: "devin.message.role_unsupported",
 };
 
+const CORRUPT_SQLITE_DIAGNOSTIC: Record<(typeof sqliteProviders)[number], string> = {
+  opencode: "opencode.sqlite.unreadable",
+  hermes: "hermes.sqlite.unreadable",
+  cursor: "cursor.store.snapshot_failed",
+  devin: "devin.sqlite.unreadable",
+};
 const readProvider = async (provider: AdapterProvider, fixture: AdapterFixture) =>
   adapterFor(provider).read({
     machine: { machineId: "machine:test", hostname: "test-host", platform: "darwin" },
@@ -87,7 +99,11 @@ describe("adapter hostile file/line diagnostics", () => {
       const fixture = withFixture(provider);
       writeFileSync(fixture.primaryPath, "", "utf8");
       const result = await readProvider(provider, fixture);
-      const expected = provider === "codex" ? "codex.native_session_id.missing" : `${provider}.file.empty`;
+      const expected = provider === "codex"
+        ? "codex.native_session_id.missing"
+        : provider === "omp"
+          ? "omp.session.header_missing"
+          : `${provider}.file.empty`;
       expect(result.sessions.length).toBeLessThanOrEqual(1);
       expect(result.diagnostics.some((diagnostic) => diagnosticBlob(diagnostic).includes(expected))).toBe(true);
     }, 15_000);
@@ -97,10 +113,13 @@ describe("adapter hostile file/line diagnostics", () => {
       chmodSync(fixture.primaryPath, 0);
       try {
         const result = await readProvider(provider, fixture);
-        // Codex owns its first-record open path; line adapters use common.ts
-        // which must name the kind as unreadable (never mask as invalid_json).
-        const expected =
-          provider === "codex" ? "codex.first_record.json.invalid" : `${provider}.line.unreadable`;
+        // Codex and OMP own custom open paths; the other line adapters use
+        // common.ts and must name unreadable separately from invalid_json.
+        const expected = provider === "codex"
+          ? "codex.first_record.json.invalid"
+          : provider === "omp"
+            ? "omp.root.unreadable"
+            : `${provider}.line.unreadable`;
         expect(
           result.diagnostics.some((diagnostic) => diagnosticBlob(diagnostic).includes(expected)),
         ).toBe(true);
@@ -132,27 +151,47 @@ describe("adapter hostile file/line diagnostics", () => {
     }, 15_000);
   }
 
-  test("opencode: corrupt sqlite snapshot emits named diagnostic and does not throw", async () => {
-    const fixture = withFixture("opencode");
-    writeFileSync(fixture.primaryPath, "not sqlite", "utf8");
-    const result = await readProvider("opencode", fixture);
-    expectNamedDiagnostic(result.diagnostics, "opencode.sqlite.unreadable");
-  }, 15_000);
-
-  test("hermes: corrupt sqlite snapshot emits named diagnostic and does not throw", async () => {
-    const fixture = withFixture("hermes");
-    writeFileSync(fixture.primaryPath, "not sqlite", "utf8");
-    const result = await readProvider("hermes", fixture);
-    expectNamedDiagnostic(result.diagnostics, "hermes.sqlite.unreadable");
-  }, 15_000);
+  for (const provider of sqliteProviders) {
+    test(`${provider}: corrupt sqlite snapshot emits named diagnostic and does not throw`, async () => {
+      const fixture = withFixture(provider);
+      writeFileSync(fixture.primaryPath, "not sqlite", "utf8");
+      const result = await readProvider(provider, fixture);
+      expectNamedDiagnostic(result.diagnostics, CORRUPT_SQLITE_DIAGNOSTIC[provider]);
+    }, 15_000);
+  }
 
   for (const provider of sqliteProviders) {
     test(`${provider}: unknown row subtype is named and does not pass through`, async () => {
       const fixture = withFixture(provider);
       if (provider === "opencode") {
         execFileSync("sqlite3", [fixture.primaryPath, "insert into part values ('part_unknown', 'msg_assistant', 'ses_fixture061', 199, json_object('type', 'zztest_unknown'));"]);
-      } else {
+      } else if (provider === "hermes") {
         execFileSync("sqlite3", [fixture.primaryPath, "insert into messages (session_id, role, content, timestamp) values ('20260101_000000_00000061', 'zztest_unknown', 'x', 1999);"]);
+      } else if (provider === "cursor") {
+        rewriteCursorFixtureUserMessage(fixture, {
+          role: "user",
+          content: [{ type: "zztest_unknown" }],
+        });
+      } else {
+        const chatMessage = Buffer.from(JSON.stringify({
+          message_id: "devin-hostile-unknown",
+          role: "zztest_unknown",
+          content: "must not survive",
+          metadata: {
+            created_at: "2026-06-11T00:00:00.000Z",
+            telemetry: {},
+            finish_reason: null,
+            is_user_input: null,
+            metrics: null,
+            num_tokens: null,
+            request_id: null,
+          },
+        }), "utf8").toString("hex");
+        execFileSync("sqlite3", [fixture.primaryPath, `
+update message_nodes
+set chat_message = cast(x'${chatMessage}' as text)
+where session_id = 'devin-fixture061' and node_id = 1;
+`]);
       }
       const result = await readProvider(provider, fixture);
       expect(result.sessions.flatMap((session) => session.events).some((event) => event.kind === "unknown")).toBe(false);
@@ -165,6 +204,8 @@ describe("adapter hostile file/line diagnostics", () => {
   }
 
   test("hostile matrix covers all adapters", () => {
-    expect(new Set(allProviders).size).toBe(7);
+    expect(new Set(allProviders)).toEqual(
+      new Set(stableAdapters.map((adapter) => adapter.provider)),
+    );
   });
 });

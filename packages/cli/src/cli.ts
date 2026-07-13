@@ -659,7 +659,7 @@ switch (command) {
     writeJson(
       ok("help", {
         commands: [
-          "ingest --provider all|codex|claude|opencode|grok|kimi|hermes|antigravity [--server url] [--limit n] [--force] [--summary]",
+          "ingest --provider all|codex|claude|opencode|grok|kimi|hermes|antigravity|omp|pi|cursor|devin [--server url] [--limit n] [--force] [--summary]",
           "daemon install --server https://<quasar-service-tailnet-hostname> --ingest-token <token> [--interval-seconds 60]",
           "daemon status",
           "daemon uninstall",
@@ -689,6 +689,10 @@ switch (command) {
           QUASAR_HERMES_ROOT: "override Hermes history root",
           QUASAR_KIMI_ROOT: "override Kimi history root",
           QUASAR_ANTIGRAVITY_ROOT: "override Antigravity history root",
+          QUASAR_OMP_ROOT: "override OMP history root",
+          QUASAR_PI_ROOT: "override Pi history root",
+          QUASAR_CURSOR_ROOT: "override Cursor Agent history root",
+          QUASAR_DEVIN_ROOT: "override Devin history root",
           QUASAR_SERVER_URL: "route client commands through an already-running local server",
           QUASAR_INGEST_TOKEN: "required for remote write ingest and daemon install/run unless config has ingestToken",
           QUASAR_HTTP_TIMEOUT_MS: "client HTTP timeout for server requests, default 60000",

@@ -1,0 +1,152 @@
+[
+  {
+    "sourceRoot": {
+      "adapterId": "devin-session-sqlite",
+      "discoveredAt": "2026-06-11T00:00:00.000Z",
+      "machineId": "machine:test",
+      "provider": "devin",
+      "rootPath": "/fixture/devin"
+    },
+    "type": "sourceRoot"
+  },
+  {
+    "fingerprint": {
+      "mtimeMs": "<mtimeMs>",
+      "size": 931,
+      "tag": "1c1f39f1a6ffd508dd71b7570bec74d6"
+    },
+    "session": {
+      "agentName": "devin",
+      "artifacts": [],
+      "events": [
+        {
+          "agentName": "devin",
+          "contentBlocks": [
+            {
+              "id": "devin:93eb6f6331d9c7a0ea9165f5490f0db2:block:cbd40d930b822d567f356819046ecd74",
+              "kind": "text",
+              "sequence": 0,
+              "text": "fixture user turn"
+            }
+          ],
+          "contentText": "fixture user turn",
+          "id": "devin:93eb6f6331d9c7a0ea9165f5490f0db2:event:1987e3507f8381295b200442365e6853",
+          "kind": "message",
+          "machineId": "machine:test",
+          "nativeEventId": "node:1:main",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "devin",
+          "rawReference": {
+            "nativeType": "user",
+            "rawBytes": 402,
+            "rowId": "1",
+            "sourcePath": "/fixture/devin/sessions.db",
+            "table": "message_nodes"
+          },
+          "role": "user",
+          "sequence": 0,
+          "sessionId": "devin:93eb6f6331d9c7a0ea9165f5490f0db2",
+          "timestamp": "2026-06-11T00:00:00.000Z"
+        },
+        {
+          "agentName": "devin",
+          "contentBlocks": [
+            {
+              "id": "devin:93eb6f6331d9c7a0ea9165f5490f0db2:block:89d73adf9de8a6be98792629c2ea1f80",
+              "kind": "text",
+              "sequence": 0,
+              "text": "fixture assistant turn"
+            }
+          ],
+          "contentText": "fixture assistant turn",
+          "id": "devin:93eb6f6331d9c7a0ea9165f5490f0db2:event:757a6fd21c76e16b89138b486bbcbce9",
+          "kind": "message",
+          "machineId": "machine:test",
+          "nativeEventId": "node:2:main",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "devin",
+          "rawReference": {
+            "nativeType": "assistant",
+            "rawBytes": 526,
+            "rowId": "2",
+            "sourcePath": "/fixture/devin/sessions.db",
+            "table": "message_nodes"
+          },
+          "role": "assistant",
+          "sequence": 1,
+          "sessionId": "devin:93eb6f6331d9c7a0ea9165f5490f0db2",
+          "timestamp": "2026-06-11T00:00:00.000Z"
+        }
+      ],
+      "host": "test-host",
+      "id": "devin:93eb6f6331d9c7a0ea9165f5490f0db2",
+      "identitySchemeVersion": 1,
+      "machineId": "machine:test",
+      "nativeProjectKey": "/fixture/quasar",
+      "nativeSessionId": "devin-fixture061",
+      "projectIdentity": {
+        "confidence": "low",
+        "displayName": "quasar",
+        "normalizedPath": "/fixture/quasar",
+        "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+        "rawPath": "/fixture/quasar",
+        "signals": [
+          {
+            "confidence": "low",
+            "kind": "path",
+            "value": "/fixture/quasar"
+          }
+        ]
+      },
+      "provider": "devin",
+      "sessionEdges": [
+        {
+          "agentName": "devin",
+          "fromEventId": "devin:93eb6f6331d9c7a0ea9165f5490f0db2:event:1987e3507f8381295b200442365e6853",
+          "id": "devin:93eb6f6331d9c7a0ea9165f5490f0db2:edge:039b12f6bd6f2bbdc3d3665c0f261cab",
+          "kind": "parent",
+          "machineId": "machine:test",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "devin",
+          "rawReference": {
+            "nativeType": "parent_node_id",
+            "rowId": "2",
+            "sourcePath": "/fixture/devin/sessions.db",
+            "table": "message_nodes"
+          },
+          "sessionId": "devin:93eb6f6331d9c7a0ea9165f5490f0db2",
+          "toEventId": "devin:93eb6f6331d9c7a0ea9165f5490f0db2:event:757a6fd21c76e16b89138b486bbcbce9"
+        }
+      ],
+      "sourcePath": "/fixture/devin/sessions.db",
+      "sourceRoot": "/fixture/devin",
+      "startedAt": "2026-06-11T00:00:00.000Z",
+      "title": "Fixture Devin Session",
+      "toolCalls": [],
+      "updatedAt": "2026-06-11T00:00:02.000Z",
+      "usageRecords": []
+    },
+    "sourceUnit": {
+      "adapterId": "devin-session-sqlite",
+      "physicalPath": "<fixture-root>/sessions.db",
+      "provider": "devin",
+      "rootPath": "/fixture/devin",
+      "sourcePath": "/fixture/devin/sessions.db"
+    },
+    "type": "session"
+  },
+  {
+    "diagnostic": {
+      "adapterId": "devin-session-sqlite",
+      "details": {
+        "diagnostic": "devin.sqlite.available"
+      },
+      "message": "Discovered 1 Devin session(s).",
+      "parserConfidence": "observed",
+      "provider": "devin",
+      "rootPath": "/fixture/devin",
+      "status": "available"
+    },
+    "type": "diagnostic"
+  }
+]

@@ -542,6 +542,7 @@ export const contentBlocksFromNative = (
   eventId: string,
   value: unknown,
 ): ContentBlock[] => {
+  const projectedValue = projectSessionNativeValue(value);
   const blocks: ContentBlock[] = [];
   const pushBlock = (block: Omit<ContentBlock, "id" | "sequence">) => {
     const sequence = blocks.length;
@@ -697,18 +698,18 @@ export const contentBlocksFromNative = (
       if (text !== undefined) pushText("text", text, metadataWithContext());
     }
   };
-  visit(value);
+  visit(projectedValue);
   if (
     blocks.length === 0 &&
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    providerMetadataOnly(value as Record<string, unknown>)
+    typeof projectedValue === "object" &&
+    projectedValue !== null &&
+    !Array.isArray(projectedValue) &&
+    providerMetadataOnly(projectedValue as Record<string, unknown>)
   ) {
     return [];
   }
   if (blocks.length > 0) return blocks;
-  const text = compactText(value as NativeValue | undefined);
+  const text = compactText(projectedValue);
   return textBlock(sessionId, eventId, 0, text);
 };
 
@@ -838,6 +839,16 @@ export const logicalPathFor = (
   logicalRoot: string,
 ) => (physicalRoot === logicalRoot ? physicalPath : join(logicalRoot, relative(physicalRoot, physicalPath)));
 
+const redactContentBlock = (block: ContentBlock): ContentBlock => {
+  const redacted = redactSensitive(block) as ContentBlock;
+  return {
+    ...redacted,
+    id: block.id,
+    sequence: block.sequence,
+    kind: block.kind,
+  };
+};
+
 const contentBlocksForEvent = (
   sessionId: SessionId,
   eventId: string,
@@ -845,7 +856,9 @@ const contentBlocksForEvent = (
   contentBlocks: readonly ContentBlock[] | undefined,
   contentSource: NativeValue | undefined,
 ) => {
-  if (contentBlocks !== undefined) return [...contentBlocks];
+  if (contentBlocks !== undefined) {
+    return contentBlocks.map(redactContentBlock);
+  }
   if (contentSource === undefined) return [];
   if (typeof contentSource === "string" && compactText(contentSource) === contentText) return [];
   return contentBlocksFromNative(sessionId, eventId, contentSource);
@@ -865,21 +878,25 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
     explicitProjectKey: args.explicitProjectKey,
   });
   const id = args.sessionId;
-  const events = args.events.map(({ contentBlocks, contentSource, ...event }) => ({
-    ...event,
-    sessionId: id,
-    machineId: args.machine.machineId,
-    provider: args.provider,
-    agentName: args.agentName,
-    projectIdentityKey: projectIdentity.projectIdentityKey,
-    contentBlocks: contentBlocksForEvent(
-      id,
-      event.id,
-      event.contentText,
-      contentBlocks,
-      contentSource,
-    ),
-  }));
+  const events = args.events.map(({ contentBlocks, contentSource, contentText, ...event }) => {
+    const projectedText = compactText(contentText);
+    return {
+      ...event,
+      ...(projectedText !== undefined ? { contentText: projectedText } : {}),
+      sessionId: id,
+      machineId: args.machine.machineId,
+      provider: args.provider,
+      agentName: args.agentName,
+      projectIdentityKey: projectIdentity.projectIdentityKey,
+      contentBlocks: contentBlocksForEvent(
+        id,
+        event.id,
+        projectedText,
+        contentBlocks,
+        contentSource,
+      ),
+    };
+  });
   const toolCalls = (args.toolCalls ?? []).map((toolCall) => ({
     ...toolCall,
     sessionId: id,

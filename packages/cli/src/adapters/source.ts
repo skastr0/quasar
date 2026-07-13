@@ -1,5 +1,5 @@
+import { execFileSync } from "node:child_process";
 import {
-  copyFileSync,
   createReadStream,
   existsSync,
   mkdtempSync,
@@ -18,7 +18,7 @@ import { createInterface } from "node:readline";
  * Proven duplication only:
  * - walkFiles / walkFilesWithStats — recursive discovery + skip/limit
  * - streamJsonlRecords — async JSONL line reader with named line diagnostics
- * - sqliteSnapshotForRead — copy live sqlite (+wal/shm) for read-only queries
+ * - sqliteSnapshotForRead — consistent SQLite backup for lock-free downstream queries
  *
  * Adapters keep harness-specific generators; this module owns only the
  * literally-repeated file/source substrate.
@@ -192,8 +192,10 @@ export type SqliteSnapshotOptions = {
 };
 
 /**
- * Copy a live sqlite database (with optional -wal / -shm sidecars) into a temp
- * directory for lock-free reads. Call `cleanup()` when done.
+ * Create a transactionally consistent SQLite backup in a temp directory.
+ *
+ * SQLite's backup API reads one committed snapshot, including WAL-resident pages.
+ * The returned copy is then queried without holding locks on the provider database.
  */
 export const sqliteSnapshotForRead = (
   dbPath: string,
@@ -203,10 +205,20 @@ export const sqliteSnapshotForRead = (
   const tempDir = mkdtempSync(join(tmpdir(), `quasar-${label}-`));
   const fileName = options.fileName ?? basename(dbPath);
   const tempDbPath = join(tempDir, fileName);
-  copyFileSync(dbPath, tempDbPath);
-  for (const suffix of ["-wal", "-shm"] as const) {
-    const source = `${dbPath}${suffix}`;
-    if (existsSync(source)) copyFileSync(source, `${tempDbPath}${suffix}`);
+  try {
+    execFileSync("sqlite3", [
+      dbPath,
+      `.backup '${tempDbPath.replaceAll("'", "''")}'`,
+    ], { stdio: "pipe" });
+    // Backup preserves WAL journal mode but does not need a sidecar. Convert the
+    // private snapshot so Bun can open it readonly without attempting `-shm`.
+    execFileSync("sqlite3", [
+      tempDbPath,
+      "PRAGMA journal_mode=DELETE;",
+    ], { stdio: "pipe" });
+  } catch (error) {
+    rmSync(tempDir, { recursive: true, force: true });
+    throw error;
   }
   return {
     path: tempDbPath,
