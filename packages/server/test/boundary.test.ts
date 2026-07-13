@@ -22,7 +22,7 @@ describe("server package boundary", () => {
   });
 
   test("does no provider history-root discovery", () => {
-    expect(offenders((src) => /QUASAR_(CODEX|CLAUDE|OPENCODE|GROK|HERMES|KIMI|ANTIGRAVITY)_ROOT/.test(src))).toEqual([]);
+    expect(offenders((src) => /QUASAR_(CODEX|CLAUDE|OPENCODE|GROK|HERMES|KIMI|ANTIGRAVITY|OMP|PI|CURSOR|DEVIN)_ROOT/.test(src))).toEqual([]);
   });
 
   test("exposes no provider-history command (server owns serve/worker/maintenance/search/status only)", () => {
@@ -35,7 +35,7 @@ describe("server package boundary", () => {
 });
 
 describe("ingest boundary contract is locked", () => {
-  test("provider enum is exactly the seven supported providers", () => {
+  test("provider enum is exactly the eleven supported providers", () => {
     expect([...Provider.literals]).toEqual([
       "codex",
       "claude",
@@ -44,6 +44,10 @@ describe("ingest boundary contract is locked", () => {
       "kimi",
       "hermes",
       "antigravity",
+      "omp",
+      "pi",
+      "cursor",
+      "devin",
     ]);
   });
 

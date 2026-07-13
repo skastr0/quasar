@@ -8,5 +8,9 @@ export const Provider = Schema.Literal(
   "kimi",
   "hermes",
   "antigravity",
+  "omp",
+  "pi",
+  "cursor",
+  "devin",
 );
 export type Provider = typeof Provider.Type;

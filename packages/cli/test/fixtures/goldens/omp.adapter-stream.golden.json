@@ -1,0 +1,250 @@
+[
+  {
+    "sourceRoot": {
+      "adapterId": "omp-local-jsonl",
+      "discoveredAt": "2026-06-11T00:00:00.000Z",
+      "machineId": "machine:test",
+      "provider": "omp",
+      "rootPath": "/fixture/omp"
+    },
+    "type": "sourceRoot"
+  },
+  {
+    "fingerprint": {
+      "mtimeMs": "<mtimeMs>",
+      "size": 1308
+    },
+    "session": {
+      "agentName": "oh-my-pi",
+      "artifacts": [],
+      "events": [
+        {
+          "agentName": "oh-my-pi",
+          "contentBlocks": [
+            {
+              "id": "omp:c72403d626d5a091447e25d4c19cc607:block:f9003e04999da3616eab70c249406577",
+              "kind": "text",
+              "sequence": 0,
+              "text": "fixture user turn"
+            }
+          ],
+          "contentText": "fixture user turn",
+          "id": "omp:c72403d626d5a091447e25d4c19cc607:event:99c7c8853a9fc73a607e2baf8a87b23c",
+          "kind": "message",
+          "machineId": "machine:test",
+          "nativeEventId": "omp-user-1",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "omp",
+          "rawReference": {
+            "line": 3,
+            "nativeType": "message:user",
+            "sourcePath": "/fixture/omp/-fixture-quasar/main.jsonl"
+          },
+          "role": "user",
+          "sequence": 0,
+          "sessionId": "omp:c72403d626d5a091447e25d4c19cc607",
+          "timestamp": "2026-06-11T00:00:00.000Z"
+        },
+        {
+          "agentName": "oh-my-pi",
+          "contentBlocks": [
+            {
+              "id": "omp:c72403d626d5a091447e25d4c19cc607:block:ec557c9329f9e6e63ea755bd4211fb50",
+              "kind": "text",
+              "sequence": 0,
+              "text": "fixture assistant turn"
+            },
+            {
+              "id": "omp:c72403d626d5a091447e25d4c19cc607:block:3058263625f7a203faa92948060f5e45",
+              "kind": "json",
+              "sequence": 1,
+              "value": {
+                "callId": "fixture-call",
+                "input": {
+                  "cmd": "pwd"
+                },
+                "name": "bash",
+                "nativeType": "tool_call"
+              }
+            }
+          ],
+          "contentText": "fixture assistant turn",
+          "id": "omp:c72403d626d5a091447e25d4c19cc607:event:0a3c0b4b9c244faae572c3c52a52f3ac",
+          "kind": "message",
+          "machineId": "machine:test",
+          "nativeEventId": "omp-assistant-1",
+          "parentEventId": "omp:c72403d626d5a091447e25d4c19cc607:event:99c7c8853a9fc73a607e2baf8a87b23c",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "omp",
+          "rawReference": {
+            "line": 4,
+            "nativeType": "message:assistant",
+            "sourcePath": "/fixture/omp/-fixture-quasar/main.jsonl"
+          },
+          "role": "assistant",
+          "sequence": 1,
+          "sessionId": "omp:c72403d626d5a091447e25d4c19cc607",
+          "timestamp": "2026-06-11T00:00:00.000Z",
+          "toolCallId": "omp:c72403d626d5a091447e25d4c19cc607:tool:d60ac7ea33f1915dfe558558183a2303"
+        },
+        {
+          "agentName": "oh-my-pi",
+          "contentBlocks": [
+            {
+              "id": "omp:c72403d626d5a091447e25d4c19cc607:block:c5ba2a314a43ddd439445ad331ffb116",
+              "kind": "text",
+              "metadata": {
+                "nativeType": "tool_result"
+              },
+              "sequence": 0,
+              "text": "/fixture/quasar"
+            }
+          ],
+          "contentText": "/fixture/quasar",
+          "id": "omp:c72403d626d5a091447e25d4c19cc607:event:082100b9961176126b240a3f6bc32428",
+          "kind": "tool_result",
+          "machineId": "machine:test",
+          "nativeEventId": "omp-result-1",
+          "parentEventId": "omp:c72403d626d5a091447e25d4c19cc607:event:0a3c0b4b9c244faae572c3c52a52f3ac",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "omp",
+          "rawReference": {
+            "line": 5,
+            "nativeType": "message:toolResult",
+            "sourcePath": "/fixture/omp/-fixture-quasar/main.jsonl"
+          },
+          "role": "tool",
+          "sequence": 2,
+          "sessionId": "omp:c72403d626d5a091447e25d4c19cc607",
+          "timestamp": "2026-06-11T00:00:00.000Z",
+          "toolCallId": "omp:c72403d626d5a091447e25d4c19cc607:tool:d60ac7ea33f1915dfe558558183a2303"
+        }
+      ],
+      "host": "test-host",
+      "id": "omp:c72403d626d5a091447e25d4c19cc607",
+      "identitySchemeVersion": 1,
+      "machineId": "machine:test",
+      "nativeProjectKey": "/fixture/quasar",
+      "nativeSessionId": "01900000-0000-7000-8000-000000000061",
+      "projectIdentity": {
+        "confidence": "low",
+        "displayName": "quasar",
+        "normalizedPath": "/fixture/quasar",
+        "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+        "rawPath": "/fixture/quasar",
+        "signals": [
+          {
+            "confidence": "low",
+            "kind": "path",
+            "value": "/fixture/quasar"
+          }
+        ]
+      },
+      "provider": "omp",
+      "sessionEdges": [
+        {
+          "agentName": "oh-my-pi",
+          "fromEventId": "omp:c72403d626d5a091447e25d4c19cc607:event:99c7c8853a9fc73a607e2baf8a87b23c",
+          "id": "omp:c72403d626d5a091447e25d4c19cc607:edge:35955785458a70b65c9e3be38be200bc",
+          "kind": "parent",
+          "machineId": "machine:test",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "omp",
+          "sessionId": "omp:c72403d626d5a091447e25d4c19cc607",
+          "toEventId": "omp:c72403d626d5a091447e25d4c19cc607:event:0a3c0b4b9c244faae572c3c52a52f3ac"
+        },
+        {
+          "agentName": "oh-my-pi",
+          "fromEventId": "omp:c72403d626d5a091447e25d4c19cc607:event:0a3c0b4b9c244faae572c3c52a52f3ac",
+          "id": "omp:c72403d626d5a091447e25d4c19cc607:edge:c52e9570fff57fbf1d3f596ac4504b19",
+          "kind": "parent",
+          "machineId": "machine:test",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "omp",
+          "sessionId": "omp:c72403d626d5a091447e25d4c19cc607",
+          "toEventId": "omp:c72403d626d5a091447e25d4c19cc607:event:082100b9961176126b240a3f6bc32428"
+        },
+        {
+          "agentName": "oh-my-pi",
+          "fromEventId": "omp:c72403d626d5a091447e25d4c19cc607:event:0a3c0b4b9c244faae572c3c52a52f3ac",
+          "id": "omp:c72403d626d5a091447e25d4c19cc607:edge:0475fcbc123103c156afe5ae62fca523",
+          "kind": "tool_result_for",
+          "machineId": "machine:test",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "omp",
+          "sessionId": "omp:c72403d626d5a091447e25d4c19cc607",
+          "toEventId": "omp:c72403d626d5a091447e25d4c19cc607:event:082100b9961176126b240a3f6bc32428"
+        }
+      ],
+      "sourcePath": "/fixture/omp/-fixture-quasar/main.jsonl",
+      "sourceRoot": "/fixture/omp",
+      "startedAt": "2026-06-11T00:00:00.000Z",
+      "title": "Fixture OMP Session",
+      "toolCalls": [
+        {
+          "agentName": "oh-my-pi",
+          "completedAt": "2026-06-11T00:00:00.000Z",
+          "eventId": "omp:c72403d626d5a091447e25d4c19cc607:event:0a3c0b4b9c244faae572c3c52a52f3ac",
+          "id": "omp:c72403d626d5a091447e25d4c19cc607:tool:d60ac7ea33f1915dfe558558183a2303",
+          "input": {
+            "cmd": "pwd"
+          },
+          "machineId": "machine:test",
+          "output": [
+            {
+              "text": "/fixture/quasar",
+              "type": "text"
+            }
+          ],
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "omp",
+          "sessionId": "omp:c72403d626d5a091447e25d4c19cc607",
+          "startedAt": "2026-06-11T00:00:00.000Z",
+          "status": "completed",
+          "toolName": "bash"
+        }
+      ],
+      "updatedAt": "2026-06-11T00:00:00.000Z",
+      "usageRecords": [
+        {
+          "agentName": "oh-my-pi",
+          "cacheCreationInputTokens": 0,
+          "cacheReadInputTokens": 0,
+          "cost": 0,
+          "currency": "USD",
+          "eventId": "omp:c72403d626d5a091447e25d4c19cc607:event:0a3c0b4b9c244faae572c3c52a52f3ac",
+          "id": "omp:c72403d626d5a091447e25d4c19cc607:usage:ec557c9329f9e6e63ea755bd4211fb50",
+          "inputTokens": 1,
+          "machineId": "machine:test",
+          "model": "fixture-model",
+          "modelProvider": "fixture-provider",
+          "outputTokens": 1,
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "omp",
+          "sessionId": "omp:c72403d626d5a091447e25d4c19cc607",
+          "timestamp": "2026-06-11T00:00:00.000Z",
+          "totalTokens": 2
+        }
+      ]
+    },
+    "sourceUnit": {
+      "adapterId": "omp-local-jsonl",
+      "physicalPath": "<fixture-root>/-fixture-quasar/main.jsonl",
+      "provider": "omp",
+      "rootPath": "/fixture/omp",
+      "sourcePath": "/fixture/omp/-fixture-quasar/main.jsonl"
+    },
+    "type": "session"
+  },
+  {
+    "diagnostic": {
+      "adapterId": "omp-local-jsonl",
+      "message": "Discovered 1 OMP session(s).",
+      "parserConfidence": "documented",
+      "provider": "omp",
+      "rootPath": "/fixture/omp",
+      "status": "available"
+    },
+    "type": "diagnostic"
+  }
+]

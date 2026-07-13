@@ -90,6 +90,10 @@ const providerRootEnv: Partial<Record<Provider, string>> = {
   hermes: "QUASAR_HERMES_ROOT",
   kimi: "QUASAR_KIMI_ROOT",
   antigravity: "QUASAR_ANTIGRAVITY_ROOT",
+  omp: "QUASAR_OMP_ROOT",
+  pi: "QUASAR_PI_ROOT",
+  cursor: "QUASAR_CURSOR_ROOT",
+  devin: "QUASAR_DEVIN_ROOT",
 };
 
 const configuredRoots = (): Partial<Record<Provider, string>> => {

@@ -1,0 +1,200 @@
+[
+  {
+    "sourceRoot": {
+      "adapterId": "cursor-agent-kv-sqlite",
+      "discoveredAt": "2026-06-11T00:00:00.000Z",
+      "machineId": "machine:test",
+      "provider": "cursor",
+      "rootPath": "/fixture/cursor/chats"
+    },
+    "type": "sourceRoot"
+  },
+  {
+    "fingerprint": {
+      "tag": "[{\"path\":\"3a3f2949c8b30a1cf80a6dc25949d6a9/8fd16ca4-4dfa-4fea-8c37-4df7c63c5577/store.db\",\"size\":20480,\"mtimeMs\":1781136001000},{\"path\":\"3a3f2949c8b30a1cf80a6dc25949d6a9/8fd16ca4-4dfa-4fea-8c37-4df7c63c5577/meta.json\",\"size\":155,\"mtimeMs\":1781136001000}]"
+    },
+    "session": {
+      "agentName": "cursor-agent",
+      "artifacts": [],
+      "events": [
+        {
+          "agentName": "cursor-agent",
+          "contentBlocks": [
+            {
+              "id": "cursor:f37d701704061a24cf58fd3dd48ccf4a:block:fd4e4672887d29792ab6f71ce9a34a33",
+              "kind": "text",
+              "sequence": 0,
+              "text": "fixture user turn"
+            }
+          ],
+          "contentText": "fixture user turn",
+          "id": "cursor:f37d701704061a24cf58fd3dd48ccf4a:event:826908dedac087adac1c072c4258b80b",
+          "kind": "message",
+          "machineId": "machine:test",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "cursor",
+          "rawReference": {
+            "nativeType": "user:text",
+            "rawBytes": 70,
+            "rowId": "7611fc92e56116eb388fc4f482c739f6fc0e24e2abb51829e424afe5ce7f45a0",
+            "sourcePath": "/fixture/cursor/chats/3a3f2949c8b30a1cf80a6dc25949d6a9/8fd16ca4-4dfa-4fea-8c37-4df7c63c5577/store.db",
+            "table": "blobs"
+          },
+          "role": "user",
+          "sequence": 0,
+          "sessionId": "cursor:f37d701704061a24cf58fd3dd48ccf4a"
+        },
+        {
+          "agentName": "cursor-agent",
+          "contentBlocks": [],
+          "id": "cursor:f37d701704061a24cf58fd3dd48ccf4a:event:98ee8694a165e6afb29f396aa0610ca5",
+          "kind": "tool_call",
+          "machineId": "machine:test",
+          "nativeEventId": "cursor-assistant-1:0",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "cursor",
+          "rawReference": {
+            "nativeType": "assistant:tool-call",
+            "rawBytes": 253,
+            "rowId": "0f4b30d30c20116090391aa4acf033bf0ad0fd5f3900c97d395e0e82266375cc",
+            "sourcePath": "/fixture/cursor/chats/3a3f2949c8b30a1cf80a6dc25949d6a9/8fd16ca4-4dfa-4fea-8c37-4df7c63c5577/store.db",
+            "table": "blobs"
+          },
+          "role": "assistant",
+          "sequence": 1,
+          "sessionId": "cursor:f37d701704061a24cf58fd3dd48ccf4a",
+          "toolCallId": "cursor:f37d701704061a24cf58fd3dd48ccf4a:tool:d60ac7ea33f1915dfe558558183a2303"
+        },
+        {
+          "agentName": "cursor-agent",
+          "contentBlocks": [
+            {
+              "id": "cursor:f37d701704061a24cf58fd3dd48ccf4a:block:95530c16c6312b5d960727dc9c88e7a3",
+              "kind": "text",
+              "sequence": 0,
+              "text": "fixture assistant turn"
+            }
+          ],
+          "contentText": "fixture assistant turn",
+          "id": "cursor:f37d701704061a24cf58fd3dd48ccf4a:event:5cfc770d5e310c124c4ecc671cd83a2c",
+          "kind": "message",
+          "machineId": "machine:test",
+          "nativeEventId": "cursor-assistant-1:1",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "cursor",
+          "rawReference": {
+            "nativeType": "assistant:text",
+            "rawBytes": 253,
+            "rowId": "0f4b30d30c20116090391aa4acf033bf0ad0fd5f3900c97d395e0e82266375cc",
+            "sourcePath": "/fixture/cursor/chats/3a3f2949c8b30a1cf80a6dc25949d6a9/8fd16ca4-4dfa-4fea-8c37-4df7c63c5577/store.db",
+            "table": "blobs"
+          },
+          "role": "assistant",
+          "sequence": 2,
+          "sessionId": "cursor:f37d701704061a24cf58fd3dd48ccf4a"
+        },
+        {
+          "agentName": "cursor-agent",
+          "contentBlocks": [],
+          "contentText": "/fixture/quasar",
+          "id": "cursor:f37d701704061a24cf58fd3dd48ccf4a:event:0d118a96dbd2178f9572a1848f8f6a7d",
+          "kind": "tool_result",
+          "machineId": "machine:test",
+          "nativeEventId": "cursor-tool-1:0",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "cursor",
+          "rawReference": {
+            "nativeType": "tool:tool-result",
+            "rawBytes": 246,
+            "rowId": "7c4813ab8bd036bf8d636d1ac5b10f808571d3a492157151828a94afcb5032e5",
+            "sourcePath": "/fixture/cursor/chats/3a3f2949c8b30a1cf80a6dc25949d6a9/8fd16ca4-4dfa-4fea-8c37-4df7c63c5577/store.db",
+            "table": "blobs"
+          },
+          "role": "tool",
+          "sequence": 3,
+          "sessionId": "cursor:f37d701704061a24cf58fd3dd48ccf4a",
+          "toolCallId": "cursor:f37d701704061a24cf58fd3dd48ccf4a:tool:d60ac7ea33f1915dfe558558183a2303"
+        }
+      ],
+      "host": "test-host",
+      "id": "cursor:f37d701704061a24cf58fd3dd48ccf4a",
+      "identitySchemeVersion": 1,
+      "machineId": "machine:test",
+      "nativeProjectKey": "3a3f2949c8b30a1cf80a6dc25949d6a9",
+      "nativeSessionId": "8fd16ca4-4dfa-4fea-8c37-4df7c63c5577",
+      "projectIdentity": {
+        "confidence": "low",
+        "displayName": "quasar",
+        "normalizedPath": "/fixture/quasar",
+        "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+        "rawPath": "/fixture/quasar",
+        "signals": [
+          {
+            "confidence": "low",
+            "kind": "path",
+            "value": "/fixture/quasar"
+          }
+        ]
+      },
+      "provider": "cursor",
+      "sessionEdges": [
+        {
+          "agentName": "cursor-agent",
+          "fromEventId": "cursor:f37d701704061a24cf58fd3dd48ccf4a:event:98ee8694a165e6afb29f396aa0610ca5",
+          "id": "cursor:f37d701704061a24cf58fd3dd48ccf4a:edge:c18c26596d29a754447d5163dca950fe",
+          "kind": "tool_result_for",
+          "machineId": "machine:test",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "cursor",
+          "sessionId": "cursor:f37d701704061a24cf58fd3dd48ccf4a",
+          "toEventId": "cursor:f37d701704061a24cf58fd3dd48ccf4a:event:0d118a96dbd2178f9572a1848f8f6a7d"
+        }
+      ],
+      "sourcePath": "/fixture/cursor/chats/3a3f2949c8b30a1cf80a6dc25949d6a9/8fd16ca4-4dfa-4fea-8c37-4df7c63c5577/store.db",
+      "sourceRoot": "/fixture/cursor/chats",
+      "startedAt": "2026-06-11T00:00:00.000Z",
+      "title": "Fixture Cursor Session",
+      "toolCalls": [
+        {
+          "agentName": "cursor-agent",
+          "eventId": "cursor:f37d701704061a24cf58fd3dd48ccf4a:event:98ee8694a165e6afb29f396aa0610ca5",
+          "id": "cursor:f37d701704061a24cf58fd3dd48ccf4a:tool:d60ac7ea33f1915dfe558558183a2303",
+          "input": {
+            "cmd": "pwd"
+          },
+          "machineId": "machine:test",
+          "output": "/fixture/quasar",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "cursor",
+          "sessionId": "cursor:f37d701704061a24cf58fd3dd48ccf4a",
+          "status": "completed",
+          "toolName": "bash"
+        }
+      ],
+      "updatedAt": "2026-06-11T00:00:01.000Z",
+      "usageRecords": []
+    },
+    "sourceUnit": {
+      "adapterId": "cursor-agent-kv-sqlite",
+      "physicalPath": "<fixture-root>/chats/3a3f2949c8b30a1cf80a6dc25949d6a9/8fd16ca4-4dfa-4fea-8c37-4df7c63c5577/store.db",
+      "provider": "cursor",
+      "rootPath": "/fixture/cursor/chats",
+      "sourcePath": "/fixture/cursor/chats/3a3f2949c8b30a1cf80a6dc25949d6a9/8fd16ca4-4dfa-4fea-8c37-4df7c63c5577/store.db"
+    },
+    "type": "session"
+  },
+  {
+    "diagnostic": {
+      "adapterId": "cursor-agent-kv-sqlite",
+      "details": {
+        "diagnostic": "cursor.sessions.available"
+      },
+      "message": "Discovered 1 authoritative Cursor Agent session(s).",
+      "parserConfidence": "observed",
+      "provider": "cursor",
+      "rootPath": "/fixture/cursor",
+      "status": "available"
+    },
+    "type": "diagnostic"
+  }
+]
