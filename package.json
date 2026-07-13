@@ -54,6 +54,7 @@
     "js-tiktoken": "^1.0.21"
   },
   "overrides": {
+    "mathjs": "15.2.0",
     "ws": "8.21.0"
   }
 }
