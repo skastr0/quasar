@@ -1,32 +1,58 @@
 /**
- * In-process Quasar client for the TUI.
+ * In-process Quasar client for the TUI, built on `@skastr0/quasar-sdk`.
  *
- * The TUI sits on top of the CLI: it reuses the CLI's server-URL resolution
- * (`configuredServerUrl`) and the same HTTP contract the CLI commands drive.
+ * Schemas, envelope/row decode, retry, and typed errors are single-sourced
+ * from the SDK (`QuasarClientLive`) -- this file supplies only what the SDK
+ * deliberately leaves pluggable: the transport, and a thin adapter down to
+ * the TUI's own (narrower, pre-existing) row/Outcome shapes so app.tsx/
+ * actions.ts/query.ts need no changes.
  *
- * I/O works AROUND an opentui constraint: the render loop runs continuously and
- * starves libuv's poll phase, so in-process async `fetch` RESPONSE-BODY reads
- * hang under an active renderer (proven: headers return in ~30ms, bodies never
- * resolve; pause() does not help). But `setTimeout` and synchronous `fs` calls
- * keep working. So: spawn `curl` writing the body to a temp file (no streaming
- * read, no awaiting the also-starved process-exit), and POLL that file with
- * setTimeout + sync readFileSync until it parses as complete JSON. The result is
- * genuinely asynchronous — the UI stays responsive (animated "searching…",
- * cancellable) instead of freezing — without ever touching a starved code path.
- *
- * Parsing is split into pure functions (unit-tested against real response
- * fixtures) and the poll-based IO layer.
+ * The transport works AROUND an opentui constraint: the render loop runs
+ * continuously and starves libuv's poll phase, so in-process async reads off
+ * a LIVE socket (a real `fetch` response body stream) hang under an active
+ * renderer (proven: headers return in ~30ms, bodies never resolve; pause()
+ * does not help). But `setTimeout` and synchronous `fs` calls keep working.
+ * So: spawn `curl` writing the body to a temp file (no streaming read, no
+ * awaiting the also-starved process-exit), and POLL that file with
+ * setTimeout + sync readFileSync until it parses as complete JSON. Once
+ * complete, the full body is already in memory -- wrapping it as a Web
+ * `Response` and handing it to `HttpClientResponse.fromWeb` lets the SDK's
+ * `.json()` read run over an in-memory Blob (a microtask, not a socket
+ * read), which is NOT the starved path this workaround exists for. The
+ * result is genuinely asynchronous IO (the UI stays responsive -- animated
+ * "searching…", cancellable) without ever touching a starved code path, and
+ * the SDK's own retry/timeout/decode logic (`QuasarClientLive`) now runs
+ * for the TUI too, exactly as it does for the CLI's read commands.
  */
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { HttpClient, HttpClientError, HttpClientResponse } from "@effect/platform";
+import { Cause, Effect, Exit, Layer, Option } from "effect";
+import {
+  makeQuasarConfig,
+  QuasarClientLive,
+  QuasarClientTag,
+  type MessageRow as SdkMessageRow,
+  type ProjectRow as SdkProjectRow,
+  type Provider,
+  type QuasarClientService,
+  type QuasarError,
+  type SearchHit,
+  type SearchMode as SdkSearchMode,
+  type SessionRow as SdkSessionRow,
+  type ToolCallRow as SdkToolCallRow,
+} from "@skastr0/quasar-sdk";
+
 import { configuredServerUrl } from "../client-config";
 
-let ioCounter = 0;
+// ----------------------------------------------------------- public surface
+// Unchanged since before the SDK swap: app.tsx, actions.ts, and query.ts
+// import these names and shapes directly.
 
-export type SearchMode = "lexical" | "semantic" | "fusion";
+export type SearchMode = SdkSearchMode;
 
 export const SEARCH_MODES: readonly SearchMode[] = ["lexical", "semantic", "fusion"];
 
@@ -101,149 +127,193 @@ export interface QuasarClientLike {
   }): Promise<Outcome<readonly ToolCallRow[]>>;
 }
 
-const isRecord = (v: unknown): v is Record<string, unknown> =>
-  v !== null && typeof v === "object";
+// ------------------------------------------------- SDK row -> TUI row shape
+// The TUI's row types are a pre-existing, narrower projection of the SDK's
+// full rows (e.g. no sourcePath/sourceFingerprint/host on SessionRow). These
+// adapters keep that projection; nothing downstream of quasar-client.ts
+// changes shape.
 
-const str = (v: unknown): string => (typeof v === "string" ? v : "");
-const numOr = (v: unknown, fallback: number): number => (typeof v === "number" ? v : fallback);
-const strOrNull = (v: unknown): string | null => (typeof v === "string" ? v : null);
+const toSearchMatch = (hit: SearchHit): SearchMatch => ({
+  key: hit.key,
+  score: hit.score,
+  sessionId: hit.row.sessionId,
+  seq: hit.row.seq,
+  role: hit.row.role,
+  projectKey: hit.row.projectKey,
+  provider: hit.row.provider,
+  text: hit.row.text,
+});
 
-const failure = (envelope: unknown, fallbackMessage: string): { ok: false; code: string; message: string } => {
-  if (isRecord(envelope) && isRecord(envelope.error)) {
-    const e = envelope.error;
-    return {
-      ok: false,
-      code: str(e.code) || str(e.type) || "Error",
-      message: str(e.message) || fallbackMessage,
+const toSessionRow = (row: SdkSessionRow): SessionRow => ({
+  sessionId: row.sessionId,
+  projectKey: row.projectKey,
+  provider: row.provider,
+  agentName: row.agentName,
+  title: row.title ?? null,
+  startedAt: row.startedAt ?? null,
+  updatedAt: row.updatedAt ?? null,
+  messageCount: row.messageCount,
+  toolCallCount: row.toolCallCount,
+});
+
+const toMessageRow = (row: SdkMessageRow): MessageRow => ({
+  seq: row.seq,
+  role: row.role,
+  text: row.text,
+  ts: row.ts ?? null,
+});
+
+const toToolCallRow = (row: SdkToolCallRow): ToolCallRow => ({
+  id: row.id,
+  sessionId: row.sessionId,
+  seq: row.seq,
+  toolName: row.toolName,
+  status: row.status ?? "",
+  inputText: row.inputText,
+  outputText: row.outputText,
+  provider: row.provider,
+  projectKey: row.projectKey,
+});
+
+const toProjectRow = (row: SdkProjectRow): ProjectRow => ({
+  projectKey: row.projectKey,
+  displayName: row.displayName,
+  rawPath: row.rawPath ?? "",
+});
+
+// --------------------------------------------------- QuasarError -> Outcome
+// The real server envelope (packages/server/src/server.ts's badRequest/
+// semanticDisabled/embeddingUnavailable/unauthorized/serviceUnavailable/
+// notFound builders) carries only `error.type`, never a separate `error.code`
+// -- confirmed against the live server and against every server-side error
+// builder. The pre-SDK hand-rolled parser's `str(e.code) || str(e.type)`
+// therefore always fell through to `type` in production; this mapping
+// reproduces that observed behavior exactly, now sourced from the SDK's
+// typed QuasarServerError.type instead of a hand-parsed field.
+const toOutcomeFailure = (error: QuasarError): { readonly code: string; readonly message: string } => {
+  switch (error._tag) {
+    case "QuasarServerError":
+      return { code: error.type, message: error.message };
+    case "QuasarTransportError":
+      return { code: "Network", message: error.message };
+    case "QuasarDecodeError":
+      return { code: "DecodeError", message: error.message };
+    case "QuasarConfigError":
+      return { code: "Configuration", message: error.message };
+  }
+};
+
+const toOutcomeFailureFromCause = (cause: Cause.Cause<QuasarError>): { readonly code: string; readonly message: string } => {
+  const failure = Cause.failureOption(cause);
+  if (Option.isSome(failure)) return toOutcomeFailure(failure.value);
+  if (Cause.isInterruptedOnly(cause)) return { code: "Network", message: "aborted" };
+  return { code: "Error", message: Cause.pretty(cause) };
+};
+
+// ----------------------------------------------------------------- transport
+// curl-file-poll IO (see module doc) wrapped as an Effect `HttpClient`, so
+// `QuasarClientLive` runs completely unmodified over it -- same envelope
+// decode, same retry-on-transient-transport-error, same per-attempt timeout
+// as the CLI's SDK-backed read commands.
+
+let ioCounter = 0;
+
+const curlBody = (url: string, timeoutSec: number, signal: AbortSignal | undefined): Promise<string> => {
+  const tmp = join(tmpdir(), `quasar-tui-io-${process.pid}-${ioCounter++}`);
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const child = spawn("curl", ["-s", "--max-time", String(timeoutSec), "-o", tmp, url], {
+      stdio: "ignore",
+    });
+    const cleanup = () => {
+      signal?.removeEventListener("abort", onAbort);
+      try {
+        unlinkSync(tmp);
+      } catch {
+        // best-effort
+      }
     };
-  }
-  return { ok: false, code: "Error", message: fallbackMessage };
-};
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn();
+    };
+    const onAbort = () => {
+      try {
+        child.kill();
+      } catch {
+        // best-effort
+      }
+      settle(() => reject(new Error("aborted")));
+    };
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort);
 
-const envelopeOk = (envelope: unknown): envelope is { data: unknown } =>
-  isRecord(envelope) && envelope.ok === true;
-
-// ----------------------------------------------------------------- pure parsers
-
-export const parseSearch = (envelope: unknown): Outcome<readonly SearchMatch[]> => {
-  if (!envelopeOk(envelope)) return failure(envelope, "search failed");
-  const data = (envelope as { data: unknown }).data;
-  const rawMatches = isRecord(data) && Array.isArray(data.matches) ? data.matches : [];
-  const matches = rawMatches.flatMap((m): SearchMatch[] => {
-    if (!isRecord(m)) return [];
-    const row = isRecord(m.row) ? m.row : {};
-    return [
-      {
-        key: str(m.key) || str(row.key),
-        score: numOr(m.score, 0),
-        sessionId: str(row.sessionId),
-        seq: numOr(row.seq, 0),
-        role: str(row.role),
-        projectKey: str(row.projectKey),
-        provider: str(row.provider),
-        text: str(row.text),
-      },
-    ];
+    const deadline = Date.now() + (timeoutSec + 5) * 1000;
+    const poll = () => {
+      if (settled) return;
+      if (existsSync(tmp)) {
+        try {
+          const text = readFileSync(tmp, "utf8");
+          JSON.parse(text); // throws while the write is partial
+          return settle(() => resolve(text));
+        } catch {
+          // partial write — keep polling
+        }
+      }
+      if (Date.now() > deadline) {
+        try {
+          child.kill();
+        } catch {
+          // best-effort
+        }
+        return settle(() => reject(new Error("request timed out")));
+      }
+      setTimeout(poll, 40);
+    };
+    setTimeout(poll, 20);
   });
-  return { ok: true, value: matches };
 };
 
-export const parseSessions = (envelope: unknown): Outcome<readonly SessionRow[]> => {
-  if (!envelopeOk(envelope)) return failure(envelope, "sessions failed");
-  const data = (envelope as { data: unknown }).data;
-  const rows = isRecord(data) && Array.isArray(data.rows) ? data.rows : [];
-  return {
-    ok: true,
-    value: rows.flatMap((r): SessionRow[] =>
-      !isRecord(r)
-        ? []
-        : [
-            {
-              sessionId: str(r.sessionId),
-              projectKey: str(r.projectKey),
-              provider: str(r.provider),
-              agentName: strOrNull(r.agentName),
-              title: strOrNull(r.title),
-              startedAt: strOrNull(r.startedAt),
-              updatedAt: strOrNull(r.updatedAt),
-              messageCount: numOr(r.messageCount, 0),
-              toolCallCount: numOr(r.toolCallCount, 0),
-            },
-          ],
-    ),
-  };
-};
+/** curl-backed `HttpClient`. `HttpClient.make` hands the handler a fresh
+ * `AbortController.signal` per request, tied to fiber interruption by
+ * @effect/platform itself — wiring it into curl's spawn/kill means an
+ * interrupted/superseded search kills its curl process, no separate
+ * cancellation plumbing needed. Reading the resolved body is done via
+ * `HttpClientResponse.fromWeb` over an in-memory `Response`, so the SDK's
+ * `.json()` decode never touches a live socket (see module doc). */
+const curlHttpClient: HttpClient.HttpClient = HttpClient.make((request, url, signal) =>
+  Effect.tryPromise({
+    try: () => curlBody(url.toString(), 30, signal),
+    catch: (cause) => new HttpClientError.RequestError({ request, reason: "Transport", cause }),
+  }).pipe(Effect.map((body) => HttpClientResponse.fromWeb(request, new Response(body, { status: 200 })))),
+);
 
-export const parseMessages = (envelope: unknown): Outcome<readonly MessageRow[]> => {
-  if (!envelopeOk(envelope)) return failure(envelope, "messages failed");
-  const data = (envelope as { data: unknown }).data;
-  const rows = isRecord(data) && Array.isArray(data.rows) ? data.rows : [];
-  return {
-    ok: true,
-    value: rows.flatMap((r): MessageRow[] =>
-      !isRecord(r)
-        ? []
-        : [{ seq: numOr(r.seq, 0), role: str(r.role), text: str(r.text), ts: strOrNull(r.ts) }],
-    ),
-  };
-};
-
-export const parseToolCalls = (envelope: unknown): Outcome<readonly ToolCallRow[]> => {
-  if (!envelopeOk(envelope)) return failure(envelope, "tool-calls failed");
-  const data = (envelope as { data: unknown }).data;
-  const rows = isRecord(data) && Array.isArray(data.rows) ? data.rows : [];
-  return {
-    ok: true,
-    value: rows.flatMap((r): ToolCallRow[] =>
-      !isRecord(r)
-        ? []
-        : [
-            {
-              id: str(r.id),
-              sessionId: str(r.sessionId),
-              seq: numOr(r.seq, 0),
-              toolName: str(r.toolName),
-              status: str(r.status),
-              inputText: str(r.inputText),
-              outputText: str(r.outputText),
-              provider: str(r.provider),
-              projectKey: str(r.projectKey),
-            },
-          ],
-    ),
-  };
-};
-
-export const parseProjects = (envelope: unknown): Outcome<readonly ProjectRow[]> => {
-  if (!envelopeOk(envelope)) return failure(envelope, "projects failed");
-  const data = (envelope as { data: unknown }).data;
-  const rows = isRecord(data) && Array.isArray(data.rows) ? data.rows : [];
-  return {
-    ok: true,
-    value: rows.flatMap((r): ProjectRow[] =>
-      !isRecord(r)
-        ? []
-        : [{ projectKey: str(r.projectKey), displayName: str(r.displayName), rawPath: str(r.rawPath) }],
-    ),
-  };
-};
-
-// ----------------------------------------------------------------- sync IO layer
-
-const QueryParams = (params: Record<string, string | number | undefined>): string => {
-  const usp = new URLSearchParams();
-  for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && String(v).trim() !== "") usp.set(k, String(v));
-  }
-  const s = usp.toString();
-  return s ? `?${s}` : "";
-};
+/** Builds the resolved `QuasarClientTag` layer for a given transport.
+ * Exported so tests can inject a fake `HttpClient` (mirrors
+ * `@skastr0/quasar-sdk`'s own test/client.test.ts pattern) instead of
+ * spawning a real curl process. */
+export const quasarClientLayer = (
+  config: { readonly serverUrl: string; readonly httpTimeoutMs?: number },
+  httpClient: HttpClient.HttpClient = curlHttpClient,
+): Layer.Layer<QuasarClientTag> =>
+  QuasarClientLive.pipe(Layer.provide([makeQuasarConfig(config), Layer.succeed(HttpClient.HttpClient, httpClient)]));
 
 export class QuasarClient implements QuasarClientLike {
+  private readonly layer: Layer.Layer<QuasarClientTag>;
+
   constructor(
     private readonly serverUrl: string,
     private readonly timeoutSec = 30,
-  ) {}
+    httpClient?: HttpClient.HttpClient,
+  ) {
+    this.layer = quasarClientLayer({ serverUrl, httpTimeoutMs: timeoutSec * 1000 }, httpClient);
+  }
 
   /** Resolve a client from the same config the CLI uses; null if unconfigured. */
   static fromConfig(timeoutSec = 30): QuasarClient | null {
@@ -251,86 +321,19 @@ export class QuasarClient implements QuasarClientLike {
     return url === undefined ? null : new QuasarClient(url, timeoutSec);
   }
 
-  /**
-   * Spawn `curl` writing the body to a temp file, then poll the file with
-   * setTimeout until it parses as complete JSON. Avoids both starved paths
-   * (body-stream read, process-exit await) while staying non-blocking.
-   */
-  private requestPolled(
-    path: string,
-    params: Record<string, string | number | undefined>,
+  private async execute<A>(
+    program: (client: QuasarClientService) => Effect.Effect<A, QuasarError>,
     signal?: AbortSignal,
-  ): Promise<unknown> {
-    const base = this.serverUrl.endsWith("/") ? this.serverUrl.slice(0, -1) : this.serverUrl;
-    const url = `${base}/${path}${QueryParams(params)}`;
-    const tmp = join(tmpdir(), `quasar-tui-io-${process.pid}-${ioCounter++}`);
-
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      const child = spawn("curl", ["-s", "--max-time", String(this.timeoutSec), "-o", tmp, url], {
-        stdio: "ignore",
-      });
-      const cleanup = () => {
-        signal?.removeEventListener("abort", onAbort);
-        try {
-          unlinkSync(tmp);
-        } catch {
-          // best-effort
-        }
-      };
-      const settle = (fn: () => void) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        fn();
-      };
-      const onAbort = () => {
-        try {
-          child.kill();
-        } catch {
-          // best-effort
-        }
-        settle(() => reject(new Error("aborted")));
-      };
-      if (signal?.aborted) return onAbort();
-      signal?.addEventListener("abort", onAbort);
-
-      const deadline = Date.now() + (this.timeoutSec + 5) * 1000;
-      const poll = () => {
-        if (settled) return;
-        if (existsSync(tmp)) {
-          try {
-            const json = JSON.parse(readFileSync(tmp, "utf8")) as unknown;
-            return settle(() => resolve(json));
-          } catch {
-            // partial write — keep polling
-          }
-        }
-        if (Date.now() > deadline) {
-          try {
-            child.kill();
-          } catch {
-            // best-effort
-          }
-          return settle(() => reject(new Error("request timed out")));
-        }
-        setTimeout(poll, 40);
-      };
-      setTimeout(poll, 20);
-    });
-  }
-
-  private async run<T>(
-    parse: (e: unknown) => Outcome<T>,
-    path: string,
-    params: Record<string, string | number | undefined>,
-    signal?: AbortSignal,
-  ): Promise<Outcome<T>> {
-    try {
-      return parse(await this.requestPolled(path, params, signal));
-    } catch (error) {
-      return { ok: false, code: "Network", message: error instanceof Error ? error.message : String(error) };
-    }
+  ): Promise<Outcome<A>> {
+    const exit = await Effect.runPromiseExit(
+      Effect.gen(function* () {
+        const client = yield* QuasarClientTag;
+        return yield* program(client);
+      }).pipe(Effect.provide(this.layer)),
+      { signal },
+    );
+    if (Exit.isSuccess(exit)) return { ok: true, value: exit.value };
+    return { ok: false, ...toOutcomeFailureFromCause(exit.cause) };
   }
 
   search(
@@ -338,10 +341,17 @@ export class QuasarClient implements QuasarClientLike {
     mode: SearchMode,
     opts: { limit?: number; projectKey?: string; provider?: string; role?: string; signal?: AbortSignal } = {},
   ): Promise<Outcome<readonly SearchMatch[]>> {
-    return this.run(
-      parseSearch,
-      `search/${mode}`,
-      { q: query, limit: opts.limit, projectKey: opts.projectKey, provider: opts.provider, role: opts.role },
+    return this.execute(
+      (client) =>
+        client
+          .search(mode, {
+            query,
+            projectKey: opts.projectKey,
+            role: opts.role as SdkMessageRow["role"] | undefined,
+            providers: opts.provider ? [opts.provider as Provider] : undefined,
+            limit: opts.limit,
+          })
+          .pipe(Effect.map((hits) => hits.map(toSearchMatch))),
       opts.signal,
     );
   }
@@ -349,31 +359,41 @@ export class QuasarClient implements QuasarClientLike {
   sessions(
     opts: { provider?: string; projectKey?: string; limit?: number; offset?: number; signal?: AbortSignal } = {},
   ): Promise<Outcome<readonly SessionRow[]>> {
-    return this.run(
-      parseSessions,
-      "sessions",
-      { provider: opts.provider, projectKey: opts.projectKey, limit: opts.limit, offset: opts.offset },
+    return this.execute(
+      (client) =>
+        client
+          .listSessions({
+            provider: opts.provider as Provider | undefined,
+            projectKey: opts.projectKey,
+            limit: opts.limit,
+            offset: opts.offset,
+          })
+          .pipe(Effect.map((rows) => rows.map(toSessionRow))),
       opts.signal,
     );
   }
 
   messages(sessionId: string, opts: { limit?: number; signal?: AbortSignal } = {}): Promise<Outcome<readonly MessageRow[]>> {
-    return this.run(parseMessages, "messages", { sessionId, limit: opts.limit }, opts.signal);
+    return this.execute(
+      (client) => client.readMessages(sessionId, { limit: opts.limit }).pipe(Effect.map((rows) => rows.map(toMessageRow))),
+      opts.signal,
+    );
   }
 
   toolCalls(
     opts: { sessionId?: string; projectKey?: string; provider?: string; toolName?: string; limit?: number; signal?: AbortSignal } = {},
   ): Promise<Outcome<readonly ToolCallRow[]>> {
-    return this.run(
-      parseToolCalls,
-      "tool-calls",
-      {
-        sessionId: opts.sessionId,
-        projectKey: opts.projectKey,
-        provider: opts.provider,
-        toolName: opts.toolName,
-        limit: opts.limit,
-      },
+    return this.execute(
+      (client) =>
+        client
+          .listToolCalls({
+            sessionId: opts.sessionId,
+            projectKey: opts.projectKey,
+            provider: opts.provider as Provider | undefined,
+            toolName: opts.toolName,
+            limit: opts.limit,
+          })
+          .pipe(Effect.map((rows) => rows.map(toToolCallRow))),
       opts.signal,
     );
   }
@@ -381,6 +401,9 @@ export class QuasarClient implements QuasarClientLike {
   projects(
     opts: { limit?: number; offset?: number; signal?: AbortSignal } = {},
   ): Promise<Outcome<readonly ProjectRow[]>> {
-    return this.run(parseProjects, "projects", { limit: opts.limit, offset: opts.offset }, opts.signal);
+    return this.execute(
+      (client) => client.listProjects({ limit: opts.limit, offset: opts.offset }).pipe(Effect.map((rows) => rows.map(toProjectRow))),
+      opts.signal,
+    );
   }
 }
