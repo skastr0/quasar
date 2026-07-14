@@ -45,12 +45,16 @@
     "@skastr0/quasar-cli-linux-arm64": "0.4.0",
     "@skastr0/quasar-cli-linux-x64": "0.4.0"
   },
+  "dependencies": {
+    "@effect/platform": "^0.96.1",
+    "@skastr0/quasar-sdk": "workspace:*",
+    "effect": "^3.21.2"
+  },
   "devDependencies": {
     "@opentui/core": "0.4.1",
     "@opentui/react": "0.4.1",
     "@types/bun": "^1.3.1",
     "@types/react": "^19.2.7",
-    "effect": "^3.21.2",
     "react": "19.2.7",
     "typescript": "^6.0.3"
   }
