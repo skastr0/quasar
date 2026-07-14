@@ -28,11 +28,9 @@
     "effect": "^3.21.0",
     "@effect/platform": "^0.96.0"
   },
-  "dependencies": {
-    "effect": "^3.21.2",
-    "@effect/platform": "^0.96.1"
-  },
   "devDependencies": {
+    "effect": "^3.21.2",
+    "@effect/platform": "^0.96.1",
     "@types/bun": "latest",
     "typescript": "^5.7.0"
   }
