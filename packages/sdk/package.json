@@ -1,0 +1,39 @@
+{
+  "name": "@skastr0/quasar-sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "sideEffects": false,
+  "description": "Typed Effect HTTP client over the Quasar server read/search contract",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "keywords": [
+    "quasar",
+    "effect",
+    "sdk",
+    "http-client"
+  ],
+  "peerDependencies": {
+    "effect": "^3.21.0",
+    "@effect/platform": "^0.96.0"
+  },
+  "dependencies": {
+    "effect": "^3.21.2",
+    "@effect/platform": "^0.96.1"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  }
+}
