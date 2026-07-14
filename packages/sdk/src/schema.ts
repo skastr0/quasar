@@ -39,10 +39,26 @@ export const IngestRunStatus = Schema.Literal(
 );
 export type IngestRunStatus = typeof IngestRunStatus.Type;
 
+// Optional string columns are read straight out of bun:sqlite server-side
+// (packages/server/src/store.ts), where a SQL NULL materializes as JS `null`
+// and survives JSON.stringify as a present `"field": null` key -- never an
+// absent key. Schema.optional(Schema.String) only accepts absent-or-string
+// and rejects `null`, so it decodes real rows fine until the first row with
+// an actually-null column arrives, then throws. Caught live against
+// https://quasar.tail6742f6.ts.net (LIVE check 1): ProjectRow.rawPath came
+// back `null` on a real row. Schema.optionalWith(..., { nullable: true }) is
+// the Effect Schema feature built for exactly this SQL-nullable-column shape
+// -- it accepts absent OR null on the wire and normalizes both to `undefined`
+// in the decoded value, so ProjectRow.rawPath stays `string | undefined` for
+// every consumer. Applied to every optional string field sourced the same
+// way (server/model.ts's other `?: string` columns), not just the one that
+// happened to fail on this query.
+const nullableString = Schema.optionalWith(Schema.String, { nullable: true });
+
 export const ProjectRow = Schema.Struct({
   projectKey: Schema.String,
   displayName: Schema.String,
-  rawPath: Schema.optional(Schema.String),
+  rawPath: nullableString,
 });
 export type ProjectRow = typeof ProjectRow.Type;
 
@@ -51,14 +67,14 @@ export const SessionRow = Schema.Struct({
   projectKey: Schema.String,
   provider: Provider,
   agentName: Schema.String,
-  title: Schema.optional(Schema.String),
-  startedAt: Schema.optional(Schema.String),
-  updatedAt: Schema.optional(Schema.String),
+  title: nullableString,
+  startedAt: nullableString,
+  updatedAt: nullableString,
   sourcePath: Schema.String,
   sourceFingerprint: Schema.String,
   host: Schema.String,
   identitySchemeVersion: Schema.Number,
-  parentSessionId: Schema.optional(Schema.String),
+  parentSessionId: nullableString,
   messageCount: Schema.Number,
   toolCallCount: Schema.Number,
 });
@@ -69,7 +85,7 @@ export const MessageRow = Schema.Struct({
   seq: Schema.Number,
   role: MessageRole,
   text: Schema.String,
-  ts: Schema.optional(Schema.String),
+  ts: nullableString,
   projectKey: Schema.String,
   contentHash: Schema.String,
 });
@@ -80,11 +96,11 @@ export const ToolCallRow = Schema.Struct({
   sessionId: Schema.String,
   seq: Schema.Number,
   toolName: Schema.String,
-  status: Schema.optional(Schema.String),
+  status: nullableString,
   inputText: Schema.String,
   outputText: Schema.String,
-  startedAt: Schema.optional(Schema.String),
-  completedAt: Schema.optional(Schema.String),
+  startedAt: nullableString,
+  completedAt: nullableString,
   projectKey: Schema.String,
   provider: Provider,
 });
@@ -95,7 +111,7 @@ export const IngestRunRow = Schema.Struct({
   provider: Schema.Union(Provider, Schema.Literal("all")),
   status: IngestRunStatus,
   startedAt: Schema.String,
-  completedAt: Schema.optional(Schema.String),
+  completedAt: nullableString,
   sessionsSeen: Schema.Number,
   sessionsWritten: Schema.Number,
   sessionsSkipped: Schema.Number,
