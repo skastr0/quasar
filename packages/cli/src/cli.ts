@@ -4,6 +4,22 @@ import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync 
 import { homedir, platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
+import { FetchHttpClient } from "@effect/platform";
+import { Cause, Effect, Exit, Layer } from "effect";
+import {
+  makeQuasarConfig,
+  QuasarClientLive,
+  QuasarClientTag,
+  type IngestRunRow,
+  type IngestRunStatus,
+  type MessageRow,
+  type ProjectRow,
+  type QuasarClientService,
+  type QuasarError,
+  type SessionRow,
+  type ToolCallRow,
+} from "@skastr0/quasar-sdk";
+
 import { configuredIngestToken, configuredServerUrl, defaultClientConfigPath } from "./client-config";
 import { Provider, SessionRole } from "./core/schemas";
 import { ingestFailureError, ingestReportPayload } from "./ingest-report";
@@ -346,6 +362,127 @@ const fetchServer = async (name: string, path: string, params: Record<string, st
   if (body !== undefined) writeJson(body);
 };
 
+// ---- SDK-backed read commands ---------------------------------------------
+// projects/sessions/messages/tool-calls/ingest-runs consolidate onto
+// @skastr0/quasar-sdk's QuasarClient: retry/timeout/decode live once, in the
+// SDK. stats, workers, tool-call, search, and the maintenance commands stay
+// on fetchServer above -- each hits a real gap in the SDK's frozen v1
+// contract, not an oversight:
+//   - stats/workers hit GET /status, which the SDK's public API (health,
+//     listProjects, listSessions, readMessages, listToolCalls, getToolCall,
+//     listIngestRuns, search) never covered.
+//   - tool-call: store.getToolCall (packages/server/src/store.ts) returns
+//     bun:sqlite's `null` for a missing row, not `undefined`, so the server's
+//     `row === undefined ? notFound(...) : ok(...)` guard never fires and a
+//     miss serves `{ok:true, data:{row:null}}` (confirmed live). SDK's
+//     ToolCallRow is a non-nullable struct, so QuasarClient.getToolCall
+//     would turn that graceful miss into a QuasarDecodeError -- a real
+//     regression, not a format nuance.
+//   - search: the server's data also carries `receipt`/`degraded` (timing +
+//     fusion-degrade telemetry, live-verified against
+//     https://quasar.tail6742f6.ts.net/search/lexical), which
+//     QuasarClientService.search intentionally narrows to `SearchHit[]`
+//     only (see packages/sdk/test/client.test.ts's "must be tolerated, not
+//     rejected" note) -- consolidating would drop those fields from stdout.
+
+/** Pins serverUrl via makeQuasarConfig (never QuasarConfigLive) so --server /
+ * configuredServerUrl() stays the one source of truth the SDK client resolves
+ * through -- QuasarConfigLive only reads env/file and would miss a --server
+ * override. Mirrors fetchServerJson's failure contract: any QuasarError is
+ * reported via the CLI's own fail() envelope with exitCode 1 (matching the
+ * existing catch-and-report shape every other command case already uses). */
+const runSdkRead = async <A>(
+  name: string,
+  base: string,
+  program: (client: QuasarClientService) => Effect.Effect<A, QuasarError>,
+): Promise<A | undefined> => {
+  const layer = QuasarClientLive.pipe(
+    Layer.provide([makeQuasarConfig({ serverUrl: base }), FetchHttpClient.layer]),
+  );
+  const exit = await Effect.runPromiseExit(
+    Effect.gen(function* () {
+      const client = yield* QuasarClientTag;
+      return yield* program(client);
+    }).pipe(Effect.provide(layer)),
+  );
+  if (Exit.isSuccess(exit)) return exit.value;
+  writeJson(fail(name, Cause.squash(exit.cause)));
+  process.exitCode = 1;
+  return undefined;
+};
+
+// Effect Schema's nullable-optional decode (schema.ts's `nullableString`)
+// normalizes a SQL-NULL column to an absent key, but the server's wire
+// contract always serves SQL NULL as an explicit `"field": null` (bun:sqlite
+// -> JSON.stringify never drops the key). JSON.stringify omits absent/
+// undefined keys, so re-serializing a decoded row as-is would silently turn
+// `"parentSessionId": null` into a missing key. These wireX mappers restore
+// the explicit null (and pin the original server field order) so the
+// migrated commands' stdout stays byte-identical to the pre-SDK envelope.
+const wireProject = (row: ProjectRow) => ({
+  projectKey: row.projectKey,
+  displayName: row.displayName,
+  rawPath: row.rawPath ?? null,
+});
+
+const wireSession = (row: SessionRow) => ({
+  sessionId: row.sessionId,
+  projectKey: row.projectKey,
+  provider: row.provider,
+  agentName: row.agentName,
+  title: row.title ?? null,
+  startedAt: row.startedAt ?? null,
+  updatedAt: row.updatedAt ?? null,
+  sourcePath: row.sourcePath,
+  sourceFingerprint: row.sourceFingerprint,
+  host: row.host,
+  identitySchemeVersion: row.identitySchemeVersion,
+  parentSessionId: row.parentSessionId ?? null,
+  messageCount: row.messageCount,
+  toolCallCount: row.toolCallCount,
+});
+
+const wireMessage = (row: MessageRow) => ({
+  sessionId: row.sessionId,
+  seq: row.seq,
+  role: row.role,
+  text: row.text,
+  ts: row.ts ?? null,
+  projectKey: row.projectKey,
+  contentHash: row.contentHash,
+});
+
+const wireToolCall = (row: ToolCallRow) => ({
+  id: row.id,
+  sessionId: row.sessionId,
+  seq: row.seq,
+  toolName: row.toolName,
+  status: row.status ?? null,
+  inputText: row.inputText,
+  outputText: row.outputText,
+  startedAt: row.startedAt ?? null,
+  completedAt: row.completedAt ?? null,
+  projectKey: row.projectKey,
+  provider: row.provider,
+});
+
+const wireIngestRun = (row: IngestRunRow) => ({
+  runId: row.runId,
+  provider: row.provider,
+  status: row.status,
+  startedAt: row.startedAt,
+  completedAt: row.completedAt ?? null,
+  sessionsSeen: row.sessionsSeen,
+  sessionsWritten: row.sessionsWritten,
+  sessionsSkipped: row.sessionsSkipped,
+  sessionsFailed: row.sessionsFailed,
+});
+
+const numArg = (name: string): number | undefined => {
+  const raw = arg(name);
+  return raw === undefined ? undefined : Number(raw);
+};
+
 class CommandInputError extends Error {
   override readonly name = "CommandInputError";
   readonly details: unknown;
@@ -560,17 +697,25 @@ switch (command) {
   }
   case "projects": {
     if (!(checkInt("projects", "--limit", 1) && checkInt("projects", "--offset", 0))) break;
-    await fetchServer("projects", "/projects", { limit: arg("--limit"), offset: arg("--offset") });
+    const base = requireServer("projects");
+    if (base === undefined) break;
+    const rows = await runSdkRead("projects", base, (client) =>
+      client.listProjects({ limit: numArg("--limit"), offset: numArg("--offset") }));
+    if (rows !== undefined) writeJson(ok("projects", { rows: rows.map(wireProject) }));
     break;
   }
   case "sessions": {
     if (!(checkEnum("sessions", "--provider", PROVIDERS) && checkInt("sessions", "--limit", 1) && checkInt("sessions", "--offset", 0))) break;
-    await fetchServer("sessions", "/sessions", {
-      provider: arg("--provider"),
-      projectKey: arg("--project-key"),
-      limit: arg("--limit"),
-      offset: arg("--offset"),
-    });
+    const base = requireServer("sessions");
+    if (base === undefined) break;
+    const rows = await runSdkRead("sessions", base, (client) =>
+      client.listSessions({
+        provider: arg("--provider") as Provider | undefined,
+        projectKey: arg("--project-key"),
+        limit: numArg("--limit"),
+        offset: numArg("--offset"),
+      }));
+    if (rows !== undefined) writeJson(ok("sessions", { rows: rows.map(wireSession) }));
     break;
   }
   case "messages": {
@@ -584,19 +729,27 @@ switch (command) {
       break;
     }
     if (!checkInt("messages", "--limit", 1)) break;
-    await fetchServer("messages", "/messages", { sessionId, limit: arg("--limit") });
+    const base = requireServer("messages");
+    if (base === undefined) break;
+    const rows = await runSdkRead("messages", base, (client) =>
+      client.readMessages(sessionId, { limit: numArg("--limit") }));
+    if (rows !== undefined) writeJson(ok("messages", { sessionId, rows: rows.map(wireMessage) }));
     break;
   }
   case "tool-calls": {
     if (!(checkEnum("tool-calls", "--provider", PROVIDERS) && checkInt("tool-calls", "--limit", 1) && checkInt("tool-calls", "--offset", 0))) break;
-    await fetchServer("tool-calls", "/tool-calls", {
-      sessionId: arg("--session-id"),
-      projectKey: arg("--project-key"),
-      provider: arg("--provider"),
-      toolName: arg("--tool-name"),
-      limit: arg("--limit"),
-      offset: arg("--offset"),
-    });
+    const base = requireServer("tool-calls");
+    if (base === undefined) break;
+    const rows = await runSdkRead("tool-calls", base, (client) =>
+      client.listToolCalls({
+        sessionId: arg("--session-id"),
+        projectKey: arg("--project-key"),
+        provider: arg("--provider") as Provider | undefined,
+        toolName: arg("--tool-name"),
+        limit: numArg("--limit"),
+        offset: numArg("--offset"),
+      }));
+    if (rows !== undefined) writeJson(ok("tool-calls", { rows: rows.map(wireToolCall) }));
     break;
   }
   case "tool-call": {
@@ -609,12 +762,22 @@ switch (command) {
       }));
       break;
     }
+    // Stays on fetchServer, not QuasarClient.getToolCall: see the SDK-backed
+    // read commands note above (store.getToolCall's null-vs-undefined gap).
     await fetchServer("tool-call", "/tool-call", { id });
     break;
   }
   case "ingest-runs": {
     if (!(checkEnum("ingest-runs", "--status", INGEST_RUN_STATUSES) && checkInt("ingest-runs", "--limit", 1) && checkInt("ingest-runs", "--offset", 0))) break;
-    await fetchServer("ingest-runs", "/ingest-runs", { status: arg("--status"), limit: arg("--limit"), offset: arg("--offset") });
+    const base = requireServer("ingest-runs");
+    if (base === undefined) break;
+    const rows = await runSdkRead("ingest-runs", base, (client) =>
+      client.listIngestRuns({
+        status: arg("--status") as IngestRunStatus | undefined,
+        limit: numArg("--limit"),
+        offset: numArg("--offset"),
+      }));
+    if (rows !== undefined) writeJson(ok("ingest-runs", { rows: rows.map(wireIngestRun) }));
     break;
   }
   case "replay-embedding-cache": {

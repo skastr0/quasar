@@ -1,32 +1,29 @@
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+// Server-URL/ingest-token resolution is no longer CLI-private: the file read
+// + precedence (env > config file > default path) is single-sourced from
+// @skastr0/quasar-sdk's QuasarConfig plumbing, which the SDK-backed read
+// commands resolve through too (see cli.ts sdkConfigFor). This file keeps
+// only the CLI's own narrower, exact-shape surface ({serverUrl, ingestToken},
+// no httpTimeoutMs) that daemon/ingest callers and client-config.test.ts pin.
+import {
+  defaultClientConfigPath as sdkDefaultClientConfigPath,
+  loadClientConfig as sdkLoadClientConfig,
+} from "@skastr0/quasar-sdk";
 
 export interface QuasarClientConfig {
   readonly serverUrl?: string;
   readonly ingestToken?: string;
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === "object" && !Array.isArray(value);
-
-const asString = (value: unknown): string | undefined =>
+const asString = (value: string | undefined): string | undefined =>
   typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 
-const asClientConfig = (value: unknown): QuasarClientConfig => {
-  if (!isRecord(value)) return {};
-  return {
-    serverUrl: asString(value.serverUrl),
-    ingestToken: asString(value.ingestToken),
-  };
-};
-
 export const defaultClientConfigPath = (env: NodeJS.ProcessEnv = process.env): string =>
-  resolve(env.QUASAR_CONFIG ?? join(homedir(), ".config", "quasar", "config.json"));
+  sdkDefaultClientConfigPath(env);
 
 export const loadClientConfig = (path = defaultClientConfigPath()): QuasarClientConfig | undefined => {
-  if (!existsSync(path)) return undefined;
-  return asClientConfig(JSON.parse(readFileSync(path, "utf8")) as unknown);
+  const config = sdkLoadClientConfig(path);
+  if (config === undefined) return undefined;
+  return { serverUrl: config.serverUrl, ingestToken: config.ingestToken };
 };
 
 export const configuredServerUrl = (env: NodeJS.ProcessEnv = process.env): string | undefined => {
