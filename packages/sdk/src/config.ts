@@ -4,9 +4,15 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { QuasarConfigError } from "./errors.js";
 
+// Read-plane config: serverUrl + httpTimeoutMs is everything QuasarClientLive
+// resolves through (see client.ts -- only config.serverUrl and
+// config.httpTimeoutMs are ever read). ingestToken is a write-plane
+// credential the read SDK never sends on the wire; it does NOT belong on
+// this Context.Tag surface. The CLI's ingest-token resolution (client-config.ts)
+// reads it off loadClientConfig()'s own return shape below instead, which
+// stays a plain config-file parse, not the client's runtime dependency.
 export interface QuasarConfig {
   readonly serverUrl: string;
-  readonly ingestToken?: string;
   readonly httpTimeoutMs: number;
 }
 
@@ -52,8 +58,9 @@ export const QuasarConfig = QuasarConfigTag;
 
 /** Resolves QuasarConfig from env vars, config file, and defaults.
  * Resolution order: QUASAR_SERVER_URL env var > ~/.config/quasar/config.json serverUrl > error.
- * QUASAR_INGEST_TOKEN env var > config file ingestToken > undefined.
- * QUASAR_HTTP_TIMEOUT_MS env var > config file httpTimeoutMs > 60000ms default. */
+ * QUASAR_HTTP_TIMEOUT_MS env var > config file httpTimeoutMs > 60000ms default.
+ * (ingestToken is not part of this read-plane resolution -- see loadClientConfig
+ * for the write-plane token the CLI resolves separately.) */
 export const QuasarConfigLive: Layer.Layer<QuasarConfigTag> = Layer.effect(
   QuasarConfigTag,
   Effect.sync(() => {
@@ -62,28 +69,24 @@ export const QuasarConfigLive: Layer.Layer<QuasarConfigTag> = Layer.effect(
     // Server URL is required
     const serverUrlFromEnv = asString(env.QUASAR_SERVER_URL);
     if (serverUrlFromEnv !== undefined) {
-      const ingestToken = asString(env.QUASAR_INGEST_TOKEN);
       const timeoutMs =
         typeof env.QUASAR_HTTP_TIMEOUT_MS === "string"
           ? parseInt(env.QUASAR_HTTP_TIMEOUT_MS, 10) || 60_000
           : 60_000;
       return QuasarConfigTag.of({
         serverUrl: serverUrlFromEnv,
-        ingestToken,
         httpTimeoutMs: timeoutMs,
       });
     }
 
     const config = loadClientConfig();
     if (config?.serverUrl !== undefined) {
-      const ingestToken = asString(env.QUASAR_INGEST_TOKEN) ?? config.ingestToken;
       const timeoutMs =
         typeof env.QUASAR_HTTP_TIMEOUT_MS === "string"
           ? parseInt(env.QUASAR_HTTP_TIMEOUT_MS, 10) || (config.httpTimeoutMs ?? 60_000)
           : config.httpTimeoutMs ?? 60_000;
       return QuasarConfigTag.of({
         serverUrl: config.serverUrl,
-        ingestToken,
         httpTimeoutMs: timeoutMs,
       });
     }
@@ -102,7 +105,6 @@ export const makeQuasarConfig = (override: Partial<QuasarConfig>): Layer.Layer<Q
     Effect.sync(() =>
       QuasarConfigTag.of({
         serverUrl: override.serverUrl ?? "",
-        ingestToken: override.ingestToken,
         httpTimeoutMs: override.httpTimeoutMs ?? 60_000,
       }),
     ),
