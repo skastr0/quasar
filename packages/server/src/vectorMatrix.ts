@@ -38,7 +38,6 @@ import {
 } from "./metrics";
 
 const LOAD_PAGE_ROWS = 8_192;
-const MAX_TOP_K = 256;
 const APPEND_HEADROOM_BYTES = 256 * 1024 * 1024;
 const GROW_CHUNK_BYTES = 32 * 1024 * 1024;
 /** Scan work unit: small enough that a preempted worker only delays one chunk
@@ -833,7 +832,7 @@ export const makeVectorMatrixLayer = (
             });
           }
           const rowCount = state.rowCount;
-          const k = Math.min(Math.max(1, request.limit), MAX_TOP_K, rowCount);
+          const k = Math.min(Math.max(1, request.limit), rowCount);
           const filtered = request.projectKey !== undefined
             || request.role !== undefined
             || request.providers !== undefined
