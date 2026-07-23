@@ -99,6 +99,38 @@ describe("HTTP server resources", () => {
     } finally { proc.kill(); await proc.exited; }
   });
 
+  test("ingest run lifecycle persists running, completed, and failed ledger rows", async () => {
+    const dir = tempDir();
+    const { proc, base } = startServer(join(dir, "quasar.sqlite"), "test-ingest-token");
+    const writeRun = (run: Record<string, unknown>) => fetch(`${base}/ingest/run`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-quasar-ingest-token": "test-ingest-token" },
+      body: JSON.stringify({ run }),
+    });
+    const startedAt = "2026-07-23T12:00:00.000Z";
+    try {
+      await waitFor(`${base}/health`);
+      const running = {
+        runId: "run-recovery", provider: "codex", status: "running", startedAt,
+        sessionsSeen: 0, sessionsWritten: 0, sessionsSkipped: 0, sessionsFailed: 0,
+      };
+      expect((await writeRun(running)).status).toBe(200);
+      const recovery = await fetch(`${base}/ingest-run?runId=run-recovery`).then((response) => response.json());
+      expect(recovery.data.row).toMatchObject({ ...running, completedAt: null });
+
+      expect((await writeRun({ ...running, status: "completed", completedAt: "2026-07-23T12:01:00.000Z", sessionsSeen: 3, sessionsWritten: 2, sessionsSkipped: 1 })).status).toBe(200);
+      expect((await writeRun({ ...running, runId: "run-failed", status: "failed", completedAt: "2026-07-23T12:02:00.000Z", sessionsSeen: 1, sessionsFailed: 1 })).status).toBe(200);
+      const rows = await fetch(`${base}/ingest-runs?limit=10`).then((response) => response.json());
+      expect(rows.data.rows).toEqual(expect.arrayContaining([
+        expect.objectContaining({ runId: "run-recovery", status: "completed", sessionsSeen: 3, sessionsWritten: 2, sessionsSkipped: 1 }),
+        expect.objectContaining({ runId: "run-failed", status: "failed", sessionsFailed: 1 }),
+      ]));
+      expect((await fetch(`${base}/ingest/run`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ run: running }) })).status).toBe(401);
+      expect((await writeRun({ ...running, extra: true })).status).toBe(400);
+      expect((await writeRun({ ...running, status: "completed" })).status).toBe(400);
+    } finally { proc.kill(); await proc.exited; }
+  });
+
   test("GET resources use enriched rows, bounded pages, summary tool calls, and typed failures", async () => {
     const dir = tempDir();
     const sqlite = join(dir, "quasar.sqlite");

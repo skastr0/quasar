@@ -3,7 +3,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 
 import { adaptersByProvider } from "../src/adapters/registry";
 import type { SessionAdapter } from "../src/adapters/types";
-import { ingestRemote } from "../src/ingest";
+import { ingestRemote, postFingerprintProbe, postIngestRun, postMappedSession } from "../src/ingest";
 
 const realClaudeAdapter = adaptersByProvider.get("claude");
 afterEach(() => {
@@ -145,25 +145,44 @@ const diagnosticAdapter = (): SessionAdapter => ({
 describe("ingestRemote", () => {
   test("remote ingest reports adapter error diagnostics as failures", async () => {
     adaptersByProvider.set("claude", diagnosticAdapter());
+    const runs: Array<Record<string, unknown>> = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1", port: 0,
+      fetch: async (request) => {
+        if (request.headers.get("x-quasar-ingest-token") !== "token-a") return new Response(null, { status: 401 });
+        if (new URL(request.url).pathname !== "/ingest/run") return new Response(null, { status: 404 });
+        runs.push((await request.json() as { run: Record<string, unknown> }).run);
+        return Response.json({ ok: true, data: {} });
+      },
+    });
 
-    const reports = await ingestRemote(
-      { provider: "claude", ingestToken: "token-a" },
-      "http://127.0.0.1:1",
-    );
+    try {
+      const reports = await ingestRemote(
+        { provider: "claude", ingestToken: "token-a" },
+        `http://127.0.0.1:${server.port}`,
+      );
 
-    expect(reports[0]?.sessionsSeen).toBe(0);
-    expect(reports[0]?.sessionsWritten).toBe(0);
-    expect(reports[0]?.sessionsFailed).toBe(1);
-    expect(reports[0]?.failures).toEqual([{
-      sessionId: "/history/bad.jsonl",
-      diagnostic: "fixture.adapter.boundary",
-      error: "fixture adapter diagnostic",
-    }]);
+      expect(reports[0]?.sessionsSeen).toBe(0);
+      expect(reports[0]?.sessionsWritten).toBe(0);
+      expect(reports[0]?.sessionsFailed).toBe(1);
+      expect(reports[0]?.failures).toEqual([{
+        sessionId: "/history/bad.jsonl",
+        diagnostic: "fixture.adapter.boundary",
+        error: "fixture adapter diagnostic",
+      }]);
+      expect(runs).toHaveLength(2);
+      expect(runs[0]).toMatchObject({ status: "running", sessionsSeen: 0 });
+      expect(runs[1]).toMatchObject({ status: "failed", sessionsFailed: 1, completedAt: expect.any(String) });
+      expect(runs[1]?.runId).toBe(runs[0]?.runId);
+    } finally {
+      server.stop(true);
+    }
   });
 
   test("remote ingest retries transient server write failures", async () => {
     adaptersByProvider.set("claude", adapterFor([session("remote-retry")]));
     let writeAttempts = 0;
+    const runs: Array<Record<string, unknown>> = [];
     const server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
@@ -173,6 +192,10 @@ describe("ingestRemote", () => {
         }
         if (new URL(request.url).pathname === "/ingest/fingerprint") {
           return Response.json({ ok: true, data: { unchanged: false } });
+        }
+        if (new URL(request.url).pathname === "/ingest/run") {
+          runs.push((await request.json() as { run: Record<string, unknown> }).run);
+          return Response.json({ ok: true, data: {} });
         }
         writeAttempts += 1;
         if (writeAttempts === 1) {
@@ -211,6 +234,8 @@ describe("ingestRemote", () => {
       expect(reports[0]?.sessionsFailed).toBe(0);
       expect(reports[0]?.messagesWritten).toBe(2);
       expect(reports[0]?.toolCallsWritten).toBe(1);
+      expect(runs).toHaveLength(2);
+      expect(runs[1]).toMatchObject({ status: "completed", sessionsSeen: 1, sessionsWritten: 1, sessionsFailed: 0 });
     } finally {
       server.stop(true);
     }
@@ -232,6 +257,9 @@ describe("ingestRemote", () => {
           probes += 1;
           return Response.json({ ok: true, data: { unchanged: true } });
         }
+        if (new URL(request.url).pathname === "/ingest/run") {
+          return Response.json({ ok: true, data: {} });
+        }
         writes += 1;
         return Response.json({ ok: false, error: { message: "unexpected write" } }, { status: 500 });
       },
@@ -250,6 +278,32 @@ describe("ingestRemote", () => {
       expect(reports[0]?.sessionsSkipped).toBe(1);
       expect(reports[0]?.sessionsWritten).toBe(0);
       expect(reports[0]?.sessionsFailed).toBe(0);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("remote lifecycle, fingerprint, and session writes honor the configured timeout", async () => {
+    const server = Bun.serve({
+      hostname: "127.0.0.1", port: 0,
+      fetch: async () => {
+        await Bun.sleep(100);
+        return Response.json({ ok: true, data: { unchanged: false } });
+      },
+    });
+    const base = `http://127.0.0.1:${server.port}`;
+    const options = { ingestToken: "token-a", timeoutMs: 10 };
+    try {
+      await expect(postFingerprintProbe(base, { sessionId: "timeout-fingerprint", sourceFingerprint: "timeout" }, options)).rejects.toThrow();
+      await expect(postIngestRun(base, {
+        runId: "timeout-run", provider: "claude", status: "running", startedAt: new Date().toISOString(),
+        sessionsSeen: 0, sessionsWritten: 0, sessionsSkipped: 0, sessionsFailed: 0,
+      }, options)).rejects.toThrow();
+      await expect(postMappedSession(base, {
+        project: { projectKey: "timeout-project", displayName: "Timeout Project" },
+        session: { sessionId: "timeout-session", projectKey: "timeout-project", provider: "claude", agentName: "claude", sourcePath: "/tmp/timeout", sourceFingerprint: "timeout", host: "timeout-host", identitySchemeVersion: 1, normalizationVersion: 1, messageCount: 0, toolCallCount: 0 },
+        messages: [], toolCalls: [], events: [], usageRecords: [], sessionEdges: [], artifacts: [], executionContexts: [],
+      }, options)).rejects.toThrow();
     } finally {
       server.stop(true);
     }

@@ -186,6 +186,9 @@ const startServer = (
         if (options.requests !== undefined) options.requests.probes += 1;
         return Response.json({ ok: true, data: { unchanged: options.unchanged ?? false } });
       }
+      if (pathname === "/ingest/run") {
+        return Response.json({ ok: true, data: {} });
+      }
       if (pathname === "/ingest/session") {
         writes += 1;
         if (options.requests !== undefined) options.requests.writes += 1;

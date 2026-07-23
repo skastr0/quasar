@@ -710,6 +710,7 @@ if (missingValueOption !== undefined) {
       limit: arg("--limit") === undefined ? undefined : intArg("--limit", 1),
       force: flag("--force"),
       ingestToken,
+      timeoutMs: httpTimeoutMs(),
     };
     try {
       const reports = await ingestRemote(options, base);
