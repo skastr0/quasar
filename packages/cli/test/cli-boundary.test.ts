@@ -350,6 +350,57 @@ describe("CLI client/operator boundary", () => {
     }
   }, 15_000);
 
+  test("option-shaped values stay data while repeated filters and detail remain explicit", async () => {
+    const requested: QuerySpec[] = [];
+    const server = Bun.serve({
+      port: 0,
+      fetch: async (request) => {
+        const spec = await request.json() as QuerySpec;
+        requested.push(spec);
+        return Response.json(emptyQueryResponse(spec));
+      },
+    });
+    const env = { QUASAR_SERVER_URL: `http://127.0.0.1:${server.port}` };
+    try {
+      expect((await runCli(["tool-calls", "--tool", "--detail"], env)).exitCode).toBe(0);
+      expect((await runCli([
+        "sessions",
+        "--provider",
+        "codex",
+        "--provider",
+        "claude",
+      ], env)).exitCode).toBe(0);
+      expect((await runCli([
+        "tool-calls",
+        "--tool",
+        "Read",
+        "--detail",
+      ], env)).exitCode).toBe(0);
+
+      expect(requested[0]).toMatchObject({
+        kind: "toolCalls",
+        filters: { toolName: "--detail" },
+        projection: { detail: "summary" },
+      });
+      expect(requested[0]?.projection.fields).not.toContain("input");
+      expect(requested[0]?.projection.fields).not.toContain("output");
+      expect(requested[1]).toMatchObject({
+        kind: "sessions",
+        filters: { providers: ["codex", "claude"] },
+        projection: { detail: "summary" },
+      });
+      expect(requested[2]).toMatchObject({
+        kind: "toolCalls",
+        filters: { toolName: "Read" },
+        projection: { detail: "detail" },
+      });
+      expect(requested[2]?.projection.fields).toContain("input");
+      expect(requested[2]?.projection.fields).toContain("output");
+    } finally {
+      server.stop(true);
+    }
+  }, 15_000);
+
   test("session --id retains the rich independent-detail endpoint", async () => {
     let requestedUrl: URL | undefined;
     const server = Bun.serve({

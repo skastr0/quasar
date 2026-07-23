@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 
 import type { QuerySpec } from "@skastr0/quasar-protocol";
 
+import { parseCliArguments } from "./argv";
 import { configuredIngestToken, configuredServerUrl, defaultClientConfigPath } from "./client-config";
 import { Provider } from "./core/schemas";
 import { ingestFailureError, ingestReportPayload } from "./ingest-report";
@@ -37,22 +38,55 @@ import {
   type MaterializeTotals,
 } from "./materialize-receipt";
 
-const arg = (name: string): string | undefined => {
-  const index = process.argv.indexOf(name);
-  return index === -1 ? undefined : process.argv[index + 1];
-};
-
-const flag = (name: string): boolean => process.argv.includes(name);
-
-const args = (...names: readonly string[]): readonly string[] => {
-  const found: string[] = [];
-  for (let index = 0; index < process.argv.length; index += 1) {
-    if (!names.includes(process.argv[index]!)) continue;
-    const value = process.argv[index + 1];
-    if (value !== undefined && !value.startsWith("--")) found.push(value);
-  }
-  return found;
-};
+const valueOptionNames = new Set([
+  "--agent",
+  "--agent-name",
+  "--agent-role",
+  "--artifact-limit",
+  "--binary",
+  "--context-limit",
+  "--cursor",
+  "--edge-limit",
+  "--event-limit",
+  "--fields",
+  "--id",
+  "--ingest-token",
+  "--interval-seconds",
+  "--limit",
+  "--max-batches",
+  "--message-limit",
+  "--mode",
+  "--model",
+  "--model-provider",
+  "--name",
+  "--offset",
+  "--out",
+  "--project",
+  "--project-key",
+  "--provider",
+  "--providers",
+  "--query",
+  "--require-provider",
+  "--role",
+  "--schema",
+  "--server",
+  "--session",
+  "--session-id",
+  "--smoke-query",
+  "--status",
+  "--timeout-ms",
+  "--tool",
+  "--tool-call",
+  "--tool-call-id",
+  "--tool-call-limit",
+  "--tool-name",
+  "--usage-limit",
+  "-q",
+]);
+const parsedArguments = parseCliArguments(process.argv.slice(2), valueOptionNames);
+const arg = (name: string): string | undefined => parsedArguments.first(name);
+const flag = (name: string): boolean => parsedArguments.has(name);
+const args = (...names: readonly string[]): readonly string[] => parsedArguments.all(...names);
 
 const firstArg = (...names: readonly string[]): string | undefined =>
   args(...names)[0];
@@ -77,17 +111,18 @@ const positiveInt = (raw: string | undefined, fallback: number): number => {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 };
 
-const rawCommand = process.argv[2];
+const rawCommand = parsedArguments.positionals[0];
 const isInteractiveTty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
 const subcommandHelpTarget =
-  rawCommand !== undefined && process.argv.slice(3).some((value) => value === "--help" || value === "-h")
+  rawCommand !== undefined && (flag("--help") || flag("-h"))
     ? rawCommand
     : undefined;
 const command =
   subcommandHelpTarget !== undefined ? "help"
+  : rawCommand === undefined && (flag("--help") || flag("-h")) ? "help"
+  : rawCommand === undefined && (flag("--version") || flag("-v")) ? "version"
   : rawCommand === undefined && isInteractiveTty ? "tui"
-  : rawCommand === undefined || rawCommand === "--help" || rawCommand === "-h" ? "help"
-  : rawCommand === "--version" || rawCommand === "-v" ? "version"
+  : rawCommand === undefined ? "help"
   : rawCommand;
 const cliPackage = {
   name: "@skastr0/quasar-cli",
@@ -643,7 +678,7 @@ const materializeEmbeddingVectors = async () => {
 
 switch (command) {
   case "daemon": {
-    const subcommand = process.argv[3] ?? "status";
+    const subcommand = parsedArguments.positionals[1] ?? "status";
     try {
       if (subcommand === "install") writeJson(ok("daemon install", installDaemon()));
       else if (subcommand === "uninstall") writeJson(ok("daemon uninstall", uninstallDaemon()));
@@ -795,13 +830,13 @@ switch (command) {
     break;
   }
   case "query": {
-    const source = process.argv[3];
+    const source = parsedArguments.positionals[1];
     await executeQuery("query", () => readQueryArgument(source));
     break;
   }
   case "schema": {
     try {
-      const requested = arg("--name") ?? process.argv[3];
+      const requested = arg("--name") ?? parsedArguments.positionals[1];
       writeJson(ok("schema", protocolContract(requested)));
     } catch (error) {
       rejectInput("schema", error);
@@ -810,7 +845,7 @@ switch (command) {
   }
   case "examples": {
     try {
-      writeJson(ok("examples", protocolExampleList(arg("--name") ?? arg("--schema") ?? process.argv[3])));
+      writeJson(ok("examples", protocolExampleList(arg("--name") ?? arg("--schema") ?? parsedArguments.positionals[1])));
     } catch (error) {
       rejectInput("examples", error);
     }
