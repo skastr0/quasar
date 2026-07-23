@@ -120,6 +120,7 @@
           "toolCallId": "omp:c72403d626d5a091447e25d4c19cc607:tool:d60ac7ea33f1915dfe558558183a2303"
         }
       ],
+      "executionContexts": [],
       "host": "test-host",
       "id": "omp:c72403d626d5a091447e25d4c19cc607",
       "identitySchemeVersion": 1,

@@ -7,10 +7,20 @@ import {
   type SessionAdapter,
 } from "./types";
 import { CodexSessionId, type SessionId } from "../core/identity";
-import type { NormalizedSession, SessionEventKind, SessionRole, ToolCall, UsageRecord } from "../core/schemas";
+import type {
+  AgentAssignment,
+  ExecutionContextRecord,
+  NormalizedSession,
+  SessionEventKind,
+  SessionRole,
+  ToolCall,
+  UsageRecord,
+} from "../core/schemas";
 import {
   CODEX_SESSION_META_DECODE_FAILED,
   CodexSessionMetaSchema,
+  CodexThreadSettingsAppliedPayloadSchema,
+  CodexTurnContextSchema,
   classifyCodexRecord,
   type CodexClassification,
   type CodexSessionMeta,
@@ -47,6 +57,10 @@ type CodexUsageDraft = Omit<
   UsageRecord,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
 >;
+type CodexExecutionContextDraft = Omit<
+  ExecutionContextRecord,
+  "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
+>;
 type CodexEventDraft = Parameters<typeof buildSession>[0]["events"][number];
 type CodexEdgeDraft = NonNullable<Parameters<typeof buildSession>[0]["sessionEdges"]>[number];
 type CodexSessionIdV1LegacyHeader = string & Brand.Brand<"CodexSessionIdV1LegacyHeader">;
@@ -68,6 +82,15 @@ const payloadRecordFrom = (value: unknown): CodexRecord =>
 
 const payloadTypeFrom = (payload: CodexRecord) =>
   typeof payload.type === "string" ? payload.type : undefined;
+
+const firstStringValue = (...values: readonly unknown[]): string | undefined => {
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (trimmed.length > 0) return trimmed;
+  }
+  return undefined;
+};
 
 const codexNativeType = (recordType: string, payloadType: string | undefined) =>
   payloadType === undefined ? recordType : `${recordType}.${payloadType}`;
@@ -268,6 +291,42 @@ export const codexMessageText = (
   return undefined;
 };
 
+/** Select only measured fields for provider activity records. */
+const codexActivityContent = (
+  recordType: string,
+  payloadType: string | undefined,
+  payload: CodexRecord,
+) => {
+  if (
+    (recordType === "response_item" && payloadType === "agent_message") ||
+    (recordType === "event_msg" && payloadType === "sub_agent_activity")
+  ) {
+    return projectSessionNativeValue({
+      type: payloadType,
+      ...(typeof payload.event_id === "string" ? { event_id: payload.event_id } : {}),
+      ...(typeof payload.occurred_at_ms === "number"
+        ? { occurred_at_ms: payload.occurred_at_ms }
+        : {}),
+      ...(typeof payload.agent_thread_id === "string"
+        ? { agent_thread_id: payload.agent_thread_id }
+        : {}),
+      ...(typeof payload.agent_path === "string"
+        ? { agent_path: payload.agent_path }
+        : {}),
+      ...(typeof payload.kind === "string" ? { kind: payload.kind } : {}),
+    });
+  }
+  if (recordType === "event_msg" && payloadType === "thread_rolled_back") {
+    return projectSessionNativeValue({
+      type: payloadType,
+      ...(typeof payload.num_turns === "number"
+        ? { num_turns: payload.num_turns }
+        : {}),
+    });
+  }
+  return undefined;
+};
+
 /**
  * Map a raw codex role string to the canonical `SessionRole`. Local to this
  * adapter: the codex adapter owns its own role parsing rather than
@@ -323,7 +382,7 @@ const codexRoleFrom = (
   );
   if (explicitRole !== "unknown") return explicitRole;
   if (payloadType === "user_message") return "user";
-  if (payloadType === "agent_message") return "assistant";
+  if (payloadType === "agent_message" && kind === "message") return "assistant";
   switch (kind) {
     case "tool_call":
       return "assistant";
@@ -358,6 +417,51 @@ const parseToolInput = (value: unknown): unknown => {
   }
 };
 
+const codexToolName = (payloadType: string, payload: CodexRecord): string => {
+  if (typeof payload.name === "string" && payload.name.length > 0) return payload.name;
+  switch (payloadType) {
+    case "local_shell_call":
+      return "local_shell";
+    case "web_search_call":
+      return "web_search";
+    case "tool_search_call":
+    case "tool_search_output":
+      return "tool_search";
+    default:
+      return "codex_tool";
+  }
+};
+
+const codexToolInput = (payloadType: string, payload: CodexRecord): unknown => {
+  switch (payloadType) {
+    case "custom_tool_call":
+      return projectToolPayloadNativeValue(payload.input);
+    case "local_shell_call":
+    case "web_search_call":
+      return projectToolPayloadNativeValue(payload.action);
+    case "tool_search_call":
+      return projectToolPayloadNativeValue({
+        ...(typeof payload.execution === "string"
+          ? { execution: payload.execution }
+          : {}),
+        ...(payload.arguments !== undefined ? { arguments: payload.arguments } : {}),
+      });
+    default:
+      return parseToolInput(payload.arguments);
+  }
+};
+
+const codexToolOutput = (payloadType: string, payload: CodexRecord): unknown => {
+  switch (payloadType) {
+    case "mcp_tool_call_end":
+      return projectToolPayloadNativeValue(payload.result);
+    case "tool_search_output":
+      return projectToolPayloadNativeValue(payload.tools);
+    default:
+      return projectToolPayloadNativeValue(payload.output);
+  }
+};
+
 const upsertCodexToolCall = (
   toolCallsById: Map<string, CodexToolCallDraft>,
   sessionId: SessionId,
@@ -380,27 +484,23 @@ const upsertCodexToolCall = (
   if (
     payloadType === "function_call" ||
     payloadType === "local_shell_call" ||
-    payloadType === "custom_tool_call"
+    payloadType === "custom_tool_call" ||
+    payloadType === "web_search_call" ||
+    payloadType === "tool_search_call"
   ) {
-    const toolName =
-      typeof payload.name === "string" && payload.name.length > 0
-        ? payload.name
-        : payloadType === "local_shell_call"
-          ? "local_shell"
-          : "codex_tool";
+    const toolName = codexToolName(payloadType, payload);
     const existing = toolCallsById.get(id);
-    const input =
-      payloadType === "custom_tool_call"
-        ? projectToolPayloadNativeValue(payload.input)
-        : payloadType === "local_shell_call"
-          ? projectToolPayloadNativeValue(payload.action)
-          : parseToolInput(payload.arguments);
+    const input = codexToolInput(payloadType, payload);
+    const payloadStatus =
+      typeof payload.status === "string" && payload.status.length > 0
+        ? payload.status
+        : "started";
     toolCallsById.set(id, {
       ...existing,
       id,
       eventId: existing?.eventId ?? eventId,
       toolName,
-      status: existing?.status === "completed" ? "completed" : "started",
+      status: existing?.status === "completed" ? "completed" : payloadStatus,
       ...(input !== undefined ? { input } : {}),
       ...(existing?.output !== undefined ? { output: existing.output } : {}),
       ...(timestamp !== undefined ? { startedAt: timestamp } : {}),
@@ -417,16 +517,15 @@ const upsertCodexToolCall = (
     payloadType === "function_call_output" ||
     payloadType === "local_shell_call_output" ||
     payloadType === "custom_tool_call_output" ||
+    payloadType === "tool_search_output" ||
     payloadType === "mcp_tool_call_end"
   ) {
     const existing = toolCallsById.get(id);
-    const output = projectToolPayloadNativeValue(
-      payloadType === "mcp_tool_call_end" ? payload.result : payload.output,
-    );
+    const output = codexToolOutput(payloadType, payload);
     toolCallsById.set(id, {
       id,
       eventId: existing?.eventId ?? eventId,
-      toolName: existing?.toolName ?? "codex_tool",
+      toolName: existing?.toolName ?? codexToolName(payloadType, payload),
       status: "completed",
       ...(existing?.input !== undefined ? { input: existing.input } : {}),
       ...(output !== undefined ? { output } : {}),
@@ -444,6 +543,8 @@ const codexUsageRecord = (
   sequence: number,
   timestamp: string | undefined,
   payload: CodexRecord,
+  modelFallback: string | undefined,
+  modelProviderFallback: string | undefined,
 ): CodexUsageDraft | undefined => {
   if (payloadTypeFrom(payload) !== "token_count") return undefined;
   const info = recordFrom(payload.info);
@@ -465,12 +566,17 @@ const codexUsageRecord = (
     numberValue(usage.completion_tokens) ??
     numberValue(usage.completionTokens);
   const reasoningTokens =
-    numberValue(usage.reasoning_tokens) ?? numberValue(usage.reasoningTokens);
+    numberValue(usage.reasoning_output_tokens) ??
+    numberValue(usage.reasoning_tokens) ??
+    numberValue(usage.reasoningTokens);
   const cacheCreationInputTokens =
+    numberValue(usage.cache_write_input_tokens) ??
     numberValue(usage.cache_creation_input_tokens) ??
     numberValue(usage.cacheCreationInputTokens);
   const cacheReadInputTokens =
-    numberValue(usage.cache_read_input_tokens) ?? numberValue(usage.cacheReadInputTokens);
+    numberValue(usage.cached_input_tokens) ??
+    numberValue(usage.cache_read_input_tokens) ??
+    numberValue(usage.cacheReadInputTokens);
   const totalTokens =
     numberValue(usage.total_tokens) ??
     numberValue(usage.totalTokens) ??
@@ -485,13 +591,14 @@ const codexUsageRecord = (
     id: usageIdFor(sessionId, eventId, sequence),
     eventId,
     ...(timestamp !== undefined ? { timestamp } : {}),
-    model:
-      typeof usage.model === "string"
-        ? usage.model
-        : typeof payload.model === "string"
-          ? payload.model
-          : undefined,
-    modelProvider: "openai",
+    model: firstStringValue(usage.model, payload.model, modelFallback),
+    modelProvider: firstStringValue(
+      usage.model_provider,
+      usage.modelProvider,
+      payload.model_provider,
+      payload.modelProvider,
+      modelProviderFallback,
+    ),
     inputTokens,
     outputTokens,
     reasoningTokens,
@@ -512,6 +619,7 @@ type CodexSessionSlice = {
   readonly events: CodexEventDraft[];
   readonly toolCallIds: Set<string>;
   readonly usageRecords: CodexUsageDraft[];
+  readonly executionContexts: CodexExecutionContextDraft[];
   readonly sessionEdges: CodexEdgeDraft[];
 };
 
@@ -519,6 +627,7 @@ const emptyCodexSlice = (): CodexSessionSlice => ({
   events: [],
   toolCallIds: new Set<string>(),
   usageRecords: [],
+  executionContexts: [],
   sessionEdges: [],
 });
 
@@ -747,11 +856,11 @@ const firstRecordJsonDiagnostic = (error: unknown, sourcePath: string) => ({
  * `source.subagent`, so this returns `undefined` and the session maps with no
  * parent.
  */
-type CodexSubagentLineage = {
+type CodexSubagentMetadata = {
   /** The parent rollout's native id (its session_meta.payload.id). */
-  readonly parentNativeId: string;
-  /** Human label for the spawned agent, or undefined when none was recorded. */
-  readonly agentName: string | undefined;
+  readonly parentNativeId?: string;
+  /** Typed assignment facts kept independently from the display agentName. */
+  readonly assignment?: AgentAssignment;
 };
 
 const trimmedNonEmpty = (value: string | null | undefined): string | undefined => {
@@ -760,21 +869,131 @@ const trimmedNonEmpty = (value: string | null | undefined): string | undefined =
   return trimmed.length === 0 ? undefined : trimmed;
 };
 
-const codexSubagentLineage = (meta: CodexSessionMeta): CodexSubagentLineage | undefined => {
+const codexSubagentMetadata = (meta: CodexSessionMeta): CodexSubagentMetadata | undefined => {
   const subagent = meta.payload.source?.subagent ?? undefined;
   if (subagent === undefined || subagent === null) return undefined;
   const threadSpawn = subagent.thread_spawn ?? undefined;
   const parentNativeId = trimmedNonEmpty(threadSpawn?.parent_thread_id ?? undefined);
-  if (parentNativeId === undefined) return undefined;
-  // Agent identity lives under thread_spawn on real disk (all 517 subagent
-  // rollouts); the subagent-level read is a secondary fallback only.
+  const nickname =
+    trimmedNonEmpty(threadSpawn?.agent_nickname) ??
+    trimmedNonEmpty(subagent.agent_nickname);
+  const role =
+    trimmedNonEmpty(threadSpawn?.agent_role) ??
+    trimmedNonEmpty(subagent.agent_role);
+  const path = trimmedNonEmpty(threadSpawn?.agent_path);
+  const rawDepth = numberValue(threadSpawn?.depth);
+  const depth =
+    rawDepth !== undefined && Number.isInteger(rawDepth) && rawDepth >= 0
+      ? rawDepth
+      : undefined;
+  const assignment =
+    nickname !== undefined || role !== undefined || path !== undefined || depth !== undefined
+      ? {
+          ...(nickname !== undefined ? { nickname } : {}),
+          ...(role !== undefined ? { role } : {}),
+          ...(path !== undefined ? { path } : {}),
+          ...(depth !== undefined ? { depth } : {}),
+        }
+      : undefined;
+  if (parentNativeId === undefined && assignment === undefined) return undefined;
   return {
-    parentNativeId,
-    agentName:
-      trimmedNonEmpty(threadSpawn?.agent_nickname) ??
-      trimmedNonEmpty(threadSpawn?.agent_role) ??
-      trimmedNonEmpty(subagent.agent_nickname) ??
-      trimmedNonEmpty(subagent.agent_role),
+    ...(parentNativeId !== undefined ? { parentNativeId } : {}),
+    ...(assignment !== undefined ? { assignment } : {}),
+  };
+};
+
+type CodexExecutionContextCapture = {
+  readonly context: CodexExecutionContextDraft;
+  readonly model?: string;
+  readonly modelProvider?: string;
+};
+
+const codexExecutionContextFrom = (
+  record: CodexRecord,
+  sessionId: SessionId,
+  sequence: number,
+  timestamp: string | undefined,
+  modelProviderFallback: string | undefined,
+): CodexExecutionContextCapture | undefined => {
+  if (record.type === "turn_context") {
+    const decision = decodeOrDrop(CodexTurnContextSchema, record, {
+      kind: "turn_context" as const,
+      diagnosticName: "codex.turn_context.decode_failed",
+      diagnostics: [],
+    });
+    if (!isSignal(decision)) return undefined;
+    const payload = decision.value.payload ?? undefined;
+    if (payload === undefined || payload === null) return undefined;
+    const model = trimmedNonEmpty(payload.model);
+    const modelProvider = modelProviderFallback;
+    const reasoningEffort =
+      trimmedNonEmpty(payload.effort) ??
+      trimmedNonEmpty(payload.collaboration_mode?.settings?.reasoning_effort);
+    const turnId = trimmedNonEmpty(payload.turn_id);
+    const approvalPolicy = trimmedNonEmpty(payload.approval_policy);
+    const collaborationMode = trimmedNonEmpty(payload.collaboration_mode?.mode);
+    const multiAgentMode = trimmedNonEmpty(payload.multi_agent_mode);
+    const personality = trimmedNonEmpty(payload.personality);
+    const permissionProfileType = trimmedNonEmpty(payload.permission_profile?.type);
+    const context: CodexExecutionContextDraft = {
+      id: scopedId(sessionId, "execution-context", sequence, "turn_context"),
+      sequence,
+      scope: "turn",
+      ...(timestamp !== undefined ? { timestamp } : {}),
+      ...(turnId !== undefined ? { turnId } : {}),
+      ...(model !== undefined ? { model } : {}),
+      ...(modelProvider !== undefined ? { modelProvider } : {}),
+      ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+      ...(approvalPolicy !== undefined ? { approvalPolicy } : {}),
+      ...(collaborationMode !== undefined ? { collaborationMode } : {}),
+      ...(multiAgentMode !== undefined ? { multiAgentMode } : {}),
+      ...(personality !== undefined ? { personality } : {}),
+      ...(permissionProfileType !== undefined ? { permissionProfileType } : {}),
+    };
+    return {
+      context,
+      ...(model !== undefined ? { model } : {}),
+      ...(modelProvider !== undefined ? { modelProvider } : {}),
+    };
+  }
+
+  if (record.type !== "event_msg") return undefined;
+  const payloadRecord = payloadRecordFrom(record.payload);
+  if (payloadTypeFrom(payloadRecord) !== "thread_settings_applied") return undefined;
+  const decision = decodeOrDrop(CodexThreadSettingsAppliedPayloadSchema, record.payload, {
+    kind: "thread_settings_applied" as const,
+    diagnosticName: "codex.event_msg.thread_settings_applied.decode_failed",
+    diagnostics: [],
+  });
+  if (!isSignal(decision)) return undefined;
+  const settings = decision.value.thread_settings;
+  const model = trimmedNonEmpty(settings.model);
+  const modelProvider =
+    trimmedNonEmpty(settings.model_provider_id) ?? modelProviderFallback;
+  const reasoningEffort = trimmedNonEmpty(settings.reasoning_effort);
+  const serviceTier = trimmedNonEmpty(settings.service_tier);
+  const approvalPolicy = trimmedNonEmpty(settings.approval_policy);
+  const collaborationMode = trimmedNonEmpty(settings.collaboration_mode?.mode);
+  const personality = trimmedNonEmpty(settings.personality);
+  const permissionProfileType = trimmedNonEmpty(settings.permission_profile?.type);
+  const context: CodexExecutionContextDraft = {
+    id: scopedId(sessionId, "execution-context", sequence, "thread_settings_applied"),
+    sequence,
+    scope: "session",
+    ...(timestamp !== undefined ? { timestamp } : {}),
+    ...(model !== undefined ? { model } : {}),
+    ...(modelProvider !== undefined ? { modelProvider } : {}),
+    ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+    ...(serviceTier !== undefined ? { serviceTier } : {}),
+    ...(approvalPolicy !== undefined ? { approvalPolicy } : {}),
+    ...(collaborationMode !== undefined ? { collaborationMode } : {}),
+    ...(personality !== undefined ? { personality } : {}),
+    ...(permissionProfileType !== undefined ? { permissionProfileType } : {}),
+  };
+  return {
+    context,
+    ...(model !== undefined ? { model } : {}),
+    ...(modelProvider !== undefined ? { modelProvider } : {}),
   };
 };
 
@@ -835,6 +1054,9 @@ async function* streamCodexSessionFromFile(
   // Subagent lineage + agent identity, sourced fail-closed from the decoded
   // session_meta. Defaults: no parent, agentName "codex" (a main session).
   let agentName = "codex";
+  let assignment: AgentAssignment | undefined;
+  let currentModel: string | undefined;
+  let currentModelProvider: string | undefined;
   let slice = emptyCodexSlice();
 
   const buildCompleteSession = () => {
@@ -842,6 +1064,7 @@ async function* streamCodexSessionFromFile(
     const session = buildSession({
       provider: "codex",
       agentName,
+      ...(assignment !== undefined ? { assignment } : {}),
       machine: options.machine,
       sessionId,
       nativeSessionId,
@@ -856,6 +1079,7 @@ async function* streamCodexSessionFromFile(
         return toolCall === undefined ? [] : [toolCall];
       }),
       usageRecords: slice.usageRecords,
+      executionContexts: slice.executionContexts,
       sessionEdges: slice.sessionEdges,
     });
     slice = emptyCodexSlice();
@@ -907,27 +1131,34 @@ async function* streamCodexSessionFromFile(
         diagnostics: [],
       });
       if (isSignal(decision)) {
-        const lineage = codexSubagentLineage(decision.value);
-        if (lineage !== undefined) {
-          if (lineage.agentName !== undefined) agentName = lineage.agentName;
+        currentModelProvider ??= trimmedNonEmpty(decision.value.payload.model_provider);
+        const metadata = codexSubagentMetadata(decision.value);
+        if (metadata !== undefined) {
+          assignment = metadata.assignment;
+          agentName = assignment?.nickname ?? assignment?.role ?? agentName;
           // Session-to-session subagent lineage. The canonical signal is a
           // `subagent_of` edge whose `fromId` is the parent's machine-independent
           // Quasar SessionId and `toId` is this child's; mapSession projects it
           // onto SessionRow.parentSessionId. The parent's native id is preserved
           // in `rawReference`. NEVER `kind: "parent"` (event threading).
-          const parentSessionId = sessionIdFor("codex", CodexSessionId(lineage.parentNativeId));
-          slice.sessionEdges.push({
-            id: edgeIdFor(sessionId, "subagent_of", parentSessionId, sessionId),
-            kind: "subagent_of",
-            fromId: parentSessionId,
-            toId: sessionId,
-            rawReference: {
-              sourcePath,
-              line: lineNumber,
-              nativeType: "session_meta.payload.source.subagent.thread_spawn.parent_thread_id",
-              nativeValue: lineage.parentNativeId,
-            },
-          });
+          if (metadata.parentNativeId !== undefined) {
+            const parentSessionId = sessionIdFor(
+              "codex",
+              CodexSessionId(metadata.parentNativeId),
+            );
+            slice.sessionEdges.push({
+              id: edgeIdFor(sessionId, "subagent_of", parentSessionId, sessionId),
+              kind: "subagent_of",
+              fromId: parentSessionId,
+              toId: sessionId,
+              rawReference: {
+                sourcePath,
+                line: lineNumber,
+                nativeType: "session_meta.payload.source.subagent.thread_spawn.parent_thread_id",
+                nativeValue: metadata.parentNativeId,
+              },
+            });
+          }
         }
       }
     }
@@ -939,23 +1170,39 @@ async function* streamCodexSessionFromFile(
     const payloadValue = record.payload;
     const payloadRecord = payloadRecordFrom(payloadValue);
     const payloadType = payloadTypeFrom(payloadRecord);
+    const timestamp = typeof record.timestamp === "string" ? record.timestamp : undefined;
     // Route EVERY record through the declarative fail-closed classifier.
     // It returns a SIGNAL (kept, with a mapped SessionEventKind) or a DROP
     // (discarded, with a NAMED reason). A schema failure or unmodeled type is a
     // named decode diagnostic + a DROP — never a throw, never an `unknown`
     // pass-through event. A DROP emits NO event/tool-call/usage row.
     const classification: CodexClassification = classifyCodexRecord(value, decodeDiagnostics);
+    const executionContext = codexExecutionContextFrom(
+      record,
+      sessionId,
+      recordIndex,
+      timestamp,
+      currentModelProvider,
+    );
+    if (executionContext !== undefined) {
+      slice.executionContexts.push(executionContext.context);
+      currentModel = executionContext.model ?? currentModel;
+      currentModelProvider = executionContext.modelProvider ?? currentModelProvider;
+    }
     if (!isSignal(classification)) continue;
-    const content = projectSessionNativeValue(payloadValue);
+    const content =
+      codexActivityContent(nativeType, payloadType, payloadRecord) ??
+      projectSessionNativeValue(payloadValue);
     const kind = refineCodexSignalKind(payloadType, payloadRecord, classification.kind);
     const role = codexRoleFrom(payloadRecord, classification.kind, payloadType);
     const payloadCallId = callIdFromPayload(payloadRecord);
     const nativeEventId =
       typeof payloadRecord.id === "string"
         ? payloadRecord.id
-        : payloadCallId ?? (typeof record.id === "string" ? record.id : undefined);
+        : typeof payloadRecord.event_id === "string"
+          ? payloadRecord.event_id
+          : payloadCallId ?? (typeof record.id === "string" ? record.id : undefined);
     const eventId = eventIdFor(sessionId, recordIndex, nativeEventId ?? lineNumber);
-    const timestamp = typeof record.timestamp === "string" ? record.timestamp : undefined;
     const toolCallId = upsertCodexToolCall(
       toolCallsById,
       sessionId,
@@ -984,6 +1231,8 @@ async function* streamCodexSessionFromFile(
       recordIndex,
       timestamp,
       payloadRecord,
+      currentModel,
+      currentModelProvider,
     );
     if (usageRecord !== undefined) slice.usageRecords.push(usageRecord);
     // Message events whose payload carries no turn content (empty text stubs)

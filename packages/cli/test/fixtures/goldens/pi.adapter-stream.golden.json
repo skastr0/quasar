@@ -75,6 +75,7 @@
           "toolCallId": "pi:d4724bfa84bc0b1375e2a878d08f89e1:tool:d60ac7ea33f1915dfe558558183a2303"
         }
       ],
+      "executionContexts": [],
       "host": "test-host",
       "id": "pi:d4724bfa84bc0b1375e2a878d08f89e1",
       "identitySchemeVersion": 1,

@@ -93,6 +93,7 @@
           "timestamp": "1970-01-01T00:00:00.002Z"
         }
       ],
+      "executionContexts": [],
       "host": "test-host",
       "id": "opencode:bde655f6dd084eb1390da46c0cb8197f",
       "identitySchemeVersion": 1,

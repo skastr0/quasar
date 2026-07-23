@@ -82,6 +82,7 @@
           "toolCallId": "hermes:55717f63609a33c4d6a3ab09aecdb942:tool:e672f46e6755b891470176643ccb0ec7"
         }
       ],
+      "executionContexts": [],
       "host": "test-host",
       "id": "hermes:55717f63609a33c4d6a3ab09aecdb942",
       "identitySchemeVersion": 1,

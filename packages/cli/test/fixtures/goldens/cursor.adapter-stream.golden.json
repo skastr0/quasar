@@ -116,6 +116,7 @@
           "toolCallId": "cursor:f37d701704061a24cf58fd3dd48ccf4a:tool:d60ac7ea33f1915dfe558558183a2303"
         }
       ],
+      "executionContexts": [],
       "host": "test-host",
       "id": "cursor:f37d701704061a24cf58fd3dd48ccf4a",
       "identitySchemeVersion": 1,

@@ -138,6 +138,46 @@ export const SessionEdge = Schema.Struct({
 });
 export type SessionEdge = typeof SessionEdge.Type;
 
+/** Provider-neutral identity and structural placement for a spawned agent. */
+export const AgentAssignment = Schema.Struct({
+  nickname: Schema.optional(Schema.String),
+  role: Schema.optional(Schema.String),
+  path: Schema.optional(Schema.String),
+  depth: Schema.optional(NonNegativeInteger),
+});
+export type AgentAssignment = typeof AgentAssignment.Type;
+
+export const ExecutionContextScope = Schema.Literal("session", "turn");
+export type ExecutionContextScope = typeof ExecutionContextScope.Type;
+
+/**
+ * A typed provider configuration snapshot. Provider adapters select only these
+ * canonical facts; arbitrary settings, instructions, and working-directory
+ * blobs never cross this boundary.
+ */
+export const ExecutionContextRecord = Schema.Struct({
+  id: Schema.String,
+  sessionId: Schema.String,
+  machineId: Schema.String,
+  provider: Provider,
+  agentName: Schema.String,
+  projectIdentityKey: Schema.String,
+  sequence: NonNegativeInteger,
+  scope: ExecutionContextScope,
+  timestamp: Schema.optional(Schema.String),
+  turnId: Schema.optional(Schema.String),
+  model: Schema.optional(Schema.String),
+  modelProvider: Schema.optional(Schema.String),
+  reasoningEffort: Schema.optional(Schema.String),
+  serviceTier: Schema.optional(Schema.String),
+  approvalPolicy: Schema.optional(Schema.String),
+  collaborationMode: Schema.optional(Schema.String),
+  multiAgentMode: Schema.optional(Schema.String),
+  personality: Schema.optional(Schema.String),
+  permissionProfileType: Schema.optional(Schema.String),
+});
+export type ExecutionContextRecord = typeof ExecutionContextRecord.Type;
+
 export const UsageRecord = Schema.Struct({
   id: Schema.String,
   sessionId: Schema.String,
@@ -276,6 +316,7 @@ export const NormalizedSession = Schema.Struct({
   nativeSessionId: Schema.String,
   provider: Provider,
   agentName: Schema.String,
+  assignment: Schema.optional(AgentAssignment),
   machineId: Schema.String,
   /** Readable hostname/machine the session was observed on — provenance only,
    * NOT part of the machine/path-independent identity key. */
@@ -292,6 +333,7 @@ export const NormalizedSession = Schema.Struct({
   events: Schema.Array(SessionEvent),
   toolCalls: Schema.Array(ToolCall),
   sessionEdges: Schema.Array(SessionEdge),
+  executionContexts: Schema.Array(ExecutionContextRecord),
   usageRecords: Schema.Array(UsageRecord),
   artifacts: Schema.Array(Artifact),
   eventCount: Schema.optional(NonNegativeInteger),

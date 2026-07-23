@@ -78,6 +78,7 @@
           "timestamp": "2026-06-11T00:00:00.000Z"
         }
       ],
+      "executionContexts": [],
       "host": "test-host",
       "id": "devin:93eb6f6331d9c7a0ea9165f5490f0db2",
       "identitySchemeVersion": 1,

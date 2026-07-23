@@ -456,6 +456,253 @@ describe("codex adapter", () => {
     expect(kinds).toEqual(["tool_call", "tool_result", "tool_call", "tool_result"]);
   });
 
+  test("captures current execution contexts, usage aliases, search tools, and lifecycle records", async () => {
+    const currentRoot = mkdtempSync(join(tmpdir(), "quasar-codex-current-"));
+    try {
+      const dir = join(currentRoot, "sessions", "2026", "07", "22");
+      mkdirSync(dir, { recursive: true });
+      const id = "0fab0000-fab0-7fab-8fab-0000000000d4";
+      writeFileSync(
+        join(dir, rolloutFilename("2026-07-22T12-00-00", id)),
+        [
+          line({
+            timestamp: NOW,
+            type: "session_meta",
+            payload: {
+              id,
+              cwd: FIXTURE_CWD,
+              model_provider: "qsr-fab-provider",
+            },
+          }),
+          line({
+            timestamp: NOW,
+            type: "turn_context",
+            payload: {
+              turn_id: "0fab0000-fab0-7fab-8fab-0000000000d5",
+              cwd: "/qsr/fab/must-not-cross",
+              model: "qsr-fab-model-turn",
+              effort: "qsr-fab-effort-turn",
+              approval_policy: "qsr-fab-approval-turn",
+              collaboration_mode: {
+                mode: "qsr-fab-collaboration-turn",
+                settings: { reasoning_effort: "qsr-fab-effort-nested" },
+              },
+              multi_agent_mode: "qsr-fab-multi-agent",
+              personality: "qsr-fab-personality-turn",
+              permission_profile: { type: "qsr-fab-permission-turn" },
+              developer_instructions: "qsr-fab-must-not-cross",
+            },
+          }),
+          line({
+            timestamp: NOW,
+            type: "event_msg",
+            payload: {
+              type: "thread_settings_applied",
+              thread_settings: {
+                model: "qsr-fab-model-session",
+                model_provider_id: "qsr-fab-provider-session",
+                service_tier: "qsr-fab-tier",
+                approval_policy: "qsr-fab-approval-session",
+                reasoning_effort: "qsr-fab-effort-session",
+                collaboration_mode: {
+                  mode: "qsr-fab-collaboration-session",
+                  settings: {},
+                },
+                personality: "qsr-fab-personality-session",
+                permission_profile: { type: "qsr-fab-permission-session" },
+                cwd: "/qsr/fab/must-not-cross",
+                developer_instructions: "qsr-fab-must-not-cross",
+              },
+            },
+          }),
+          line({
+            timestamp: NOW,
+            type: "event_msg",
+            payload: {
+              type: "token_count",
+              info: {
+                total_token_usage: {
+                  inputTokens: 55,
+                  cache_creation_input_tokens: 3,
+                  cache_read_input_tokens: 11,
+                  outputTokens: 22,
+                  reasoning_tokens: 7,
+                  totalTokens: 77,
+                },
+              },
+            },
+          }),
+          line({
+            timestamp: NOW,
+            type: "event_msg",
+            payload: {
+              type: "token_count",
+              info: {
+                total_token_usage: {
+                  input_tokens: 101,
+                  cached_input_tokens: 17,
+                  cache_write_input_tokens: 5,
+                  output_tokens: 23,
+                  reasoning_output_tokens: 13,
+                  total_tokens: 124,
+                },
+              },
+            },
+          }),
+          line({
+            timestamp: NOW,
+            type: "response_item",
+            payload: {
+              type: "web_search_call",
+              call_id: "qsrfab_call_web",
+              status: "completed",
+              action: { type: "search", query: "qsr fabricated web query" },
+            },
+          }),
+          line({
+            timestamp: NOW,
+            type: "response_item",
+            payload: {
+              type: "tool_search_call",
+              call_id: "qsrfab_call_tool_search",
+              status: "completed",
+              execution: "client",
+              arguments: { query: "qsr fabricated tool query" },
+            },
+          }),
+          line({
+            timestamp: NOW,
+            type: "response_item",
+            payload: {
+              type: "tool_search_output",
+              call_id: "qsrfab_call_tool_search",
+              status: "completed",
+              execution: "client",
+              tools: [{ type: "namespace", name: "qsr_fab_tool" }],
+            },
+          }),
+          line({
+            timestamp: NOW,
+            type: "response_item",
+            payload: {
+              type: "agent_message",
+              event_id: "qsr-fab-agent-event",
+              occurred_at_ms: 1,
+              agent_thread_id: "qsr-fab-agent-thread",
+              agent_path: "/qsr/fab/agents/current.md",
+              kind: "qsr-fab-agent-kind",
+              encrypted_content: "qsr-fab-must-not-cross",
+            },
+          }),
+          line({
+            timestamp: NOW,
+            type: "event_msg",
+            payload: {
+              type: "sub_agent_activity",
+              event_id: "qsr-fab-subagent-event",
+              occurred_at_ms: 2,
+              agent_thread_id: "qsr-fab-subagent-thread",
+              agent_path: "/qsr/fab/agents/subagent.md",
+              kind: "qsr-fab-subagent-kind",
+              internal_metadata: "qsr-fab-must-not-cross",
+            },
+          }),
+          line({
+            timestamp: NOW,
+            type: "event_msg",
+            payload: { type: "thread_rolled_back", num_turns: 2 },
+          }),
+          line({
+            timestamp: NOW,
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "qsr fabricated final answer" }],
+            },
+          }),
+        ].join("\n"),
+      );
+
+      const result = await codexAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { codex: currentRoot },
+      });
+      const session = result.sessions[0]!;
+
+      expect(session.executionContexts).toHaveLength(2);
+      expect(session.executionContexts[0]).toMatchObject({
+        scope: "turn",
+        turnId: "0fab0000-fab0-7fab-8fab-0000000000d5",
+        model: "qsr-fab-model-turn",
+        modelProvider: "qsr-fab-provider",
+        reasoningEffort: "qsr-fab-effort-turn",
+        approvalPolicy: "qsr-fab-approval-turn",
+        collaborationMode: "qsr-fab-collaboration-turn",
+        multiAgentMode: "qsr-fab-multi-agent",
+        personality: "qsr-fab-personality-turn",
+        permissionProfileType: "qsr-fab-permission-turn",
+      });
+      expect(session.executionContexts[1]).toMatchObject({
+        scope: "session",
+        model: "qsr-fab-model-session",
+        modelProvider: "qsr-fab-provider-session",
+        reasoningEffort: "qsr-fab-effort-session",
+        serviceTier: "qsr-fab-tier",
+        approvalPolicy: "qsr-fab-approval-session",
+        collaborationMode: "qsr-fab-collaboration-session",
+        personality: "qsr-fab-personality-session",
+        permissionProfileType: "qsr-fab-permission-session",
+      });
+      expect(JSON.stringify(session.executionContexts)).not.toContain("must-not-cross");
+
+      expect(session.usageRecords[0]).toMatchObject({
+        inputTokens: 55,
+        outputTokens: 22,
+        reasoningTokens: 7,
+        cacheCreationInputTokens: 3,
+        cacheReadInputTokens: 11,
+        totalTokens: 77,
+      });
+      expect(session.usageRecords[1]).toMatchObject({
+        model: "qsr-fab-model-session",
+        modelProvider: "qsr-fab-provider-session",
+        inputTokens: 101,
+        outputTokens: 23,
+        reasoningTokens: 13,
+        cacheCreationInputTokens: 5,
+        cacheReadInputTokens: 17,
+        totalTokens: 124,
+      });
+
+      const webSearch = session.toolCalls.find((call) => call.toolName === "web_search")!;
+      expect(webSearch.status).toBe("completed");
+      expect(webSearch.input).toEqual({ type: "search", query: "qsr fabricated web query" });
+      const toolSearch = session.toolCalls.find((call) => call.toolName === "tool_search")!;
+      expect(toolSearch.input).toEqual({
+        execution: "client",
+        arguments: { query: "qsr fabricated tool query" },
+      });
+      expect(toolSearch.output).toEqual([{ type: "namespace", name: "qsr_fab_tool" }]);
+
+      const activityKinds = session.events
+        .filter((event) =>
+          [
+            "response_item.agent_message",
+            "event_msg.sub_agent_activity",
+            "event_msg.thread_rolled_back",
+          ].includes(event.rawReference.nativeType ?? ""),
+        )
+        .map((event) => event.kind);
+      expect(activityKinds).toEqual(["system", "lifecycle", "lifecycle"]);
+      expect(JSON.stringify(session.events)).not.toContain("must-not-cross");
+      expect(mapSession(session, "fp-current").messages).toHaveLength(1);
+    } finally {
+      rmSync(currentRoot, { recursive: true, force: true });
+    }
+  });
+
   // ---------------------------------------------------------------------------
   // Idempotency proof (content-sourced id)
   //
@@ -1049,6 +1296,12 @@ describe("codex adapter", () => {
       const mappedParent = mapSession(parent, "fp-parent");
       expect(mappedChild.session.parentSessionId).toBe(parent.id);
       expect(mappedChild.session.agentName).toBe("qsr-fab-agent-name");
+      expect(child.assignment).toEqual({
+        nickname: "qsr-fab-agent-name",
+        role: "qsr-fab-role",
+        path: "/qsr/fab/agents/qsr-fab-agent.md",
+        depth: 1,
+      });
 
       // A main session carries no parentSessionId and the default agentName.
       expect(mappedParent.session.parentSessionId).toBeUndefined();
@@ -1247,6 +1500,18 @@ describe("codex full data fidelity — declarative signal/drop per record type",
       }),
     },
     {
+      name: "response_item.agent_message",
+      kind: "system",
+      record: responseItem({
+        type: "agent_message",
+        event_id: "qsr-fab-agent-event",
+        occurred_at_ms: 1,
+        agent_thread_id: "qsr-fab-agent-thread",
+        agent_path: "/qsr/fab/agents/current.md",
+        kind: "qsr-fab-agent-kind",
+      }),
+    },
+    {
       name: "response_item.function_call",
       kind: "tool_call",
       record: responseItem({ type: "function_call", call_id: "qsrfab_call_a", name: "shell", arguments: "{}" }),
@@ -1352,6 +1617,23 @@ describe("codex full data fidelity — declarative signal/drop per record type",
       record: eventMsg({ type: "turn_aborted", turn_id: "0fab0000-fab0-7fab-8fab-0000000000e1", reason: "interrupted" }),
     },
     {
+      name: "event_msg.sub_agent_activity",
+      kind: "lifecycle",
+      record: eventMsg({
+        type: "sub_agent_activity",
+        event_id: "qsr-fab-subagent-event",
+        occurred_at_ms: 2,
+        agent_thread_id: "qsr-fab-subagent-thread",
+        agent_path: "/qsr/fab/agents/subagent.md",
+        kind: "qsr-fab-subagent-kind",
+      }),
+    },
+    {
+      name: "event_msg.thread_rolled_back",
+      kind: "lifecycle",
+      record: eventMsg({ type: "thread_rolled_back", num_turns: 2 }),
+    },
+    {
       // FIX: mcp_tool_call_end carries the tool result, not unknown pass-through.
       name: "event_msg.mcp_tool_call_end",
       kind: "tool_result",
@@ -1371,11 +1653,23 @@ describe("codex full data fidelity — declarative signal/drop per record type",
   }> = [
     {
       name: "turn_context",
-      reason: "codex.turn_context.provider_bookkeeping",
+      reason: "codex.turn_context.captured_execution_context",
       record: assertSchemaValid({
         type: "turn_context",
         timestamp: NOW,
         payload: { turn_id: "0fab0000-fab0-7fab-8fab-0000000000f1", cwd: FIXTURE_CWD, model: "qsr-fab-model" },
+      }),
+    },
+    {
+      name: "event_msg.thread_settings_applied",
+      reason: "codex.event_msg.thread_settings_applied.captured_execution_context",
+      record: eventMsg({
+        type: "thread_settings_applied",
+        thread_settings: {
+          model: "qsr-fab-model",
+          model_provider_id: "qsr-fab-provider",
+          reasoning_effort: "qsr-fab-effort",
+        },
       }),
     },
     {

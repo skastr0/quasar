@@ -81,6 +81,7 @@
           "toolCallId": "grok:c72403d626d5a091447e25d4c19cc607:tool:e672f46e6755b891470176643ccb0ec7"
         }
       ],
+      "executionContexts": [],
       "host": "test-host",
       "id": "grok:c72403d626d5a091447e25d4c19cc607",
       "identitySchemeVersion": 1,
