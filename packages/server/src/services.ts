@@ -4,6 +4,7 @@ import { Context, Effect, Layer, Schema } from "effect";
 import { makeEmbeddingProfile, type EmbeddingProfile } from "./embeddingProfiles";
 import type { QueueJobRow } from "./model";
 import { ensureParentDir, sqlitePath } from "./paths";
+import { LocalStore } from "./store";
 
 export class DurableQueueError extends Schema.TaggedError<DurableQueueError>()(
   "DurableQueueError",
@@ -540,7 +541,15 @@ export const EmbeddingsLive = Layer.succeed(
   })(),
 );
 
-export const IngestCoordinatorLive = Layer.succeed(
+export const IngestCoordinatorLive = Layer.effect(
   IngestCoordinator,
-  IngestCoordinator.of({ status: Effect.succeed({ activeRuns: 0 }) }),
+  Effect.gen(function* () {
+    const store = yield* LocalStore;
+    return IngestCoordinator.of({
+      status: store.countIngestRuns("running").pipe(
+        Effect.map((activeRuns) => ({ activeRuns })),
+        Effect.orDie,
+      ),
+    });
+  }),
 );
