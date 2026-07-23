@@ -29,6 +29,13 @@ test("parseQuery leaves an invalid role token in the text", () => {
   expect(out.text).toBe("role:bogus hello");
 });
 
+test("parseQuery accepts every stored message role used by /query", () => {
+  expect(parseQuery("role:user vector")).toMatchObject({ role: "user", text: "vector" });
+  expect(parseQuery("role:assistant plan")).toMatchObject({ role: "assistant", text: "plan" });
+  expect(parseQuery("role:reasoning vector")).toMatchObject({ role: "reasoning", text: "vector" });
+  expect(parseQuery("role:thinking plan")).toEqual({ text: "role:thinking plan" });
+});
+
 test("filterSummary and shortProject render compactly", () => {
   expect(shortProject("git:github.com/skastr0/quasar")).toBe("quasar");
   expect(filterSummary(parseQuery("project:git:github.com/skastr0/quasar #grok role:user x"))).toBe(

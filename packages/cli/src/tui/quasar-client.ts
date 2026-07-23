@@ -1,34 +1,36 @@
 /**
- * In-process Quasar client for the TUI.
+ * Poll-based HTTP client for the OpenTUI render loop.
  *
- * The TUI sits on top of the CLI: it reuses the CLI's server-URL resolution
- * (`configuredServerUrl`) and the same HTTP contract the CLI commands drive.
- *
- * I/O works AROUND an opentui constraint: the render loop runs continuously and
- * starves libuv's poll phase, so in-process async `fetch` RESPONSE-BODY reads
- * hang under an active renderer (proven: headers return in ~30ms, bodies never
- * resolve; pause() does not help). But `setTimeout` and synchronous `fs` calls
- * keep working. So: spawn `curl` writing the body to a temp file (no streaming
- * read, no awaiting the also-starved process-exit), and POLL that file with
- * setTimeout + sync readFileSync until it parses as complete JSON. The result is
- * genuinely asynchronous — the UI stays responsive (animated "searching…",
- * cancellable) instead of freezing — without ever touching a starved code path.
- *
- * Parsing is split into pure functions (unit-tested against real response
- * fixtures) and the poll-based IO layer.
+ * OpenTUI starves fetch body reads while rendering. Curl writes each response to
+ * a temporary file and a timer polls for complete JSON, keeping the UI live and
+ * cancellable. Query collections still share the exact typed POST /query
+ * contract used by the CLI; only the I/O mechanism differs.
  */
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import type { QueryResponse, QuerySpec } from "@skastr0/quasar-protocol";
+
 import { configuredServerUrl } from "../client-config";
+import { decodeQueryOutput } from "../query-client";
+import { messagesQuery, searchQuery, sessionsQuery, toolCallsQuery } from "../query-spec";
 
 let ioCounter = 0;
 
 export type SearchMode = "lexical" | "semantic" | "fusion";
-
 export const SEARCH_MODES: readonly SearchMode[] = ["lexical", "semantic", "fusion"];
+const TUI_SEARCH_FIELDS = [
+  "messageId",
+  "sessionId",
+  "sequence",
+  "projectKey",
+  "provider",
+  "role",
+  "text",
+  "score",
+] as const;
 
 export interface SearchMatch {
   readonly key: string;
@@ -68,6 +70,8 @@ export interface ToolCallRow {
   readonly status: string;
   readonly inputText: string;
   readonly outputText: string;
+  readonly inputBytes: number;
+  readonly outputBytes: number;
   readonly provider: string;
   readonly projectKey: string;
 }
@@ -78,12 +82,10 @@ export interface ProjectRow {
   readonly rawPath: string;
 }
 
-/** A typed outcome: data on success, a structured failure otherwise. */
 export type Outcome<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly code: string; readonly message: string };
 
-/** The slice of the client the TUI depends on — injectable so tests use a fake. */
 export interface QuasarClientLike {
   search(
     query: string,
@@ -99,184 +101,180 @@ export interface QuasarClientLike {
     limit?: number;
     signal?: AbortSignal;
   }): Promise<Outcome<readonly ToolCallRow[]>>;
+  toolCall(id: string, opts?: { signal?: AbortSignal }): Promise<Outcome<ToolCallRow>>;
 }
 
-const isRecord = (v: unknown): v is Record<string, unknown> =>
-  v !== null && typeof v === "object";
-
-const str = (v: unknown): string => (typeof v === "string" ? v : "");
-const numOr = (v: unknown, fallback: number): number => (typeof v === "number" ? v : fallback);
-const strOrNull = (v: unknown): string | null => (typeof v === "string" ? v : null);
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object";
+const str = (value: unknown): string => typeof value === "string" ? value : "";
+const numOr = (value: unknown, fallback = 0): number => typeof value === "number" ? value : fallback;
+const strOrNull = (value: unknown): string | null => typeof value === "string" ? value : null;
 
 const failure = (envelope: unknown, fallbackMessage: string): { ok: false; code: string; message: string } => {
   if (isRecord(envelope) && isRecord(envelope.error)) {
-    const e = envelope.error;
     return {
       ok: false,
-      code: str(e.code) || str(e.type) || "Error",
-      message: str(e.message) || fallbackMessage,
+      code: str(envelope.error.code) || str(envelope.error.type) || "Error",
+      message: str(envelope.error.message) || fallbackMessage,
     };
   }
   return { ok: false, code: "Error", message: fallbackMessage };
 };
 
-const envelopeOk = (envelope: unknown): envelope is { data: unknown } =>
-  isRecord(envelope) && envelope.ok === true;
-
-// ----------------------------------------------------------------- pure parsers
-
-export const parseSearch = (envelope: unknown): Outcome<readonly SearchMatch[]> => {
-  if (!envelopeOk(envelope)) return failure(envelope, "search failed");
-  const data = (envelope as { data: unknown }).data;
-  const rawMatches = isRecord(data) && Array.isArray(data.matches) ? data.matches : [];
-  const matches = rawMatches.flatMap((m): SearchMatch[] => {
-    if (!isRecord(m)) return [];
-    const row = isRecord(m.row) ? m.row : {};
-    return [
-      {
-        key: str(m.key) || str(row.key),
-        score: numOr(m.score, 0),
-        sessionId: str(row.sessionId),
-        seq: numOr(row.seq, 0),
-        role: str(row.role),
-        projectKey: str(row.projectKey),
-        provider: str(row.provider),
-        text: str(row.text),
-      },
-    ];
-  });
-  return { ok: true, value: matches };
+const payloadText = (value: unknown): string => {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  return JSON.stringify(value, null, 2);
 };
 
-export const parseSessions = (envelope: unknown): Outcome<readonly SessionRow[]> => {
-  if (!envelopeOk(envelope)) return failure(envelope, "sessions failed");
-  const data = (envelope as { data: unknown }).data;
-  const rows = isRecord(data) && Array.isArray(data.rows) ? data.rows : [];
-  return {
-    ok: true,
-    value: rows.flatMap((r): SessionRow[] =>
-      !isRecord(r)
-        ? []
-        : [
-            {
-              sessionId: str(r.sessionId),
-              projectKey: str(r.projectKey),
-              provider: str(r.provider),
-              agentName: strOrNull(r.agentName),
-              title: strOrNull(r.title),
-              startedAt: strOrNull(r.startedAt),
-              updatedAt: strOrNull(r.updatedAt),
-              messageCount: numOr(r.messageCount, 0),
-              toolCallCount: numOr(r.toolCallCount, 0),
-            },
-          ],
-    ),
-  };
+const queryItems = (input: unknown, spec: QuerySpec): QueryResponse =>
+  decodeQueryOutput(input, spec);
+
+export const parseSearch = (input: unknown, spec = searchQuery({ text: "fixture", mode: "lexical" })): Outcome<readonly SearchMatch[]> => {
+  if (isRecord(input) && input.ok === false) return failure(input, "search failed");
+  try {
+    const response = queryItems(input, spec);
+    if (response.kind !== "search") return { ok: false, code: "Protocol", message: "expected search response" };
+    return {
+      ok: true,
+      value: response.items.map((item) => ({
+        key: str(item.messageId) || `${str(item.sessionId)}:${numOr(item.sequence)}:${str(item.role)}`,
+        score: numOr(item.score),
+        sessionId: str(item.sessionId),
+        seq: numOr(item.sequence),
+        role: str(item.role),
+        projectKey: str(item.projectKey),
+        provider: str(item.provider),
+        text: str(item.text),
+      })),
+    };
+  } catch (error) {
+    return { ok: false, code: "Protocol", message: error instanceof Error ? error.message : String(error) };
+  }
 };
 
-export const parseMessages = (envelope: unknown): Outcome<readonly MessageRow[]> => {
-  if (!envelopeOk(envelope)) return failure(envelope, "messages failed");
-  const data = (envelope as { data: unknown }).data;
-  const rows = isRecord(data) && Array.isArray(data.rows) ? data.rows : [];
-  return {
-    ok: true,
-    value: rows.flatMap((r): MessageRow[] =>
-      !isRecord(r)
-        ? []
-        : [{ seq: numOr(r.seq, 0), role: str(r.role), text: str(r.text), ts: strOrNull(r.ts) }],
-    ),
-  };
+export const parseSessions = (input: unknown, spec = sessionsQuery({ projection: { detail: "detail" } })): Outcome<readonly SessionRow[]> => {
+  if (isRecord(input) && input.ok === false) return failure(input, "sessions failed");
+  try {
+    const response = queryItems(input, spec);
+    if (response.kind !== "sessions") return { ok: false, code: "Protocol", message: "expected sessions response" };
+    return {
+      ok: true,
+      value: response.items.map((item) => ({
+        sessionId: str(item.sessionId),
+        projectKey: str(item.projectKey),
+        provider: str(item.provider),
+        agentName: strOrNull(item.agentName),
+        title: strOrNull(item.title),
+        startedAt: strOrNull(item.startedAt),
+        updatedAt: strOrNull(item.endedAt),
+        messageCount: numOr(item.messageCount),
+        toolCallCount: numOr(item.toolCallCount),
+      })),
+    };
+  } catch (error) {
+    return { ok: false, code: "Protocol", message: error instanceof Error ? error.message : String(error) };
+  }
 };
 
-export const parseToolCalls = (envelope: unknown): Outcome<readonly ToolCallRow[]> => {
-  if (!envelopeOk(envelope)) return failure(envelope, "tool-calls failed");
-  const data = (envelope as { data: unknown }).data;
-  const rows = isRecord(data) && Array.isArray(data.rows) ? data.rows : [];
-  return {
-    ok: true,
-    value: rows.flatMap((r): ToolCallRow[] =>
-      !isRecord(r)
-        ? []
-        : [
-            {
-              id: str(r.id),
-              sessionId: str(r.sessionId),
-              seq: numOr(r.seq, 0),
-              toolName: str(r.toolName),
-              status: str(r.status),
-              inputText: str(r.inputText),
-              outputText: str(r.outputText),
-              provider: str(r.provider),
-              projectKey: str(r.projectKey),
-            },
-          ],
-    ),
-  };
+export const parseMessages = (input: unknown, spec: QuerySpec): Outcome<readonly MessageRow[]> => {
+  if (isRecord(input) && input.ok === false) return failure(input, "messages failed");
+  try {
+    const response = queryItems(input, spec);
+    if (response.kind !== "messages") return { ok: false, code: "Protocol", message: "expected messages response" };
+    return {
+      ok: true,
+      value: response.items.map((item) => ({
+        seq: numOr(item.sequence),
+        role: str(item.role),
+        text: str(item.text),
+        ts: strOrNull(item.timestamp),
+      })),
+    };
+  } catch (error) {
+    return { ok: false, code: "Protocol", message: error instanceof Error ? error.message : String(error) };
+  }
+};
+
+export const parseToolCalls = (input: unknown, spec: QuerySpec): Outcome<readonly ToolCallRow[]> => {
+  if (isRecord(input) && input.ok === false) return failure(input, "tool-calls failed");
+  try {
+    const response = queryItems(input, spec);
+    if (response.kind !== "toolCalls") return { ok: false, code: "Protocol", message: "expected toolCalls response" };
+    return {
+      ok: true,
+      value: response.items.map((item) => ({
+        id: str(item.toolCallId),
+        sessionId: str(item.sessionId),
+        seq: numOr(item.sequence),
+        toolName: str(item.toolName),
+        status: str(item.status),
+        inputText: payloadText(item.input),
+        outputText: payloadText(item.output),
+        inputBytes: numOr(item.inputBytes),
+        outputBytes: numOr(item.outputBytes),
+        provider: str(item.provider),
+        projectKey: str(item.projectKey),
+      })),
+    };
+  } catch (error) {
+    return { ok: false, code: "Protocol", message: error instanceof Error ? error.message : String(error) };
+  }
 };
 
 export const parseProjects = (envelope: unknown): Outcome<readonly ProjectRow[]> => {
-  if (!envelopeOk(envelope)) return failure(envelope, "projects failed");
-  const data = (envelope as { data: unknown }).data;
-  const rows = isRecord(data) && Array.isArray(data.rows) ? data.rows : [];
+  if (!isRecord(envelope) || envelope.ok !== true || !isRecord(envelope.data)) {
+    return failure(envelope, "projects failed");
+  }
+  const rows = Array.isArray(envelope.data.rows) ? envelope.data.rows : [];
   return {
     ok: true,
-    value: rows.flatMap((r): ProjectRow[] =>
-      !isRecord(r)
-        ? []
-        : [{ projectKey: str(r.projectKey), displayName: str(r.displayName), rawPath: str(r.rawPath) }],
-    ),
+    value: rows.flatMap((row): ProjectRow[] => !isRecord(row) ? [] : [{
+      projectKey: str(row.projectKey),
+      displayName: str(row.displayName),
+      rawPath: str(row.rawPath),
+    }]),
   };
 };
 
-// ----------------------------------------------------------------- sync IO layer
-
-const QueryParams = (params: Record<string, string | number | undefined>): string => {
-  const usp = new URLSearchParams();
-  for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && String(v).trim() !== "") usp.set(k, String(v));
+const queryParams = (params: Record<string, string | number | undefined>): string => {
+  const values = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && String(value).trim() !== "") values.set(key, String(value));
   }
-  const s = usp.toString();
-  return s ? `?${s}` : "";
+  const encoded = values.toString();
+  return encoded === "" ? "" : `?${encoded}`;
 };
 
 export class QuasarClient implements QuasarClientLike {
-  constructor(
-    private readonly serverUrl: string,
-    private readonly timeoutSec = 30,
-  ) {}
+  constructor(private readonly serverUrl: string, private readonly timeoutSec = 30) {}
 
-  /** Resolve a client from the same config the CLI uses; null if unconfigured. */
   static fromConfig(timeoutSec = 30): QuasarClient | null {
     const url = configuredServerUrl();
     return url === undefined ? null : new QuasarClient(url, timeoutSec);
   }
 
-  /**
-   * Spawn `curl` writing the body to a temp file, then poll the file with
-   * setTimeout until it parses as complete JSON. Avoids both starved paths
-   * (body-stream read, process-exit await) while staying non-blocking.
-   */
   private requestPolled(
     path: string,
     params: Record<string, string | number | undefined>,
     signal?: AbortSignal,
+    body?: unknown,
   ): Promise<unknown> {
     const base = this.serverUrl.endsWith("/") ? this.serverUrl.slice(0, -1) : this.serverUrl;
-    const url = `${base}/${path}${QueryParams(params)}`;
+    const url = `${base}/${path}${queryParams(params)}`;
     const tmp = join(tmpdir(), `quasar-tui-io-${process.pid}-${ioCounter++}`);
 
     return new Promise((resolve, reject) => {
       let settled = false;
-      const child = spawn("curl", ["-s", "--max-time", String(this.timeoutSec), "-o", tmp, url], {
-        stdio: "ignore",
-      });
+      const requestArgs = ["-s", "--max-time", String(this.timeoutSec), "-o", tmp];
+      if (body !== undefined) {
+        requestArgs.push("-X", "POST", "-H", "content-type: application/json", "--data-binary", JSON.stringify(body));
+      }
+      requestArgs.push(url);
+      const child = spawn("curl", requestArgs, { stdio: "ignore" });
       const cleanup = () => {
         signal?.removeEventListener("abort", onAbort);
-        try {
-          unlinkSync(tmp);
-        } catch {
-          // best-effort
-        }
+        try { unlinkSync(tmp); } catch { /* best effort */ }
       };
       const settle = (fn: () => void) => {
         if (settled) return;
@@ -285,33 +283,23 @@ export class QuasarClient implements QuasarClientLike {
         fn();
       };
       const onAbort = () => {
-        try {
-          child.kill();
-        } catch {
-          // best-effort
-        }
+        try { child.kill(); } catch { /* best effort */ }
         settle(() => reject(new Error("aborted")));
       };
       if (signal?.aborted) return onAbort();
       signal?.addEventListener("abort", onAbort);
 
-      const deadline = Date.now() + (this.timeoutSec + 5) * 1000;
+      const deadline = Date.now() + (this.timeoutSec + 5) * 1_000;
       const poll = () => {
         if (settled) return;
         if (existsSync(tmp)) {
           try {
             const json = JSON.parse(readFileSync(tmp, "utf8")) as unknown;
             return settle(() => resolve(json));
-          } catch {
-            // partial write — keep polling
-          }
+          } catch { /* partial write */ }
         }
         if (Date.now() > deadline) {
-          try {
-            child.kill();
-          } catch {
-            // best-effort
-          }
+          try { child.kill(); } catch { /* best effort */ }
           return settle(() => reject(new Error("request timed out")));
         }
         setTimeout(poll, 40);
@@ -320,67 +308,140 @@ export class QuasarClient implements QuasarClientLike {
     });
   }
 
-  private async run<T>(
-    parse: (e: unknown) => Outcome<T>,
-    path: string,
-    params: Record<string, string | number | undefined>,
+  private async runQuery<T>(
+    spec: QuerySpec,
+    parse: (input: unknown, expected: QuerySpec) => Outcome<T>,
     signal?: AbortSignal,
   ): Promise<Outcome<T>> {
     try {
-      return parse(await this.requestPolled(path, params, signal));
+      return parse(await this.requestPolled("query", {}, signal, spec), spec);
     } catch (error) {
       return { ok: false, code: "Network", message: error instanceof Error ? error.message : String(error) };
     }
   }
 
-  search(
-    query: string,
-    mode: SearchMode,
-    opts: { limit?: number; projectKey?: string; provider?: string; role?: string; signal?: AbortSignal } = {},
-  ): Promise<Outcome<readonly SearchMatch[]>> {
-    return this.run(
-      parseSearch,
-      `search/${mode}`,
-      { q: query, limit: opts.limit, projectKey: opts.projectKey, provider: opts.provider, role: opts.role },
-      opts.signal,
-    );
+  private async collectQuery<T>(
+    requestedLimit: number,
+    build: (page: { readonly limit: number; readonly cursor?: string }) => QuerySpec,
+    parse: (input: unknown, expected: QuerySpec) => Outcome<readonly T[]>,
+    signal?: AbortSignal,
+  ): Promise<Outcome<readonly T[]>> {
+    const target = Number.isInteger(requestedLimit) && requestedLimit > 0 ? requestedLimit : 1;
+    const items: T[] = [];
+    const seenCursors = new Set<string>();
+    let cursor: string | undefined;
+
+    while (items.length < target) {
+      const spec = build({
+        limit: Math.min(200, target - items.length),
+        ...(cursor === undefined ? {} : { cursor }),
+      });
+      let input: unknown;
+      try {
+        input = await this.requestPolled("query", {}, signal, spec);
+      } catch (error) {
+        return { ok: false, code: "Network", message: error instanceof Error ? error.message : String(error) };
+      }
+      const result = parse(input, spec);
+      if (!result.ok) return result;
+      items.push(...result.value);
+
+      let nextCursor: string | undefined;
+      try {
+        nextCursor = decodeQueryOutput(input, spec).page.nextCursor;
+      } catch (error) {
+        return { ok: false, code: "Protocol", message: error instanceof Error ? error.message : String(error) };
+      }
+      if (nextCursor === undefined || result.value.length === 0) break;
+      if (seenCursors.has(nextCursor)) {
+        return { ok: false, code: "Protocol", message: "query pagination repeated a cursor" };
+      }
+      seenCursors.add(nextCursor);
+      cursor = nextCursor;
+    }
+
+    return { ok: true, value: items };
   }
 
-  sessions(
-    opts: { provider?: string; projectKey?: string; limit?: number; offset?: number; signal?: AbortSignal } = {},
-  ): Promise<Outcome<readonly SessionRow[]>> {
-    return this.run(
+  search(query: string, mode: SearchMode, opts: {
+    limit?: number; projectKey?: string; provider?: string; role?: string; signal?: AbortSignal;
+  } = {}): Promise<Outcome<readonly SearchMatch[]>> {
+    const spec = searchQuery({
+      text: query,
+      mode,
+      filters: {
+        projectKey: opts.projectKey,
+        providers: opts.provider === undefined ? undefined : [opts.provider],
+        role: opts.role,
+      },
+      projection: { detail: "detail", fields: TUI_SEARCH_FIELDS, limit: opts.limit },
+    });
+    return this.runQuery(spec, parseSearch, opts.signal);
+  }
+
+  sessions(opts: {
+    provider?: string; projectKey?: string; limit?: number; signal?: AbortSignal;
+  } = {}): Promise<Outcome<readonly SessionRow[]>> {
+    return this.collectQuery(
+      opts.limit ?? 100,
+      (page) => sessionsQuery({
+        filters: {
+          projectKey: opts.projectKey,
+          providers: opts.provider === undefined ? undefined : [opts.provider],
+        },
+        projection: { detail: "detail", ...page },
+      }),
       parseSessions,
-      "sessions",
-      { provider: opts.provider, projectKey: opts.projectKey, limit: opts.limit, offset: opts.offset },
       opts.signal,
     );
   }
 
   messages(sessionId: string, opts: { limit?: number; signal?: AbortSignal } = {}): Promise<Outcome<readonly MessageRow[]>> {
-    return this.run(parseMessages, "messages", { sessionId, limit: opts.limit }, opts.signal);
-  }
-
-  toolCalls(
-    opts: { sessionId?: string; projectKey?: string; provider?: string; toolName?: string; limit?: number; signal?: AbortSignal } = {},
-  ): Promise<Outcome<readonly ToolCallRow[]>> {
-    return this.run(
-      parseToolCalls,
-      "tool-calls",
-      {
-        sessionId: opts.sessionId,
-        projectKey: opts.projectKey,
-        provider: opts.provider,
-        toolName: opts.toolName,
-        limit: opts.limit,
-      },
+    return this.collectQuery(
+      opts.limit ?? 100,
+      (page) => messagesQuery({ sessionId, projection: page }),
+      parseMessages,
       opts.signal,
     );
   }
 
-  projects(
-    opts: { limit?: number; offset?: number; signal?: AbortSignal } = {},
-  ): Promise<Outcome<readonly ProjectRow[]>> {
-    return this.run(parseProjects, "projects", { limit: opts.limit, offset: opts.offset }, opts.signal);
+  toolCalls(opts: {
+    sessionId?: string; projectKey?: string; provider?: string; toolName?: string; limit?: number; signal?: AbortSignal;
+  } = {}): Promise<Outcome<readonly ToolCallRow[]>> {
+    return this.collectQuery(
+      opts.limit ?? 100,
+      (page) => toolCallsQuery({
+        filters: {
+          sessionId: opts.sessionId,
+          projectKey: opts.projectKey,
+          providers: opts.provider === undefined ? undefined : [opts.provider],
+          toolName: opts.toolName,
+        },
+        projection: page,
+      }),
+      parseToolCalls,
+      opts.signal,
+    );
+  }
+
+  async toolCall(id: string, opts: { signal?: AbortSignal } = {}): Promise<Outcome<ToolCallRow>> {
+    const spec = toolCallsQuery({
+      filters: { toolCallId: id },
+      projection: { detail: "detail", limit: 1 },
+    });
+    const result = await this.runQuery(spec, parseToolCalls, opts.signal);
+    if (!result.ok) return result;
+    const row = result.value[0];
+    return row === undefined
+      ? { ok: false, code: "NotFound", message: `tool call not found: ${id}` }
+      : { ok: true, value: row };
+  }
+
+  async projects(opts: { limit?: number; offset?: number; signal?: AbortSignal } = {}): Promise<Outcome<readonly ProjectRow[]>> {
+    try {
+      return parseProjects(await this.requestPolled("projects", { limit: opts.limit, offset: opts.offset }, opts.signal));
+    } catch (error) {
+      return { ok: false, code: "Network", message: error instanceof Error ? error.message : String(error) };
+    }
   }
 }

@@ -78,7 +78,34 @@
           "timestamp": "2026-06-11T00:00:00.000Z"
         }
       ],
-      "executionContexts": [],
+      "executionContexts": [
+        {
+          "agentName": "devin",
+          "id": "devin:93eb6f6331d9c7a0ea9165f5490f0db2:execution-context:896c3088f5c725f5060ff2caba024e1f",
+          "machineId": "machine:test",
+          "model": "fixture-model",
+          "permissionProfileType": "normal",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "devin",
+          "scope": "session",
+          "sequence": 0,
+          "sessionId": "devin:93eb6f6331d9c7a0ea9165f5490f0db2",
+          "timestamp": "2026-06-11T00:00:00.000Z"
+        },
+        {
+          "agentName": "devin",
+          "id": "devin:93eb6f6331d9c7a0ea9165f5490f0db2:execution-context:1fc5929000ed37f56f637582696646af",
+          "machineId": "machine:test",
+          "model": "fixture-model",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "devin",
+          "scope": "turn",
+          "sequence": 1,
+          "sessionId": "devin:93eb6f6331d9c7a0ea9165f5490f0db2",
+          "timestamp": "2026-06-11T00:00:00.000Z",
+          "turnId": "devin-assistant-1"
+        }
+      ],
       "host": "test-host",
       "id": "devin:93eb6f6331d9c7a0ea9165f5490f0db2",
       "identitySchemeVersion": 1,

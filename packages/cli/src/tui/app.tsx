@@ -230,7 +230,7 @@ const Detail = ({
             tools.map((tc, i) => (
               <text
                 key={tc.id}
-                content={`${i === toolSel ? "▎" : " "} ${tc.toolName} · ${tc.status} · #${tc.seq}`}
+                content={`${i === toolSel ? "▎" : " "} ${tc.toolName} · ${tc.status} · #${tc.seq} · ${tc.inputBytes}B→${tc.outputBytes}B`}
                 fg={i === toolSel ? palette.amber : palette.muted}
               />
             ))
@@ -465,6 +465,7 @@ export const App = ({
       if (client === null) return;
       setTools([]);
       setToolSel(0);
+      setToolDetail(null);
       // Intentionally unawaited under opentui — see routeAsync.
       routeAsync(
         client.toolCalls({ sessionId, limit: 500 }),
@@ -481,6 +482,27 @@ export const App = ({
           setError(message);
         },
         "tool-call load failed",
+      );
+    },
+    [client],
+  );
+
+  const loadToolDetail = useCallback(
+    (sessionId: string, toolCallId: string) => {
+      if (client === null) return;
+      setToolDetail(null);
+      routeAsync(
+        client.toolCall(toolCallId),
+        (result) => {
+          if (!result.ok) {
+            setError(result.message);
+            return;
+          }
+          setToolDetail(result.value);
+          setReader({ kind: "toolDetail", sessionId });
+        },
+        setError,
+        "tool-call detail load failed",
       );
     },
     [client],
@@ -563,8 +585,7 @@ export const App = ({
           break;
         case "drill":
           if (s.reader?.kind === "tools" && s.tools[s.toolSel]) {
-            setToolDetail(s.tools[s.toolSel]!);
-            setReader({ kind: "toolDetail", sessionId: s.reader.sessionId });
+            loadToolDetail(s.reader.sessionId, s.tools[s.toolSel]!.id);
           }
           break;
         case "scroll":
@@ -634,7 +655,7 @@ export const App = ({
           break;
       }
     },
-    [onExit, loadTools, exitToEditor, flash, toolDetail],
+    [onExit, loadTools, loadToolDetail, exitToEditor, flash, toolDetail],
   );
 
   const onKey = useCallback(
