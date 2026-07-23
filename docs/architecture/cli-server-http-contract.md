@@ -31,12 +31,11 @@ server never imports CLI or provider-parser modules (enforced by
 | ------ | --------------------- | ----------------------------------------------------------------------- |
 | POST   | `/ingest/fingerprint` | Probe `(sessionId, sourceFingerprint, normalizationVersion)` freshness. |
 | POST   | `/ingest/session`     | Write one normalized `MappedSession`.                                   |
-| POST   | `/query`              | Execute the strict, projected, cursor-paginated query protocol.         |
 | GET    | `/projects`           | List project identities.                                                |
 | GET    | `/session-detail`     | Read bounded rich session sections, including raw normalized events.    |
-| GET    | `/sessions`           | List sessions with scoped filters.                                      |
-| GET    | `/messages`           | Read one session's messages in sequence order.                          |
-| GET    | `/tool-calls`         | List tool calls with scoped filters.                                    |
+| GET    | `/sessions`           | List source-rich sessions with scoped filters and bounded pagination.   |
+| GET    | `/messages`           | Read one session's messages in sequence order with bounded pagination.  |
+| GET    | `/tool-calls`         | List body-free tool-call summaries with scoped filters.                 |
 | GET    | `/tool-call`          | Read one complete tool call.                                            |
 | GET    | `/search/*`           | Run lexical, semantic, or fusion search.                                |
 
@@ -51,8 +50,8 @@ Both ingest endpoints require a bearer token. The server fails **closed**:
 `/ingest/session` accepts `?force=true` to bypass the unchanged-fingerprint
 skip. All read/serve/operator endpoints operate over server state only — there
 is no provider-history command on the server. Resource GET endpoints are the
-direct agent-facing read surface. `/query` remains registered only until its
-current in-tree consumers are moved back to those resource endpoints.
+only agent-facing read surface. The server deliberately has no generic
+`POST /query` route.
 
 ## Normalized payload shape
 
@@ -117,10 +116,31 @@ tool-payload fields that an older normalizer dropped: bump the normalization
 version and run normal ingest. Do not recreate SQLite and do not invent a
 parallel repair database.
 
-## Query protocol
+## Resource reads and local query composition
 
-`POST /query` accepts `quasar.query/v1`, defined and JSON-Schema-exported by
-`packages/protocol`. The discriminated query kinds are:
+The public HTTP contract is resource-shaped. Collection responses carry
+`data.rows` and `data.page`; search responses carry `data.matches` and
+`data.page`. Every page is:
+
+```ts
+interface ResourcePage {
+  limit: number;             // 1..200
+  offset: number;            // non-negative
+  nextOffset: number | null;
+}
+```
+
+`/sessions`, `/messages`, and `/tool-calls` accept resource-specific filters as
+query parameters. `/search/lexical`, `/search/semantic`, and `/search/fusion`
+accept `q`, the same session-backed filters, and bounded pagination. Search
+returns bounded excerpts with the stored byte length and a truncation marker;
+full text comes from the targeted `/messages` read. `/tool-calls` never selects
+or returns input/output bodies. `/tool-call?id=...` is the sole full-payload
+tool-call read.
+
+`quasar.query/v1`, defined and JSON-Schema-exported by `packages/protocol`, is a
+**local CLI composition input**, not an HTTP endpoint. Its discriminated kinds
+are:
 
 - `search`: lexical, semantic, or fusion message search;
 - `sessions`: normalized session metadata;
@@ -128,12 +148,14 @@ parallel repair database.
 - `toolCalls`: structural tool-call rows.
 
 Each request contains typed filters, an explicit `summary` or `detail`
-projection with a field allowlist, and a page `{ limit, cursor? }`. Provider
-filters accept all eleven provider literals. Session-backed filters include
-project, provider, session, agent name/role, model, and model provider; tool
-queries additionally accept tool-call id and tool name. Cursors are opaque and
-bound to the query shape, so changing filters or projections requires starting
-without the prior cursor.
+projection with a field allowlist, and a bounded page. The CLI dispatches the
+kind to the corresponding GET resource, applies projection locally, and emits
+the typed `quasar.query/v1` response. Its opaque cursor is a shape-bound local
+encoding of the resource offset; the server sees only `limit` and `offset`.
+Provider filters accept all eleven provider literals. Session-backed filters
+include project, provider, session, agent name/role, model, and model provider;
+tool queries additionally accept tool name. A targeted tool-call id dispatches
+to `/tool-call`.
 
 Tool-call summary projection deliberately exposes metadata and byte counts but
 not `input` or `output`. Those payloads require a detail projection, making
@@ -142,10 +164,10 @@ enumeration cheap while retaining lossless targeted retrieval.
 The CLI exposes the same contract in two layers:
 
 - ergonomic `search`, `sessions`, `messages`, `tool-calls`, and `tool-call`
-  commands with common filters, `--fields`, `--detail`, `--cursor`, and
-  `--limit`;
+  commands with common filters, local field projection, and bounded pagination;
 - `query <inline-json|@file|->`, plus local `schema` and `examples`
-  discovery, for jq-style machine composition without a second wire format.
+  discovery, for jq-style machine composition over those same resources
+  without a second server execution engine.
 
 Rich raw normalized events, usage snapshots, relationships, artifacts, and
 execution contexts remain on bounded `/session-detail`; they are intentionally
@@ -188,7 +210,8 @@ no re-ingest. This is proven by `packages/server/test/rebuild.test.ts`.
 The end-to-end contract is locked by
 `packages/cli/test/http-contract.test.ts`: it spawns the real server, drives the
 real CLI HTTP client (`postMappedSession` / `postFingerprintProbe`) against it,
-and reads normalized rows back through `/query`. Protocol schema tests lock
-strict decode, projections, pagination, and enrichment composition. A malformed
-ingest payload is asserted to yield a `4xx` through the CLI client with zero
-rows persisted.
+and reads normalized rows back through the first-class GET resources. Server
+tests assert `POST /query` is not registered. Protocol schema tests lock strict
+local query decode, projections, pagination, and enrichment composition. A
+malformed ingest payload is asserted to yield a `4xx` through the CLI client
+with zero rows persisted.

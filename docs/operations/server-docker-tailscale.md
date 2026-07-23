@@ -176,13 +176,13 @@ serving surface is read/search only:
 | Agent job | CLI wrapper | HTTP route | Filters / projection |
 | --- | --- | --- | --- |
 | Project list | `projects` | `GET /projects` | `limit`, `offset` |
-| Session list | `sessions` | `POST /query` | project, providers, session, agent, assignment role, model/provider; `--fields`, `--detail`, opaque cursor |
+| Session list | `sessions` | `GET /sessions` | project, providers, session, agent, assignment role, model/provider; bounded page |
 | Session read | `session --id <id>` | `GET /session-detail` | bounded message, tool-call, event, usage, edge, artifact, and execution-context sections |
-| Message list | `messages --session-id <id>` | `POST /query` | role/model filters; `--fields`, `--detail`, opaque cursor |
-| Search | `search --query <text> --mode lexical\|semantic\|fusion` | `POST /query` | project, providers, session, role, agent, assignment role, model/provider; all modes serve live |
-| Tool-call list | `tool-calls` | `POST /query` | session, project, providers, tool, agent, assignment role, model/provider; body-free summary by default |
-| Tool-call read | `tool-call --id <id>` | `POST /query` | detail projection returns full input/output |
-| Raw typed query | `query <inline-json\|@file\|->` | `POST /query` | strict `quasar.query/v1` request |
+| Message list | `messages --session-id <id>` | `GET /messages` | role/model filters; bounded page |
+| Search | `search --query <text> --mode lexical\|semantic\|fusion` | `GET /search/{mode}` | project, providers, session, role, agent, assignment role, model/provider; bounded excerpts |
+| Tool-call list | `tool-calls` | `GET /tool-calls` | session, project, providers, tool, agent, assignment role, model/provider; body-free summaries |
+| Tool-call read | `tool-call --id <id>` | `GET /tool-call` | targeted full input/output |
+| Raw typed query | `query <inline-json\|@file\|->` | client-side over resource GETs | strict `quasar.query/v1` input, local projection |
 | Contract discovery | `schema`, `examples` | local | JSON Schema and copyable request examples; no server required |
 | Remote ingest | `ingest --provider all` | `POST /ingest/session` | operator only; set `QUASAR_SERVER_URL` and `QUASAR_INGEST_TOKEN` |
 
@@ -193,10 +193,12 @@ Notes for wrappers:
   tool-call input/output remains structural/lexical evidence.
 - Provider filters accept `codex`, `claude`, `opencode`, `grok`, `kimi`,
   `hermes`, `antigravity`, `omp`, `pi`, `cursor`, and `devin`.
-- Query-backed commands use opaque cursors. Numeric `--offset` is intentionally
-  rejected; carry the returned `nextCursor` into `--cursor`.
-- Keep tool enumeration on summary projection. Fetch `tool-call --id` only for
-  the payloads the agent actually needs.
+- Resource collections use `{ limit, offset, nextOffset }` with a server maximum
+  of 200. Carry `nextOffset` into the next request until it is `null`.
+- CLI query/list commands may expose an opaque cursor; it is a local,
+  query-shape-bound encoding of that offset, not a server query protocol.
+- Tool enumeration is always body-free. Fetch `tool-call --id` only for the
+  payloads the agent actually needs.
 - Operator-only commands: agent wrappers should not expose ingest, embedding,
   maintenance, or backfill as default tools. Those remain operator actions.
 - If a wrapper cannot reach `QUASAR_SERVER_URL`, fail closed with a connection
