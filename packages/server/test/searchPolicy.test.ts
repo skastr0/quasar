@@ -42,6 +42,7 @@ const reasoningSession = (text: string): MappedSession => ({
     sourceFingerprint: "fp-reasoning",
     host: "host-r",
     identitySchemeVersion: 1,
+    normalizationVersion: 2,
     messageCount: 1,
     toolCallCount: 0,
   },

@@ -67,6 +67,7 @@ export const ingestMappedSession = (
       : yield* store.hasSessionFingerprint(
         mapped.session.sessionId,
         mapped.session.sourceFingerprint,
+        mapped.session.normalizationVersion,
       ).pipe(Effect.catchAll(() => Effect.succeed(false)));
     if (unchanged) {
       return {

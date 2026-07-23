@@ -40,6 +40,7 @@ const duplicateContentSession = (): MappedSession => ({
     sourceFingerprint: "fingerprint-a",
     host: "host-a",
     identitySchemeVersion: 1,
+    normalizationVersion: 2,
     messageCount: 2,
     toolCallCount: 0,
   },

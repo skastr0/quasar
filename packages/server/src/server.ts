@@ -78,12 +78,17 @@ const isSeq = (value: unknown): value is number =>
 const isNonNegativeInt = (value: unknown): value is number =>
   typeof value === "number" && Number.isInteger(value) && value >= 0;
 
-const isFingerprintProbe = (value: unknown): value is { readonly sessionId: string; readonly sourceFingerprint: string } =>
+const isFingerprintProbe = (value: unknown): value is {
+  readonly sessionId: string;
+  readonly sourceFingerprint: string;
+  readonly normalizationVersion: number;
+} =>
   isRecord(value)
   && isString(value.sessionId)
   && value.sessionId.trim() !== ""
   && isString(value.sourceFingerprint)
-  && value.sourceFingerprint.trim() !== "";
+  && value.sourceFingerprint.trim() !== ""
+  && isNonNegativeInt(value.normalizationVersion);
 
 const providers = new Set<string>(Provider.literals);
 
@@ -109,6 +114,7 @@ const isSessionRow = (value: unknown): boolean =>
   && isString(value.sourceFingerprint)
   && isString(value.host)
   && isNonNegativeInt(value.identitySchemeVersion)
+  && isNonNegativeInt(value.normalizationVersion)
   && isOptionalString(value.parentSessionId)
   && isNonNegativeInt(value.messageCount)
   && isNonNegativeInt(value.toolCallCount);
@@ -347,7 +353,11 @@ const ingestFingerprint = Effect.gen(function* () {
     return badRequest("ingest/fingerprint", "JSON body must be { probe: { sessionId, sourceFingerprint } }");
   }
   const store = yield* LocalStore;
-  const unchanged = yield* store.hasSessionFingerprint(body.probe.sessionId, body.probe.sourceFingerprint).pipe(
+  const unchanged = yield* store.hasSessionFingerprint(
+    body.probe.sessionId,
+    body.probe.sourceFingerprint,
+    body.probe.normalizationVersion,
+  ).pipe(
     Effect.catchAll(() => Effect.succeed(false)),
   );
   return json(ok("ingest/fingerprint", { unchanged }));
