@@ -3,8 +3,8 @@
  *
  * OpenTUI starves fetch body reads while rendering. Curl writes each response to
  * a temporary file and a timer polls for complete JSON, keeping the UI live and
- * cancellable. Query collections still share the exact typed POST /query
- * contract used by the CLI; only the I/O mechanism differs.
+ * cancellable. Query collections use the same local typed projection adapter
+ * as the CLI; curl only performs canonical GET resource reads.
  */
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
@@ -14,7 +14,13 @@ import { join } from "node:path";
 import type { QueryResponse, QuerySpec } from "@skastr0/quasar-protocol";
 
 import { configuredServerUrl } from "../client-config";
-import { decodeQueryOutput } from "../query-client";
+import {
+  decodeQueryOutput,
+  QueryInputError,
+  QueryProtocolError,
+  queryResourceRequest,
+  queryResponseFromResource,
+} from "../query-client";
 import { messagesQuery, searchQuery, sessionsQuery, toolCallsQuery } from "../query-spec";
 
 let ioCounter = 0;
@@ -256,9 +262,8 @@ export class QuasarClient implements QuasarClientLike {
 
   private requestPolled(
     path: string,
-    params: Record<string, string | number | undefined>,
+    params: Readonly<Record<string, string | number | undefined>>,
     signal?: AbortSignal,
-    body?: unknown,
   ): Promise<unknown> {
     const base = this.serverUrl.endsWith("/") ? this.serverUrl.slice(0, -1) : this.serverUrl;
     const url = `${base}/${path}${queryParams(params)}`;
@@ -267,9 +272,6 @@ export class QuasarClient implements QuasarClientLike {
     return new Promise((resolve, reject) => {
       let settled = false;
       const requestArgs = ["-s", "--max-time", String(this.timeoutSec), "-o", tmp];
-      if (body !== undefined) {
-        requestArgs.push("-X", "POST", "-H", "content-type: application/json", "--data-binary", JSON.stringify(body));
-      }
       requestArgs.push(url);
       const child = spawn("curl", requestArgs, { stdio: "ignore" });
       const cleanup = () => {
@@ -308,15 +310,35 @@ export class QuasarClient implements QuasarClientLike {
     });
   }
 
+  private async requestQueryResource(spec: QuerySpec, signal?: AbortSignal): Promise<unknown> {
+    const request = queryResourceRequest(spec);
+    const input = await this.requestPolled(request.path, request.params, signal);
+    return isRecord(input) && input.ok === false
+      ? input
+      : queryResponseFromResource(input, spec);
+  }
+
+  private queryFailure(error: unknown): { readonly ok: false; readonly code: string; readonly message: string } {
+    return {
+      ok: false,
+      code: error instanceof QueryProtocolError
+        ? "Protocol"
+        : error instanceof QueryInputError
+          ? "Input"
+          : "Network",
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+
   private async runQuery<T>(
     spec: QuerySpec,
     parse: (input: unknown, expected: QuerySpec) => Outcome<T>,
     signal?: AbortSignal,
   ): Promise<Outcome<T>> {
     try {
-      return parse(await this.requestPolled("query", {}, signal, spec), spec);
+      return parse(await this.requestQueryResource(spec, signal), spec);
     } catch (error) {
-      return { ok: false, code: "Network", message: error instanceof Error ? error.message : String(error) };
+      return this.queryFailure(error);
     }
   }
 
@@ -327,20 +349,21 @@ export class QuasarClient implements QuasarClientLike {
     signal?: AbortSignal,
   ): Promise<Outcome<readonly T[]>> {
     const target = Number.isInteger(requestedLimit) && requestedLimit > 0 ? requestedLimit : 1;
+    const pageLimit = Math.min(200, target);
     const items: T[] = [];
     const seenCursors = new Set<string>();
     let cursor: string | undefined;
 
     while (items.length < target) {
       const spec = build({
-        limit: Math.min(200, target - items.length),
+        limit: pageLimit,
         ...(cursor === undefined ? {} : { cursor }),
       });
       let input: unknown;
       try {
-        input = await this.requestPolled("query", {}, signal, spec);
+        input = await this.requestQueryResource(spec, signal);
       } catch (error) {
-        return { ok: false, code: "Network", message: error instanceof Error ? error.message : String(error) };
+        return this.queryFailure(error);
       }
       const result = parse(input, spec);
       if (!result.ok) return result;
@@ -360,7 +383,7 @@ export class QuasarClient implements QuasarClientLike {
       cursor = nextCursor;
     }
 
-    return { ok: true, value: items };
+    return { ok: true, value: items.slice(0, target) };
   }
 
   search(query: string, mode: SearchMode, opts: {

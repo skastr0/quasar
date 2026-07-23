@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
 import {
@@ -14,6 +15,11 @@ export interface QueryRequestOptions {
   readonly serverUrl: string;
   readonly timeoutMs: number;
   readonly fetchImpl?: typeof fetch;
+}
+
+export interface QueryResourceRequest {
+  readonly path: string;
+  readonly params: Readonly<Record<string, string | number>>;
 }
 
 export class QueryTransportError extends Error {
@@ -48,9 +54,6 @@ export class QueryInputError extends Error {
   }
 }
 
-const queryUrl = (serverUrl: string): URL =>
-  new URL("query", serverUrl.endsWith("/") ? serverUrl : `${serverUrl}/`);
-
 const errorMessage = (body: unknown, fallback: string): string => {
   if (typeof body !== "object" || body === null || !("error" in body)) return fallback;
   const error = (body as { readonly error?: unknown }).error;
@@ -80,26 +83,288 @@ export const decodeQueryOutput = (input: unknown, expected?: QuerySpec): QueryRe
   return response;
 };
 
+type JsonRecord = Record<string, unknown>;
+
+interface QueryCursorPayload {
+  readonly version: 1;
+  readonly kind: QuerySpec["kind"];
+  readonly fingerprint: string;
+  readonly offset: number;
+}
+
+const isRecord = (value: unknown): value is JsonRecord =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+const queryFingerprint = (spec: QuerySpec): string => {
+  const page = { limit: spec.page.limit };
+  return createHash("sha256")
+    .update(JSON.stringify({ ...spec, page }))
+    .digest("base64url");
+};
+
+const encodeCursor = (spec: QuerySpec, offset: number): string =>
+  Buffer.from(JSON.stringify({
+    version: 1,
+    kind: spec.kind,
+    fingerprint: queryFingerprint(spec),
+    offset,
+  } satisfies QueryCursorPayload), "utf8").toString("base64url");
+
+const decodeCursor = (spec: QuerySpec): number => {
+  const cursor = spec.page.cursor;
+  if (cursor === undefined) return 0;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
+  } catch (error) {
+    throw new QueryInputError("query cursor is malformed", {
+      cursor,
+      cause: error instanceof Error ? error.message : String(error),
+    });
+  }
+  if (
+    !isRecord(payload)
+    || payload.version !== 1
+    || payload.kind !== spec.kind
+    || payload.fingerprint !== queryFingerprint(spec)
+    || !Number.isSafeInteger(payload.offset)
+    || (payload.offset as number) < 0
+  ) {
+    throw new QueryInputError("query cursor does not match the query shape", {
+      expectedKind: spec.kind,
+      cursor,
+    });
+  }
+  return payload.offset as number;
+};
+
+const compactParams = (
+  input: Record<string, string | number | undefined>,
+): Record<string, string | number> =>
+  Object.fromEntries(Object.entries(input).filter((entry): entry is [string, string | number] =>
+    entry[1] !== undefined));
+
+const resourceFilters = (
+  filters: Readonly<Record<string, unknown>> | undefined,
+): Record<string, string | number> => compactParams({
+  projectKey: typeof filters?.projectKey === "string" ? filters.projectKey : undefined,
+  provider: Array.isArray(filters?.providers) ? filters.providers.join(",") : undefined,
+  sessionId: typeof filters?.sessionId === "string" ? filters.sessionId : undefined,
+  role: typeof filters?.role === "string" ? filters.role : undefined,
+  agentName: typeof filters?.agentName === "string" ? filters.agentName : undefined,
+  agentRole: typeof filters?.agentRole === "string" ? filters.agentRole : undefined,
+  model: typeof filters?.model === "string" ? filters.model : undefined,
+  modelProvider: typeof filters?.modelProvider === "string" ? filters.modelProvider : undefined,
+  toolName: typeof filters?.toolName === "string" ? filters.toolName : undefined,
+});
+
+const toolCallBodyFields = new Set(["input", "output", "error"]);
+
+export const queryResourceRequest = (input: unknown): QueryResourceRequest => {
+  const spec = decodeQueryInput(input);
+  const offset = decodeCursor(spec);
+  const filters = spec.filters as Readonly<Record<string, unknown>> | undefined;
+  const params = {
+    ...resourceFilters(filters),
+    limit: spec.page.limit,
+    offset,
+  };
+
+  switch (spec.kind) {
+    case "sessions":
+      return { path: "sessions", params };
+    case "messages":
+      return { path: "messages", params };
+    case "search":
+      return {
+        path: `search/${spec.mode}`,
+        params: { ...params, q: spec.text },
+      };
+    case "toolCalls": {
+      const toolCallId = typeof filters?.toolCallId === "string"
+        ? filters.toolCallId
+        : undefined;
+      if (toolCallId !== undefined) {
+        return { path: "tool-call", params: { id: toolCallId } };
+      }
+      const requestedBodies = spec.projection.fields.filter((field) =>
+        toolCallBodyFields.has(field));
+      if (requestedBodies.length > 0) {
+        throw new QueryInputError(
+          "tool-call payload fields require filters.toolCallId",
+          {
+            fields: requestedBodies,
+            hint: "Fetch one tool call by id; bulk tool-call resources never return payload bodies.",
+          },
+        );
+      }
+      return { path: "tool-calls", params };
+    }
+  }
+};
+
+const requireRecord = (value: unknown, message: string): JsonRecord => {
+  if (!isRecord(value)) throw new QueryProtocolError(message, value);
+  return value;
+};
+
+const requireRows = (value: unknown, message: string): readonly JsonRecord[] => {
+  if (!Array.isArray(value) || value.some((row) => !isRecord(row))) {
+    throw new QueryProtocolError(message, value);
+  }
+  return value as readonly JsonRecord[];
+};
+
+const resourcePage = (
+  value: unknown,
+  spec: QuerySpec,
+  expectedOffset: number,
+): { readonly nextOffset: number | null } => {
+  const page = requireRecord(value, "resource response data.page must be an object");
+  if (
+    page.limit !== spec.page.limit
+    || page.offset !== expectedOffset
+    || !(page.nextOffset === null
+      || (Number.isSafeInteger(page.nextOffset)
+        && (page.nextOffset as number) > expectedOffset))
+  ) {
+    throw new QueryProtocolError("resource response page does not match the request", {
+      expected: { limit: spec.page.limit, offset: expectedOffset },
+      received: page,
+    });
+  }
+  return { nextOffset: page.nextOffset as number | null };
+};
+
+const payloadValue = (value: unknown): unknown => {
+  if (typeof value !== "string") return value ?? null;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return value;
+  }
+};
+
+const normalizeSearchMatch = (match: JsonRecord): JsonRecord => {
+  const row = requireRecord(match.row, "search match row must be an object");
+  return {
+    ...row,
+    messageId: row.messageId ?? match.key,
+    sequence: row.sequence ?? row.seq,
+    score: match.score,
+    // `row.text` is the server-bounded excerpt. Never hydrate or expand it here.
+    text: row.text,
+  };
+};
+
+const normalizeToolCall = (row: JsonRecord): JsonRecord => ({
+  ...row,
+  input: payloadValue(row.input ?? row.inputText),
+  output: payloadValue(row.output ?? row.outputText),
+  error: payloadValue(row.error),
+});
+
+const projectRows = (
+  rows: readonly JsonRecord[],
+  spec: QuerySpec,
+): readonly JsonRecord[] => rows.map((row) =>
+  Object.fromEntries(spec.projection.fields.map((field) => [
+    field,
+    row[field] === undefined ? null : row[field],
+  ])));
+
+export const queryResponseFromResource = (
+  input: unknown,
+  expected: unknown,
+): QueryResponse => {
+  const spec = decodeQueryInput(expected);
+  const envelope = requireRecord(input, "resource response must be an object");
+  if (envelope.ok !== true) {
+    throw new QueryProtocolError("resource response is not a success envelope", input);
+  }
+  const data = requireRecord(envelope.data, "resource response data must be an object");
+  const offset = decodeCursor(spec);
+  let rows: readonly JsonRecord[];
+  let nextOffset: number | null = null;
+
+  switch (spec.kind) {
+    case "sessions":
+    case "messages": {
+      rows = requireRows(data.rows, `resource response for ${spec.kind} must contain data.rows`);
+      nextOffset = resourcePage(data.page, spec, offset).nextOffset;
+      break;
+    }
+    case "toolCalls": {
+      const filters = spec.filters as Readonly<Record<string, unknown>> | undefined;
+      if (typeof filters?.toolCallId === "string") {
+        const row = requireRecord(data.row, "tool-call resource response must contain data.row");
+        rows = offset === 0 ? [normalizeToolCall(row)] : [];
+      } else {
+        rows = requireRows(data.rows, "tool-calls resource response must contain data.rows")
+          .map(normalizeToolCall);
+        nextOffset = resourcePage(data.page, spec, offset).nextOffset;
+      }
+      break;
+    }
+    case "search": {
+      rows = requireRows(data.matches, "search resource response must contain data.matches")
+        .map(normalizeSearchMatch);
+      nextOffset = resourcePage(data.page, spec, offset).nextOffset;
+      break;
+    }
+  }
+
+  const items = projectRows(rows, spec);
+  return decodeQueryOutput({
+    protocolVersion: spec.protocolVersion,
+    kind: spec.kind,
+    projection: spec.projection,
+    page: {
+      returned: items.length,
+      ...(nextOffset === null ? {} : { nextCursor: encodeCursor(spec, nextOffset) }),
+    },
+    items,
+  }, spec);
+};
+
+const resourceUrl = (
+  serverUrl: string,
+  request: QueryResourceRequest,
+): URL => {
+  const url = new URL(request.path, serverUrl.endsWith("/") ? serverUrl : `${serverUrl}/`);
+  for (const [key, value] of Object.entries(request.params)) {
+    url.searchParams.set(key, String(value));
+  }
+  return url;
+};
+
 export const runQuery = async (
   input: unknown,
   options: QueryRequestOptions,
 ): Promise<QueryResponse> => {
   const spec = decodeQueryInput(input);
-  const response = await (options.fetchImpl ?? fetch)(queryUrl(options.serverUrl), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(spec),
+  const request = queryResourceRequest(spec);
+  const response = await (options.fetchImpl ?? fetch)(resourceUrl(options.serverUrl, request), {
+    method: "GET",
     signal: AbortSignal.timeout(options.timeoutMs),
   });
-  const body: unknown = await response.json();
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch (error) {
+    throw new QueryProtocolError("resource response is not valid JSON", {
+      path: request.path,
+      cause: error instanceof Error ? error.message : String(error),
+    });
+  }
   if (!response.ok) {
     throw new QueryTransportError(
       response.status,
-      errorMessage(body, `query request failed with HTTP ${response.status}`),
+      errorMessage(body, `${request.path} request failed with HTTP ${response.status}`),
       body,
     );
   }
-  return decodeQueryOutput(body, spec);
+  return queryResponseFromResource(body, spec);
 };
 
 export const readQueryArgument = (source: string | undefined): QuerySpec => {

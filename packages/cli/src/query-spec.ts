@@ -80,6 +80,8 @@ const projection = <K extends keyof typeof queryFields>(
   };
 };
 
+const toolCallPayloadFields = new Set(["input", "output", "error"]);
+
 const searchFilters = (filters: CommonQueryFilters) => compact({
   projectKey: filters.projectKey,
   providers: filters.providers,
@@ -159,10 +161,19 @@ export const messagesQuery = (input: {
 export const toolCallsQuery = (input: {
   readonly filters?: CommonQueryFilters;
   readonly projection?: QueryProjectionOptions;
-} = {}): QuerySpec => decodeQueryInput({
-  protocolVersion: QUERY_PROTOCOL_VERSION,
-  kind: "toolCalls",
-  filters: toolCallFilters(input.filters ?? {}),
-  projection: projection("toolCalls", input.projection ?? {}),
-  page: page(input.projection ?? {}, 100),
-});
+} = {}): QuerySpec => {
+  const options = input.projection ?? {};
+  const selected = projection("toolCalls", options);
+  const fields = options.fields === undefined
+    && options.detail === "detail"
+    && input.filters?.toolCallId === undefined
+    ? selected.fields.filter((field) => !toolCallPayloadFields.has(field))
+    : selected.fields;
+  return decodeQueryInput({
+    protocolVersion: QUERY_PROTOCOL_VERSION,
+    kind: "toolCalls",
+    filters: toolCallFilters(input.filters ?? {}),
+    projection: { ...selected, fields },
+    page: page(options, 100),
+  });
+};
