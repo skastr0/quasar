@@ -117,8 +117,12 @@ describe("HTTP server resources", () => {
       expect((await writeRun(running)).status).toBe(200);
       const recovery = await fetch(`${base}/ingest-run?runId=run-recovery`).then((response) => response.json());
       expect(recovery.data.row).toMatchObject({ ...running, completedAt: null });
+      const whileRunning = await fetch(`${base}/status`).then((response) => response.json());
+      expect(whileRunning.data.ingest).toEqual({ activeRuns: 1 });
 
       expect((await writeRun({ ...running, status: "completed", completedAt: "2026-07-23T12:01:00.000Z", sessionsSeen: 3, sessionsWritten: 2, sessionsSkipped: 1 })).status).toBe(200);
+      const afterCompletion = await fetch(`${base}/status`).then((response) => response.json());
+      expect(afterCompletion.data.ingest).toEqual({ activeRuns: 0 });
       expect((await writeRun({ ...running, runId: "run-failed", status: "failed", completedAt: "2026-07-23T12:02:00.000Z", sessionsSeen: 1, sessionsFailed: 1 })).status).toBe(200);
       const rows = await fetch(`${base}/ingest-runs?limit=10`).then((response) => response.json());
       expect(rows.data.rows).toEqual(expect.arrayContaining([

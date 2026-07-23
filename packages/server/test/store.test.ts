@@ -1000,11 +1000,12 @@ describe("LocalStore", () => {
       sessionsFailed: 0,
     };
 
-    const [stored, completed] = await withStore(
+    const [stored, completed, running] = await withStore(
       path,
       (store) =>
         Effect.gen(function* () {
           yield* store.recordIngestRun(run);
+          const running = yield* store.countIngestRuns("running");
           yield* store.recordIngestRun({
             ...run,
             status: "completed",
@@ -1014,12 +1015,13 @@ describe("LocalStore", () => {
           });
           const stored = yield* store.getIngestRun("run-a");
           const completed = yield* store.listIngestRuns({ status: "completed" });
-          return [stored, completed] as const;
+          return [stored, completed, running] as const;
         }),
     );
 
     expect(stored?.status).toBe("completed");
     expect(stored?.sessionsWritten).toBe(9);
     expect(completed.map((item) => item.runId)).toEqual(["run-a"]);
+    expect(running).toBe(1);
   });
 });

@@ -13,10 +13,13 @@ const DataQueueLayer = Layer.mergeAll(
   LocalServerConfigLive,
   makeLocalStoreLayer(),
   DurableQueueLive,
-  IngestCoordinatorLive,
 );
 
-const WithEmbeddingsLayer = makeEmbeddingsLayer().pipe(Layer.provideMerge(DataQueueLayer));
+// The coordinator reads lifecycle state through the same LocalStore instance
+// as the HTTP handlers; provideMerge keeps that store shared rather than
+// opening a second connection solely for status.
+const WithIngestLayer = IngestCoordinatorLive.pipe(Layer.provideMerge(DataQueueLayer));
+const WithEmbeddingsLayer = makeEmbeddingsLayer().pipe(Layer.provideMerge(WithIngestLayer));
 // The resident matrix registers the store's vector-write listener at layer
 // init, so it must build on the same LocalStore instance the embeddings
 // write through — provideMerge keeps one shared store underneath both.

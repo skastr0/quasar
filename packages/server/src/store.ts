@@ -255,6 +255,7 @@ export interface LocalStoreService {
     readonly limit?: number;
     readonly offset?: number;
   }) => Effect.Effect<readonly IngestRunRow[], SqliteStoreError>;
+  readonly countIngestRuns: (status?: IngestRunRow["status"]) => Effect.Effect<number, SqliteStoreError>;
   readonly stats: Effect.Effect<StoreStats, SqliteStoreError>;
   readonly upsertMessageVectors: (rows: readonly MessageVectorUpsert[]) => Effect.Effect<number, SqliteStoreError>;
   readonly listMessagesMissingVector: (options: {
@@ -2057,6 +2058,13 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               return db
                 .query("SELECT run_id AS runId, provider, status, started_at AS startedAt, completed_at AS completedAt, sessions_seen AS sessionsSeen, sessions_written AS sessionsWritten, sessions_skipped AS sessionsSkipped, sessions_failed AS sessionsFailed FROM ingest_runs ORDER BY started_at DESC LIMIT ? OFFSET ?")
                 .all(limit, offset) as IngestRunRow[];
+            }),
+          countIngestRuns: (status) =>
+            trySqlite("countIngestRuns", () => {
+              const row = status === undefined
+                ? db.query("SELECT COUNT(*) AS count FROM ingest_runs").get()
+                : db.query("SELECT COUNT(*) AS count FROM ingest_runs WHERE status = ?").get(status);
+              return (row as { count: number }).count;
             }),
           stats: trySqlite("stats", () => ({
             projects: count(db, "projects"),
