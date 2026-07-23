@@ -64,7 +64,7 @@ services:
       # See docs/operations/observability-sink.md
       QUASAR_OTLP_BASE_URL: ${QUASAR_OTLP_BASE_URL:-}
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:6180/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:6180/ready"]
       interval: 10s
       timeout: 10s
       start_period: 10s
