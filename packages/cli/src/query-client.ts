@@ -11,10 +11,16 @@ import {
   type QuerySpec,
 } from "@skastr0/quasar-protocol";
 
-export interface QueryRequestOptions {
-  readonly serverUrl: string;
+export interface FetchRequestOptions {
   readonly timeoutMs: number;
-  readonly fetchImpl?: typeof fetch;
+  readonly fetchImpl?: (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => Promise<Response>;
+}
+
+export interface QueryRequestOptions extends FetchRequestOptions {
+  readonly serverUrl: string;
 }
 
 export interface QueryResourceRequest {
@@ -51,6 +57,21 @@ export class QueryInputError extends Error {
   constructor(message: string, details: unknown) {
     super(message);
     this.details = details;
+  }
+}
+
+export class FetchTransportError extends Error {
+  override readonly name = "FetchTransportError";
+  readonly url: string;
+  readonly attempts: number;
+  override readonly cause: unknown;
+
+  constructor(url: URL, attempts: number, cause: unknown) {
+    const causeMessage = cause instanceof Error ? cause.message : String(cause);
+    super(`request failed after ${attempts} attempt${attempts === 1 ? "" : "s"}: ${causeMessage}`);
+    this.url = url.toString();
+    this.attempts = attempts;
+    this.cause = cause;
   }
 }
 
@@ -338,16 +359,46 @@ const resourceUrl = (
   return url;
 };
 
+const isTransientFetchError = (error: unknown): boolean => {
+  const signals = [error];
+  if (isRecord(error) && error.cause !== error) signals.push(error.cause);
+  const description = signals
+    .flatMap((value) => isRecord(value)
+      ? [value.name, value.message, value.code]
+      : [value])
+    .filter((value): value is string | number => typeof value === "string" || typeof value === "number")
+    .join(" ");
+  return /socket|closed|ECONNRESET|ETIMEDOUT|terminated|ConnectionRefused|TimeoutError|timed out|unable to connect/i.test(description);
+};
+
+export const fetchWithRetry = async (
+  url: URL,
+  options: FetchRequestOptions,
+): Promise<Response> => {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await fetchImpl(url, {
+        method: "GET",
+        signal: AbortSignal.timeout(options.timeoutMs),
+      });
+    } catch (error) {
+      if (!isTransientFetchError(error) || attempt === 2) {
+        throw new FetchTransportError(url, attempt + 1, error);
+      }
+      await Bun.sleep(250 * (attempt + 1));
+    }
+  }
+  throw new FetchTransportError(url, 3, new Error("retry budget exhausted"));
+};
+
 export const runQuery = async (
   input: unknown,
   options: QueryRequestOptions,
 ): Promise<QueryResponse> => {
   const spec = decodeQueryInput(input);
   const request = queryResourceRequest(spec);
-  const response = await (options.fetchImpl ?? fetch)(resourceUrl(options.serverUrl, request), {
-    method: "GET",
-    signal: AbortSignal.timeout(options.timeoutMs),
-  });
+  const response = await fetchWithRetry(resourceUrl(options.serverUrl, request), options);
   let body: unknown;
   try {
     body = await response.json();
