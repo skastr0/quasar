@@ -107,9 +107,7 @@ describe("observability spans", () => {
 
   test("stage span names are asserted from real Effect.withSpan wiring", () => {
     const wiredSources = {
-      "server.ts": readServerSrc("server.ts"),
       "query.ts": readServerSrc("query.ts"),
-      "search.ts": readServerSrc("search.ts"),
       "embeddings.ts": readServerSrc("embeddings.ts"),
       "vectorMatrix.ts": readServerSrc("vectorMatrix.ts"),
       "ingest.ts": readServerSrc("ingest.ts"),
@@ -120,20 +118,10 @@ describe("observability spans", () => {
       Object.entries(wiredSources).map(([file, source]) => [file, extractWithSpanNames(source)]),
     ) as Record<keyof typeof wiredSources, string[]>;
 
-    // One HTTP route span wraps the strict protocol adapter; search stages
-    // remain explicit inside the query executor.
-    expect(byFile["server.ts"]).toEqual(["query"]);
-    expect(byFile["query.ts"]).toEqual(
-      expect.arrayContaining([
-        "search.semantic",
-        "search.fusion",
-        "search.readiness",
-        "search.lexicalScan",
-        "search.rrfFuse",
-      ]),
-    );
+    expect(byFile["query.ts"]).toEqual(expect.arrayContaining([
+      "search.semantic", "search.fusion", "search.readiness", "search.lexicalScan",
+    ]));
     // Child legs on the services they instrument.
-    expect(byFile["search.ts"]).toContain("search.lexicalScan");
     expect(byFile["embeddings.ts"]).toContain("search.embedText");
     expect(byFile["vectorMatrix.ts"]).toContain("search.matrixScan");
     expect(byFile["ingest.ts"]).toContain("ingest.session");
@@ -151,13 +139,11 @@ describe("observability spans", () => {
 
     // Required stable set (each must appear at least once in product wiring).
     const required = [
-      "query",
       "search.semantic",
       "search.fusion",
       "search.lexicalScan",
       "search.embedText",
       "search.matrixScan",
-      "search.rrfFuse",
       "search.readiness",
       "ingest.session",
       "ingest.diffApply",
@@ -182,14 +168,14 @@ describe("observability spans", () => {
     expect(spanSites).toEqual(["search.matrixScan"]);
   });
 
-  test("query responses stay protocol-only while search timing remains internal", () => {
+  test("GET search resources retain internal timing receipts", () => {
     const server = readServerSrc("server.ts");
     const query = readServerSrc("query.ts");
-    expect(server).toContain('HttpRouter.post("/query", queryEndpoint)');
-    expect(server).toContain("return json(result.right)");
+    expect(server).toContain('HttpRouter.get("/search/lexical", lexicalSearch)');
+    expect(server).not.toContain('HttpRouter.post("/query", queryEndpoint)');
     expect(query).toContain("recordSearchReceiptMetrics");
     expect(query).not.toContain("traceId");
-    expect(query).not.toContain("receipt:");
+    expect(query).toContain("receipt:");
   });
 });
 

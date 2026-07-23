@@ -4,7 +4,6 @@ import { Effect, Layer, Logger, ManagedRuntime } from "effect";
 
 import { LocalServerConfigLive } from "./config";
 import { makeEmbeddingsLayer } from "./embeddings";
-import { DerivedSearchLive } from "./search";
 import { DurableQueueLive, IngestCoordinatorLive } from "./services";
 import { makeLocalStoreLayer } from "./store";
 import { makeVectorMatrixLayer } from "./vectorMatrix";
@@ -17,8 +16,7 @@ const DataQueueLayer = Layer.mergeAll(
   IngestCoordinatorLive,
 );
 
-const DataSearchLayer = DerivedSearchLive.pipe(Layer.provideMerge(DataQueueLayer));
-const WithEmbeddingsLayer = makeEmbeddingsLayer().pipe(Layer.provideMerge(DataSearchLayer));
+const WithEmbeddingsLayer = makeEmbeddingsLayer().pipe(Layer.provideMerge(DataQueueLayer));
 // The resident matrix registers the store's vector-write listener at layer
 // init, so it must build on the same LocalStore instance the embeddings
 // write through — provideMerge keeps one shared store underneath both.

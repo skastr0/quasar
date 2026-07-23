@@ -113,6 +113,11 @@ export interface QuerySessionRow {
   readonly agentRole: string | null;
   readonly agentPath: string | null;
   readonly agentDepth: number | null;
+  readonly sourcePath: string;
+  readonly sourceFingerprint: string;
+  readonly host: string;
+  readonly identitySchemeVersion: number;
+  readonly normalizationVersion: number;
 }
 
 export interface QueryMessageRow {

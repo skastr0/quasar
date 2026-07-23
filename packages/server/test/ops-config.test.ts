@@ -132,10 +132,10 @@ describe("server ops config", () => {
     expect(clientConfig).toContain("serverUrl");
     expect(clientConfig).toContain("ingestToken");
     expect(runbook).toContain("Agent / MCP serving contract");
-    expect(runbook).toContain("POST /query");
+    expect(runbook).toContain("GET /search/{mode}");
     expect(runbook).toContain("remote write ingest fails closed before provider scanning");
-    expect(runbook).toContain("opaque cursor");
-    expect(runbook).toContain("body-free summary by default");
+    expect(runbook).toContain("nextOffset");
+    expect(runbook).toContain("body-free summaries");
     expect(runbook).toContain("Operator-only commands");
   });
 });
