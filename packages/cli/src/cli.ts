@@ -676,7 +676,15 @@ const materializeEmbeddingVectors = async () => {
   }
 };
 
-switch (command) {
+const missingValueOption = parsedArguments.missingValueOptions[0];
+if (missingValueOption !== undefined) {
+  rejectInput(command, new CommandInputError(`${missingValueOption} requires a value`, {
+    path: missingValueOption,
+    expected: `a value following ${missingValueOption}`,
+    received: null,
+    hint: `Pass ${missingValueOption} <value>.`,
+  }));
+} else switch (command) {
   case "daemon": {
     const subcommand = parsedArguments.positionals[1] ?? "status";
     try {

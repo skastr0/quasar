@@ -5,6 +5,7 @@ type ParsedOption = {
 
 export type ParsedCliArguments = {
   readonly positionals: readonly string[];
+  readonly missingValueOptions: readonly string[];
   readonly first: (name: string) => string | undefined;
   readonly all: (...names: readonly string[]) => readonly string[];
   readonly has: (name: string) => boolean;
@@ -34,6 +35,9 @@ export const parseCliArguments = (
 
   return {
     positionals,
+    missingValueOptions: options.flatMap((option) =>
+      valueOptionNames.has(option.name) && option.value === undefined ? [option.name] : []
+    ),
     first: (name) => options.find((option) => option.name === name)?.value,
     all: (...names) => options.flatMap((option) =>
       names.includes(option.name) && option.value !== undefined ? [option.value] : []

@@ -401,6 +401,35 @@ describe("CLI client/operator boundary", () => {
     }
   }, 15_000);
 
+  test("terminal value options fail closed before server dispatch or config fallback", async () => {
+    let requests = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => {
+        requests += 1;
+        return Response.json({ ok: true });
+      },
+    });
+    const env = { QUASAR_SERVER_URL: `http://127.0.0.1:${server.port}` };
+    try {
+      const tool = await runCli(["tool-calls", "--tool"], env);
+      expect(tool.exitCode).toBe(1);
+      expect(tool.json.command).toBe("tool-calls");
+      expect(tool.json.error?.type).toBe("CommandInputError");
+      expect(tool.json.error?.message).toContain("--tool requires a value");
+
+      const configuredServer = await runCli(["stats", "--server"], env);
+      expect(configuredServer.exitCode).toBe(1);
+      expect(configuredServer.json.command).toBe("stats");
+      expect(configuredServer.json.error?.type).toBe("CommandInputError");
+      expect(configuredServer.json.error?.message).toContain("--server requires a value");
+
+      expect(requests).toBe(0);
+    } finally {
+      server.stop(true);
+    }
+  }, 15_000);
+
   test("session --id retains the rich independent-detail endpoint", async () => {
     let requestedUrl: URL | undefined;
     const server = Bun.serve({
