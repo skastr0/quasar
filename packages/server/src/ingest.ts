@@ -80,11 +80,19 @@ export const ingestMappedSession = (
       };
     }
     const diff = yield* store.upsertSession(mapped);
-    // Embedding jobs fan out over the row delta only. `force` keeps its repair
-    // meaning: re-enqueue every searchable message so vectors can be rebuilt
-    // even when no row changed.
-    const embedTargets = options.force === true ? mapped.messages : diff.changedMessages;
+    // A prior interrupted apply may have written rows before its queue fan-out
+    // failed. Replay every desired job in that case; queue idempotency collapses
+    // any jobs that were already durable. Ordinary applies stay row-delta-only.
+    // `force` keeps its repair meaning even when no row changed.
+    const embedTargets = options.force === true || diff.requiresDownstreamReplay
+      ? mapped.messages
+      : diff.changedMessages;
     const jobsEnqueued = yield* enqueueDownstreamJobs(queue, embedTargets);
+    yield* store.finalizeSessionIngest(
+      mapped.session.sessionId,
+      mapped.session.sourceFingerprint,
+      mapped.session.normalizationVersion,
+    );
     return {
       sessionId: mapped.session.sessionId,
       status: "ok" as const,

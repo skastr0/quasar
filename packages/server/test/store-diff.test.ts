@@ -154,7 +154,17 @@ describe("upsertSession row-level diff", () => {
   test("fresh session inserts every row and stamps the real fingerprint", async () => {
     const path = sqlitePath();
     const rows = initialMessages(5);
-    const outcome = await withStore(path, (store) => store.upsertSession(session(rows, [toolCall("tc-1", 1)])) as Effect.Effect<SessionDiffOutcome, unknown, never>);
+    const outcome = await withStore(path, (store) =>
+      Effect.gen(function* () {
+        const mapped = session(rows, [toolCall("tc-1", 1)]);
+        const diff = yield* store.upsertSession(mapped);
+        yield* store.finalizeSessionIngest(
+          mapped.session.sessionId,
+          mapped.session.sourceFingerprint,
+          mapped.session.normalizationVersion,
+        );
+        return diff;
+      }) as Effect.Effect<SessionDiffOutcome, unknown, never>);
     expect(outcome.messagesInserted).toBe(5);
     expect(outcome.messagesUpdated).toBe(0);
     expect(outcome.messagesDeleted).toBe(0);
@@ -170,10 +180,22 @@ describe("upsertSession row-level diff", () => {
     const rows = initialMessages(2);
     const result = await withStore(path, (store) =>
       Effect.gen(function* () {
-        yield* store.upsertSession(session(rows));
+        const initial = session(rows);
+        yield* store.upsertSession(initial);
+        yield* store.finalizeSessionIngest(
+          initial.session.sessionId,
+          initial.session.sourceFingerprint,
+          initial.session.normalizationVersion,
+        );
         const current = yield* store.hasSessionFingerprint(SESSION_ID, "fp-1", 2);
         const staleProjection = yield* store.hasSessionFingerprint(SESSION_ID, "fp-1", 3);
-        const replay = yield* store.upsertSession(session(rows, [], { normalizationVersion: 3 }));
+        const upgradedSession = session(rows, [], { normalizationVersion: 3 });
+        const replay = yield* store.upsertSession(upgradedSession);
+        yield* store.finalizeSessionIngest(
+          upgradedSession.session.sessionId,
+          upgradedSession.session.sourceFingerprint,
+          upgradedSession.session.normalizationVersion,
+        );
         const upgraded = yield* store.hasSessionFingerprint(SESSION_ID, "fp-1", 3);
         return { current, staleProjection, replay, upgraded };
       }));
@@ -378,7 +400,13 @@ describe("upsertSession row-level diff", () => {
       Effect.gen(function* () {
         yield* store.upsertSession(session(rows));
         yield* store.upsertMessageVectors(rows.map(vectorRow));
-        const second = yield* store.upsertSession(session(grown, [], { sourceFingerprint: "fp-2" }));
+        const next = session(grown, [], { sourceFingerprint: "fp-2" });
+        const second = yield* store.upsertSession(next);
+        yield* store.finalizeSessionIngest(
+          next.session.sessionId,
+          next.session.sourceFingerprint,
+          next.session.normalizationVersion,
+        );
         const vectors = yield* store.listMessageVectorsBySession({ sessionId: SESSION_ID, model: "test-model" });
         return { second, vectors };
       }));
@@ -462,7 +490,14 @@ describe("upsertSession row-level diff", () => {
     const second = await withStore(path, (store) =>
       Effect.gen(function* () {
         yield* store.upsertSession(session(rows, calls));
-        return yield* store.upsertSession(session(rows, calls, { sourceFingerprint: "fp-2" }));
+        const next = session(rows, calls, { sourceFingerprint: "fp-2" });
+        const diff = yield* store.upsertSession(next);
+        yield* store.finalizeSessionIngest(
+          next.session.sessionId,
+          next.session.sourceFingerprint,
+          next.session.normalizationVersion,
+        );
+        return diff;
       }));
     expect(second.messagesInserted + second.messagesUpdated + second.messagesDeleted).toBe(0);
     expect(second.messagesUnchanged).toBe(25);
@@ -484,7 +519,13 @@ describe("upsertSession row-level diff", () => {
     const { unchangedBefore, second, fingerprintMatches } = await withStore(path, (store) =>
       Effect.gen(function* () {
         const unchangedBefore = yield* store.hasSessionFingerprint(SESSION_ID, "fp-2", 2);
-        const second = yield* store.upsertSession(session(rows, [], { sourceFingerprint: "fp-2" }));
+        const next = session(rows, [], { sourceFingerprint: "fp-2" });
+        const second = yield* store.upsertSession(next);
+        yield* store.finalizeSessionIngest(
+          next.session.sessionId,
+          next.session.sourceFingerprint,
+          next.session.normalizationVersion,
+        );
         const fingerprintMatches = yield* store.hasSessionFingerprint(SESSION_ID, "fp-2", 2);
         return { unchangedBefore, second, fingerprintMatches };
       }));
@@ -492,6 +533,7 @@ describe("upsertSession row-level diff", () => {
     expect(unchangedBefore).toBe(false);
     expect(second.messagesInserted).toBe(1);
     expect(second.messagesUnchanged).toBe(11);
+    expect(second.requiresDownstreamReplay).toBe(true);
     expect(fingerprintMatches).toBe(true);
     expect(messagesCount(path)).toBe(12);
     expect(ftsCount(path)).toBe(12);

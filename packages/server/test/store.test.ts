@@ -128,7 +128,15 @@ describe("LocalStore", () => {
   test("adds tool payload hashes without scanning bodies and forces one safe replay", async () => {
     const path = sqlitePath();
     const mapped = mappedSession({ normalizationVersion: 4 });
-    await withStore(path, (store) => store.upsertSession(mapped));
+    await withStore(path, (store) =>
+      Effect.gen(function* () {
+        yield* store.upsertSession(mapped);
+        yield* store.finalizeSessionIngest(
+          mapped.session.sessionId,
+          mapped.session.sourceFingerprint,
+          mapped.session.normalizationVersion,
+        );
+      }));
 
     const legacy = new Database(path);
     try {
@@ -156,6 +164,11 @@ describe("LocalStore", () => {
     const replay = await withStore(path, (store) =>
       Effect.gen(function* () {
         const outcome = yield* store.upsertSession(mapped);
+        yield* store.finalizeSessionIngest(
+          mapped.session.sessionId,
+          mapped.session.sourceFingerprint,
+          mapped.session.normalizationVersion,
+        );
         const unchanged = yield* store.hasSessionFingerprint(
           mapped.session.sessionId,
           mapped.session.sourceFingerprint,

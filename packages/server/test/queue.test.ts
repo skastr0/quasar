@@ -72,6 +72,60 @@ describe("DurableQueue", () => {
     expect(stats).toEqual({ pending: 1, leased: 0, failed: 0 });
   });
 
+  test("failed idempotent jobs are atomically replaced by fresh pending work", async () => {
+    const path = sqlitePath();
+    const [failed, revived, leased, duringLease, stats] = await withQueue(
+      path,
+      (queue) =>
+        Effect.gen(function* () {
+          const failed = yield* queue.enqueue({
+            kind: "embed-message",
+            payload: { sessionId: "a", seq: 1, version: "stale" },
+            idempotencyKey: "embed-message:a:1:hash",
+            maxAttempts: 2,
+          });
+          yield* queue.fail(failed.jobId, "provider outage", "2099-06-18T10:00:00.000Z");
+          const revived = yield* queue.enqueue({
+            kind: "embed-message",
+            payload: { sessionId: "a", seq: 1, version: "current" },
+            idempotencyKey: "embed-message:a:1:hash",
+            maxAttempts: 12,
+          });
+          const leased = yield* queue.leaseBatch({
+            workerId: "worker-a",
+            kind: "embed-message",
+            limit: 10,
+            leaseMs: 60_000,
+            now: "2099-06-18T10:00:01.000Z",
+          });
+          const duringLease = yield* queue.enqueue({
+            kind: "embed-message",
+            payload: { sessionId: "a", seq: 1, version: "duplicate" },
+            idempotencyKey: "embed-message:a:1:hash",
+            maxAttempts: 12,
+          });
+          const stats = yield* queue.stats;
+          return [failed, revived, leased, duringLease, stats] as const;
+        }),
+    );
+
+    expect(revived.jobId).not.toBe(failed.jobId);
+    expect(revived).toMatchObject({
+      status: "pending",
+      attempts: 0,
+      maxAttempts: 12,
+      payload: { sessionId: "a", seq: 1, version: "current" },
+    });
+    expect(leased).toHaveLength(1);
+    expect(leased[0]?.jobId).toBe(revived.jobId);
+    expect(duringLease).toMatchObject({
+      jobId: revived.jobId,
+      status: "leased",
+      payload: { sessionId: "a", seq: 1, version: "current" },
+    });
+    expect(stats).toEqual({ pending: 0, leased: 1, failed: 0 });
+  });
+
   test("leaseBatch leases ready jobs exclusively up to the requested limit", async () => {
     const path = sqlitePath();
     const [firstLease, secondLease, stats] = await withQueue(
