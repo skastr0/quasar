@@ -117,6 +117,62 @@ describe("QuerySpec v1", () => {
     })).not.toThrow();
   });
 
+  test("exposes session provenance and search excerpt metadata in detail projections", () => {
+    const sessionProjection = {
+      detail: "detail",
+      fields: [
+        "sessionId",
+        "sourcePath",
+        "sourceFingerprint",
+        "host",
+        "identitySchemeVersion",
+        "normalizationVersion",
+      ],
+    } as const;
+    expect(() => decodeQuerySpecSync({
+      protocolVersion: QUERY_PROTOCOL_VERSION,
+      kind: "sessions",
+      projection: sessionProjection,
+      page: { limit: 10 },
+    })).not.toThrow();
+    expect(() => decodeQueryResponseSync({
+      protocolVersion: QUERY_PROTOCOL_VERSION,
+      kind: "sessions",
+      projection: sessionProjection,
+      page: { returned: 1 },
+      items: [{
+        sessionId: "codex:example-session",
+        sourcePath: "/history/example.jsonl",
+        sourceFingerprint: "{\"size\":42}",
+        host: "example.local",
+        identitySchemeVersion: 1,
+        normalizationVersion: 4,
+      }],
+    })).not.toThrow();
+
+    const searchProjection = {
+      detail: "detail",
+      fields: ["messageId", "text", "contentHash", "textBytes", "textTruncated"],
+    } as const;
+    expect(() => decodeQuerySpecSync({
+      ...searchQuery,
+      projection: searchProjection,
+    })).not.toThrow();
+    expect(() => decodeQueryResponseSync({
+      protocolVersion: QUERY_PROTOCOL_VERSION,
+      kind: "search",
+      projection: searchProjection,
+      page: { returned: 1 },
+      items: [{
+        messageId: "codex:example-session:1",
+        text: "bounded excerpt",
+        contentHash: "sha256-example",
+        textBytes: 9_001,
+        textTruncated: true,
+      }],
+    })).not.toThrow();
+  });
+
   test("rejects raw event roles from message queries", () => {
     expect(() => decodeQuerySpecSync({
       protocolVersion: QUERY_PROTOCOL_VERSION,

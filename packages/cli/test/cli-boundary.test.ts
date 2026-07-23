@@ -331,7 +331,7 @@ describe("CLI client/operator boundary", () => {
         "openai",
         "--detail",
         "--fields",
-        "sessionId,provider,agentRole,modelProvider",
+        "sessionId,provider,agentRole,modelProvider,sourcePath,normalizationVersion",
         "--limit",
         "25",
       ];
@@ -350,7 +350,14 @@ describe("CLI client/operator boundary", () => {
       });
       expect(first.json.projection).toEqual({
         detail: "detail",
-        fields: ["sessionId", "provider", "agentRole", "modelProvider"],
+        fields: [
+          "sessionId",
+          "provider",
+          "agentRole",
+          "modelProvider",
+          "sourcePath",
+          "normalizationVersion",
+        ],
       });
       const cursor = (first.json.page as { readonly nextCursor?: string }).nextCursor;
       expect(typeof cursor).toBe("string");

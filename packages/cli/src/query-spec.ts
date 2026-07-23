@@ -30,6 +30,7 @@ export const queryFields = {
     detail: [
       "sessionId", "projectKey", "provider", "title", "role", "text", "score",
       "messageId", "sequence", "timestamp", "agentName", "agentRole", "model", "modelProvider",
+      "contentHash", "textBytes", "textTruncated",
     ],
   },
   sessions: {
@@ -37,7 +38,8 @@ export const queryFields = {
     detail: [
       "sessionId", "projectKey", "provider", "title", "startedAt", "endedAt", "agentName",
       "model", "modelProvider", "messageCount", "toolCallCount", "parentSessionId", "agentRole",
-      "agentPath", "agentDepth",
+      "agentPath", "agentDepth", "sourcePath", "sourceFingerprint", "host",
+      "identitySchemeVersion", "normalizationVersion",
     ],
   },
   messages: {
