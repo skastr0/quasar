@@ -73,8 +73,8 @@ export interface SearchDocumentPolicyStats {
   readonly ignored: number;
 }
 
-const isSearchableRole = (role: MessageRole): role is "user" | "assistant" =>
-  role === "user" || role === "assistant";
+const isSearchableRole = (role: MessageRole): role is "user" | "assistant" | "reasoning" =>
+  role === "user" || role === "assistant" || role === "reasoning";
 
 const summarizeSearchDocumentPolicy = (
   messages: readonly { readonly role: MessageRole }[],
@@ -123,6 +123,7 @@ export interface SessionIngestOutcome {
   readonly messagesWritten: number;
   readonly toolCallsWritten: number;
   readonly jobsEnqueued: number;
+  /** Policy counts for the full mapped session, distinct from row-delta writes. */
   readonly searchDocuments?: SearchDocumentPolicyStats;
   readonly delta?: {
     readonly messagesDeleted: number;
@@ -374,6 +375,7 @@ const ingestProviderRemote = async (
   let messagesWritten = 0;
   let toolCallsWritten = 0;
   let jobsEnqueued = 0;
+  let searchDocumentsTotal = 0;
   let semanticEligible = 0;
   let ignored = 0;
   const outcomes: SessionIngestOutcome[] = [];
@@ -477,6 +479,7 @@ const ingestProviderRemote = async (
         toolCallsWritten += outcome.toolCallsWritten;
         jobsEnqueued += outcome.jobsEnqueued;
         const searchDocuments = outcome.searchDocuments ?? summarizeSearchDocumentPolicy(mapped.messages);
+        searchDocumentsTotal += searchDocuments.total;
         semanticEligible += searchDocuments.semanticEligible;
         ignored += searchDocuments.ignored;
         // Stage the physical source stat. The provider walk may still fail on
@@ -529,7 +532,7 @@ const ingestProviderRemote = async (
       messagesWritten,
       toolCallsWritten,
       jobsEnqueued,
-      searchDocuments: { total: messagesWritten, semanticEligible, ignored },
+      searchDocuments: { total: searchDocumentsTotal, semanticEligible, ignored },
       outcomes,
       failures,
       durationMs: Date.now() - startedAt,

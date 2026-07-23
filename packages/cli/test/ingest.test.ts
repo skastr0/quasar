@@ -229,6 +229,11 @@ describe("ingestRemote", () => {
               messagesWritten: payload.session.messages.length,
               toolCallsWritten: payload.session.toolCalls.length,
               jobsEnqueued: payload.session.messages.length + payload.session.toolCalls.length + 1,
+              searchDocuments: {
+                total: 9,
+                semanticEligible: 7,
+                ignored: 2,
+              },
             },
           },
         });
@@ -246,6 +251,11 @@ describe("ingestRemote", () => {
       expect(reports[0]?.sessionsFailed).toBe(0);
       expect(reports[0]?.messagesWritten).toBe(2);
       expect(reports[0]?.toolCallsWritten).toBe(1);
+      expect(reports[0]?.searchDocuments).toEqual({
+        total: 9,
+        semanticEligible: 7,
+        ignored: 2,
+      });
       expect(runs).toHaveLength(2);
       expect(runs[1]).toMatchObject({ status: "completed", sessionsSeen: 1, sessionsWritten: 1, sessionsFailed: 0 });
     } finally {
@@ -254,7 +264,13 @@ describe("ingestRemote", () => {
   });
 
   test("remote ingest retries an uncertain successful acknowledgement with a null JSON body", async () => {
-    adaptersByProvider.set("claude", adapterFor([session("remote-null-ack")]));
+    const baseSession = session("remote-null-ack");
+    const reasoningSession: NormalizedSession = {
+      ...baseSession,
+      events: baseSession.events.map((event, index) =>
+        index === 1 ? { ...event, role: "thinking", kind: "reasoning" } : event),
+    };
+    adaptersByProvider.set("claude", adapterFor([reasoningSession]));
     let writeAttempts = 0;
     const server = Bun.serve({
       hostname: "127.0.0.1",
@@ -301,6 +317,11 @@ describe("ingestRemote", () => {
       expect(reports[0]).toMatchObject({
         sessionsWritten: 1,
         sessionsFailed: 0,
+        searchDocuments: {
+          total: 2,
+          semanticEligible: 2,
+          ignored: 0,
+        },
       });
     } finally {
       server.stop(true);
