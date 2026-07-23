@@ -752,6 +752,9 @@ const migrate = (db: Database): readonly StoreMigrationLog[] => {
     CREATE INDEX IF NOT EXISTS tool_calls_by_session ON tool_calls(session_id, seq);
     CREATE INDEX IF NOT EXISTS tool_calls_by_project_tool ON tool_calls(project_key, tool_name, session_id, seq);
     CREATE INDEX IF NOT EXISTS tool_calls_by_tool ON tool_calls(tool_name, session_id);
+    CREATE INDEX IF NOT EXISTS tool_calls_by_provider_order ON tool_calls(provider, session_id, seq, id);
+    CREATE INDEX IF NOT EXISTS tool_calls_by_project_order ON tool_calls(project_key, session_id, seq, id);
+    CREATE INDEX IF NOT EXISTS tool_calls_by_tool_order ON tool_calls(tool_name, session_id, seq, id);
     CREATE TABLE IF NOT EXISTS session_events (
       session_id TEXT NOT NULL,
       id TEXT NOT NULL,
