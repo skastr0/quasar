@@ -446,6 +446,7 @@ describe("QSR-220 regression: event-level kind=parent edge must not corrupt pare
       events: [],
       toolCalls: [],
       usageRecords: [],
+      executionContexts: [],
       artifacts: [],
       sessionEdges: [
         {
@@ -488,6 +489,7 @@ describe("QSR-220 regression: event-level kind=parent edge must not corrupt pare
       events: [],
       toolCalls: [],
       usageRecords: [],
+      executionContexts: [],
       artifacts: [],
       sessionEdges: [
         {
