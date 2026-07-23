@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -45,7 +45,9 @@ export const loadManifest = (path?: string): IngestManifest => {
 export const saveManifest = (manifest: IngestManifest, path?: string): void => {
   const file = manifestPath(path);
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify(manifest, null, 2), "utf8");
+  const pending = `${file}.${process.pid}.tmp`;
+  writeFileSync(pending, JSON.stringify(manifest, null, 2), "utf8");
+  renameSync(pending, file);
 };
 
 export const clearManifest = (path?: string): void => {
@@ -302,6 +304,7 @@ const ingestProviderRemote = async (
   const outcomes: SessionIngestOutcome[] = [];
   const failures: { sessionId: string; diagnostic: string; error: string }[] = [];
   const manifestUpdates: IngestManifest = {};
+  const manifestCandidates = new Map<string, ManifestEntry>();
 
   const shouldParseSession = options.force === true
     ? undefined
@@ -333,10 +336,18 @@ const ingestProviderRemote = async (
     ? undefined
     : (path: string, stat: import("node:fs").Stats): boolean => {
         const entry = manifest[path];
-        if (entry === undefined) return true;
-        return entry.normalizationVersion !== NORMALIZATION_VERSION
+        const shouldRead = entry === undefined
+          || entry.normalizationVersion !== NORMALIZATION_VERSION
           || entry.mtimeMs !== stat.mtimeMs
           || entry.size !== stat.size;
+        if (shouldRead) {
+          manifestCandidates.set(path, {
+            mtimeMs: stat.mtimeMs,
+            size: stat.size,
+            normalizationVersion: NORMALIZATION_VERSION,
+          });
+        }
+        return shouldRead;
       };
 
   const stream = adapter.stream({
@@ -393,17 +404,20 @@ const ingestProviderRemote = async (
         const searchDocuments = outcome.searchDocuments ?? summarizeSearchDocumentPolicy(mapped.messages);
         semanticEligible += searchDocuments.semanticEligible;
         ignored += searchDocuments.ignored;
-        // Record in manifest: physicalPath preferred (same path the adapter stat'd)
-        const physicalPath = item.sourceUnit?.physicalPath ?? item.session.sourcePath;
-        try {
-          const fileStat = statSync(physicalPath);
-          manifestUpdates[physicalPath] = {
-            mtimeMs: fileStat.mtimeMs,
-            size: fileStat.size,
-            normalizationVersion: NORMALIZATION_VERSION,
-          };
-        } catch {
-          // non-fatal: best-effort manifest update
+        // A limited walk cannot prove that every session sharing this physical
+        // source was seen. Persist file-level state only after unbounded walks.
+        if (options.limit === undefined) {
+          const physicalPath = item.sourceUnit?.physicalPath ?? item.session.sourcePath;
+          try {
+            const fileStat = statSync(physicalPath);
+            manifestUpdates[physicalPath] = {
+              mtimeMs: fileStat.mtimeMs,
+              size: fileStat.size,
+              normalizationVersion: NORMALIZATION_VERSION,
+            };
+          } catch {
+            // non-fatal: best-effort manifest update
+          }
         }
       } else if (outcome.status === "skipped") {
         sessionsSkipped += 1;
@@ -415,6 +429,17 @@ const ingestProviderRemote = async (
       sessionsFailed += 1;
       failures.push({ sessionId: mapped.session.sessionId, diagnostic: "remote_write_failed", error: detail });
       outcomes.push({ sessionId: mapped.session.sessionId, status: "failed", diagnostic: "remote_write_failed", detail, messagesWritten: 0, toolCallsWritten: 0, jobsEnqueued: 0 });
+    }
+  }
+
+  // A full successful provider walk proves every staged source either matched
+  // the server's current normalization fingerprint or was posted successfully.
+  // This also converges shared-DB adapters whose per-session probe fingerprints
+  // intentionally differ from the DB file stat. Limited walks cannot prove that
+  // unseen sessions are current, so they persist no file-level manifest state.
+  if (options.limit === undefined && sessionsFailed === 0) {
+    for (const [path, entry] of manifestCandidates) {
+      manifestUpdates[path] ??= entry;
     }
   }
 
