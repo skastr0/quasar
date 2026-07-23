@@ -817,6 +817,51 @@ describe("LocalStore", () => {
     expect(byProjectTool[0]?.toolName).toBe("shell_command");
   });
 
+  test("tool-call filter indexes satisfy bounded reads without a table scan or temp sort", async () => {
+    const path = sqlitePath();
+    await withStore(
+      path,
+      (store) =>
+        Effect.gen(function* () {
+          yield* store.upsertSession(mappedSession());
+        }),
+    );
+
+    const db = new Database(path, { readonly: true });
+    try {
+      const plans = [
+        {
+          index: "tool_calls_by_provider_order",
+          rows: db.query(
+            "EXPLAIN QUERY PLAN SELECT id FROM tool_calls WHERE provider = ? ORDER BY session_id ASC, seq ASC LIMIT ? OFFSET ?",
+          ).all("codex", 1, 0),
+        },
+        {
+          index: "tool_calls_by_project_order",
+          rows: db.query(
+            "EXPLAIN QUERY PLAN SELECT id FROM tool_calls WHERE project_key = ? ORDER BY session_id ASC, seq ASC LIMIT ? OFFSET ?",
+          ).all("project-a", 1, 0),
+        },
+        {
+          index: "tool_calls_by_tool_order",
+          rows: db.query(
+            "EXPLAIN QUERY PLAN SELECT id FROM tool_calls WHERE tool_name = ? ORDER BY session_id ASC, seq ASC LIMIT ? OFFSET ?",
+          ).all("shell_command", 1, 0),
+        },
+      ] as const;
+
+      for (const plan of plans) {
+        const details = plan.rows.map((row) =>
+          (row as { readonly detail: string }).detail);
+        expect(details.some((detail) => detail.includes(plan.index))).toBe(true);
+        expect(details.some((detail) => detail.includes("SCAN tool_calls"))).toBe(false);
+        expect(details.some((detail) => detail.includes("USE TEMP B-TREE"))).toBe(false);
+      }
+    } finally {
+      db.close();
+    }
+  });
+
   test("reads a single tool call by id", async () => {
     const path = sqlitePath();
     const toolCall = await withStore(
