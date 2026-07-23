@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { Effect } from "effect";
 
 import type { MappedSession } from "../src/model";
+import { SERVER_MAX_REQUEST_BODY_SIZE_BYTES } from "../src/server";
 import { LocalStore, makeLocalStoreLayer } from "../src/store";
 
 const tempDirs: string[] = [];
@@ -64,6 +65,30 @@ const startServer = (sqlite: string, token?: string) => {
 };
 
 describe("HTTP server resources", () => {
+  test("does not let Bun's 128 MiB default reject aggregate session requests", async () => {
+    expect(SERVER_MAX_REQUEST_BODY_SIZE_BYTES).toBe(Number.MAX_SAFE_INTEGER);
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      maxRequestBodySize: SERVER_MAX_REQUEST_BODY_SIZE_BYTES,
+      fetch: async (request) => new Response(String((await request.arrayBuffer()).byteLength)),
+    });
+
+    const bodySize = 167_743_747;
+    const body = new Uint8Array(bodySize);
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.port}/`, {
+        method: "POST",
+        body,
+      });
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe(String(bodySize));
+    } finally {
+      await server.stop(true);
+    }
+  }, 30_000);
+
   test("ingest is authenticated and GET messages reflects a forced rewrite", async () => {
     const dir = tempDir();
     const { proc, base } = startServer(join(dir, "quasar.sqlite"), "test-ingest-token");
