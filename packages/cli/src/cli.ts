@@ -4,11 +4,27 @@ import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync 
 import { homedir, platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
+import type { QuerySpec } from "@skastr0/quasar-protocol";
+
 import { configuredIngestToken, configuredServerUrl, defaultClientConfigPath } from "./client-config";
-import { Provider, SessionRole } from "./core/schemas";
+import { Provider } from "./core/schemas";
 import { ingestFailureError, ingestReportPayload } from "./ingest-report";
 import { ingestRemote } from "./ingest";
 import { fail, ok, writeJson } from "./json";
+import {
+  protocolContract,
+  protocolExampleList,
+  readQueryArgument,
+  runQuery,
+} from "./query-client";
+import {
+  messagesQuery,
+  searchQuery,
+  sessionsQuery,
+  toolCallsQuery,
+  type CommonQueryFilters,
+  type QueryProjectionOptions,
+} from "./query-spec";
 import {
   addMaterializeTotals,
   decideMaterializeLoop,
@@ -27,6 +43,26 @@ const arg = (name: string): string | undefined => {
 };
 
 const flag = (name: string): boolean => process.argv.includes(name);
+
+const args = (...names: readonly string[]): readonly string[] => {
+  const found: string[] = [];
+  for (let index = 0; index < process.argv.length; index += 1) {
+    if (!names.includes(process.argv[index]!)) continue;
+    const value = process.argv[index + 1];
+    if (value !== undefined && !value.startsWith("--")) found.push(value);
+  }
+  return found;
+};
+
+const firstArg = (...names: readonly string[]): string | undefined =>
+  args(...names)[0];
+
+const listArg = (...names: readonly string[]): readonly string[] | undefined => {
+  const values = args(...names).flatMap((value) => value.split(","))
+    .map((value) => value.trim())
+    .filter((value) => value !== "");
+  return values.length === 0 ? undefined : values;
+};
 
 const intArg = (name: string, fallback: number): number => {
   const raw = arg(name);
@@ -391,11 +427,95 @@ const checkInt = (name: string, flag: string, min: number): boolean => {
   }));
 };
 
+const checkIntRange = (name: string, flagName: string, min: number, max: number): boolean => {
+  const raw = arg(flagName);
+  if (raw === undefined) return true;
+  const parsed = Number(raw);
+  if (Number.isInteger(parsed) && parsed >= min && parsed <= max) return true;
+  return rejectInput(name, new CommandInputError(`${flagName} must be an integer from ${min} to ${max}`, {
+    path: flagName,
+    expected: `integer ${min}..${max}`,
+    received: raw,
+  }));
+};
+
 const SEARCH_MODES = ["lexical", "semantic", "fusion"] as const;
 const INGEST_RUN_STATUSES = ["running", "completed", "failed"] as const;
 const PROVIDERS = Provider.literals;
 const INGEST_PROVIDERS = ["all", ...PROVIDERS] as const;
-const ROLES = SessionRole.literals;
+const QUERY_ROLES = ["user", "assistant", "reasoning"] as const;
+
+const providersArg = (name: string): readonly string[] | undefined => {
+  const providers = listArg("--provider", "--providers");
+  if (providers === undefined) return undefined;
+  const invalid = providers.find((provider) => !PROVIDERS.includes(provider as never));
+  if (invalid !== undefined) {
+    rejectInput(name, new CommandInputError(`--provider must be one of: ${PROVIDERS.join(", ")}`, {
+      path: "--provider",
+      expected: PROVIDERS,
+      received: invalid,
+    }));
+    return undefined;
+  }
+  return providers;
+};
+
+const queryFilters = (name: string): CommonQueryFilters | undefined => {
+  const providers = providersArg(name);
+  if (process.exitCode === 1) return undefined;
+  return {
+    projectKey: firstArg("--project", "--project-key"),
+    providers,
+    sessionId: firstArg("--session", "--session-id"),
+    role: arg("--role"),
+    agentName: firstArg("--agent", "--agent-name"),
+    agentRole: arg("--agent-role"),
+    model: arg("--model"),
+    modelProvider: arg("--model-provider"),
+    toolCallId: firstArg("--tool-call", "--tool-call-id"),
+    toolName: firstArg("--tool", "--tool-name"),
+  };
+};
+
+const queryProjection = (): QueryProjectionOptions => ({
+  detail: flag("--detail") ? "detail" : "summary",
+  fields: listArg("--fields"),
+  limit: arg("--limit") === undefined ? undefined : Number(arg("--limit")),
+  cursor: arg("--cursor"),
+});
+
+const rejectQueryOffset = (name: string): boolean => {
+  if (!flag("--offset")) return true;
+  const offset = arg("--offset");
+  return rejectInput(name, new CommandInputError("--offset was removed from query-backed commands", {
+    path: "--offset",
+    received: offset ?? null,
+    expected: "opaque --cursor token from page.nextCursor",
+    hint: "Pass the previous response's page.nextCursor as --cursor.",
+  }));
+};
+
+const executeQuery = async (name: string, build: () => QuerySpec) => {
+  let spec: QuerySpec;
+  try {
+    spec = build();
+  } catch (error) {
+    rejectInput(name, error);
+    return;
+  }
+  const base = requireServer(name);
+  if (base === undefined) return;
+  try {
+    const response = await runQuery(spec, {
+      serverUrl: base,
+      timeoutMs: httpTimeoutMs(),
+    });
+    writeJson(response);
+  } catch (error) {
+    writeJson(fail(name, error));
+    process.exitCode = 1;
+  }
+};
 
 const materializeFailureDetails = (details: unknown, batches: number, totals: MaterializeTotals, last: unknown) => ({
   ...(typeof details === "object" && details !== null ? details as Record<string, unknown> : {}),
@@ -569,17 +689,14 @@ switch (command) {
     break;
   }
   case "sessions": {
-    if (!(checkEnum("sessions", "--provider", PROVIDERS) && checkInt("sessions", "--limit", 1) && checkInt("sessions", "--offset", 0))) break;
-    await fetchServer("sessions", "/sessions", {
-      provider: arg("--provider"),
-      projectKey: arg("--project-key"),
-      limit: arg("--limit"),
-      offset: arg("--offset"),
-    });
+    if (!(rejectQueryOffset("sessions") && checkIntRange("sessions", "--limit", 1, 200))) break;
+    const filters = queryFilters("sessions");
+    if (filters === undefined) break;
+    await executeQuery("sessions", () => sessionsQuery({ filters, projection: queryProjection() }));
     break;
   }
   case "messages": {
-    const sessionId = arg("--session-id");
+    const sessionId = firstArg("--session", "--session-id");
     if (sessionId === undefined) {
       rejectInput("messages", new CommandInputError("--session-id is required", {
         field: "--session-id",
@@ -588,24 +705,21 @@ switch (command) {
       }));
       break;
     }
-    if (!checkInt("messages", "--limit", 1)) break;
-    await fetchServer("messages", "/messages", { sessionId, limit: arg("--limit") });
+    if (!(rejectQueryOffset("messages") && checkEnum("messages", "--role", QUERY_ROLES) && checkIntRange("messages", "--limit", 1, 200))) break;
+    const filters = queryFilters("messages");
+    if (filters === undefined) break;
+    await executeQuery("messages", () => messagesQuery({ sessionId, filters, projection: queryProjection() }));
     break;
   }
   case "tool-calls": {
-    if (!(checkEnum("tool-calls", "--provider", PROVIDERS) && checkInt("tool-calls", "--limit", 1) && checkInt("tool-calls", "--offset", 0))) break;
-    await fetchServer("tool-calls", "/tool-calls", {
-      sessionId: arg("--session-id"),
-      projectKey: arg("--project-key"),
-      provider: arg("--provider"),
-      toolName: arg("--tool-name"),
-      limit: arg("--limit"),
-      offset: arg("--offset"),
-    });
+    if (!(rejectQueryOffset("tool-calls") && checkIntRange("tool-calls", "--limit", 1, 200))) break;
+    const filters = queryFilters("tool-calls");
+    if (filters === undefined) break;
+    await executeQuery("tool-calls", () => toolCallsQuery({ filters, projection: queryProjection() }));
     break;
   }
   case "tool-call": {
-    const id = arg("--id");
+    const id = arg("--id") ?? firstArg("--tool-call", "--tool-call-id");
     if (id === undefined) {
       rejectInput("tool-call", new CommandInputError("--id is required", {
         field: "--id",
@@ -614,7 +728,39 @@ switch (command) {
       }));
       break;
     }
-    await fetchServer("tool-call", "/tool-call", { id });
+    const filters = queryFilters("tool-call");
+    if (filters === undefined) break;
+    await executeQuery("tool-call", () => toolCallsQuery({
+      filters: { ...filters, toolCallId: id },
+      projection: { ...queryProjection(), detail: "detail", limit: 1 },
+    }));
+    break;
+  }
+  case "session": {
+    const id = arg("--id") ?? firstArg("--session", "--session-id");
+    if (id === undefined) {
+      rejectInput("session", new CommandInputError("--id is required", {
+        field: "--id",
+        expected: "a session id",
+        hint: "Pass --id <id> (find ids via `quasar sessions`).",
+      }));
+      break;
+    }
+    const detailLimitFlags = [
+      "--message-limit", "--tool-call-limit", "--event-limit", "--usage-limit",
+      "--edge-limit", "--artifact-limit", "--context-limit",
+    ] as const;
+    if (!detailLimitFlags.every((flagName) => checkIntRange("session", flagName, 1, 1_000))) break;
+    await fetchServer("session", "/session-detail", {
+      sessionId: id,
+      messageLimit: arg("--message-limit"),
+      toolCallLimit: arg("--tool-call-limit"),
+      eventLimit: arg("--event-limit"),
+      usageLimit: arg("--usage-limit"),
+      edgeLimit: arg("--edge-limit"),
+      artifactLimit: arg("--artifact-limit"),
+      contextLimit: arg("--context-limit"),
+    });
     break;
   }
   case "ingest-runs": {
@@ -640,16 +786,34 @@ switch (command) {
     break;
   }
   case "search": {
-    if (!(checkEnum("search", "--mode", SEARCH_MODES) && checkEnum("search", "--provider", PROVIDERS) && checkEnum("search", "--role", ROLES) && checkInt("search", "--limit", 1))) break;
+    if (!(rejectQueryOffset("search") && checkEnum("search", "--mode", SEARCH_MODES) && checkEnum("search", "--role", QUERY_ROLES) && checkIntRange("search", "--limit", 1, 200))) break;
     const query = arg("--query") ?? arg("-q") ?? "";
     const mode = arg("--mode") ?? "lexical";
-    await fetchServer("search", `/search/${mode}`, {
-      q: query,
-      limit: arg("--limit"),
-      projectKey: arg("--project-key"),
-      provider: arg("--provider"),
-      role: arg("--role"),
-    });
+    const filters = queryFilters("search");
+    if (filters === undefined) break;
+    await executeQuery("search", () => searchQuery({ text: query, mode, filters, projection: queryProjection() }));
+    break;
+  }
+  case "query": {
+    const source = process.argv[3];
+    await executeQuery("query", () => readQueryArgument(source));
+    break;
+  }
+  case "schema": {
+    try {
+      const requested = arg("--name") ?? process.argv[3];
+      writeJson(ok("schema", protocolContract(requested)));
+    } catch (error) {
+      rejectInput("schema", error);
+    }
+    break;
+  }
+  case "examples": {
+    try {
+      writeJson(ok("examples", protocolExampleList(arg("--name") ?? arg("--schema") ?? process.argv[3])));
+    } catch (error) {
+      rejectInput("examples", error);
+    }
     break;
   }
   case "tui": {
@@ -673,16 +837,20 @@ switch (command) {
       "daemon status",
       "daemon uninstall",
       "projects [--limit n] [--offset n]",
-      "sessions [--provider name] [--project-key key] [--limit n] [--offset n]",
-      "messages --session-id id [--limit n]",
-      "tool-calls [--session-id id] [--project-key key] [--provider name] [--tool-name name] [--limit n] [--offset n]",
-      "tool-call --id id",
+      "sessions [--provider name[,name]] [--project key] [--agent name] [--agent-role role] [--model slug] [--model-provider name] [--fields a,b] [--detail] [--cursor token] [--limit n]",
+      "session --id id [--message-limit n] [--tool-call-limit n] [--event-limit n] [--usage-limit n] [--edge-limit n] [--artifact-limit n] [--context-limit n]",
+      "messages --session id [--role user|assistant|reasoning] [--model slug] [--model-provider name] [--fields a,b] [--detail] [--cursor token] [--limit n]",
+      "tool-calls [--session id] [--project key] [--provider name[,name]] [--tool name] [--agent name] [--agent-role role] [--model slug] [--model-provider name] [--fields a,b] [--detail] [--cursor token] [--limit n]",
+      "tool-call --id id [--fields a,b] (full input/output detail)",
+      "query <inline-json|@file|-> [--server url]",
+      "schema [query|response|session-enrichment] (local; no server required)",
+      "examples [schema-id|example-name] (local; no server required)",
       "ingest-runs [--status running|completed|failed] [--limit n]",
       "replay-embedding-cache [--limit n] [--server url]",
       "materialize-embedding-vectors [--limit n] [--until-empty] [--max-batches n] [--require-provider local|synthetic] [--out path] [--server url]",
       "prune-dead-letters [--server url] (delete failed queue jobs whose work is provably done, orphaned, or a retired kind)",
       "workers [--server url]",
-      "search --query text [--mode lexical|semantic|fusion] [--project-key key] [--provider name] [--role user|assistant|reasoning] [--limit n] [--server url]",
+      "search --query text [--mode lexical|semantic|fusion] [--project key] [--provider name[,name]] [--role user|assistant|reasoning] [--agent name] [--agent-role role] [--model slug] [--model-provider name] [--fields a,b] [--detail] [--cursor token] [--limit n] [--server url]",
       "stats",
       "tui [--server url] (interactive terminal UI; default when run in a terminal)",
       "version",

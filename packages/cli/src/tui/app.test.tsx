@@ -38,11 +38,19 @@ const fakeClient = (opts: {
   matches?: readonly SearchMatch[];
   messages?: readonly MessageRow[];
   tools?: readonly ToolCallRow[];
+  toolDetail?: ToolCallRow;
+  toolCallImpl?: (id: string) => Promise<Outcome<ToolCallRow>>;
   searchImpl?: (q: string, mode: SearchMode) => Promise<Outcome<readonly SearchMatch[]>>;
 }): QuasarClientLike => ({
   search: opts.searchImpl ?? (async () => ({ ok: true, value: opts.matches ?? [] })),
   messages: async () => ({ ok: true, value: opts.messages ?? [] }),
   toolCalls: async () => ({ ok: true, value: opts.tools ?? [] }),
+  toolCall: opts.toolCallImpl ?? (async (id) => {
+    const row = opts.toolDetail ?? opts.tools?.find((tool) => tool.id === id);
+    return row === undefined
+      ? { ok: false, code: "NotFound", message: `missing ${id}` }
+      : { ok: true, value: row };
+  }),
 });
 
 const render = (client: QuasarClientLike | null) =>
@@ -123,6 +131,8 @@ test("t opens tool-call forensics for the selected session", async () => {
           status: "completed",
           inputText: "{}",
           outputText: "ok",
+          inputBytes: 2,
+          outputBytes: 2,
           provider: "kimi",
           projectKey: "git:github.com/skastr0/quasar",
         },
@@ -141,6 +151,54 @@ test("t opens tool-call forensics for the selected session", async () => {
     expect(frame).toContain("tool calls");
     expect(frame).toContain("Glob");
     expect(frame).toContain("completed");
+  } finally {
+    act(() => setup.renderer.destroy());
+  }
+});
+
+test("tool payloads load only after drilling into a body-free summary", async () => {
+  let detailCalls = 0;
+  const summary: ToolCallRow = {
+    id: "t-lazy",
+    sessionId: "kimi:s0",
+    seq: 4,
+    toolName: "exec_command",
+    status: "completed",
+    inputText: "",
+    outputText: "",
+    inputBytes: 13,
+    outputBytes: 17,
+    provider: "kimi",
+    projectKey: "git:github.com/skastr0/quasar",
+  };
+  const detail: ToolCallRow = {
+    ...summary,
+    inputText: '{"cmd":"pwd"}',
+    outputText: "lazy detail body",
+  };
+  const setup = await render(fakeClient({
+    matches: [match(0)],
+    tools: [summary],
+    toolCallImpl: async () => {
+      detailCalls += 1;
+      return { ok: true, value: detail };
+    },
+  }));
+  try {
+    await act(async () => {
+      await setup.mockInput.typeText("vector");
+    });
+    await settle(setup);
+    act(() => setup.mockInput.pressTab());
+    act(() => setup.mockInput.pressKey("t"));
+    await settle(setup, 150);
+    expect(detailCalls).toBe(0);
+    expect(setup.captureCharFrame()).not.toContain("lazy detail body");
+
+    act(() => setup.mockInput.pressKey("i"));
+    await settle(setup, 150);
+    expect(detailCalls).toBe(1);
+    expect(setup.captureCharFrame()).toContain("lazy detail body");
   } finally {
     act(() => setup.renderer.destroy());
   }
@@ -175,6 +233,7 @@ test("transcript load rejection surfaces in the header error strip", async () =>
       throw new Error("session fetch exploded");
     },
     toolCalls: async () => ({ ok: true, value: [] }),
+    toolCall: async () => ({ ok: false, code: "NotFound", message: "missing" }),
   };
   const setup = await render(client);
   try {
@@ -205,6 +264,7 @@ test("failed messages for editor path surfaces error and does not exit to editor
       return { ok: false, code: "Network", message: "network down" };
     },
     toolCalls: async () => ({ ok: true, value: [] }),
+    toolCall: async () => ({ ok: false, code: "NotFound", message: "missing" }),
   };
   const setup = await testRender(
     <App
