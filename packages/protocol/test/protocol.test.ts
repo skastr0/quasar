@@ -152,6 +152,57 @@ describe("QueryResponse v1", () => {
     })).toThrow();
   });
 
+  test("represents requested missing metadata as explicit null", () => {
+    const response = {
+      protocolVersion: QUERY_PROTOCOL_VERSION,
+      kind: "sessions",
+      projection: {
+        detail: "detail",
+        fields: [
+          "sessionId",
+          "title",
+          "model",
+          "modelProvider",
+          "agentRole",
+          "endedAt",
+        ],
+      },
+      page: { returned: 1 },
+      items: [{
+        sessionId: "codex:example-session",
+        title: null,
+        model: null,
+        modelProvider: null,
+        agentRole: null,
+        endedAt: null,
+      }],
+    } as const;
+
+    expect(() => decodeQueryResponseSync(response)).not.toThrow();
+    expect(() => decodeQueryResponseSync({
+      ...response,
+      items: [{ ...response.items[0], sessionId: null }],
+    })).toThrow();
+
+    expect(() => decodeQueryResponseSync({
+      protocolVersion: QUERY_PROTOCOL_VERSION,
+      kind: "toolCalls",
+      projection: {
+        detail: "detail",
+        fields: ["toolCallId", "model", "startedAt", "input", "output", "error"],
+      },
+      page: { returned: 1 },
+      items: [{
+        toolCallId: "call_example",
+        model: null,
+        startedAt: null,
+        input: null,
+        output: null,
+        error: null,
+      }],
+    })).not.toThrow();
+  });
+
   test("keeps tool bodies out of summary rows", () => {
     const response = protocolContracts.response.examples[1].input;
     expect(response.items[0].inputBytes).toBe(128);
