@@ -117,6 +117,22 @@ describe("QuerySpec v1", () => {
     })).not.toThrow();
   });
 
+  test("rejects raw event roles from message queries", () => {
+    expect(() => decodeQuerySpecSync({
+      protocolVersion: QUERY_PROTOCOL_VERSION,
+      kind: "messages",
+      filters: {
+        sessionId: "codex:example-session",
+        role: "tool",
+      },
+      projection: {
+        detail: "summary",
+        fields: ["messageId", "role", "text"],
+      },
+      page: { limit: 10 },
+    })).toThrow();
+  });
+
   test("requires tool payload fields to use detail projection", () => {
     expect(() => decodeQuerySpecSync({
       protocolVersion: QUERY_PROTOCOL_VERSION,

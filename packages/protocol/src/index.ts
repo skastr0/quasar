@@ -69,11 +69,6 @@ const SessionRole = Schema.Literal(
   "user",
   "assistant",
   "reasoning",
-  "developer",
-  "system",
-  "tool",
-  "thinking",
-  "unknown",
 ).annotations({ identifier: "QuasarSessionRole" });
 
 const SearchMode = Schema.Literal("lexical", "semantic", "fusion")
@@ -597,7 +592,7 @@ const queryExamples = [
           "agentRole",
         ],
       },
-      page: { limit: 100, cursor: "opaque-next-page-token" },
+      page: { limit: 100 },
     },
   },
   {
