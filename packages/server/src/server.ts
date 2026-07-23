@@ -93,6 +93,17 @@ const isFingerprintProbe = (value: unknown): value is {
 const providers = new Set<string>(Provider.literals);
 
 const roles = new Set<string>(["user", "assistant", "reasoning"]);
+const sessionEventRoles = new Set<string>([
+  "user", "assistant", "developer", "system", "tool", "thinking", "unknown",
+]);
+const sessionEventKinds = new Set<string>([
+  "message", "tool_call", "tool_result", "reasoning", "preamble", "system",
+  "summary", "edit", "snapshot", "lifecycle", "usage", "unknown",
+]);
+const contentBlockKinds = new Set<string>(["text", "markdown", "thinking", "image", "file", "json"]);
+const sessionEdgeKinds = new Set<string>([
+  "next", "parent", "tool_result_for", "forked_from", "subagent_of", "compacted_into", "artifact_of",
+]);
 
 const isProjectRow = (value: unknown): boolean =>
   isRecord(value)
@@ -115,6 +126,9 @@ const isSessionRow = (value: unknown): boolean =>
   && isString(value.host)
   && isNonNegativeInt(value.identitySchemeVersion)
   && isNonNegativeInt(value.normalizationVersion)
+  && isOptionalString(value.model)
+  && isOptionalString(value.modelProvider)
+  && isOptionalString(value.assignmentRole)
   && isOptionalString(value.parentSessionId)
   && isNonNegativeInt(value.messageCount)
   && isNonNegativeInt(value.toolCallCount);
@@ -134,6 +148,7 @@ const isToolCallRow = (sessionId: string, projectKey: string, provider: string, 
   isRecord(value)
   && isString(value.id)
   && value.sessionId === sessionId
+  && isOptionalString(value.eventId)
   && value.projectKey === projectKey
   && value.provider === provider
   && isSeq(value.seq)
@@ -144,6 +159,133 @@ const isToolCallRow = (sessionId: string, projectKey: string, provider: string, 
   && isOptionalString(value.startedAt)
   && isOptionalString(value.completedAt);
 
+const isOptionalNonNegativeInt = (value: unknown): boolean =>
+  value === undefined || isNonNegativeInt(value);
+
+const isAgentAssignment = (value: unknown): boolean =>
+  isRecord(value)
+  && isOptionalString(value.nickname)
+  && isOptionalString(value.role)
+  && isOptionalString(value.path)
+  && isOptionalNonNegativeInt(value.depth);
+
+const hasFactOwnership = (
+  value: Record<string, unknown>,
+  sessionId: string,
+  projectKey: string,
+  provider: string,
+): boolean =>
+  value.sessionId === sessionId
+  && value.projectIdentityKey === projectKey
+  && value.provider === provider;
+
+const isContentBlockRow = (value: unknown): boolean =>
+  isRecord(value)
+  && isString(value.id)
+  && isSeq(value.sequence)
+  && isString(value.kind)
+  && contentBlockKinds.has(value.kind)
+  && isOptionalString(value.text)
+  && isOptionalString(value.markdown)
+  && isOptionalString(value.thinking)
+  && isOptionalString(value.path)
+  && isOptionalString(value.uri)
+  && isOptionalString(value.mediaType);
+
+const isRawReferenceRow = (value: unknown): boolean =>
+  isRecord(value)
+  && isString(value.sourcePath)
+  && (value.line === undefined || (isNonNegativeInt(value.line) && value.line > 0))
+  && isOptionalString(value.table)
+  && isOptionalString(value.rowId)
+  && isOptionalString(value.nativeType)
+  && isOptionalNonNegativeInt(value.rawBytes);
+
+const isSessionEventRow = (sessionId: string, projectKey: string, provider: string, value: unknown): boolean =>
+  isRecord(value)
+  && hasFactOwnership(value, sessionId, projectKey, provider)
+  && isString(value.id)
+  && isSeq(value.sequence)
+  && isString(value.machineId)
+  && isString(value.agentName)
+  && isString(value.role)
+  && sessionEventRoles.has(value.role)
+  && isString(value.kind)
+  && sessionEventKinds.has(value.kind)
+  && isOptionalString(value.nativeEventId)
+  && isOptionalString(value.timestamp)
+  && isOptionalString(value.contentText)
+  && Array.isArray(value.contentBlocks)
+  && value.contentBlocks.every(isContentBlockRow)
+  && isOptionalString(value.toolCallId)
+  && isOptionalString(value.parentEventId)
+  && isRawReferenceRow(value.rawReference);
+
+const isUsageRecordRow = (sessionId: string, projectKey: string, provider: string, value: unknown): boolean =>
+  isRecord(value)
+  && hasFactOwnership(value, sessionId, projectKey, provider)
+  && isString(value.id)
+  && isString(value.machineId)
+  && isString(value.agentName)
+  && isOptionalString(value.eventId)
+  && isOptionalString(value.timestamp)
+  && isOptionalString(value.model)
+  && isOptionalString(value.modelProvider)
+  && isOptionalNonNegativeInt(value.inputTokens)
+  && isOptionalNonNegativeInt(value.outputTokens)
+  && isOptionalNonNegativeInt(value.reasoningTokens)
+  && isOptionalNonNegativeInt(value.cacheCreationInputTokens)
+  && isOptionalNonNegativeInt(value.cacheReadInputTokens)
+  && isOptionalNonNegativeInt(value.totalTokens)
+  && (value.cost === undefined || (typeof value.cost === "number" && Number.isFinite(value.cost) && value.cost >= 0))
+  && isOptionalString(value.currency);
+
+const isSessionEdgeRow = (sessionId: string, projectKey: string, provider: string, value: unknown): boolean =>
+  isRecord(value)
+  && hasFactOwnership(value, sessionId, projectKey, provider)
+  && isString(value.id)
+  && isString(value.machineId)
+  && isString(value.agentName)
+  && isString(value.kind)
+  && sessionEdgeKinds.has(value.kind)
+  && isOptionalString(value.fromEventId)
+  && isOptionalString(value.toEventId)
+  && isOptionalString(value.fromId)
+  && isOptionalString(value.toId);
+
+const isArtifactRow = (sessionId: string, projectKey: string, provider: string, value: unknown): boolean =>
+  isRecord(value)
+  && hasFactOwnership(value, sessionId, projectKey, provider)
+  && isString(value.id)
+  && isString(value.machineId)
+  && isString(value.agentName)
+  && isString(value.kind)
+  && isOptionalString(value.eventId)
+  && isOptionalString(value.path)
+  && isOptionalString(value.uri)
+  && isOptionalString(value.contentHash)
+  && isOptionalString(value.sourcePath);
+
+const isExecutionContextRow = (sessionId: string, projectKey: string, provider: string, value: unknown): boolean =>
+  isRecord(value)
+  && hasFactOwnership(value, sessionId, projectKey, provider)
+  && isString(value.id)
+  && isSeq(value.sequence)
+  && (value.scope === "session" || value.scope === "turn")
+  && isString(value.machineId)
+  && isString(value.agentName)
+  && isOptionalString(value.timestamp)
+  && isOptionalString(value.turnId)
+  && isOptionalString(value.model)
+  && isOptionalString(value.modelProvider)
+  && isOptionalString(value.reasoningEffort)
+  && isOptionalString(value.serviceTier)
+  && isOptionalString(value.approvalPolicy)
+  && isOptionalString(value.collaborationMode)
+  && isOptionalString(value.multiAgentMode)
+  && isOptionalString(value.personality)
+  && isOptionalString(value.permissionProfileType);
+
 const isMappedSession = (value: unknown): value is MappedSession => {
   if (!isRecord(value)) return false;
   const project = value.project;
@@ -151,15 +293,31 @@ const isMappedSession = (value: unknown): value is MappedSession => {
   if (!isRecord(project) || !isRecord(session)) return false;
   if (!isProjectRow(project) || !isSessionRow(session)) return false;
   if (project.projectKey !== session.projectKey) return false;
-  if (!Array.isArray(value.messages) || !Array.isArray(value.toolCalls)) return false;
+  if (
+    !Array.isArray(value.messages)
+    || !Array.isArray(value.toolCalls)
+    || !Array.isArray(value.events)
+    || !Array.isArray(value.usageRecords)
+    || !Array.isArray(value.sessionEdges)
+    || !Array.isArray(value.artifacts)
+    || !Array.isArray(value.executionContexts)
+  ) return false;
   const sessionId = session.sessionId as string;
   const projectKey = session.projectKey as string;
   const provider = session.provider as string;
   const messageCount = session.messageCount as number;
   const toolCallCount = session.toolCallCount as number;
   if (value.messages.length !== messageCount || value.toolCalls.length !== toolCallCount) return false;
+  if (value.assignment !== undefined && !isAgentAssignment(value.assignment)) return false;
+  const assignmentRole = isRecord(value.assignment) ? value.assignment.role : undefined;
+  if (session.assignmentRole !== assignmentRole) return false;
   return value.messages.every((row) => isMessageRow(sessionId, projectKey, row))
-    && value.toolCalls.every((row) => isToolCallRow(sessionId, projectKey, provider, row));
+    && value.toolCalls.every((row) => isToolCallRow(sessionId, projectKey, provider, row))
+    && value.events.every((row) => isSessionEventRow(sessionId, projectKey, provider, row))
+    && value.usageRecords.every((row) => isUsageRecordRow(sessionId, projectKey, provider, row))
+    && value.sessionEdges.every((row) => isSessionEdgeRow(sessionId, projectKey, provider, row))
+    && value.artifacts.every((row) => isArtifactRow(sessionId, projectKey, provider, row))
+    && value.executionContexts.every((row) => isExecutionContextRow(sessionId, projectKey, provider, row));
 };
 
 const configuredIngestToken = (): string | undefined => {
@@ -184,6 +342,23 @@ const positiveInt = (params: URLSearchParams, name: string, fallback: number): n
   const parsed = Number(raw);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 };
+
+const boundedPositiveInt = (
+  params: URLSearchParams,
+  name: string,
+  fallback: number,
+  maximum: number,
+): number => Math.min(positiveInt(params, name, fallback), maximum);
+
+const nonNegativeInt = (params: URLSearchParams, name: string, fallback: number): number => {
+  const raw = params.get(name);
+  if (raw === null) return fallback;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+};
+
+const SESSION_DETAIL_PAGE_DEFAULT = 100;
+const SESSION_DETAIL_PAGE_MAXIMUM = 1_000;
 
 const health = Effect.gen(function* () {
   const config = yield* LocalServerConfig;
@@ -271,10 +446,43 @@ const sessions = Effect.gen(function* () {
   const rows = yield* store.listSessions({
     provider: params.get("provider") ?? undefined,
     projectKey: params.get("projectKey") ?? undefined,
+    model: params.get("model") ?? undefined,
+    modelProvider: params.get("modelProvider") ?? undefined,
+    assignmentRole: params.get("assignmentRole") ?? undefined,
     limit: positiveInt(params, "limit", 100),
     offset: positiveInt(params, "offset", 0),
   });
   return json(ok("sessions", { rows }));
+});
+
+const sessionDetail = Effect.gen(function* () {
+  const store = yield* LocalStore;
+  const params = yield* query;
+  const sessionId = params.get("sessionId");
+  if (sessionId === null || sessionId.trim() === "") {
+    return badRequest("session-detail", "sessionId is required");
+  }
+  const window = (name: string) => ({
+    limit: boundedPositiveInt(
+      params,
+      `${name}Limit`,
+      SESSION_DETAIL_PAGE_DEFAULT,
+      SESSION_DETAIL_PAGE_MAXIMUM,
+    ),
+    offset: nonNegativeInt(params, `${name}Offset`, 0),
+  });
+  const detail = yield* store.readSessionDetail(sessionId, {
+    messages: window("message"),
+    toolCalls: window("toolCall"),
+    events: window("event"),
+    usageRecords: window("usage"),
+    sessionEdges: window("edge"),
+    artifacts: window("artifact"),
+    executionContexts: window("context"),
+  });
+  return detail === undefined
+    ? notFound("session-detail", `session not found: ${sessionId}`)
+    : json(ok("session-detail", detail));
 });
 
 const messages = Effect.gen(function* () {
@@ -524,10 +732,10 @@ const assembleSemanticMatches = (
     const rows = yield* store.getMessagesBySessionSeq(
       hits.map((hit) => ({ sessionId: hit.sessionId, seq: hit.seq })),
     );
-    const byKey = new Map(rows.map((row) => [`${row.sessionId} ${row.seq}`, row]));
+    const byKey = new Map(rows.map((row) => [`${row.sessionId}\0${row.seq}`, row]));
     const matches: SearchHit[] = [];
     for (const hit of hits) {
-      const row = byKey.get(`${hit.sessionId} ${hit.seq}`);
+      const row = byKey.get(`${hit.sessionId}\0${hit.seq}`);
       if (row === undefined) continue;
       const key = `${row.sessionId}:${row.seq}:${row.role}`;
       matches.push({
@@ -879,6 +1087,7 @@ const routes = HttpRouter.empty.pipe(
   HttpRouter.get("/status", status),
   HttpRouter.get("/projects", projects),
   HttpRouter.get("/sessions", sessions),
+  HttpRouter.get("/session-detail", sessionDetail),
   HttpRouter.get("/messages", messages),
   HttpRouter.get("/tool-calls", toolCalls),
   HttpRouter.get("/tool-call", toolCall),

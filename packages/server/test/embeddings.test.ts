@@ -57,6 +57,11 @@ const mappedSession = (text = "alpha terminal"): MappedSession => ({
     },
   ],
   toolCalls: [],
+  events: [],
+  usageRecords: [],
+  sessionEdges: [],
+  artifacts: [],
+  executionContexts: [],
 });
 
 const defaultEmbeddingProfile = makeEmbeddingProfile({

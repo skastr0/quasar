@@ -1,8 +1,25 @@
 import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { Cause, Context, Effect, Layer, Schema } from "effect";
 
-import type { IngestRunRow, MappedSession, MessageRow, ProjectRow, SessionRow, ToolCallRow } from "./model";
+import type {
+  ArtifactRow,
+  ExecutionContextRow,
+  IngestRunRow,
+  MappedSession,
+  MessageRow,
+  Page,
+  PageWindow,
+  ProjectRow,
+  SessionDetail,
+  SessionDetailPageOptions,
+  SessionEdgeRow,
+  SessionEventRow,
+  SessionRow,
+  ToolCallRow,
+  UsageRecordRow,
+} from "./model";
 import { ensureParentDir, sqlitePath } from "./paths";
 import { composeScopedFtsQuery, ftsProjectScopeToken, positiveInt } from "./fts5";
 import { decodeFloat16Vector, encodeFloat16Vector, VECTOR_BLOB_ENCODING } from "./vectorBlob";
@@ -117,6 +134,10 @@ export interface SessionDiffOutcome {
   readonly toolCallsDeleted: number;
   readonly toolCallsUnchanged: number;
   readonly changedMessages: readonly MessageRow[];
+  /** Message keys whose prior resident-vector slots may now be stale. The
+   * store's SQL triggers delete their vector rows; the matrix consumer uses
+   * this explicit structural receipt to invalidate the corresponding slots. */
+  readonly invalidatedVectorKeys: readonly MessageVectorKey[];
 }
 
 export interface LocalStoreService {
@@ -131,9 +152,16 @@ export interface LocalStoreService {
   readonly listSessions: (options?: {
     readonly provider?: string;
     readonly projectKey?: string;
+    readonly model?: string;
+    readonly modelProvider?: string;
+    readonly assignmentRole?: string;
     readonly limit?: number;
     readonly offset?: number;
   }) => Effect.Effect<readonly SessionRow[], SqliteStoreError>;
+  readonly readSessionDetail: (
+    sessionId: string,
+    pages: SessionDetailPageOptions,
+  ) => Effect.Effect<SessionDetail | undefined, SqliteStoreError>;
   readonly getMessage: (options: {
     readonly sessionId: string;
     readonly seq: number;
@@ -552,6 +580,12 @@ const migrate = (db: Database): readonly StoreMigrationLog[] => {
       host TEXT NOT NULL DEFAULT '',
       identity_scheme_version INTEGER NOT NULL DEFAULT 0,
       normalization_version INTEGER NOT NULL DEFAULT 0,
+      model TEXT,
+      model_provider TEXT,
+      assignment_nickname TEXT,
+      assignment_role TEXT,
+      assignment_path TEXT,
+      assignment_depth INTEGER,
       parent_session_id TEXT,
       message_count INTEGER NOT NULL,
       tool_call_count INTEGER NOT NULL
@@ -573,6 +607,7 @@ const migrate = (db: Database): readonly StoreMigrationLog[] => {
     CREATE TABLE IF NOT EXISTS tool_calls (
       id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL,
+      event_id TEXT,
       seq INTEGER NOT NULL,
       tool_name TEXT NOT NULL,
       status TEXT,
@@ -586,6 +621,52 @@ const migrate = (db: Database): readonly StoreMigrationLog[] => {
     CREATE INDEX IF NOT EXISTS tool_calls_by_session ON tool_calls(session_id, seq);
     CREATE INDEX IF NOT EXISTS tool_calls_by_project_tool ON tool_calls(project_key, tool_name, session_id, seq);
     CREATE INDEX IF NOT EXISTS tool_calls_by_tool ON tool_calls(tool_name, session_id);
+    CREATE TABLE IF NOT EXISTS session_events (
+      session_id TEXT NOT NULL,
+      id TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      fact_hash TEXT NOT NULL,
+      event_json TEXT NOT NULL,
+      PRIMARY KEY (session_id, id)
+    );
+    CREATE INDEX IF NOT EXISTS session_events_by_session_sequence ON session_events(session_id, sequence, id);
+    CREATE TABLE IF NOT EXISTS usage_records (
+      session_id TEXT NOT NULL,
+      id TEXT NOT NULL,
+      order_index INTEGER NOT NULL,
+      timestamp TEXT,
+      fact_hash TEXT NOT NULL,
+      record_json TEXT NOT NULL,
+      PRIMARY KEY (session_id, id)
+    );
+    CREATE INDEX IF NOT EXISTS usage_records_by_session_order ON usage_records(session_id, order_index, id);
+    CREATE TABLE IF NOT EXISTS session_edges (
+      session_id TEXT NOT NULL,
+      id TEXT NOT NULL,
+      order_index INTEGER NOT NULL,
+      fact_hash TEXT NOT NULL,
+      edge_json TEXT NOT NULL,
+      PRIMARY KEY (session_id, id)
+    );
+    CREATE INDEX IF NOT EXISTS session_edges_by_session_order ON session_edges(session_id, order_index, id);
+    CREATE TABLE IF NOT EXISTS session_artifacts (
+      session_id TEXT NOT NULL,
+      id TEXT NOT NULL,
+      order_index INTEGER NOT NULL,
+      fact_hash TEXT NOT NULL,
+      artifact_json TEXT NOT NULL,
+      PRIMARY KEY (session_id, id)
+    );
+    CREATE INDEX IF NOT EXISTS session_artifacts_by_session_order ON session_artifacts(session_id, order_index, id);
+    CREATE TABLE IF NOT EXISTS execution_contexts (
+      session_id TEXT NOT NULL,
+      id TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      fact_hash TEXT NOT NULL,
+      context_json TEXT NOT NULL,
+      PRIMARY KEY (session_id, id)
+    );
+    CREATE INDEX IF NOT EXISTS execution_contexts_by_session_sequence ON execution_contexts(session_id, sequence, id);
     CREATE TABLE IF NOT EXISTS ingest_runs (
       run_id TEXT PRIMARY KEY,
       provider TEXT NOT NULL,
@@ -631,10 +712,56 @@ const migrate = (db: Database): readonly StoreMigrationLog[] => {
       "ALTER TABLE sessions ADD COLUMN normalization_version INTEGER NOT NULL DEFAULT 0",
     );
   }
+  if (!sessionColumns.has("model")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN model TEXT");
+  }
+  if (!sessionColumns.has("model_provider")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN model_provider TEXT");
+  }
+  if (!sessionColumns.has("assignment_nickname")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN assignment_nickname TEXT");
+  }
+  if (!sessionColumns.has("assignment_role")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN assignment_role TEXT");
+  }
+  if (!sessionColumns.has("assignment_path")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN assignment_path TEXT");
+  }
+  if (!sessionColumns.has("assignment_depth")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN assignment_depth INTEGER");
+  }
   // Idempotent column add for parent-session lineage (QSR-220). Nullable, so
   // existing rows default to NULL (root). Empty-column add, not a data migration.
   if (!sessionColumns.has("parent_session_id")) {
     db.exec("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT");
+  }
+  const toolCallColumns = new Set(
+    (db.query("PRAGMA table_info(tool_calls)").all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (!toolCallColumns.has("event_id")) {
+    db.exec("ALTER TABLE tool_calls ADD COLUMN event_id TEXT");
+  }
+  // Source-fact hashes make the full desired-state payload cheap to converge:
+  // appends write only new/changed rows, while normalization replays can still
+  // delete facts that disappeared. Empty hashes force one safe refresh for a
+  // database opened by an earlier build that created these tables first.
+  for (const table of [
+    "session_events",
+    "usage_records",
+    "session_edges",
+    "session_artifacts",
+    "execution_contexts",
+  ] as const) {
+    const columns = new Set(
+      (db.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(
+        (column) => column.name,
+      ),
+    );
+    if (!columns.has("fact_hash")) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN fact_hash TEXT NOT NULL DEFAULT ''`);
+    }
   }
   migrateMessageVectorsTable(db);
   db.exec(MESSAGE_VECTORS_MIGRATION_SQL);
@@ -682,17 +809,42 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
            ON CONFLICT(project_key) DO UPDATE SET display_name = excluded.display_name, raw_path = excluded.raw_path`,
         );
         const upsertSession = db.prepare(
-          `INSERT INTO sessions(session_id, project_key, provider, agent_name, title, started_at, updated_at, source_path, source_fingerprint, host, identity_scheme_version, normalization_version, parent_session_id, message_count, tool_call_count)
-           VALUES ($sessionId, $projectKey, $provider, $agentName, $title, $startedAt, $updatedAt, $sourcePath, $sourceFingerprint, $host, $identitySchemeVersion, $normalizationVersion, $parentSessionId, $messageCount, $toolCallCount)
-           ON CONFLICT(session_id) DO UPDATE SET project_key = excluded.project_key, provider = excluded.provider, agent_name = excluded.agent_name, title = excluded.title, started_at = excluded.started_at, updated_at = excluded.updated_at, source_path = excluded.source_path, source_fingerprint = excluded.source_fingerprint, host = excluded.host, identity_scheme_version = excluded.identity_scheme_version, normalization_version = excluded.normalization_version, parent_session_id = excluded.parent_session_id, message_count = excluded.message_count, tool_call_count = excluded.tool_call_count`,
+          `INSERT INTO sessions(session_id, project_key, provider, agent_name, title, started_at, updated_at, source_path, source_fingerprint, host, identity_scheme_version, normalization_version, model, model_provider, assignment_nickname, assignment_role, assignment_path, assignment_depth, parent_session_id, message_count, tool_call_count)
+           VALUES ($sessionId, $projectKey, $provider, $agentName, $title, $startedAt, $updatedAt, $sourcePath, $sourceFingerprint, $host, $identitySchemeVersion, $normalizationVersion, $model, $modelProvider, $assignmentNickname, $assignmentRole, $assignmentPath, $assignmentDepth, $parentSessionId, $messageCount, $toolCallCount)
+           ON CONFLICT(session_id) DO UPDATE SET project_key = excluded.project_key, provider = excluded.provider, agent_name = excluded.agent_name, title = excluded.title, started_at = excluded.started_at, updated_at = excluded.updated_at, source_path = excluded.source_path, source_fingerprint = excluded.source_fingerprint, host = excluded.host, identity_scheme_version = excluded.identity_scheme_version, normalization_version = excluded.normalization_version, model = excluded.model, model_provider = excluded.model_provider, assignment_nickname = excluded.assignment_nickname, assignment_role = excluded.assignment_role, assignment_path = excluded.assignment_path, assignment_depth = excluded.assignment_depth, parent_session_id = excluded.parent_session_id, message_count = excluded.message_count, tool_call_count = excluded.tool_call_count`,
         );
         const insertMessage = db.prepare(
           `INSERT INTO messages(session_id, seq, role, text, ts, project_key, content_hash, project_scope_token)
            VALUES ($sessionId, $seq, $role, $text, $ts, $projectKey, $contentHash, $projectScopeToken)`,
         );
         const insertToolCall = db.prepare(
-          `INSERT INTO tool_calls(id, session_id, seq, tool_name, status, input_text, output_text, started_at, completed_at, project_key, provider)
-           VALUES ($id, $sessionId, $seq, $toolName, $status, $inputText, $outputText, $startedAt, $completedAt, $projectKey, $provider)`,
+          `INSERT INTO tool_calls(id, session_id, event_id, seq, tool_name, status, input_text, output_text, started_at, completed_at, project_key, provider)
+           VALUES ($id, $sessionId, $eventId, $seq, $toolName, $status, $inputText, $outputText, $startedAt, $completedAt, $projectKey, $provider)`,
+        );
+        const deleteSessionEvent = db.prepare("DELETE FROM session_events WHERE session_id = ? AND id = ?");
+        const upsertSessionEvent = db.prepare(
+          `INSERT INTO session_events(session_id, id, sequence, fact_hash, event_json) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(session_id, id) DO UPDATE SET sequence = excluded.sequence, fact_hash = excluded.fact_hash, event_json = excluded.event_json`,
+        );
+        const deleteUsageRecord = db.prepare("DELETE FROM usage_records WHERE session_id = ? AND id = ?");
+        const upsertUsageRecord = db.prepare(
+          `INSERT INTO usage_records(session_id, id, order_index, timestamp, fact_hash, record_json) VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(session_id, id) DO UPDATE SET order_index = excluded.order_index, timestamp = excluded.timestamp, fact_hash = excluded.fact_hash, record_json = excluded.record_json`,
+        );
+        const deleteSessionEdge = db.prepare("DELETE FROM session_edges WHERE session_id = ? AND id = ?");
+        const upsertSessionEdge = db.prepare(
+          `INSERT INTO session_edges(session_id, id, order_index, fact_hash, edge_json) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(session_id, id) DO UPDATE SET order_index = excluded.order_index, fact_hash = excluded.fact_hash, edge_json = excluded.edge_json`,
+        );
+        const deleteSessionArtifact = db.prepare("DELETE FROM session_artifacts WHERE session_id = ? AND id = ?");
+        const upsertSessionArtifact = db.prepare(
+          `INSERT INTO session_artifacts(session_id, id, order_index, fact_hash, artifact_json) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(session_id, id) DO UPDATE SET order_index = excluded.order_index, fact_hash = excluded.fact_hash, artifact_json = excluded.artifact_json`,
+        );
+        const deleteExecutionContext = db.prepare("DELETE FROM execution_contexts WHERE session_id = ? AND id = ?");
+        const upsertExecutionContext = db.prepare(
+          `INSERT INTO execution_contexts(session_id, id, sequence, fact_hash, context_json) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(session_id, id) DO UPDATE SET sequence = excluded.sequence, fact_hash = excluded.fact_hash, context_json = excluded.context_json`,
         );
         const upsertIngestRun = db.prepare(
           `INSERT INTO ingest_runs(run_id, provider, status, started_at, completed_at, sessions_seen, sessions_written, sessions_skipped, sessions_failed)
@@ -779,21 +931,89 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
           "SELECT seq, role, content_hash AS contentHash, project_key AS projectKey, ts FROM messages WHERE session_id = ?",
         );
         const selectToolCallDiffRows = db.prepare(
-          `SELECT id, seq, tool_name AS toolName, status, started_at AS startedAt, completed_at AS completedAt,
+          `SELECT id, event_id AS eventId, seq, tool_name AS toolName, status, started_at AS startedAt, completed_at AS completedAt,
                   project_key AS projectKey, provider,
                   length(CAST(input_text AS BLOB)) AS inputBytes, length(CAST(output_text AS BLOB)) AS outputBytes
            FROM tool_calls WHERE session_id = ?`,
         );
+        const selectSessionEventDiffRows = db.prepare(
+          "SELECT id, sequence AS position, fact_hash AS factHash FROM session_events WHERE session_id = ?",
+        );
+        const selectUsageRecordDiffRows = db.prepare(
+          "SELECT id, order_index AS position, fact_hash AS factHash FROM usage_records WHERE session_id = ?",
+        );
+        const selectSessionEdgeDiffRows = db.prepare(
+          "SELECT id, order_index AS position, fact_hash AS factHash FROM session_edges WHERE session_id = ?",
+        );
+        const selectSessionArtifactDiffRows = db.prepare(
+          "SELECT id, order_index AS position, fact_hash AS factHash FROM session_artifacts WHERE session_id = ?",
+        );
+        const selectExecutionContextDiffRows = db.prepare(
+          "SELECT id, sequence AS position, fact_hash AS factHash FROM execution_contexts WHERE session_id = ?",
+        );
         const deleteMessageRow = db.prepare("DELETE FROM messages WHERE session_id = ? AND seq = ?");
         const deleteToolCallRow = db.prepare("DELETE FROM tool_calls WHERE id = ?");
         const upsertToolCall = db.prepare(
-          `INSERT INTO tool_calls(id, session_id, seq, tool_name, status, input_text, output_text, started_at, completed_at, project_key, provider)
-           VALUES ($id, $sessionId, $seq, $toolName, $status, $inputText, $outputText, $startedAt, $completedAt, $projectKey, $provider)
-           ON CONFLICT(id) DO UPDATE SET session_id = excluded.session_id, seq = excluded.seq, tool_name = excluded.tool_name, status = excluded.status, input_text = excluded.input_text, output_text = excluded.output_text, started_at = excluded.started_at, completed_at = excluded.completed_at, project_key = excluded.project_key, provider = excluded.provider`,
+          `INSERT INTO tool_calls(id, session_id, event_id, seq, tool_name, status, input_text, output_text, started_at, completed_at, project_key, provider)
+           VALUES ($id, $sessionId, $eventId, $seq, $toolName, $status, $inputText, $outputText, $startedAt, $completedAt, $projectKey, $provider)
+           ON CONFLICT(id) DO UPDATE SET session_id = excluded.session_id, event_id = excluded.event_id, seq = excluded.seq, tool_name = excluded.tool_name, status = excluded.status, input_text = excluded.input_text, output_text = excluded.output_text, started_at = excluded.started_at, completed_at = excluded.completed_at, project_key = excluded.project_key, provider = excluded.provider`,
         );
         const stampSessionFingerprint = db.prepare(
           "UPDATE sessions SET source_fingerprint = ? WHERE session_id = ?",
         );
+
+        interface StoredSourceFact {
+          readonly id: string;
+          readonly position: number;
+          readonly factHash: string;
+        }
+
+        interface SourceFactWrite {
+          readonly id: string;
+          readonly position: number;
+          readonly timestamp: string | null;
+          readonly factHash: string;
+          readonly json: string;
+        }
+
+        interface SourceFactDiff {
+          readonly upserts: readonly SourceFactWrite[];
+          readonly deleteIds: readonly string[];
+        }
+
+        const sourceFactHash = (json: string): string =>
+          createHash("sha256").update(json).digest("hex");
+
+        const diffSourceFacts = <A extends { readonly id: string }>(
+          incoming: readonly A[],
+          existing: readonly StoredSourceFact[],
+          positionFor: (row: A, index: number) => number,
+          timestampFor: (row: A) => string | undefined = () => undefined,
+        ): SourceFactDiff => {
+          const existingById = new Map(existing.map((row) => [row.id, row]));
+          const incomingIds = new Set<string>();
+          const upserts: SourceFactWrite[] = [];
+          for (const [index, row] of incoming.entries()) {
+            incomingIds.add(row.id);
+            const position = positionFor(row, index);
+            const json = JSON.stringify(row);
+            const factHash = sourceFactHash(json);
+            const current = existingById.get(row.id);
+            if (current?.position !== position || current.factHash !== factHash) {
+              upserts.push({
+                id: row.id,
+                position,
+                timestamp: timestampFor(row) ?? null,
+                factHash,
+                json,
+              });
+            }
+          }
+          return {
+            upserts,
+            deleteIds: existing.filter((row) => !incomingIds.has(row.id)).map((row) => row.id),
+          };
+        };
 
         interface SessionDiffPlan {
           readonly messageUpserts: readonly MessageRow[];
@@ -806,6 +1026,11 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
           readonly toolCallsInserted: number;
           readonly toolCallsUpdated: number;
           readonly toolCallsUnchanged: number;
+          readonly events: SourceFactDiff;
+          readonly usageRecords: SourceFactDiff;
+          readonly sessionEdges: SourceFactDiff;
+          readonly artifacts: SourceFactDiff;
+          readonly executionContexts: SourceFactDiff;
         }
 
         const computeSessionDiff = (mapped: MappedSession): SessionDiffPlan => {
@@ -840,7 +1065,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
             .map((row) => row.seq);
 
           const existingToolCalls = selectToolCallDiffRows.all(mapped.session.sessionId) as Array<{
-            id: string; seq: number; toolName: string; status: string | null;
+            id: string; eventId: string | null; seq: number; toolName: string; status: string | null;
             startedAt: string | null; completedAt: string | null;
             projectKey: string; provider: string; inputBytes: number; outputBytes: number;
           }>;
@@ -863,6 +1088,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               // append-only in practice, and a mutated session's messages
               // still carry content hashes that force the session through here.
               existing.seq !== toolCall.seq
+              || existing.eventId !== (toolCall.eventId ?? null)
               || existing.toolName !== toolCall.toolName
               || existing.status !== (toolCall.status ?? null)
               || existing.startedAt !== (toolCall.startedAt ?? null)
@@ -882,9 +1108,39 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
             .filter((row) => !incomingIds.has(row.id))
             .map((row) => row.id);
 
+          const sourceFacts = (statement: ReturnType<Database["prepare"]>): StoredSourceFact[] =>
+            statement.all(mapped.session.sessionId) as StoredSourceFact[];
+          const events = diffSourceFacts(
+            mapped.events,
+            sourceFacts(selectSessionEventDiffRows),
+            (event) => event.sequence,
+          );
+          const usageRecords = diffSourceFacts(
+            mapped.usageRecords,
+            sourceFacts(selectUsageRecordDiffRows),
+            (_record, index) => index,
+            (record) => record.timestamp,
+          );
+          const sessionEdges = diffSourceFacts(
+            mapped.sessionEdges,
+            sourceFacts(selectSessionEdgeDiffRows),
+            (_edge, index) => index,
+          );
+          const artifacts = diffSourceFacts(
+            mapped.artifacts,
+            sourceFacts(selectSessionArtifactDiffRows),
+            (_artifact, index) => index,
+          );
+          const executionContexts = diffSourceFacts(
+            mapped.executionContexts,
+            sourceFacts(selectExecutionContextDiffRows),
+            (context) => context.sequence,
+          );
+
           return {
             messageUpserts, messageDeleteSeqs, messagesInserted, messagesUpdated, messagesUnchanged,
             toolCallUpserts, toolCallDeleteIds, toolCallsInserted, toolCallsUpdated, toolCallsUnchanged,
+            events, usageRecords, sessionEdges, artifacts, executionContexts,
           };
         };
 
@@ -893,7 +1149,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
         // fingerprint. A crash mid-apply leaves a fingerprint mismatch, the
         // daemon re-sends the full session, and the diff converges on the
         // remainder — no journal or partial-apply bookkeeping needed.
-        const applySessionHead = db.transaction((mapped: MappedSession) => {
+        const applySessionHead = db.transaction((mapped: MappedSession, plan: SessionDiffPlan) => {
           upsertProject.run({
             $projectKey: mapped.project.projectKey,
             $displayName: mapped.project.displayName,
@@ -912,10 +1168,56 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
             $host: mapped.session.host,
             $identitySchemeVersion: mapped.session.identitySchemeVersion,
             $normalizationVersion: mapped.session.normalizationVersion,
+            $model: mapped.session.model ?? null,
+            $modelProvider: mapped.session.modelProvider ?? null,
+            $assignmentNickname: mapped.assignment?.nickname ?? null,
+            $assignmentRole: mapped.assignment?.role ?? mapped.session.assignmentRole ?? null,
+            $assignmentPath: mapped.assignment?.path ?? null,
+            $assignmentDepth: mapped.assignment?.depth ?? null,
             $parentSessionId: mapped.session.parentSessionId ?? null,
             $messageCount: mapped.session.messageCount,
             $toolCallCount: mapped.session.toolCallCount,
           });
+          const sessionId = mapped.session.sessionId;
+          for (const id of plan.events.deleteIds) deleteSessionEvent.run(sessionId, id);
+          for (const event of plan.events.upserts) {
+            upsertSessionEvent.run(sessionId, event.id, event.position, event.factHash, event.json);
+          }
+          for (const id of plan.usageRecords.deleteIds) deleteUsageRecord.run(sessionId, id);
+          for (const record of plan.usageRecords.upserts) {
+            upsertUsageRecord.run(
+              sessionId,
+              record.id,
+              record.position,
+              record.timestamp,
+              record.factHash,
+              record.json,
+            );
+          }
+          for (const id of plan.sessionEdges.deleteIds) deleteSessionEdge.run(sessionId, id);
+          for (const edge of plan.sessionEdges.upserts) {
+            upsertSessionEdge.run(sessionId, edge.id, edge.position, edge.factHash, edge.json);
+          }
+          for (const id of plan.artifacts.deleteIds) deleteSessionArtifact.run(sessionId, id);
+          for (const artifact of plan.artifacts.upserts) {
+            upsertSessionArtifact.run(
+              sessionId,
+              artifact.id,
+              artifact.position,
+              artifact.factHash,
+              artifact.json,
+            );
+          }
+          for (const id of plan.executionContexts.deleteIds) deleteExecutionContext.run(sessionId, id);
+          for (const context of plan.executionContexts.upserts) {
+            upsertExecutionContext.run(
+              sessionId,
+              context.id,
+              context.position,
+              context.factHash,
+              context.json,
+            );
+          }
         });
         const applyMessageDeleteChunk = db.transaction((sessionId: string, seqs: readonly number[]) => {
           for (const seq of seqs) deleteMessageRow.run(sessionId, seq);
@@ -943,6 +1245,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
             upsertToolCall.run({
               $id: toolCall.id,
               $sessionId: toolCall.sessionId,
+              $eventId: toolCall.eventId ?? null,
               $seq: toolCall.seq,
               $toolName: toolCall.toolName,
               $status: toolCall.status ?? null,
@@ -974,7 +1277,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
             const plan = yield* trySqlite("upsertSession.plan", () => computeSessionDiff(mapped)).pipe(
               Effect.withSpan("ingest.diffPlan"),
             );
-            yield* trySqlite("upsertSession.head", () => applySessionHead(mapped)).pipe(
+            yield* trySqlite("upsertSession.head", () => applySessionHead(mapped, plan)).pipe(
               Effect.withSpan("ingest.diffHead"),
             );
             for (const chunk of chunked(plan.messageDeleteSeqs)) {
@@ -1023,12 +1326,145 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               toolCallsDeleted: plan.toolCallDeleteIds.length,
               toolCallsUnchanged: plan.toolCallsUnchanged,
               changedMessages: plan.messageUpserts,
+              invalidatedVectorKeys: [
+                ...plan.messageUpserts.map((row) => ({ sessionId: row.sessionId, seq: row.seq })),
+                ...plan.messageDeleteSeqs.map((seq) => ({ sessionId: mapped.session.sessionId, seq })),
+              ],
             };
           }).pipe(
             Effect.withSpan("ingest.diffApply", {
               attributes: { sessionId: mapped.session.sessionId },
             }),
           );
+
+        interface SessionDetailHeadRow {
+          readonly sessionId: string;
+          readonly projectKey: string;
+          readonly provider: SessionRow["provider"];
+          readonly agentName: string;
+          readonly title: string | null;
+          readonly startedAt: string | null;
+          readonly updatedAt: string | null;
+          readonly sourcePath: string;
+          readonly sourceFingerprint: string;
+          readonly host: string;
+          readonly identitySchemeVersion: number;
+          readonly normalizationVersion: number;
+          readonly model: string | null;
+          readonly modelProvider: string | null;
+          readonly assignmentNickname: string | null;
+          readonly assignmentRole: string | null;
+          readonly assignmentPath: string | null;
+          readonly assignmentDepth: number | null;
+          readonly parentSessionId: string | null;
+          readonly messageCount: number;
+          readonly toolCallCount: number;
+        }
+
+        const selectSessionDetailHead = db.prepare(`
+          SELECT session_id AS sessionId, project_key AS projectKey, provider,
+            agent_name AS agentName, title, started_at AS startedAt,
+            updated_at AS updatedAt, source_path AS sourcePath,
+            source_fingerprint AS sourceFingerprint, host,
+            identity_scheme_version AS identitySchemeVersion,
+            normalization_version AS normalizationVersion, model,
+            model_provider AS modelProvider,
+            assignment_nickname AS assignmentNickname,
+            assignment_role AS assignmentRole,
+            assignment_path AS assignmentPath,
+            assignment_depth AS assignmentDepth,
+            parent_session_id AS parentSessionId,
+            message_count AS messageCount, tool_call_count AS toolCallCount
+          FROM sessions WHERE session_id = ?
+        `);
+        const countMessagesBySession = db.prepare("SELECT COUNT(*) AS count FROM messages WHERE session_id = ?");
+        const countToolCallsBySession = db.prepare("SELECT COUNT(*) AS count FROM tool_calls WHERE session_id = ?");
+        const countEventsBySession = db.prepare("SELECT COUNT(*) AS count FROM session_events WHERE session_id = ?");
+        const countUsageBySession = db.prepare("SELECT COUNT(*) AS count FROM usage_records WHERE session_id = ?");
+        const countEdgesBySession = db.prepare("SELECT COUNT(*) AS count FROM session_edges WHERE session_id = ?");
+        const countArtifactsBySession = db.prepare("SELECT COUNT(*) AS count FROM session_artifacts WHERE session_id = ?");
+        const countContextsBySession = db.prepare("SELECT COUNT(*) AS count FROM execution_contexts WHERE session_id = ?");
+
+        const page = <A>(window: PageWindow, total: number, rows: readonly A[]): Page<A> => ({
+          ...window,
+          total,
+          hasMore: window.offset + rows.length < total,
+          rows,
+        });
+        const countRows = (statement: ReturnType<Database["prepare"]>, sessionId: string): number =>
+          (statement.get(sessionId) as { count: number }).count;
+        const parseFact = <A>(row: { readonly json: string }): A => JSON.parse(row.json) as A;
+
+        const readSessionDetail = (
+          sessionId: string,
+          pages: SessionDetailPageOptions,
+        ): SessionDetail | undefined => {
+          const head = selectSessionDetailHead.get(sessionId) as SessionDetailHeadRow | null;
+          if (head === null) return undefined;
+          const session: SessionRow = {
+            sessionId: head.sessionId,
+            projectKey: head.projectKey,
+            provider: head.provider,
+            agentName: head.agentName,
+            ...(head.title !== null ? { title: head.title } : {}),
+            ...(head.startedAt !== null ? { startedAt: head.startedAt } : {}),
+            ...(head.updatedAt !== null ? { updatedAt: head.updatedAt } : {}),
+            sourcePath: head.sourcePath,
+            sourceFingerprint: head.sourceFingerprint,
+            host: head.host,
+            identitySchemeVersion: head.identitySchemeVersion,
+            normalizationVersion: head.normalizationVersion,
+            ...(head.model !== null ? { model: head.model } : {}),
+            ...(head.modelProvider !== null ? { modelProvider: head.modelProvider } : {}),
+            ...(head.assignmentRole !== null ? { assignmentRole: head.assignmentRole } : {}),
+            ...(head.parentSessionId !== null ? { parentSessionId: head.parentSessionId } : {}),
+            messageCount: head.messageCount,
+            toolCallCount: head.toolCallCount,
+          };
+          const assignment = head.assignmentNickname !== null
+            || head.assignmentRole !== null
+            || head.assignmentPath !== null
+            || head.assignmentDepth !== null
+            ? {
+              ...(head.assignmentNickname !== null ? { nickname: head.assignmentNickname } : {}),
+              ...(head.assignmentRole !== null ? { role: head.assignmentRole } : {}),
+              ...(head.assignmentPath !== null ? { path: head.assignmentPath } : {}),
+              ...(head.assignmentDepth !== null ? { depth: head.assignmentDepth } : {}),
+            }
+            : undefined;
+          const messageRows = db.query(
+            "SELECT session_id AS sessionId, seq, role, text, ts, project_key AS projectKey, content_hash AS contentHash FROM messages WHERE session_id = ? ORDER BY seq ASC LIMIT ? OFFSET ?",
+          ).all(sessionId, pages.messages.limit, pages.messages.offset) as MessageRow[];
+          const toolCallRows = db.query(
+            "SELECT id, session_id AS sessionId, event_id AS eventId, seq, tool_name AS toolName, status, input_text AS inputText, output_text AS outputText, started_at AS startedAt, completed_at AS completedAt, project_key AS projectKey, provider FROM tool_calls WHERE session_id = ? ORDER BY seq ASC, id ASC LIMIT ? OFFSET ?",
+          ).all(sessionId, pages.toolCalls.limit, pages.toolCalls.offset) as ToolCallRow[];
+          const eventRows = (db.query(
+            "SELECT event_json AS json FROM session_events WHERE session_id = ? ORDER BY sequence ASC, id ASC LIMIT ? OFFSET ?",
+          ).all(sessionId, pages.events.limit, pages.events.offset) as Array<{ json: string }>).map(parseFact<SessionEventRow>);
+          const usageRows = (db.query(
+            "SELECT record_json AS json FROM usage_records WHERE session_id = ? ORDER BY order_index ASC, id ASC LIMIT ? OFFSET ?",
+          ).all(sessionId, pages.usageRecords.limit, pages.usageRecords.offset) as Array<{ json: string }>).map(parseFact<UsageRecordRow>);
+          const edgeRows = (db.query(
+            "SELECT edge_json AS json FROM session_edges WHERE session_id = ? ORDER BY order_index ASC, id ASC LIMIT ? OFFSET ?",
+          ).all(sessionId, pages.sessionEdges.limit, pages.sessionEdges.offset) as Array<{ json: string }>).map(parseFact<SessionEdgeRow>);
+          const artifactRows = (db.query(
+            "SELECT artifact_json AS json FROM session_artifacts WHERE session_id = ? ORDER BY order_index ASC, id ASC LIMIT ? OFFSET ?",
+          ).all(sessionId, pages.artifacts.limit, pages.artifacts.offset) as Array<{ json: string }>).map(parseFact<ArtifactRow>);
+          const contextRows = (db.query(
+            "SELECT context_json AS json FROM execution_contexts WHERE session_id = ? ORDER BY sequence ASC, id ASC LIMIT ? OFFSET ?",
+          ).all(sessionId, pages.executionContexts.limit, pages.executionContexts.offset) as Array<{ json: string }>).map(parseFact<ExecutionContextRow>);
+          return {
+            session,
+            ...(assignment !== undefined ? { assignment } : {}),
+            messages: page(pages.messages, countRows(countMessagesBySession, sessionId), messageRows),
+            toolCalls: page(pages.toolCalls, countRows(countToolCallsBySession, sessionId), toolCallRows),
+            events: page(pages.events, countRows(countEventsBySession, sessionId), eventRows),
+            usageRecords: page(pages.usageRecords, countRows(countUsageBySession, sessionId), usageRows),
+            sessionEdges: page(pages.sessionEdges, countRows(countEdgesBySession, sessionId), edgeRows),
+            artifacts: page(pages.artifacts, countRows(countArtifactsBySession, sessionId), artifactRows),
+            executionContexts: page(pages.executionContexts, countRows(countContextsBySession, sessionId), contextRows),
+          };
+        };
 
         return {
           dbPath: path,
@@ -1041,6 +1477,8 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                 .all(limit, offset) as ProjectRow[];
             }),
           upsertSession: upsertSessionDiff,
+          readSessionDetail: (sessionId, pages) =>
+            trySqlite("readSessionDetail", () => readSessionDetail(sessionId, pages)),
           hasSessionFingerprint: (sessionId, sourceFingerprint, normalizationVersion) =>
             trySqlite("hasSessionFingerprint", () => {
               const row = db
@@ -1063,9 +1501,21 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                 filters.push("project_key = ?");
                 args.push(options.projectKey);
               }
+              if (options.model !== undefined) {
+                filters.push("model = ?");
+                args.push(options.model);
+              }
+              if (options.modelProvider !== undefined) {
+                filters.push("model_provider = ?");
+                args.push(options.modelProvider);
+              }
+              if (options.assignmentRole !== undefined) {
+                filters.push("assignment_role = ?");
+                args.push(options.assignmentRole);
+              }
               const where = filters.length > 0 ? ` WHERE ${filters.join(" AND ")}` : "";
               return db
-                .query(`SELECT session_id AS sessionId, project_key AS projectKey, provider, agent_name AS agentName, title, started_at AS startedAt, updated_at AS updatedAt, source_path AS sourcePath, source_fingerprint AS sourceFingerprint, host, identity_scheme_version AS identitySchemeVersion, normalization_version AS normalizationVersion, parent_session_id AS parentSessionId, message_count AS messageCount, tool_call_count AS toolCallCount FROM sessions${where} ORDER BY COALESCE(updated_at, started_at, '') DESC LIMIT ? OFFSET ?`)
+                .query(`SELECT session_id AS sessionId, project_key AS projectKey, provider, agent_name AS agentName, title, started_at AS startedAt, updated_at AS updatedAt, source_path AS sourcePath, source_fingerprint AS sourceFingerprint, host, identity_scheme_version AS identitySchemeVersion, normalization_version AS normalizationVersion, model, model_provider AS modelProvider, assignment_role AS assignmentRole, parent_session_id AS parentSessionId, message_count AS messageCount, tool_call_count AS toolCallCount FROM sessions${where} ORDER BY COALESCE(updated_at, started_at, '') DESC LIMIT ? OFFSET ?`)
                 .all(...args, limit, offset) as SessionRow[];
             }),
           getMessage: ({ sessionId, seq, contentHash }) =>
@@ -1102,13 +1552,13 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               }
               const where = filters.length > 0 ? ` WHERE ${filters.join(" AND ")}` : "";
               return db
-                .query(`SELECT id, session_id AS sessionId, seq, tool_name AS toolName, status, input_text AS inputText, output_text AS outputText, started_at AS startedAt, completed_at AS completedAt, project_key AS projectKey, provider FROM tool_calls${where} ORDER BY session_id ASC, seq ASC LIMIT ? OFFSET ?`)
+                .query(`SELECT id, session_id AS sessionId, event_id AS eventId, seq, tool_name AS toolName, status, input_text AS inputText, output_text AS outputText, started_at AS startedAt, completed_at AS completedAt, project_key AS projectKey, provider FROM tool_calls${where} ORDER BY session_id ASC, seq ASC LIMIT ? OFFSET ?`)
                 .all(...args, limit, offset) as ToolCallRow[];
             }),
           getToolCall: (id) =>
             trySqlite("getToolCall", () =>
               db
-                .query("SELECT id, session_id AS sessionId, seq, tool_name AS toolName, status, input_text AS inputText, output_text AS outputText, started_at AS startedAt, completed_at AS completedAt, project_key AS projectKey, provider FROM tool_calls WHERE id = ?")
+                .query("SELECT id, session_id AS sessionId, event_id AS eventId, seq, tool_name AS toolName, status, input_text AS inputText, output_text AS outputText, started_at AS startedAt, completed_at AS completedAt, project_key AS projectKey, provider FROM tool_calls WHERE id = ?")
                 .get(id) as ToolCallRow | undefined,
             ),
           recordIngestRun: (run) =>

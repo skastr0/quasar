@@ -91,6 +91,11 @@ const sessionFixture = (sessionId: string, projectKey: string, messageCount: num
     contentHash: `hash-${sessionId}-${seq}`,
   })),
   toolCalls: [],
+  events: [],
+  usageRecords: [],
+  sessionEdges: [],
+  artifacts: [],
+  executionContexts: [],
 });
 
 const vectorUpsert = (

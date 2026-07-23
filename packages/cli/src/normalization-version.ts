@@ -4,4 +4,4 @@
  * manifest, fingerprint probe, mapped payload, and SQLite session head, so a
  * deployment replays each source exactly once through idempotent upserts.
  */
-export const NORMALIZATION_VERSION = 2;
+export const NORMALIZATION_VERSION = 3;

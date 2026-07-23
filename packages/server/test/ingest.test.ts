@@ -49,6 +49,11 @@ const duplicateContentSession = (): MappedSession => ({
     { sessionId: "session-a", seq: 2, role: "user", text: "identical", projectKey: "project-a", contentHash: "dup-hash" },
   ],
   toolCalls: [],
+  events: [],
+  usageRecords: [],
+  sessionEdges: [],
+  artifacts: [],
+  executionContexts: [],
 });
 
 const withQueue = <A>(run: Effect.Effect<A, unknown, LocalStore | DurableQueue>) => {

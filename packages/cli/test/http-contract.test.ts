@@ -24,7 +24,10 @@ import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 
 import { postFingerprintProbe, postMappedSession } from "../src/ingest";
+import { mapSession } from "../src/map";
 import type { MappedSession } from "../src/model";
+import type { NormalizedSession } from "../src/core/schemas";
+import { NORMALIZATION_VERSION } from "../src/normalization-version";
 
 const serverRoot = join(import.meta.dir, "..", "..", "server");
 
@@ -46,7 +49,11 @@ const randomPort = () => 20_000 + Math.floor(Math.random() * 20_000);
 
 const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
 
-const mappedSession = (overrides: { readonly fingerprint?: string; readonly firstText?: string } = {}): MappedSession => ({
+const mappedSession = (overrides: {
+  readonly fingerprint?: string;
+  readonly firstText?: string;
+  readonly normalizationVersion?: number;
+} = {}): MappedSession => ({
   project: { projectKey: "contract-project", displayName: "Contract Project", rawPath: "/tmp/contract-project" },
   session: {
     sessionId: "contract-session",
@@ -60,7 +67,10 @@ const mappedSession = (overrides: { readonly fingerprint?: string; readonly firs
     sourceFingerprint: overrides.fingerprint ?? "contract-fingerprint",
     host: "contract-host",
     identitySchemeVersion: 1,
-    normalizationVersion: 2,
+    normalizationVersion: overrides.normalizationVersion ?? NORMALIZATION_VERSION,
+    model: "gpt-5.6-sol",
+    modelProvider: "openai",
+    assignmentRole: "builder",
     messageCount: 2,
     toolCallCount: 1,
   },
@@ -88,6 +98,7 @@ const mappedSession = (overrides: { readonly fingerprint?: string; readonly firs
     {
       id: "contract-tool",
       sessionId: "contract-session",
+      eventId: "contract-event-tool",
       seq: 3,
       toolName: "shell_command",
       status: "ok",
@@ -99,6 +110,161 @@ const mappedSession = (overrides: { readonly fingerprint?: string; readonly firs
       provider: "codex",
     },
   ],
+  events: [
+    {
+      id: "contract-event-user",
+      sessionId: "contract-session",
+      nativeEventId: "native-user",
+      sequence: 10,
+      timestamp: "2026-06-18T10:00:30.000Z",
+      machineId: "machine-contract",
+      provider: "codex",
+      agentName: "codex",
+      projectIdentityKey: "contract-project",
+      role: "user",
+      kind: "message",
+      contentText: "contract handshake over http",
+      contentBlocks: [],
+      rawReference: { sourcePath: "/history/contract-session.jsonl", line: 1 },
+    },
+    {
+      id: "contract-event-tool",
+      sessionId: "contract-session",
+      nativeEventId: "native-tool",
+      sequence: 12,
+      timestamp: "2026-06-18T10:00:40.000Z",
+      machineId: "machine-contract",
+      provider: "codex",
+      agentName: "codex",
+      projectIdentityKey: "contract-project",
+      role: "tool",
+      kind: "tool_call",
+      contentText: "shell_command",
+      contentBlocks: [],
+      toolCallId: "contract-tool",
+      rawReference: { sourcePath: "/history/contract-session.jsonl", line: 2 },
+    },
+  ],
+  usageRecords: [
+    {
+      id: "contract-usage-1",
+      sessionId: "contract-session",
+      eventId: "contract-event-user",
+      machineId: "machine-contract",
+      provider: "codex",
+      agentName: "codex",
+      projectIdentityKey: "contract-project",
+      timestamp: "2026-06-18T10:00:31.000Z",
+      model: "gpt-5.6-sol",
+      modelProvider: "openai",
+      inputTokens: 20,
+      outputTokens: 5,
+      totalTokens: 25,
+    },
+    {
+      id: "contract-usage-2",
+      sessionId: "contract-session",
+      eventId: "contract-event-tool",
+      machineId: "machine-contract",
+      provider: "codex",
+      agentName: "codex",
+      projectIdentityKey: "contract-project",
+      timestamp: "2026-06-18T10:00:41.000Z",
+      model: "gpt-5.6-sol",
+      modelProvider: "openai",
+      inputTokens: 30,
+      outputTokens: 10,
+      totalTokens: 40,
+    },
+  ],
+  sessionEdges: [
+    {
+      id: "contract-edge-1",
+      sessionId: "contract-session",
+      machineId: "machine-contract",
+      provider: "codex",
+      agentName: "codex",
+      projectIdentityKey: "contract-project",
+      kind: "next",
+      fromEventId: "contract-event-user",
+      toEventId: "contract-event-tool",
+    },
+    {
+      id: "contract-edge-2",
+      sessionId: "contract-session",
+      machineId: "machine-contract",
+      provider: "codex",
+      agentName: "codex",
+      projectIdentityKey: "contract-project",
+      kind: "artifact_of",
+      fromEventId: "contract-event-tool",
+      toId: "contract-artifact-1",
+    },
+  ],
+  artifacts: [
+    {
+      id: "contract-artifact-1",
+      sessionId: "contract-session",
+      eventId: "contract-event-tool",
+      machineId: "machine-contract",
+      provider: "codex",
+      agentName: "codex",
+      projectIdentityKey: "contract-project",
+      kind: "file",
+      path: "/tmp/output-one.txt",
+      contentHash: "artifact-hash-1",
+    },
+    {
+      id: "contract-artifact-2",
+      sessionId: "contract-session",
+      eventId: "contract-event-tool",
+      machineId: "machine-contract",
+      provider: "codex",
+      agentName: "codex",
+      projectIdentityKey: "contract-project",
+      kind: "file",
+      path: "/tmp/output-two.txt",
+      contentHash: "artifact-hash-2",
+    },
+  ],
+  executionContexts: [
+    {
+      id: "contract-context-1",
+      sessionId: "contract-session",
+      sequence: 0,
+      scope: "session",
+      timestamp: "2026-06-18T10:00:00.000Z",
+      machineId: "machine-contract",
+      provider: "codex",
+      agentName: "codex",
+      projectIdentityKey: "contract-project",
+      model: "gpt-5.6-sol",
+      modelProvider: "openai",
+      reasoningEffort: "high",
+    },
+    {
+      id: "contract-context-2",
+      sessionId: "contract-session",
+      sequence: 1,
+      scope: "turn",
+      timestamp: "2026-06-18T10:00:30.000Z",
+      turnId: "turn-1",
+      machineId: "machine-contract",
+      provider: "codex",
+      agentName: "codex",
+      projectIdentityKey: "contract-project",
+      model: "gpt-5.6-sol",
+      modelProvider: "openai",
+      reasoningEffort: "high",
+      approvalPolicy: "never",
+    },
+  ],
+  assignment: {
+    nickname: "Laplace",
+    role: "builder",
+    path: "/root/rich-store-roundtrip",
+    depth: 1,
+  },
 });
 
 const waitFor = async (url: string) => {
@@ -139,6 +305,173 @@ const fetchJson = async (url: string): Promise<{ readonly status: number; readon
 };
 
 describe("CLI HTTP client <-> server contract", () => {
+  test("mapSession keeps only conversation messages in search while preserving redacted source facts and tool linkage", () => {
+    const normalized: NormalizedSession = {
+      id: "codex:mapped-contract",
+      nativeSessionId: "mapped-contract",
+      provider: "codex",
+      agentName: "codex",
+      assignment: { nickname: "Laplace", role: "builder", path: "/root/mapped", depth: 1 },
+      machineId: "machine-contract",
+      host: "contract-host",
+      identitySchemeVersion: 1,
+      projectIdentity: {
+        projectIdentityKey: "contract-project",
+        displayName: "Contract Project",
+        confidence: "explicit",
+        signals: [],
+      },
+      startedAt: "2026-06-18T10:00:00.000Z",
+      updatedAt: "2026-06-18T10:01:00.000Z",
+      sourceRoot: "/history",
+      sourcePath: "/history/mapped-contract.jsonl",
+      events: [
+        {
+          id: "event-user",
+          sessionId: "codex:mapped-contract",
+          sequence: 2,
+          machineId: "machine-contract",
+          provider: "codex",
+          agentName: "codex",
+          projectIdentityKey: "contract-project",
+          role: "user",
+          kind: "message",
+          contentText: "searchable user message",
+          contentBlocks: [],
+          rawReference: { sourcePath: "/history/mapped-contract.jsonl", line: 1 },
+        },
+        {
+          id: "event-preamble",
+          sessionId: "codex:mapped-contract",
+          sequence: 3,
+          machineId: "machine-contract",
+          provider: "codex",
+          agentName: "codex",
+          projectIdentityKey: "contract-project",
+          role: "assistant",
+          kind: "preamble",
+          contentText: "Bearer sk-abcdefghijklmnopqrstuvwxyz123456",
+          contentBlocks: [],
+          rawReference: { sourcePath: "/history/mapped-contract.jsonl", line: 2 },
+        },
+        {
+          id: "event-reasoning",
+          sessionId: "codex:mapped-contract",
+          sequence: 4,
+          machineId: "machine-contract",
+          provider: "codex",
+          agentName: "codex",
+          projectIdentityKey: "contract-project",
+          role: "thinking",
+          kind: "reasoning",
+          contentText: "searchable reasoning",
+          contentBlocks: [],
+          rawReference: { sourcePath: "/history/mapped-contract.jsonl", line: 3 },
+        },
+        {
+          id: "event-tool",
+          sessionId: "codex:mapped-contract",
+          sequence: 9,
+          machineId: "machine-contract",
+          provider: "codex",
+          agentName: "codex",
+          projectIdentityKey: "contract-project",
+          role: "tool",
+          kind: "tool_call",
+          contentBlocks: [],
+          toolCallId: "tool-linked",
+          rawReference: { sourcePath: "/history/mapped-contract.jsonl", line: 4 },
+        },
+      ],
+      toolCalls: [{
+        id: "tool-linked",
+        sessionId: "codex:mapped-contract",
+        eventId: "event-tool",
+        machineId: "machine-contract",
+        provider: "codex",
+        agentName: "codex",
+        projectIdentityKey: "contract-project",
+        toolName: "shell_command",
+        input: { authorization: "Bearer sk-abcdefghijklmnopqrstuvwxyz123456" },
+        output: "ok",
+      }],
+      sessionEdges: [],
+      executionContexts: [{
+        id: "context-new",
+        sessionId: "codex:mapped-contract",
+        sequence: 20,
+        scope: "session",
+        machineId: "machine-contract",
+        provider: "codex",
+        agentName: "codex",
+        projectIdentityKey: "contract-project",
+        model: "gpt-5.6-terra",
+        modelProvider: "openai",
+      }, {
+        id: "context-old",
+        sessionId: "codex:mapped-contract",
+        sequence: 1,
+        scope: "session",
+        machineId: "machine-contract",
+        provider: "codex",
+        agentName: "codex",
+        projectIdentityKey: "contract-project",
+        model: "gpt-5.6-sol",
+        modelProvider: "openai",
+      }],
+      usageRecords: [],
+      artifacts: [{
+        id: "artifact-1",
+        sessionId: "codex:mapped-contract",
+        machineId: "machine-contract",
+        provider: "codex",
+        agentName: "codex",
+        projectIdentityKey: "contract-project",
+        kind: "trace",
+        metadata: { apiKey: "sk-abcdefghijklmnopqrstuvwxyz123456" },
+      }],
+    };
+
+    const mapped = mapSession(normalized, "mapped-fingerprint");
+    expect(mapped.messages.map((row) => ({ role: row.role, text: row.text }))).toEqual([
+      { role: "user", text: "searchable user message" },
+      { role: "reasoning", text: "searchable reasoning" },
+    ]);
+    expect(mapped.toolCalls[0]).toMatchObject({ eventId: "event-tool", seq: 9 });
+    expect(mapped.toolCalls[0]?.inputText).toContain("[redacted]");
+    expect(mapped.events.find((event) => event.id === "event-preamble")?.contentText).toBe("Bearer [redacted]");
+    expect(mapped.artifacts[0]?.metadata).toEqual({ apiKey: "[redacted]" });
+    expect(mapped.session).toMatchObject({
+      model: "gpt-5.6-terra",
+      modelProvider: "openai",
+      assignmentRole: "builder",
+    });
+    const usageFallback = mapSession({
+      ...normalized,
+      executionContexts: [],
+      usageRecords: [{
+        id: "usage-old",
+        sessionId: "codex:mapped-contract",
+        machineId: "machine-contract",
+        provider: "codex",
+        agentName: "codex",
+        projectIdentityKey: "contract-project",
+        model: "gpt-5.4-mini",
+        modelProvider: "openai",
+      }, {
+        id: "usage-new",
+        sessionId: "codex:mapped-contract",
+        machineId: "machine-contract",
+        provider: "codex",
+        agentName: "codex",
+        projectIdentityKey: "contract-project",
+        model: "gpt-5.6-luna",
+        modelProvider: "openai",
+      }],
+    }, "usage-fallback-fingerprint");
+    expect(usageFallback.session.model).toBe("gpt-5.6-luna");
+  });
+
   test("a normalized MappedSession POSTed via the CLI client persists and is served back over HTTP", async () => {
     const dir = tempDir();
     const sqlite = join(dir, "quasar.sqlite");
@@ -166,21 +499,62 @@ describe("CLI HTTP client <-> server contract", () => {
       expect(unchanged).toBe(true);
 
       // Read everything back over plain HTTP — the server's serving surface.
-      const [sessions, messages, toolCalls, status] = await Promise.all([
+      const [sessions, messages, toolCalls, detail, status] = await Promise.all([
         fetch(`${base}/sessions`).then((r) => r.json()),
         fetch(`${base}/messages?sessionId=contract-session`).then((r) => r.json()),
         fetch(`${base}/tool-calls?provider=codex&toolName=shell_command`).then((r) => r.json()),
+        fetch(`${base}/session-detail?sessionId=contract-session&messageLimit=1&eventLimit=1&usageLimit=1&edgeLimit=1&artifactLimit=1&contextLimit=1`).then((r) => r.json()),
         fetch(`${base}/status`).then((r) => r.json()),
       ]);
 
       expect(sessions.data.rows.map((row: { sessionId: string }) => row.sessionId)).toEqual(["contract-session"]);
       expect(sessions.data.rows[0].messageCount).toBe(2);
       expect(sessions.data.rows[0].toolCallCount).toBe(1);
+      expect(sessions.data.rows[0]).toMatchObject({
+        model: "gpt-5.6-sol",
+        modelProvider: "openai",
+        assignmentRole: "builder",
+      });
       expect(messages.data.rows.map((row: { text: string }) => row.text)).toEqual([
         "contract handshake over http",
         "assistant contract reply",
       ]);
       expect(toolCalls.data.rows.map((row: { id: string }) => row.id)).toEqual(["contract-tool"]);
+      expect(toolCalls.data.rows[0].eventId).toBe("contract-event-tool");
+      expect(detail).toMatchObject({
+        ok: true,
+        command: "session-detail",
+        data: {
+          session: {
+            sessionId: "contract-session",
+            model: "gpt-5.6-sol",
+            modelProvider: "openai",
+            assignmentRole: "builder",
+          },
+          assignment: { nickname: "Laplace", role: "builder", depth: 1 },
+          messages: { limit: 1, offset: 0, total: 2, hasMore: true },
+          events: { limit: 1, offset: 0, total: 2, hasMore: true },
+          usageRecords: { limit: 1, offset: 0, total: 2, hasMore: true },
+          sessionEdges: { limit: 1, offset: 0, total: 2, hasMore: true },
+          artifacts: { limit: 1, offset: 0, total: 2, hasMore: true },
+          executionContexts: { limit: 1, offset: 0, total: 2, hasMore: true },
+        },
+      });
+      expect(detail.data.events.rows[0].id).toBe("contract-event-user");
+      expect(detail.data.usageRecords.rows[0].id).toBe("contract-usage-1");
+      expect(detail.data.sessionEdges.rows[0].id).toBe("contract-edge-1");
+      expect(detail.data.artifacts.rows[0].id).toBe("contract-artifact-1");
+      expect(detail.data.executionContexts.rows[0].id).toBe("contract-context-1");
+
+      const detailPageTwo = await fetch(
+        `${base}/session-detail?sessionId=contract-session&messageLimit=1&messageOffset=1&eventLimit=1&eventOffset=1&usageLimit=1&usageOffset=1&edgeLimit=1&edgeOffset=1&artifactLimit=1&artifactOffset=1&contextLimit=1&contextOffset=1`,
+      ).then((response) => response.json());
+      expect(detailPageTwo.data.messages.rows[0].seq).toBe(2);
+      expect(detailPageTwo.data.events.rows[0].id).toBe("contract-event-tool");
+      expect(detailPageTwo.data.usageRecords.rows[0].id).toBe("contract-usage-2");
+      expect(detailPageTwo.data.sessionEdges.rows[0].id).toBe("contract-edge-2");
+      expect(detailPageTwo.data.artifacts.rows[0].id).toBe("contract-artifact-2");
+      expect(detailPageTwo.data.executionContexts.rows[0].id).toBe("contract-context-2");
       // The store/queue enqueued the derived work: one embed-message job per
       // searchable message (the two messages). Lexical search is trigger-
       // maintained in SQLite, so there is no index-session job; that the queue
@@ -191,6 +565,70 @@ describe("CLI HTTP client <-> server contract", () => {
       const pendingFor = (kind: string) => byKind.find((entry) => entry.kind === kind)?.pending;
       expect(pendingFor("index-session")).toBeUndefined();
       expect(pendingFor("embed-message")).toBe(2);
+    } finally {
+      proc.kill();
+      await proc.exited;
+    }
+  }, 20_000);
+
+  test("unchanged repeats are no-ops and a normalization replay replaces typed source facts without duplicates", async () => {
+    const dir = tempDir();
+    const sqlite = join(dir, "quasar.sqlite");
+    const port = randomPort();
+    const token = "contract-ingest-token";
+    const base = `http://127.0.0.1:${port}`;
+    const proc = spawnServer(sqlite, port, token);
+
+    try {
+      await waitFor(`${base}/health`);
+      const original = mappedSession({ normalizationVersion: NORMALIZATION_VERSION - 1 });
+      const first = await postMappedSession(base, original, { ingestToken: token });
+      const repeated = await postMappedSession(base, original, { ingestToken: token });
+      expect(first.status).toBe("ok");
+      expect(repeated).toMatchObject({
+        status: "skipped",
+        diagnostic: "unchanged_source_fingerprint",
+        messagesWritten: 0,
+        toolCallsWritten: 0,
+        jobsEnqueued: 0,
+      });
+
+      const upgraded: MappedSession = {
+        ...original,
+        session: {
+          ...original.session,
+          normalizationVersion: NORMALIZATION_VERSION,
+          model: "gpt-5.6-terra",
+          assignmentRole: "reviewer",
+        },
+        events: [original.events[1]!],
+        usageRecords: [{ ...original.usageRecords[1]!, model: "gpt-5.6-terra" }],
+        sessionEdges: [],
+        artifacts: [original.artifacts[1]!],
+        executionContexts: [{
+          ...original.executionContexts[1]!,
+          model: "gpt-5.6-terra",
+          reasoningEffort: "xhigh",
+        }],
+        assignment: { ...original.assignment, role: "reviewer" },
+      };
+      const replay = await postMappedSession(base, upgraded, { ingestToken: token });
+      expect(replay.status).toBe("ok");
+      expect(replay.messagesWritten).toBe(0);
+      expect(replay.toolCallsWritten).toBe(0);
+
+      const detail = await fetch(`${base}/session-detail?sessionId=contract-session`).then((response) => response.json());
+      expect(detail.data.session).toMatchObject({
+        normalizationVersion: NORMALIZATION_VERSION,
+        model: "gpt-5.6-terra",
+        assignmentRole: "reviewer",
+      });
+      expect(detail.data.assignment).toMatchObject({ role: "reviewer" });
+      expect(detail.data.events.rows.map((row: { id: string }) => row.id)).toEqual(["contract-event-tool"]);
+      expect(detail.data.usageRecords.rows.map((row: { id: string }) => row.id)).toEqual(["contract-usage-2"]);
+      expect(detail.data.sessionEdges.rows).toEqual([]);
+      expect(detail.data.artifacts.rows.map((row: { id: string }) => row.id)).toEqual(["contract-artifact-2"]);
+      expect(detail.data.executionContexts.rows.map((row: { id: string }) => row.id)).toEqual(["contract-context-2"]);
     } finally {
       proc.kill();
       await proc.exited;
@@ -226,6 +664,14 @@ describe("CLI HTTP client <-> server contract", () => {
       }
       expect(rejected).toBeInstanceOf(Error);
       expect((rejected as Error).name).toBe("RemoteIngestError");
+
+      const invalidEvent = {
+        ...broken,
+        events: [{ ...broken.events[0]!, kind: "provider_private" }],
+      } as unknown as MappedSession;
+      await expect(postMappedSession(base, invalidEvent, { ingestToken: token })).rejects.toMatchObject({
+        name: "RemoteIngestError",
+      });
 
       // Fail-closed proof: nothing was persisted; the boundary rejection wrote
       // zero rows, so the CLI client did NOT fall back to a local write.

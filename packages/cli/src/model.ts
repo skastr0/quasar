@@ -1,4 +1,12 @@
-import type { Provider } from "./core/schemas";
+import type {
+  AgentAssignment,
+  Artifact,
+  ExecutionContextRecord,
+  Provider,
+  SessionEdge,
+  SessionEvent,
+  UsageRecord,
+} from "./core/schemas";
 
 export type MessageRole = "user" | "assistant" | "reasoning";
 
@@ -21,6 +29,11 @@ export interface SessionRow {
   readonly host: string;
   readonly identitySchemeVersion: number;
   readonly normalizationVersion: number;
+  /** Latest observed execution model, projected for cheap list/filter access. */
+  readonly model?: string;
+  readonly modelProvider?: string;
+  /** Assignment role only; the complete assignment is returned by session detail. */
+  readonly assignmentRole?: string;
   /** Canonical Quasar SessionId of the parent session when this session is a
    * subagent/child, recovered from a `kind="subagent_of"` SessionEdge — the
    * single canonical source of this column. (Never `kind="parent"`, which is
@@ -45,6 +58,7 @@ export interface MessageRow {
 export interface ToolCallRow {
   readonly id: string;
   readonly sessionId: string;
+  readonly eventId?: string;
   readonly seq: number;
   readonly toolName: string;
   readonly status?: string;
@@ -61,4 +75,10 @@ export interface MappedSession {
   readonly session: SessionRow;
   readonly messages: readonly MessageRow[];
   readonly toolCalls: readonly ToolCallRow[];
+  readonly events: readonly SessionEvent[];
+  readonly usageRecords: readonly UsageRecord[];
+  readonly sessionEdges: readonly SessionEdge[];
+  readonly artifacts: readonly Artifact[];
+  readonly executionContexts: readonly ExecutionContextRecord[];
+  readonly assignment?: AgentAssignment;
 }

@@ -51,6 +51,11 @@ const mappedSession = (): MappedSession => ({
   },
   messages: [{ sessionId: "session-a", seq: 1, role: "user", text: "alpha terminal", projectKey: "project-a", contentHash: "hash-a" }],
   toolCalls: [],
+  events: [],
+  usageRecords: [],
+  sessionEdges: [],
+  artifacts: [],
+  executionContexts: [],
 });
 
 const withWorkers = <A>(run: Effect.Effect<A, unknown, LocalStore | DurableQueue | Embeddings | WorkerSupervisor>) => {
