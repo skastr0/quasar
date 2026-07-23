@@ -156,6 +156,9 @@ const SearchDetailField = Schema.Literal(
   "agentRole",
   "model",
   "modelProvider",
+  "contentHash",
+  "textBytes",
+  "textTruncated",
 ).annotations({ identifier: "QuasarSearchDetailField" });
 
 const SessionSummaryField = Schema.Literal(
@@ -178,6 +181,11 @@ const SessionDetailField = Schema.Literal(
   "agentRole",
   "agentPath",
   "agentDepth",
+  "sourcePath",
+  "sourceFingerprint",
+  "host",
+  "identitySchemeVersion",
+  "normalizationVersion",
 ).annotations({ identifier: "QuasarSessionDetailField" });
 
 const MessageSummaryField = Schema.Literal(
@@ -365,6 +373,9 @@ const SearchItem = Schema.Struct({
   agentRole: Schema.optional(Schema.NullOr(AgentRole)),
   model: Schema.optional(Schema.NullOr(Model)),
   modelProvider: Schema.optional(Schema.NullOr(ModelProvider)),
+  contentHash: Schema.optional(Schema.NullOr(Schema.String)),
+  textBytes: Schema.optional(Schema.NullOr(NonNegativeInteger)),
+  textTruncated: Schema.optional(Schema.NullOr(Schema.Boolean)),
 });
 
 const SessionItem = Schema.Struct({
@@ -383,6 +394,11 @@ const SessionItem = Schema.Struct({
   agentRole: Schema.optional(Schema.NullOr(AgentRole)),
   agentPath: Schema.optional(Schema.NullOr(boundedString("QuasarAgentPath", 2_048))),
   agentDepth: Schema.optional(Schema.NullOr(NonNegativeInteger)),
+  sourcePath: Schema.optional(Schema.NullOr(Schema.String)),
+  sourceFingerprint: Schema.optional(Schema.NullOr(Schema.String)),
+  host: Schema.optional(Schema.NullOr(Schema.String)),
+  identitySchemeVersion: Schema.optional(Schema.NullOr(NonNegativeInteger)),
+  normalizationVersion: Schema.optional(Schema.NullOr(NonNegativeInteger)),
 });
 
 const MessageItem = Schema.Struct({
