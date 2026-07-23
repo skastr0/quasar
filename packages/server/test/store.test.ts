@@ -284,11 +284,27 @@ describe("LocalStore", () => {
     );
     expect(hostile).toEqual([]);
 
-    const rowidSkewDb = new Database(path);
+    const rowidDb = new Database(path);
     try {
-      rowidSkewDb.prepare("UPDATE messages_fts SET rowid = rowid + 1000 WHERE key = ?").run(`${sessionId}:1:user`);
+      const rowids = rowidDb
+        .query(
+          `SELECT f.rowid AS ftsRowid, k.fts_rowid AS keyRowid
+           FROM messages AS m
+           JOIN messages_fts_keys AS k
+             ON k.session_id = m.session_id AND k.seq = m.seq
+           JOIN messages_fts AS f
+             ON f.rowid = k.fts_rowid
+           WHERE m.session_id = ? AND m.seq = ?`,
+        )
+        .get(sessionId, 1) as { ftsRowid: number; keyRowid: number } | null;
+      expect(rowids?.ftsRowid).toBe(rowids?.keyRowid);
+      const triggerSql = rowidDb
+        .query("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'messages_fts_ad'")
+        .get() as { sql: string } | null;
+      expect(triggerSql?.sql).toContain("FROM messages_fts_keys");
+      expect(triggerSql?.sql).not.toContain("WHERE key =");
     } finally {
-      rowidSkewDb.close();
+      rowidDb.close();
     }
 
     const db = new Database(path);
@@ -326,7 +342,7 @@ describe("LocalStore", () => {
     expect(afterDelete).toEqual([]);
   });
 
-  test("QSR: fresh DB migration lands PRAGMA user_version 1 with scope-token-prefixed FTS text", async () => {
+  test("QSR: fresh DB migration lands PRAGMA user_version 2 with rowid-aligned scope-token FTS", async () => {
     const path = sqlitePath();
     const sessionId = "codex:session-scope";
 
@@ -337,7 +353,7 @@ describe("LocalStore", () => {
     const db = new Database(path);
     try {
       const { user_version: userVersion } = db.query("PRAGMA user_version").get() as { user_version: number };
-      expect(userVersion).toBe(1);
+      expect(userVersion).toBe(2);
 
       const messageRow = db
         .query("SELECT project_scope_token AS token FROM messages WHERE session_id = ? AND seq = 1")
@@ -350,9 +366,146 @@ describe("LocalStore", () => {
       expect(ftsRow?.text).toBe(
         `${ftsProjectScopeToken("project-scope")} ${ftsRoleScopeToken("user")} ${ftsProviderScopeToken("codex")} First message`,
       );
+      const rowids = db
+        .query(
+          `SELECT k.fts_rowid AS keyRowid, f.rowid AS ftsRowid
+           FROM messages AS m
+           JOIN messages_fts_keys AS k
+             ON k.session_id = m.session_id AND k.seq = m.seq
+           JOIN messages_fts AS f
+             ON f.rowid = k.fts_rowid
+           WHERE m.session_id = ? AND m.seq = 1`,
+        )
+        .get(sessionId) as { keyRowid: number; ftsRowid: number } | null;
+      expect(rowids?.ftsRowid).toBe(rowids?.keyRowid);
     } finally {
       db.close();
     }
+  });
+
+  test("QSR: version-1 FTS is rebuilt onto canonical message rowids", async () => {
+    const path = sqlitePath();
+    const sessionId = "codex:session-v1";
+    await withStore(path, (store) => store.upsertSession(mappedSession({ sessionId })));
+
+    const seedDb = new Database(path);
+    try {
+      seedDb.prepare("UPDATE messages_fts SET rowid = rowid + 1000 WHERE session_id = ?").run(sessionId);
+      seedDb.exec("PRAGMA user_version = 1");
+    } finally {
+      seedDb.close();
+    }
+
+    await withStore(path, (store) => store.stats);
+
+    const db = new Database(path);
+    try {
+      const { user_version: userVersion } = db.query("PRAGMA user_version").get() as { user_version: number };
+      expect(userVersion).toBe(2);
+      const rowidMismatches = (
+        db
+          .query(
+            `SELECT COUNT(*) AS count
+             FROM messages_fts_keys AS k
+             JOIN messages_fts AS f
+               ON f.session_id = k.session_id AND f.seq = k.seq
+             WHERE k.session_id = ? AND f.rowid != k.fts_rowid`,
+          )
+          .get(sessionId) as { count: number }
+      ).count;
+      expect(rowidMismatches).toBe(0);
+    } finally {
+      db.close();
+    }
+
+    const hits = await withStore(path, (store) => store.lexicalSearch({ query: "First", limit: 10 }));
+    expect(hits.map((hit) => hit.row.sessionId)).toEqual([sessionId]);
+  });
+
+  test("QSR: interrupted version-2 rebuild retries from messages instead of accepting a partial index", async () => {
+    const path = sqlitePath();
+    const sessionId = "codex:session-interrupted";
+    await withStore(path, (store) => store.upsertSession(mappedSession({ sessionId })));
+
+    const interruptedDb = new Database(path);
+    try {
+      interruptedDb.exec(`
+        PRAGMA user_version = -2;
+        DROP TRIGGER IF EXISTS messages_fts_ai;
+        DROP TRIGGER IF EXISTS messages_fts_ad;
+        DROP TRIGGER IF EXISTS messages_fts_au;
+        DROP TABLE messages_fts;
+        DROP TABLE messages_fts_keys;
+      `);
+    } finally {
+      interruptedDb.close();
+    }
+
+    await withStore(path, (store) => store.stats);
+
+    const db = new Database(path);
+    try {
+      const { user_version: userVersion } = db.query("PRAGMA user_version").get() as { user_version: number };
+      expect(userVersion).toBe(2);
+      const counts = db
+        .query(
+          `SELECT
+             (SELECT COUNT(*) FROM messages WHERE role IN ('user', 'assistant', 'reasoning')) AS messages,
+             (SELECT COUNT(*) FROM messages_fts) AS fts,
+             (SELECT COUNT(*) FROM messages_fts_keys) AS keys`,
+        )
+        .get() as { messages: number; fts: number; keys: number };
+      expect(counts.fts).toBe(counts.messages);
+      expect(counts.keys).toBe(2);
+    } finally {
+      db.close();
+    }
+
+    const hits = await withStore(path, (store) => store.lexicalSearch({ query: "First", limit: 10 }));
+    expect(hits.map((hit) => hit.row.sessionId)).toEqual([sessionId]);
+  });
+
+  test("QSR: VACUUM INTO preserves the explicit FTS identity used by later mutations", async () => {
+    const sourcePath = sqlitePath();
+    const backupPath = sqlitePath();
+    const sessionId = "codex:session-vacuum";
+    await withStore(sourcePath, (store) => store.upsertSession(mappedSession({ sessionId })));
+
+    const sourceDb = new Database(sourcePath);
+    try {
+      sourceDb.prepare("VACUUM INTO ?").run(backupPath);
+    } finally {
+      sourceDb.close();
+    }
+
+    const restoredDb = new Database(backupPath);
+    try {
+      restoredDb
+        .prepare("UPDATE messages SET text = ?, content_hash = ? WHERE session_id = ? AND seq = ?")
+        .run("Vacuum mutation keyword", "hash-vacuum", sessionId, 1);
+      const identity = restoredDb
+        .query(
+          `SELECT k.fts_rowid AS keyRowid, f.rowid AS ftsRowid
+           FROM messages_fts_keys AS k
+           JOIN messages_fts AS f ON f.rowid = k.fts_rowid
+           WHERE k.session_id = ? AND k.seq = ?`,
+        )
+        .get(sessionId, 1) as { keyRowid: number; ftsRowid: number } | null;
+      expect(identity?.ftsRowid).toBe(identity?.keyRowid);
+    } finally {
+      restoredDb.close();
+    }
+
+    const [updated, stale] = await withStore(
+      backupPath,
+      (store) =>
+        Effect.all([
+          store.lexicalSearch({ query: "Vacuum", limit: 10 }),
+          store.lexicalSearch({ query: "First", limit: 10 }),
+        ]),
+    );
+    expect(updated.map((hit) => hit.row.sessionId)).toEqual([sessionId]);
+    expect(stale).toEqual([]);
   });
 
   test("QSR: migrates an old-shape (pre-scope-token) DB — backfills every row and rebuilds FTS with row-count parity", async () => {
@@ -426,7 +579,7 @@ describe("LocalStore", () => {
     const db = new Database(path);
     try {
       const { user_version: userVersion } = db.query("PRAGMA user_version").get() as { user_version: number };
-      expect(userVersion).toBe(1);
+      expect(userVersion).toBe(2);
 
       const messageTokens = db
         .query("SELECT project_scope_token AS token FROM messages ORDER BY seq ASC")
@@ -449,6 +602,18 @@ describe("LocalStore", () => {
         `${projectToken} ${ftsRoleScopeToken("user")} ${providerToken} Old first message`,
         `${projectToken} ${ftsRoleScopeToken("assistant")} ${providerToken} Old second message`,
       ]);
+      const rowidMismatches = (
+        db
+          .query(
+            `SELECT COUNT(*) AS count
+             FROM messages_fts_keys AS k
+             JOIN messages_fts AS f
+               ON f.session_id = k.session_id AND f.seq = k.seq
+             WHERE f.rowid != k.fts_rowid`,
+          )
+          .get() as { count: number }
+      ).count;
+      expect(rowidMismatches).toBe(0);
     } finally {
       db.close();
     }
