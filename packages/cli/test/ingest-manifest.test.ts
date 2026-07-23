@@ -81,9 +81,10 @@ const adapterFor = (
   stream: async function* (opts: AdapterDiscoverOptions) {
     for (const { session: s, physicalPath } of sessions) {
       // Simulate the stat gate that adapters are expected to honour
+      let fileStat: ReturnType<typeof statSync>;
       try {
-        const st = statSync(physicalPath);
-        if (opts.shouldReadFile?.(physicalPath, st) === false) {
+        fileStat = statSync(physicalPath);
+        if (opts.shouldReadFile?.(physicalPath, fileStat) === false) {
           // Manifest says skip — no content read
           continue;
         }
@@ -92,7 +93,7 @@ const adapterFor = (
         continue;
       }
       opened.push(physicalPath);
-      const fingerprint = { tag: `fp:${s.id}` };
+      const fingerprint = { size: fileStat.size, mtimeMs: fileStat.mtimeMs };
       if (
         (await opts.shouldParseSession?.({
           sessionId: s.id,
@@ -117,8 +118,60 @@ const adapterFor = (
   },
 });
 
-/** Minimal HTTP server that always reports sessions as changed (not cached) and accepts writes. */
-const startServer = (token: string) => {
+/** Shared-DB adapter: one stat-gated file, many session-specific fingerprints. */
+const sharedDbAdapterFor = (
+  sessions: readonly NormalizedSession[],
+  physicalPath: string,
+  opened: string[],
+): SessionAdapter => ({
+  id: "manifest-shared-db-fixture",
+  provider: "claude",
+  displayName: "Manifest Shared DB Fixture Adapter",
+  stable: true,
+  defaultRoot: () => undefined,
+  read: async () => ({ sourceRoots: [], sessions: [...sessions], diagnostics: [] }),
+  stream: async function* (opts: AdapterDiscoverOptions) {
+    const fileStat = statSync(physicalPath);
+    if (opts.shouldReadFile?.(physicalPath, fileStat) === false) return;
+    opened.push(physicalPath);
+    let accepted = 0;
+    for (const s of sessions) {
+      if (accepted >= (opts.limit ?? Number.POSITIVE_INFINITY)) break;
+      const fingerprint = { tag: `session:${s.id}:${s.updatedAt}` };
+      if (
+        (await opts.shouldParseSession?.({
+          sessionId: s.id,
+          sourceFingerprint: JSON.stringify(fingerprint),
+        })) === false
+      ) {
+        continue;
+      }
+      yield {
+        type: "session" as const,
+        session: s,
+        sourceUnit: {
+          provider: "claude" as const,
+          adapterId: "manifest-shared-db-fixture",
+          rootPath: "/history",
+          sourcePath: physicalPath,
+          physicalPath,
+        },
+        fingerprint,
+      };
+      accepted += 1;
+    }
+  },
+});
+
+/** Minimal HTTP server that reports configured fingerprint state and accepts writes. */
+const startServer = (
+  token: string,
+  options: {
+    readonly unchanged?: boolean;
+    readonly requests?: { probes: number; writes: number };
+    readonly writeStatus?: number;
+  } = {},
+) => {
   return Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -128,10 +181,17 @@ const startServer = (token: string) => {
       }
       const pathname = new URL(request.url).pathname;
       if (pathname === "/ingest/fingerprint") {
-        // Always report changed so server gate never suppresses
-        return Response.json({ ok: true, data: { unchanged: false } });
+        if (options.requests !== undefined) options.requests.probes += 1;
+        return Response.json({ ok: true, data: { unchanged: options.unchanged ?? false } });
       }
       if (pathname === "/ingest/session") {
+        if (options.requests !== undefined) options.requests.writes += 1;
+        if (options.writeStatus !== undefined) {
+          return Response.json(
+            { ok: false, error: { message: "configured write failure" } },
+            { status: options.writeStatus },
+          );
+        }
         const payload = await request.json() as {
           readonly session: { readonly session: { readonly sessionId: string }; readonly messages: readonly unknown[]; readonly toolCalls: readonly unknown[] };
         };
@@ -261,6 +321,212 @@ describe("ingest manifest", () => {
 
       expect(opened).toEqual([physicalPath]);
       expect(loadManifest(manifestFilePath)[physicalPath]?.normalizationVersion).toBe(NORMALIZATION_VERSION);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("an unchanged current server refreshes a stale manifest before the next run", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "quasar-manifest-test-"));
+    const manifestFilePath = join(dir, "ingest-manifest.json");
+    const physicalPath = join(dir, "session-server-current.jsonl");
+    writeFileSync(physicalPath, '{"id":"session-server-current"}\n', "utf8");
+    const fileStat = statSync(physicalPath);
+    writeFileSync(manifestFilePath, JSON.stringify({
+      [physicalPath]: {
+        mtimeMs: fileStat.mtimeMs,
+        size: fileStat.size,
+        normalizationVersion: NORMALIZATION_VERSION - 1,
+      },
+    }));
+
+    const requests = { probes: 0, writes: 0 };
+    const server = startServer("tok", { unchanged: true, requests });
+    const s = session("manifest-server-current", physicalPath);
+
+    try {
+      const openedFirst: string[] = [];
+      adaptersByProvider.set("claude", adapterFor([{ session: s, physicalPath }], openedFirst));
+      const first = await ingestRemote(
+        { provider: "claude", ingestToken: "tok", manifestPath: manifestFilePath },
+        `http://127.0.0.1:${server.port}`,
+      );
+
+      expect(openedFirst).toEqual([physicalPath]);
+      expect(first[0]?.sessionsSkipped).toBe(1);
+      expect(requests).toEqual({ probes: 1, writes: 0 });
+      expect(loadManifest(manifestFilePath)[physicalPath]).toEqual({
+        mtimeMs: fileStat.mtimeMs,
+        size: fileStat.size,
+        normalizationVersion: NORMALIZATION_VERSION,
+      });
+
+      const openedSecond: string[] = [];
+      adaptersByProvider.set("claude", adapterFor([{ session: s, physicalPath }], openedSecond));
+      const second = await ingestRemote(
+        { provider: "claude", ingestToken: "tok", manifestPath: manifestFilePath },
+        `http://127.0.0.1:${server.port}`,
+      );
+
+      expect(openedSecond).toEqual([]);
+      expect(second[0]?.sessionsSeen).toBe(0);
+      expect(requests).toEqual({ probes: 1, writes: 0 });
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a complete shared-DB run converges stat state from per-session probes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "quasar-manifest-test-"));
+    const manifestFilePath = join(dir, "ingest-manifest.json");
+    const physicalPath = join(dir, "shared.db");
+    writeFileSync(physicalPath, "sqlite-fixture", "utf8");
+    const fileStat = statSync(physicalPath);
+    writeFileSync(manifestFilePath, JSON.stringify({
+      [physicalPath]: {
+        mtimeMs: fileStat.mtimeMs,
+        size: fileStat.size,
+        normalizationVersion: NORMALIZATION_VERSION - 1,
+      },
+    }));
+
+    const requests = { probes: 0, writes: 0 };
+    const server = startServer("tok", { unchanged: true, requests });
+    const sessions = [
+      session("manifest-shared-db-a", physicalPath),
+      session("manifest-shared-db-b", physicalPath),
+    ];
+
+    try {
+      const openedFirst: string[] = [];
+      adaptersByProvider.set("claude", sharedDbAdapterFor(sessions, physicalPath, openedFirst));
+      await ingestRemote(
+        { provider: "claude", ingestToken: "tok", manifestPath: manifestFilePath },
+        `http://127.0.0.1:${server.port}`,
+      );
+
+      expect(openedFirst).toEqual([physicalPath]);
+      expect(requests).toEqual({ probes: 2, writes: 0 });
+      expect(loadManifest(manifestFilePath)[physicalPath]?.normalizationVersion).toBe(NORMALIZATION_VERSION);
+
+      const openedSecond: string[] = [];
+      adaptersByProvider.set("claude", sharedDbAdapterFor(sessions, physicalPath, openedSecond));
+      await ingestRemote(
+        { provider: "claude", ingestToken: "tok", manifestPath: manifestFilePath },
+        `http://127.0.0.1:${server.port}`,
+      );
+
+      expect(openedSecond).toEqual([]);
+      expect(requests).toEqual({ probes: 2, writes: 0 });
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a failed shared-DB run leaves its manifest stale", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "quasar-manifest-test-"));
+    const manifestFilePath = join(dir, "ingest-manifest.json");
+    const physicalPath = join(dir, "failed-shared.db");
+    writeFileSync(physicalPath, "sqlite-fixture", "utf8");
+    const fileStat = statSync(physicalPath);
+    const staleVersion = NORMALIZATION_VERSION - 1;
+    writeFileSync(manifestFilePath, JSON.stringify({
+      [physicalPath]: {
+        mtimeMs: fileStat.mtimeMs,
+        size: fileStat.size,
+        normalizationVersion: staleVersion,
+      },
+    }));
+
+    const requests = { probes: 0, writes: 0 };
+    const server = startServer("tok", { requests, writeStatus: 400 });
+
+    try {
+      adaptersByProvider.set(
+        "claude",
+        sharedDbAdapterFor([session("manifest-shared-db-failed", physicalPath)], physicalPath, []),
+      );
+      const reports = await ingestRemote(
+        { provider: "claude", ingestToken: "tok", manifestPath: manifestFilePath },
+        `http://127.0.0.1:${server.port}`,
+      );
+
+      expect(reports[0]?.sessionsFailed).toBe(1);
+      expect(requests).toEqual({ probes: 1, writes: 1 });
+      expect(loadManifest(manifestFilePath)[physicalPath]?.normalizationVersion).toBe(staleVersion);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a limited unchanged run leaves unseen shared-DB state stale", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "quasar-manifest-test-"));
+    const manifestFilePath = join(dir, "ingest-manifest.json");
+    const physicalPath = join(dir, "limited-shared.db");
+    writeFileSync(physicalPath, "sqlite-fixture", "utf8");
+    const fileStat = statSync(physicalPath);
+    const staleVersion = NORMALIZATION_VERSION - 1;
+    writeFileSync(manifestFilePath, JSON.stringify({
+      [physicalPath]: {
+        mtimeMs: fileStat.mtimeMs,
+        size: fileStat.size,
+        normalizationVersion: staleVersion,
+      },
+    }));
+
+    const requests = { probes: 0, writes: 0 };
+    const server = startServer("tok", { unchanged: true, requests });
+
+    try {
+      adaptersByProvider.set(
+        "claude",
+        sharedDbAdapterFor([session("manifest-shared-db-limited", physicalPath)], physicalPath, []),
+      );
+      const reports = await ingestRemote(
+        { provider: "claude", ingestToken: "tok", limit: 1, manifestPath: manifestFilePath },
+        `http://127.0.0.1:${server.port}`,
+      );
+
+      expect(reports[0]?.sessionsSkipped).toBe(1);
+      expect(requests).toEqual({ probes: 1, writes: 0 });
+      expect(loadManifest(manifestFilePath)[physicalPath]?.normalizationVersion).toBe(staleVersion);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a limited successful write leaves unseen shared-DB state stale", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "quasar-manifest-test-"));
+    const manifestFilePath = join(dir, "ingest-manifest.json");
+    const physicalPath = join(dir, "limited-write-shared.db");
+    writeFileSync(physicalPath, "sqlite-fixture", "utf8");
+    const fileStat = statSync(physicalPath);
+    const staleVersion = NORMALIZATION_VERSION - 1;
+    writeFileSync(manifestFilePath, JSON.stringify({
+      [physicalPath]: {
+        mtimeMs: fileStat.mtimeMs,
+        size: fileStat.size,
+        normalizationVersion: staleVersion,
+      },
+    }));
+
+    const requests = { probes: 0, writes: 0 };
+    const server = startServer("tok", { requests });
+    const sessions = [
+      session("manifest-shared-db-limited-write-a", physicalPath),
+      session("manifest-shared-db-limited-write-b", physicalPath),
+    ];
+
+    try {
+      adaptersByProvider.set("claude", sharedDbAdapterFor(sessions, physicalPath, []));
+      const reports = await ingestRemote(
+        { provider: "claude", ingestToken: "tok", limit: 1, manifestPath: manifestFilePath },
+        `http://127.0.0.1:${server.port}`,
+      );
+
+      expect(reports[0]?.sessionsWritten).toBe(1);
+      expect(requests).toEqual({ probes: 1, writes: 1 });
+      expect(loadManifest(manifestFilePath)[physicalPath]?.normalizationVersion).toBe(staleVersion);
     } finally {
       server.stop(true);
     }
