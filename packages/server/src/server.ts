@@ -856,12 +856,23 @@ const routesWithMaintenance = routes.pipe(
   HttpRouter.get("*", json({ ok: false, error: { type: "NotFound", message: "No route" } }, { status: 404 })),
 );
 
+// Bun's 128 MiB default rejects measured, valid aggregate session envelopes before
+// Quasar can validate their normalized values. Bun has no disable sentinel, so use
+// the largest exactly representable JavaScript integer as a non-limiting transport
+// ceiling and keep data validity in the ingest contract.
+export const SERVER_MAX_REQUEST_BODY_SIZE_BYTES = Number.MAX_SAFE_INTEGER;
+
 export const makeHttpLayer = (options: { readonly port: number; readonly hostname?: string }) =>
   routesWithMaintenance.pipe(
     HttpServer.serve(HttpMiddleware.logger),
     HttpServer.withLogAddress,
     Layer.provide(AppLayer),
-    Layer.provide(BunHttpServer.layer({ port: options.port, hostname: options.hostname ?? "127.0.0.1", idleTimeout: httpIdleTimeoutSeconds() })),
+    Layer.provide(BunHttpServer.layer({
+      port: options.port,
+      hostname: options.hostname ?? "127.0.0.1",
+      idleTimeout: httpIdleTimeoutSeconds(),
+      maxRequestBodySize: SERVER_MAX_REQUEST_BODY_SIZE_BYTES,
+    })),
   );
 
 export const serve = (options: { readonly port: number; readonly hostname?: string }): void => {
