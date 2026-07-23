@@ -3,11 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { Effect, Layer } from "effect";
+import { Deferred, Effect, Either, Layer } from "effect";
 
-import { enqueueDownstreamJobs } from "../src/ingest";
+import { enqueueDownstreamJobs, ingestMappedSession } from "../src/ingest";
 import type { MappedSession } from "../src/model";
-import { DurableQueue, makeDurableQueueLayer } from "../src/services";
+import { DurableQueue, DurableQueueError, makeDurableQueueLayer } from "../src/services";
 import type { DurableQueueService } from "../src/services";
 import { LocalStore, makeLocalStoreLayer } from "../src/store";
 
@@ -97,5 +97,76 @@ describe("enqueueDownstreamJobs", () => {
     );
 
     expect(jobs.length).toBe(2);
+  });
+
+  test("a partial fan-out failure leaves the fingerprint stale and the next ingest converges every required job", async () => {
+    const sqlite = join(tempDir(), "quasar.sqlite");
+    const queueLayer = makeDurableQueueLayer(sqlite);
+    const failSecondEnqueueLayer = Layer.effect(
+      DurableQueue,
+      Effect.gen(function* () {
+        const queue = yield* DurableQueue;
+        const firstDurable = yield* Deferred.make<void>();
+        let enqueueAttempt = 0;
+        return DurableQueue.of({
+          ...queue,
+          enqueue: (job) =>
+            Effect.suspend(() => {
+              enqueueAttempt += 1;
+              if (enqueueAttempt === 1) {
+                return queue.enqueue(job).pipe(
+                  Effect.tap(() => Deferred.succeed(firstDurable, undefined)),
+                );
+              }
+              if (enqueueAttempt === 2) {
+                return Deferred.await(firstDurable).pipe(
+                  Effect.andThen(Effect.fail(new DurableQueueError({
+                    operation: "enqueue",
+                    message: "injected second enqueue failure",
+                  }))),
+                );
+              }
+              return queue.enqueue(job);
+            }),
+        });
+      }),
+    ).pipe(Layer.provide(queueLayer));
+    const layer = Layer.merge(makeLocalStoreLayer(sqlite), failSecondEnqueueLayer);
+    const mapped = duplicateContentSession();
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* LocalStore;
+        const queue = yield* DurableQueue;
+        const first = yield* Effect.either(ingestMappedSession(mapped));
+        const freshAfterFailure = yield* store.hasSessionFingerprint(
+          mapped.session.sessionId,
+          mapped.session.sourceFingerprint,
+          mapped.session.normalizationVersion,
+        );
+        const queueAfterFailure = yield* queue.stats;
+        const second = yield* ingestMappedSession(mapped);
+        const freshAfterRetry = yield* store.hasSessionFingerprint(
+          mapped.session.sessionId,
+          mapped.session.sourceFingerprint,
+          mapped.session.normalizationVersion,
+        );
+        const jobs = yield* leaseEmbedJobs(queue);
+        return { first, freshAfterFailure, queueAfterFailure, second, freshAfterRetry, jobs };
+      }).pipe(Effect.provide(layer)),
+    );
+
+    expect(Either.isLeft(result.first)).toBe(true);
+    expect(result.freshAfterFailure).toBe(false);
+    expect(result.queueAfterFailure).toEqual({ pending: 1, leased: 0, failed: 0 });
+    expect(result.second).toMatchObject({
+      status: "ok",
+      messagesWritten: 0,
+      jobsEnqueued: 2,
+    });
+    expect(result.freshAfterRetry).toBe(true);
+    expect(result.jobs).toHaveLength(2);
+    expect(result.jobs.map((job) => (job.payload as { seq: number }).seq).sort()).toEqual([1, 2]);
+    expect(new Set(result.jobs.map((job) => job.idempotencyKey)).size).toBe(2);
   });
 });

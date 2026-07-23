@@ -130,9 +130,11 @@ export interface SearchHit {
   readonly row: Record<string, unknown>;
 }
 
-/** Row-level result of a session apply. `changedMessages` carries exactly the
- * inserted+updated message rows so downstream embedding jobs fan out over the
- * delta, never the whole session. */
+/** Row-level result of a staged session apply. `changedMessages` carries
+ * exactly the inserted+updated message rows so downstream embedding jobs fan
+ * out over the delta. `requiresDownstreamReplay` is true after an interrupted
+ * prior apply: callers must then replay every desired downstream job because
+ * some already-written rows may never have reached the durable queue. */
 export interface SessionDiffOutcome {
   readonly messagesInserted: number;
   readonly messagesUpdated: number;
@@ -143,6 +145,7 @@ export interface SessionDiffOutcome {
   readonly toolCallsDeleted: number;
   readonly toolCallsUnchanged: number;
   readonly changedMessages: readonly MessageRow[];
+  readonly requiresDownstreamReplay: boolean;
   /** Message keys whose prior resident-vector slots may now be stale. The
    * store's SQL triggers delete their vector rows; the matrix consumer uses
    * this explicit structural receipt to invalidate the corresponding slots. */
@@ -152,7 +155,15 @@ export interface SessionDiffOutcome {
 export interface LocalStoreService {
   readonly dbPath: string;
   readonly listProjects: (options?: { readonly limit?: number; readonly offset?: number }) => Effect.Effect<readonly ProjectRow[], SqliteStoreError>;
+  /** Stage the desired session rows under an `applying:` fingerprint. The
+   * fingerprint remains intentionally stale until `finalizeSessionIngest`
+   * proves that downstream work is durable. */
   readonly upsertSession: (session: MappedSession) => Effect.Effect<SessionDiffOutcome, SqliteStoreError>;
+  readonly finalizeSessionIngest: (
+    sessionId: string,
+    sourceFingerprint: string,
+    normalizationVersion: number,
+  ) => Effect.Effect<void, SqliteStoreError>;
   readonly hasSessionFingerprint: (
     sessionId: string,
     sourceFingerprint: string,
@@ -1057,6 +1068,9 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
         const selectExecutionContextDiffRows = db.prepare(
           "SELECT id, sequence AS position, fact_hash AS factHash FROM execution_contexts WHERE session_id = ?",
         );
+        const selectSessionApplyState = db.prepare(
+          "SELECT source_fingerprint AS sourceFingerprint FROM sessions WHERE session_id = ?",
+        );
         const deleteMessageRow = db.prepare("DELETE FROM messages WHERE session_id = ? AND seq = ?");
         const deleteToolCallRow = db.prepare("DELETE FROM tool_calls WHERE id = ?");
         const upsertToolCall = db.prepare(
@@ -1064,8 +1078,12 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
            VALUES ($id, $sessionId, $eventId, $seq, $toolName, $status, $inputText, $outputText, $inputHash, $outputHash, $startedAt, $completedAt, $projectKey, $provider)
            ON CONFLICT(id) DO UPDATE SET session_id = excluded.session_id, event_id = excluded.event_id, seq = excluded.seq, tool_name = excluded.tool_name, status = excluded.status, input_text = excluded.input_text, output_text = excluded.output_text, input_hash = excluded.input_hash, output_hash = excluded.output_hash, started_at = excluded.started_at, completed_at = excluded.completed_at, project_key = excluded.project_key, provider = excluded.provider`,
         );
-        const stampSessionFingerprint = db.prepare(
-          "UPDATE sessions SET source_fingerprint = ? WHERE session_id = ?",
+        const finalizeSessionFingerprint = db.prepare(
+          `UPDATE sessions
+           SET source_fingerprint = ?
+           WHERE session_id = ?
+             AND source_fingerprint = ?
+             AND normalization_version = ?`,
         );
 
         interface StoredSourceFact {
@@ -1121,6 +1139,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
         };
 
         interface SessionDiffPlan {
+          readonly requiresDownstreamReplay: boolean;
           readonly messageUpserts: readonly MessageRow[];
           readonly messageDeleteSeqs: readonly number[];
           readonly messagesInserted: number;
@@ -1139,6 +1158,10 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
         }
 
         const computeSessionDiff = (mapped: MappedSession): SessionDiffPlan => {
+          const applyState = selectSessionApplyState.get(mapped.session.sessionId) as {
+            readonly sourceFingerprint: string;
+          } | null;
+          const requiresDownstreamReplay = applyState?.sourceFingerprint.startsWith("applying:") ?? false;
           const existingMessages = selectMessageDiffRows.all(mapped.session.sessionId) as Array<{
             seq: number; role: string; contentHash: string; projectKey: string; ts: string | null;
           }>;
@@ -1237,6 +1260,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
           );
 
           return {
+            requiresDownstreamReplay,
             messageUpserts, messageDeleteSeqs, messagesInserted, messagesUpdated, messagesUnchanged,
             toolCallUpserts, toolCallDeleteIds, toolCallsInserted, toolCallsUpdated, toolCallsUnchanged,
             events, usageRecords, sessionEdges, artifacts, executionContexts,
@@ -1244,10 +1268,10 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
         };
 
         // Fingerprint commit ordering: the session row lands first carrying an
-        // `applying:` sentinel and only the final step stamps the real source
-        // fingerprint. A crash mid-apply leaves a fingerprint mismatch, the
-        // daemon re-sends the full session, and the diff converges on the
-        // remainder — no journal or partial-apply bookkeeping needed.
+        // `applying:` sentinel. The ingest boundary stamps the real source
+        // fingerprint only after all downstream jobs are durable. A crash
+        // anywhere before that leaves a mismatch; the daemon re-sends the full
+        // desired session and idempotent row/queue writes converge.
         const applySessionHead = db.transaction((mapped: MappedSession, plan: SessionDiffPlan) => {
           upsertProject.run({
             $projectKey: mapped.project.projectKey,
@@ -1425,10 +1449,6 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               );
               yield* Effect.sleep("1 millis");
             }
-            yield* trySqlite("upsertSession.fingerprint", () =>
-              stampSessionFingerprint.run(mapped.session.sourceFingerprint, mapped.session.sessionId)).pipe(
-              Effect.withSpan("ingest.diffFingerprint"),
-            );
             return {
               messagesInserted: plan.messagesInserted,
               messagesUpdated: plan.messagesUpdated,
@@ -1439,6 +1459,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               toolCallsDeleted: plan.toolCallDeleteIds.length,
               toolCallsUnchanged: plan.toolCallsUnchanged,
               changedMessages: plan.messageUpserts,
+              requiresDownstreamReplay: plan.requiresDownstreamReplay,
               invalidatedVectorKeys: [
                 ...plan.messageUpserts.map((row) => ({ sessionId: row.sessionId, seq: row.seq })),
                 ...plan.messageDeleteSeqs.map((seq) => ({ sessionId: mapped.session.sessionId, seq })),
@@ -1633,6 +1654,22 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                 .all(limit, offset) as ProjectRow[];
             }),
           upsertSession: upsertSessionDiff,
+          finalizeSessionIngest: (sessionId, sourceFingerprint, normalizationVersion) =>
+            trySqlite("finalizeSessionIngest", () => {
+              const applyingFingerprint = `applying:${sourceFingerprint}`;
+              const result = finalizeSessionFingerprint.run(
+                sourceFingerprint,
+                sessionId,
+                applyingFingerprint,
+                normalizationVersion,
+              );
+              if (result.changes !== 1) {
+                throw new Error(
+                  `session ${sessionId} is not staged at fingerprint ${applyingFingerprint} `
+                  + `and normalization version ${normalizationVersion}`,
+                );
+              }
+            }),
           readSessionDetail: (sessionId, pages) =>
             trySqlite("readSessionDetail", () => readSessionDetail(sessionId, pages)),
           hasSessionFingerprint: (sessionId, sourceFingerprint, normalizationVersion) =>

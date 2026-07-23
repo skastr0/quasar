@@ -40,6 +40,9 @@ export interface PruneFailedReport {
 const LIVE_QUEUE_KINDS = ["embed-message"] as const;
 
 export interface DurableQueueService {
+  /** Enqueue idempotently. An explicit enqueue of a terminal job key creates
+   * fresh pending work atomically: completed and failed rows are replaced,
+   * while pending and leased rows remain untouched. */
   readonly enqueue: (job: {
     readonly kind: string;
     readonly payload: unknown;
@@ -327,29 +330,48 @@ export const makeDurableQueueLayer = (path = sqlitePath()): Layer.Layer<DurableQ
              AND json_extract(payload_json, '$.embeddingProfile') = ?
            GROUP BY status`,
         );
+        const enqueueJob = db.transaction((job: {
+          readonly kind: string;
+          readonly payloadJson: string;
+          readonly idempotencyKey: string | null;
+          readonly maxAttempts: number;
+          readonly nextRunAt: string;
+          readonly at: string;
+        }) => {
+          const jobId = crypto.randomUUID();
+          if (job.idempotencyKey !== null) {
+            db.prepare(
+              "DELETE FROM queue_jobs WHERE idempotency_key = ? AND status IN ('completed', 'failed')",
+            ).run(job.idempotencyKey);
+          }
+          insertJob.run({
+            $jobId: jobId,
+            $kind: job.kind,
+            $payloadJson: job.payloadJson,
+            $maxAttempts: job.maxAttempts,
+            $nextRunAt: job.nextRunAt,
+            $idempotencyKey: job.idempotencyKey,
+            $createdAt: job.at,
+            $updatedAt: job.at,
+          });
+          const row = job.idempotencyKey === null
+            ? selectJobById.get(jobId)
+            : selectJobByIdempotencyKey.get(job.idempotencyKey);
+          return rowToJob(row as Record<string, unknown>);
+        });
 
         return DurableQueue.of({
           enqueue: (job) =>
             queueTry("enqueue", () => {
               const at = nowIso();
-              const jobId = crypto.randomUUID();
-              if (job.idempotencyKey !== undefined) {
-                db.prepare("DELETE FROM queue_jobs WHERE idempotency_key = ? AND status = 'completed'").run(job.idempotencyKey);
-              }
-              insertJob.run({
-                $jobId: jobId,
-                $kind: job.kind,
-                $payloadJson: JSON.stringify(job.payload),
-                $maxAttempts: job.maxAttempts ?? 5,
-                $nextRunAt: job.nextRunAt ?? at,
-                $idempotencyKey: job.idempotencyKey ?? null,
-                $createdAt: at,
-                $updatedAt: at,
+              return enqueueJob({
+                kind: job.kind,
+                payloadJson: JSON.stringify(job.payload),
+                idempotencyKey: job.idempotencyKey ?? null,
+                maxAttempts: job.maxAttempts ?? 5,
+                nextRunAt: job.nextRunAt ?? at,
+                at,
               });
-              const row = job.idempotencyKey === undefined
-                ? selectJobById.get(jobId)
-                : selectJobByIdempotencyKey.get(job.idempotencyKey);
-              return rowToJob(row as Record<string, unknown>);
             }),
           leaseBatch: ({ workerId, kind, limit, leaseMs, now = nowIso() }) =>
             queueTry("leaseBatch", () => leaseReady({ workerId, kind, limit, leaseUntil: addMs(now, leaseMs), now })),
