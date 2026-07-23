@@ -7,6 +7,7 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package.json bun.lock tsconfig.base.json ./
+COPY packages/protocol/package.json packages/protocol/package.json
 COPY packages/server/package.json packages/server/package.json
 COPY packages/cli/package.json packages/cli/package.json
 
