@@ -332,6 +332,66 @@ describe("vectorMatrix append path", () => {
     );
   });
 
+  test("message deletes and updates invalidate resident rows without a reboot", async () => {
+    const path = sqlitePath();
+    await withMatrix(path, ({ store }) => seedCorpus(store));
+    await withMatrix(path, ({ matrix, store }) =>
+      Effect.gen(function* () {
+        yield* matrix.awaitLoaded;
+
+        const alpha = sessionFixture("codex:alpha", "project-alpha", 4);
+        const withoutClosestAlpha: MappedSession = {
+          ...alpha,
+          session: {
+            ...alpha.session,
+            sourceFingerprint: "fp-codex:alpha-delete-0",
+            messageCount: 3,
+          },
+          messages: alpha.messages.filter((row) => row.seq !== 0),
+        };
+        const deletion = yield* store.upsertSession(withoutClosestAlpha);
+        expect(deletion.invalidatedVectorKeys).toContainEqual({ sessionId: "codex:alpha", seq: 0 });
+
+        let status = yield* matrix.status;
+        expect(status.rows).toBe(6);
+        expect(status.watermark).toMatchObject({ matrixRows: 6, sqliteRows: 6 });
+        let hits = yield* matrix.search({ vector: queryVector(), limit: 1 });
+        expect(`${hits[0]?.sessionId}:${hits[0]?.seq}`).toBe("codex:beta:0");
+
+        const beta = sessionFixture("codex:beta", "project-beta", 3);
+        const changedHash = "hash-codex:beta-0-updated";
+        const changedBeta: MappedSession = {
+          ...beta,
+          session: { ...beta.session, sourceFingerprint: "fp-codex:beta-update-0" },
+          messages: beta.messages.map((row) =>
+            row.seq === 0
+              ? { ...row, text: "updated beta head", contentHash: changedHash }
+              : row,
+          ),
+        };
+        const update = yield* store.upsertSession(changedBeta);
+        expect(update.invalidatedVectorKeys).toContainEqual({ sessionId: "codex:beta", seq: 0 });
+
+        status = yield* matrix.status;
+        expect(status.rows).toBe(5);
+        expect(status.watermark).toMatchObject({ matrixRows: 5, sqliteRows: 5 });
+        hits = yield* matrix.search({ vector: queryVector(), limit: 1 });
+        expect(`${hits[0]?.sessionId}:${hits[0]?.seq}`).toBe("codex:alpha:1");
+
+        yield* store.upsertMessageVectors([{
+          ...vectorUpsert("codex:beta", "project-beta", 0, angleVector(0.01)),
+          contentHash: changedHash,
+          documentHash: "doc-codex:beta-0-updated",
+        }]);
+        status = yield* matrix.status;
+        expect(status.rows).toBe(6);
+        expect(status.watermark).toMatchObject({ matrixRows: 6, sqliteRows: 6 });
+        hits = yield* matrix.search({ vector: queryVector(), limit: 1 });
+        expect(`${hits[0]?.sessionId}:${hits[0]?.seq}`).toBe("codex:beta:0");
+      }),
+    );
+  });
+
   test("vectors for other models are ignored by the append path", async () => {
     const path = sqlitePath();
     await withMatrix(path, ({ store }) => seedCorpus(store));

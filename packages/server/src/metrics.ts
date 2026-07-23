@@ -29,7 +29,7 @@
  * watermark_drift:
  *   not ready — matrix empty/disabled: ready=0 and drift=-1 (WATERMARK_DRIFT_NOT_READY).
  *              Never treat empty-boot 0/0 as healthy lockstep.
- *   healthy  — ready=1 and drift=0 after boot load / applyVectorWrites for the
+ *   healthy  — ready=1 and drift=0 after boot load / applyVectorMutations for the
  *              active model (matrix and message_vectors stay lockstep).
  *   alert    — ready=1 and any nonzero drift. The matrix already logs
  *              vector_matrix.watermark_drift; the gauge makes it pollable on
