@@ -281,7 +281,7 @@ interface IngestRunWrite {
   readonly sessionsFailed: number;
 }
 
-export const postIngestRun = async (
+const postIngestRunOnce = async (
   base: string,
   run: IngestRunWrite,
   options: { readonly ingestToken?: string; readonly timeoutMs?: number },
@@ -306,6 +306,23 @@ export const postIngestRun = async (
   if (!response.ok || body.ok === false) {
     throw new RemoteIngestError(body.error?.message ?? `remote ingest run failed with HTTP ${response.status}`, response.status >= 500);
   }
+};
+
+export const postIngestRun = async (
+  base: string,
+  run: IngestRunWrite,
+  options: { readonly ingestToken?: string; readonly timeoutMs?: number },
+): Promise<void> => {
+  for (let attempt = 1; attempt <= remoteWriteAttempts; attempt += 1) {
+    try {
+      await postIngestRunOnce(base, run, options);
+      return;
+    } catch (error) {
+      if (attempt === remoteWriteAttempts || !retryableRemoteWriteError(error)) throw error;
+      await sleep(remoteWriteRetryDelayMs * attempt);
+    }
+  }
+  throw new Error("remote ingest run retry loop exited unexpectedly");
 };
 
 const ingestProviderRemote = async (
@@ -529,25 +546,32 @@ export const ingestRemote = async (
       runId, provider, status: "running", startedAt,
       sessionsSeen: 0, sessionsWritten: 0, sessionsSkipped: 0, sessionsFailed: 0,
     }, options);
+    let result: { report: IngestReport; manifestUpdates: IngestManifest };
     try {
-      const { report, manifestUpdates } = await ingestProviderRemote(provider, options, serverUrl, manifest);
-      await postIngestRun(serverUrl, {
-        runId, provider, status: report.sessionsFailed === 0 ? "completed" : "failed", startedAt,
-        completedAt: new Date().toISOString(),
-        sessionsSeen: report.sessionsSeen,
-        sessionsWritten: report.sessionsWritten,
-        sessionsSkipped: report.sessionsSkipped,
-        sessionsFailed: report.sessionsFailed,
-      }, options);
-      reports.push(report);
-      merged = { ...merged, ...manifestUpdates };
+      result = await ingestProviderRemote(provider, options, serverUrl, manifest);
     } catch (error) {
-      await postIngestRun(serverUrl, {
-        runId, provider, status: "failed", startedAt, completedAt: new Date().toISOString(),
-        sessionsSeen: 0, sessionsWritten: 0, sessionsSkipped: 0, sessionsFailed: 1,
-      }, options);
+      try {
+        await postIngestRun(serverUrl, {
+          runId, provider, status: "failed", startedAt, completedAt: new Date().toISOString(),
+          sessionsSeen: 0, sessionsWritten: 0, sessionsSkipped: 0, sessionsFailed: 1,
+        }, options);
+      } catch {
+        // The provider failure is the primary error. A best-effort terminal
+        // ledger update must not replace it.
+      }
       throw error;
     }
+    const { report, manifestUpdates } = result;
+    await postIngestRun(serverUrl, {
+      runId, provider, status: report.sessionsFailed === 0 ? "completed" : "failed", startedAt,
+      completedAt: new Date().toISOString(),
+      sessionsSeen: report.sessionsSeen,
+      sessionsWritten: report.sessionsWritten,
+      sessionsSkipped: report.sessionsSkipped,
+      sessionsFailed: report.sessionsFailed,
+    }, options);
+    reports.push(report);
+    merged = { ...merged, ...manifestUpdates };
   }
 
   // Persist only when there are new entries to record.

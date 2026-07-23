@@ -142,6 +142,18 @@ const diagnosticAdapter = (): SessionAdapter => ({
   },
 });
 
+const throwingAdapter = (): SessionAdapter => ({
+  id: "throwing-adapter",
+  provider: "claude",
+  displayName: "Throwing Adapter",
+  stable: true,
+  defaultRoot: () => undefined,
+  read: async () => ({ sourceRoots: [], sessions: [], diagnostics: [] }),
+  stream: async function* () {
+    throw new Error("provider stream exploded");
+  },
+});
+
 describe("ingestRemote", () => {
   test("remote ingest reports adapter error diagnostics as failures", async () => {
     adaptersByProvider.set("claude", diagnosticAdapter());
@@ -236,6 +248,83 @@ describe("ingestRemote", () => {
       expect(reports[0]?.toolCallsWritten).toBe(1);
       expect(runs).toHaveLength(2);
       expect(runs[1]).toMatchObject({ status: "completed", sessionsSeen: 1, sessionsWritten: 1, sessionsFailed: 0 });
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("completed lifecycle acknowledgement uncertainty does not rewrite a successful provider run", async () => {
+    adaptersByProvider.set("claude", adapterFor([session("completed-ack")]));
+    const runs: Array<Record<string, unknown>> = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1", port: 0,
+      fetch: async (request) => {
+        const path = new URL(request.url).pathname;
+        if (path === "/ingest/fingerprint") return Response.json({ ok: true, data: { unchanged: false } });
+        if (path === "/ingest/session") {
+          const payload = await request.json() as { readonly session: { readonly session: { readonly sessionId: string } } };
+          return Response.json({
+            ok: true,
+            data: { outcome: { sessionId: payload.session.session.sessionId, status: "ok", messagesWritten: 2, toolCallsWritten: 1, jobsEnqueued: 3 } },
+          });
+        }
+        if (path === "/ingest/run") {
+          const run = (await request.json() as { run: Record<string, unknown> }).run;
+          runs.push(run);
+          if (run.status === "completed") {
+            return Response.json({ ok: false, error: { message: "terminal acknowledgement unavailable" } }, { status: 500 });
+          }
+          return Response.json({ ok: true, data: {} });
+        }
+        return new Response(null, { status: 404 });
+      },
+    });
+
+    try {
+      await expect(ingestRemote(
+        { provider: "claude" },
+        `http://127.0.0.1:${server.port}`,
+      )).rejects.toThrow("terminal acknowledgement unavailable");
+
+      expect(runs).toHaveLength(4);
+      expect(runs.map((run) => run.status)).toEqual(["running", "completed", "completed", "completed"]);
+      expect(runs.slice(1)).toEqual(runs.slice(1).map((run) => expect.objectContaining({
+        status: "completed", sessionsSeen: 1, sessionsWritten: 1, sessionsSkipped: 0, sessionsFailed: 0,
+      })));
+      expect(new Set(runs.map((run) => run.runId))).toEqual(new Set([runs[0]?.runId]));
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("failed lifecycle acknowledgement does not mask the provider failure", async () => {
+    adaptersByProvider.set("claude", throwingAdapter());
+    const runs: Array<Record<string, unknown>> = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1", port: 0,
+      fetch: async (request) => {
+        if (new URL(request.url).pathname !== "/ingest/run") return new Response(null, { status: 404 });
+        const run = (await request.json() as { run: Record<string, unknown> }).run;
+        runs.push(run);
+        if (run.status === "failed") {
+          return Response.json({ ok: false, error: { message: "failed-run ledger unavailable" } }, { status: 500 });
+        }
+        return Response.json({ ok: true, data: {} });
+      },
+    });
+
+    try {
+      await expect(ingestRemote(
+        { provider: "claude" },
+        `http://127.0.0.1:${server.port}`,
+      )).rejects.toThrow("provider stream exploded");
+
+      expect(runs).toHaveLength(4);
+      expect(runs.map((run) => run.status)).toEqual(["running", "failed", "failed", "failed"]);
+      expect(runs.slice(1)).toEqual(runs.slice(1).map((run) => expect.objectContaining({
+        status: "failed", sessionsSeen: 0, sessionsWritten: 0, sessionsSkipped: 0, sessionsFailed: 1,
+      })));
+      expect(new Set(runs.map((run) => run.runId))).toEqual(new Set([runs[0]?.runId]));
     } finally {
       server.stop(true);
     }
