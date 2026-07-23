@@ -43,8 +43,13 @@ const positiveInt = (raw: string | undefined, fallback: number): number => {
 
 const rawCommand = process.argv[2];
 const isInteractiveTty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+const subcommandHelpTarget =
+  rawCommand !== undefined && process.argv.slice(3).some((value) => value === "--help" || value === "-h")
+    ? rawCommand
+    : undefined;
 const command =
-  rawCommand === undefined && isInteractiveTty ? "tui"
+  subcommandHelpTarget !== undefined ? "help"
+  : rawCommand === undefined && isInteractiveTty ? "tui"
   : rawCommand === undefined || rawCommand === "--help" || rawCommand === "-h" ? "help"
   : rawCommand === "--version" || rawCommand === "-v" ? "version"
   : rawCommand;
@@ -635,10 +640,16 @@ switch (command) {
     break;
   }
   case "search": {
-    if (!(checkEnum("search", "--mode", SEARCH_MODES) && checkEnum("search", "--role", ROLES) && checkInt("search", "--limit", 1))) break;
+    if (!(checkEnum("search", "--mode", SEARCH_MODES) && checkEnum("search", "--provider", PROVIDERS) && checkEnum("search", "--role", ROLES) && checkInt("search", "--limit", 1))) break;
     const query = arg("--query") ?? arg("-q") ?? "";
     const mode = arg("--mode") ?? "lexical";
-    await fetchServer("search", `/search/${mode}`, { q: query, limit: arg("--limit"), projectKey: arg("--project-key"), role: arg("--role") });
+    await fetchServer("search", `/search/${mode}`, {
+      q: query,
+      limit: arg("--limit"),
+      projectKey: arg("--project-key"),
+      provider: arg("--provider"),
+      role: arg("--role"),
+    });
     break;
   }
   case "tui": {
@@ -656,28 +667,32 @@ switch (command) {
     break;
   }
   case "help": {
+    const commands = [
+      "ingest --provider all|codex|claude|opencode|grok|kimi|hermes|antigravity|omp|pi|cursor|devin [--server url] [--limit n] [--force] [--summary]",
+      "daemon install --server https://<quasar-service-tailnet-hostname> --ingest-token <token> [--interval-seconds 60]",
+      "daemon status",
+      "daemon uninstall",
+      "projects [--limit n] [--offset n]",
+      "sessions [--provider name] [--project-key key] [--limit n] [--offset n]",
+      "messages --session-id id [--limit n]",
+      "tool-calls [--session-id id] [--project-key key] [--provider name] [--tool-name name] [--limit n] [--offset n]",
+      "tool-call --id id",
+      "ingest-runs [--status running|completed|failed] [--limit n]",
+      "replay-embedding-cache [--limit n] [--server url]",
+      "materialize-embedding-vectors [--limit n] [--until-empty] [--max-batches n] [--require-provider local|synthetic] [--out path] [--server url]",
+      "prune-dead-letters [--server url] (delete failed queue jobs whose work is provably done, orphaned, or a retired kind)",
+      "workers [--server url]",
+      "search --query text [--mode lexical|semantic|fusion] [--project-key key] [--provider name] [--role user|assistant|reasoning] [--limit n] [--server url]",
+      "stats",
+      "tui [--server url] (interactive terminal UI; default when run in a terminal)",
+      "version",
+    ];
     writeJson(
       ok("help", {
-        commands: [
-          "ingest --provider all|codex|claude|opencode|grok|kimi|hermes|antigravity|omp|pi|cursor|devin [--server url] [--limit n] [--force] [--summary]",
-          "daemon install --server https://<quasar-service-tailnet-hostname> --ingest-token <token> [--interval-seconds 60]",
-          "daemon status",
-          "daemon uninstall",
-          "projects [--limit n] [--offset n]",
-          "sessions [--provider name] [--project-key key] [--limit n] [--offset n]",
-          "messages --session-id id [--limit n]",
-          "tool-calls [--session-id id] [--project-key key] [--provider name] [--tool-name name] [--limit n] [--offset n]",
-          "tool-call --id id",
-          "ingest-runs [--status running|completed|failed] [--limit n]",
-          "replay-embedding-cache [--limit n] [--server url]",
-          "materialize-embedding-vectors [--limit n] [--until-empty] [--max-batches n] [--require-provider local|synthetic] [--out path] [--server url]",
-          "prune-dead-letters [--server url] (delete failed queue jobs whose work is provably done, orphaned, or a retired kind)",
-          "workers [--server url]",
-          "search --query text [--mode lexical|semantic|fusion] [--project-key key] [--role user|assistant] [--limit n] [--server url]",
-          "stats",
-          "tui [--server url] (interactive terminal UI; default when run in a terminal)",
-          "version",
-        ],
+        ...(subcommandHelpTarget !== undefined ? { target: subcommandHelpTarget } : {}),
+        commands: subcommandHelpTarget === undefined
+          ? commands
+          : commands.filter((entry) => entry === subcommandHelpTarget || entry.startsWith(`${subcommandHelpTarget} `)),
         env: {
           QUASAR_LOCAL_HOME: "override ~/.config/quasar/server",
           QUASAR_CONFIG: "override ~/.config/quasar/config.json for default server/token routing",

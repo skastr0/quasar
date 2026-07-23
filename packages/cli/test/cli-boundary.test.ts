@@ -57,7 +57,20 @@ describe("CLI client/operator boundary", () => {
       expect(result.exitCode).toBe(0);
       expect(result.json.ok).toBe(true);
       expect(result.json.command).toBe("help");
+      expect(result.stdout.split("\n")).toHaveLength(2);
     }
+  }, 15_000);
+
+  test("subcommand help is local and scoped", async () => {
+    const result = await runCli(["search", "--help"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.ok).toBe(true);
+    expect(result.json.command).toBe("help");
+    expect(result.json.data).toEqual(expect.objectContaining({
+      target: "search",
+      commands: [expect.stringContaining("search --query")],
+    }));
   }, 15_000);
 
   test("version aliases report package metadata", async () => {
@@ -92,6 +105,48 @@ describe("CLI client/operator boundary", () => {
     expect(result.json.ok).toBe(false);
     expect(result.json.command).toBe("search");
     expect(result.json.error?.type).toBe("ConfigurationError");
+  }, 15_000);
+
+  test("search validates and forwards provider scope", async () => {
+    let requestedUrl: URL | undefined;
+    const server = Bun.serve({
+      port: 0,
+      fetch: (request) => {
+        requestedUrl = new URL(request.url);
+        return Response.json({ ok: true, command: "search/lexical", data: { matches: [] } });
+      },
+    });
+    try {
+      const result = await runCli([
+        "search",
+        "--query",
+        "effect server",
+        "--mode",
+        "lexical",
+        "--provider",
+        "codex",
+      ], {
+        QUASAR_SERVER_URL: `http://127.0.0.1:${server.port}`,
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(requestedUrl?.pathname).toBe("/search/lexical");
+      expect(requestedUrl?.searchParams.get("provider")).toBe("codex");
+
+      const invalid = await runCli([
+        "search",
+        "--query",
+        "effect server",
+        "--provider",
+        "not-a-provider",
+      ], {
+        QUASAR_SERVER_URL: `http://127.0.0.1:${server.port}`,
+      });
+      expect(invalid.exitCode).toBe(1);
+      expect(invalid.json.error?.type).toBe("CommandInputError");
+    } finally {
+      server.stop(true);
+    }
   }, 15_000);
 
   test("remote ingest fails before scanning when no ingest token is configured", async () => {

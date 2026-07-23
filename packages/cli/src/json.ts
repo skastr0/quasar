@@ -29,5 +29,6 @@ export const fail = (command: string, error: unknown): JsonErrorEnvelope => ({
 });
 
 export const writeJson = (value: unknown): void => {
-  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+  const indentation = process.stdout.isTTY ? 2 : undefined;
+  process.stdout.write(`${JSON.stringify(value, null, indentation)}\n`);
 };
