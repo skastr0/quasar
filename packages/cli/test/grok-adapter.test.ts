@@ -149,6 +149,57 @@ describe("AC#5 idempotency: same session dir name at different parent paths → 
 });
 
 describe("grok adapter", () => {
+  test("keeps model identifiers as execution context without treating them as agent identity", async () => {
+    const root = join(testRoot, "model-contexts");
+    const projectRoot = join(root, "sessions", encodeURIComponent("/repo/model-contexts"));
+    const namedSessionId = "01900000-0000-7000-8000-000000000101";
+    const modelOnlySessionId = "01900000-0000-7000-8000-000000000102";
+    const namedSessionDir = join(projectRoot, namedSessionId);
+    const modelOnlySessionDir = join(projectRoot, modelOnlySessionId);
+    mkdirSync(namedSessionDir, { recursive: true });
+    mkdirSync(modelOnlySessionDir, { recursive: true });
+    writeFileSync(
+      join(namedSessionDir, "summary.json"),
+      JSON.stringify({ agent_name: "fab-grok-builder", current_model_id: "grok-session-model" }),
+      "utf8",
+    );
+    writeJsonLines(join(namedSessionDir, "chat_history.jsonl"), [
+      { type: "user", content: "synthetic prompt" },
+      { type: "assistant", content: "synthetic reply", model_id: "grok-message-model" },
+    ]);
+    writeJsonLines(join(namedSessionDir, "events.jsonl"), [
+      {
+        type: "turn_started",
+        ts: NOW,
+        session_id: namedSessionId,
+        turn_number: 7,
+        model_id: "grok-turn-model",
+      },
+    ]);
+    writeFileSync(
+      join(modelOnlySessionDir, "summary.json"),
+      JSON.stringify({ current_model_id: "grok-model-not-agent" }),
+      "utf8",
+    );
+    writeJsonLines(join(modelOnlySessionDir, "chat_history.jsonl"), [
+      { type: "user", content: "synthetic prompt" },
+    ]);
+
+    const result = await grokAdapter.read({ machine: MACHINE, now: NOW, roots: { grok: root } });
+    const named = result.sessions.find((session) => session.nativeSessionId === namedSessionId)!;
+    const modelOnly = result.sessions.find((session) => session.nativeSessionId === modelOnlySessionId)!;
+    expect(named.agentName).toBe("fab-grok-builder");
+    expect(named.executionContexts.map(({ scope, turnId, model }) => ({ scope, turnId, model }))).toEqual([
+      { scope: "session", turnId: undefined, model: "grok-session-model" },
+      { scope: "turn", turnId: expect.any(String), model: "grok-message-model" },
+      { scope: "turn", turnId: "7", model: "grok-turn-model" },
+    ]);
+    expect(modelOnly.agentName).toBe("grok-build");
+    expect(modelOnly.executionContexts).toContainEqual(
+      expect.objectContaining({ scope: "session", model: "grok-model-not-agent" }),
+    );
+  });
+
   test("missing optional sidecars do not abort and later sidecar creation invalidates the fingerprint", async () => {
     const root = join(testRoot, "optional-sidecars");
     // Real on-disk shape: the session directory is a UUIDv7, not "session-1".
@@ -233,6 +284,7 @@ describe("QSR-220 grok subagent lineage", () => {
         parent_session_id: PARENT_UUID,
         child_session_id: CHILD_UUID,
         subagent_type: SUBAGENT_TYPE,
+        effective_model_id: "grok-subagent-model",
         description: "synthetic subagent",
         prompt: "synthetic fabricated prompt — not real content",
         status: "completed",
@@ -242,6 +294,11 @@ describe("QSR-220 grok subagent lineage", () => {
     // Child session dir: flat, top-level, own chat_history (ingested independently).
     const childDir = join(sessionsRoot, CHILD_UUID);
     mkdirSync(childDir, { recursive: true });
+    writeFileSync(
+      join(childDir, "summary.json"),
+      JSON.stringify({ agent_name: "summary-agent-name-must-not-replace-assignment-role" }),
+      "utf8",
+    );
     writeJsonLines(join(childDir, "chat_history.jsonl"), [
       { type: "user", content: "synthetic child prompt" },
       { type: "assistant", content: "synthetic child reply" },
@@ -272,6 +329,10 @@ describe("QSR-220 grok subagent lineage", () => {
 
       // agentName is sourced from the manifest subagent_type.
       expect(child!.agentName).toBe(SUBAGENT_TYPE);
+      expect(child!.assignment).toEqual({ role: SUBAGENT_TYPE });
+      expect(child!.executionContexts).toContainEqual(
+        expect.objectContaining({ scope: "session", model: "grok-subagent-model" }),
+      );
 
       // End-to-end: map.ts projects subagent_of onto SessionRow.parentSessionId.
       const mappedChild = mapSession(child!, "fp-child");
@@ -323,7 +384,7 @@ describe("QSR-220 grok subagent lineage", () => {
 
   test("the subagent manifest schema rejects records missing required lineage fields", () => {
     const decode = Schema.decodeUnknownEither(GrokSubagentManifest);
-    expect(decode({ parent_session_id: "p", child_session_id: "c", subagent_type: "fab-explore-role" })._tag).toBe("Right");
+    expect(decode({ parent_session_id: "p", child_session_id: "c", subagent_type: "fab-explore-role", effective_model_id: "grok-test-model" })._tag).toBe("Right");
     expect(decode({ child_session_id: "c", subagent_type: "fab-explore-role" })._tag).toBe("Left");
     expect(decode({ parent_session_id: "", child_session_id: "c", subagent_type: "fab-explore-role" })._tag).toBe("Left");
   });

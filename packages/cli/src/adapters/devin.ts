@@ -54,6 +54,7 @@ import {
 type NormalizedToolCall = NormalizedSession["toolCalls"][number];
 type NormalizedEdge = NormalizedSession["sessionEdges"][number];
 type NormalizedEvent = NormalizedSession["events"][number];
+type NormalizedExecutionContext = NormalizedSession["executionContexts"][number];
 type DevinToolCallDraft = Omit<
   NormalizedToolCall,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
@@ -66,6 +67,10 @@ type DevinEventDraft = Omit<
   NormalizedEvent,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey" | "contentBlocks"
 > & { readonly contentBlocks?: NormalizedEvent["contentBlocks"] };
+type DevinExecutionContextDraft = Omit<
+  NormalizedExecutionContext,
+  "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
+>;
 
 type RawSqliteRow = Record<string, unknown>;
 type Query = { readonly all: (...parameters: readonly unknown[]) => RawSqliteRow[] };
@@ -359,6 +364,7 @@ const buildDevinSession = (
   const callEventByNativeId = new Map<string, string>();
   const results = new Map<string, { readonly message: DevinToolMessage; readonly eventId: string }>();
   const duplicateResults = new Set<string>();
+  const executionContexts: DevinExecutionContextDraft[] = [];
   let sequence = 0;
 
   for (const { row, message } of nodes) {
@@ -412,6 +418,17 @@ const buildDevinSession = (
     let eventToolCallId: string | undefined;
 
     if (message.role === "assistant") {
+      const generationModel = message.metadata.generation_model.trim();
+      if (generationModel.length > 0) {
+        executionContexts.push({
+          id: scopedId(sessionId, "execution-context", "message", message.message_id),
+          sequence,
+          scope: "turn",
+          ...(timestamp === undefined ? {} : { timestamp }),
+          turnId: message.message_id,
+          model: generationModel,
+        });
+      }
       for (const call of [...message.tool_calls].sort((left, right) => left.index - right.index)) {
         const callDecision = classifyDevinToolCall(call);
         if (!isSignal(callDecision)) {
@@ -570,6 +587,19 @@ const buildDevinSession = (
     });
   }
 
+  const sessionModel = sessionRow.model.trim();
+  const permissionProfileType = sessionRow.agent_mode.trim();
+  if (sessionModel.length > 0 || permissionProfileType.length > 0) {
+    executionContexts.unshift({
+      id: scopedId(sessionId, "execution-context", "session"),
+      sequence: 0,
+      scope: "session",
+      ...(startedAt === undefined ? {} : { timestamp: startedAt }),
+      ...(sessionModel.length === 0 ? {} : { model: sessionModel }),
+      ...(permissionProfileType.length === 0 ? {} : { permissionProfileType }),
+    });
+  }
+
   return {
     session: buildSession({
       provider: "devin",
@@ -587,6 +617,7 @@ const buildDevinSession = (
       events,
       toolCalls: [...callDrafts.values()],
       sessionEdges: edges,
+      executionContexts,
     }),
     diagnostics,
   };

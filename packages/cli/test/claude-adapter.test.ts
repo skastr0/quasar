@@ -27,6 +27,7 @@ import {
   ClaudeSystemTurnDurationSchema,
   ClaudeUserRecordSchema,
   ClaudeUsageSchema,
+  CLAUDE_BOOKKEEPING_DECODE_FAILED,
   CLAUDE_USAGE_DECODE_FAILED,
   classifyClaudeRecord,
   decodeClaudeUsage,
@@ -621,7 +622,7 @@ describe("QSR-220 top-level type dispatch", () => {
     [ClaudeLastPromptSchema, { type: "last-prompt", sessionId: FAB.sessionId, lastPrompt: "x", leafUuid: FAB.uuid }],
     [ClaudeModeSchema, { type: "mode", sessionId: FAB.sessionId, mode: "default" }],
     [ClaudePermissionModeSchema, { type: "permission-mode", sessionId: FAB.sessionId, permissionMode: "default" }],
-    [ClaudeAgentSettingSchema, { type: "agent-setting", sessionId: FAB.sessionId, agentSetting: {} }],
+    [ClaudeAgentSettingSchema, { type: "agent-setting", sessionId: FAB.sessionId, agentSetting: "prism-generated-forge:builder" }],
     [ClaudeAgentNameSchema, { type: "agent-name", sessionId: FAB.sessionId, agentName: "synthetic-agent" }],
   ];
 
@@ -696,6 +697,16 @@ describe("QSR-220 top-level type dispatch", () => {
 // QSR-220 / malformed records: NAMED diagnostic + drop, never a throw.
 // ---------------------------------------------------------------------------
 describe("QSR-220 malformed records -> named diagnostic + drop (no throw)", () => {
+  test("agent-setting rejects arbitrary settings blobs instead of preserving them", () => {
+    const diags: DecodeDiagnostic[] = [];
+    const d = classifyClaudeRecord(
+      { type: "agent-setting", sessionId: FAB.sessionId, agentSetting: { arbitrary: true } },
+      diags,
+    );
+    expect(d._tag).toBe("drop");
+    expect(diags.map((x) => x.name)).toContain(CLAUDE_BOOKKEEPING_DECODE_FAILED);
+  });
+
   test("user with non-object message -> claude.user.decode_failed", () => {
     const diags: DecodeDiagnostic[] = [];
     const d = classifyClaudeRecord({ type: "user", message: "not-an-object", sessionId: FAB.sessionId }, diags);
@@ -819,6 +830,9 @@ describe("QSR-220 end-to-end through the adapter", () => {
   mkdirSync(projectDir, { recursive: true });
 
   const records = [
+    // typed assignment records (kept as session facts, not conversation events)
+    { type: "agent-setting", sessionId: SID, agentSetting: "prism-generated-forge:builder" },
+    { type: "agent-name", sessionId: SID, agentName: "synthetic-assignment" },
     // signal: user message (kept)
     { type: "user", sessionId: SID, uuid: "u1", message: { role: "user", content: [{ type: "text", text: "syn 1" }] } },
     // drop: harness bookkeeping attachment (NOT an event)
@@ -826,7 +840,7 @@ describe("QSR-220 end-to-end through the adapter", () => {
     // drop: telemetry system (NOT an event)
     { type: "system", sessionId: SID, uuid: "s1", parentUuid: "u1", subtype: "turn_duration", durationMs: 5 },
     // signal: assistant message, parent points past the dropped records to u1
-    { type: "assistant", sessionId: SID, uuid: "a2", parentUuid: "u1", message: { role: "assistant", content: [{ type: "text", text: "syn 2" }] } },
+    { type: "assistant", sessionId: SID, uuid: "a2", parentUuid: "u1", message: { role: "assistant", model: "claude-synthetic-model", content: [{ type: "text", text: "syn 2" }] } },
     // drop: session ui bookkeeping (NOT an event)
     { type: "mode", sessionId: SID, mode: "default" },
   ];
@@ -836,10 +850,27 @@ describe("QSR-220 end-to-end through the adapter", () => {
     const result = await claudeAdapter.read({ machine: MACHINE, now: NOW, roots: { claude: root } });
     expect(result.sessions).toHaveLength(1);
     const session = result.sessions[0]!;
-    // 5 on-disk records -> 2 kept events (user + assistant).
+    // 7 on-disk records -> 2 kept events (user + assistant).
     expect(session.events).toHaveLength(2);
     expect(session.events.map((e) => e.kind)).toEqual(["message", "message"]);
     expect(session.events.map((e) => e.role)).toEqual(["user", "assistant"]);
+  });
+
+  test("preserves measured assignment records and message model as typed session facts", async () => {
+    const result = await claudeAdapter.read({ machine: MACHINE, now: NOW, roots: { claude: root } });
+    const session = result.sessions[0]!;
+    expect(session.agentName).toBe("synthetic-assignment");
+    expect(session.assignment).toEqual({
+      nickname: "synthetic-assignment",
+      path: "prism-generated-forge:builder",
+    });
+    expect(session.executionContexts).toContainEqual(
+      expect.objectContaining({
+        scope: "turn",
+        turnId: "a2",
+        model: "claude-synthetic-model",
+      }),
+    );
   });
 
   test("lineage (parent edges) survives intervening dropped records", async () => {

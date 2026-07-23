@@ -468,7 +468,8 @@ export const ClaudeQueueOperationSchema = Schema.Struct({
 export const ClaudeAgentSettingSchema = Schema.Struct({
   type: Schema.Literal("agent-setting"),
   sessionId: Schema.String,
-  agentSetting: Schema.Unknown,
+  /** Measured Claude Code shape: a non-empty agent-definition reference. */
+  agentSetting: Schema.NonEmptyString,
 });
 
 export const ClaudeAgentNameSchema = Schema.Struct({
