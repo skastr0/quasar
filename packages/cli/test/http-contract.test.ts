@@ -304,15 +304,17 @@ const fetchJson = async (url: string): Promise<{ readonly status: number; readon
   return { status: response.status, body: await response.json() };
 };
 
-const postQueryJson = async (
+const resourceJson = async (
   base: string,
-  body: Record<string, unknown>,
+  path: string,
+  params: Record<string, string | number | readonly string[] | undefined> = {},
 ): Promise<{ readonly status: number; readonly body: any }> => {
-  const response = await fetch(`${base}/query`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ protocolVersion: "quasar.query/v1", ...body }),
-  });
+  const url = new URL(path, `${base}/`);
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined) continue;
+    url.searchParams.set(key, Array.isArray(value) ? value.join(",") : String(value));
+  }
+  const response = await fetch(url);
   return { status: response.status, body: await response.json() };
 };
 
@@ -324,16 +326,20 @@ const searchQueryJson = (
     readonly filters?: Record<string, unknown>;
     readonly limit?: number;
   } = {},
-) => postQueryJson(base, {
-  kind: "search",
-  text,
-  mode,
-  ...(options.filters === undefined ? {} : { filters: options.filters }),
-  projection: {
-    detail: "detail",
-    fields: ["sessionId", "projectKey", "provider", "role", "text", "score"],
-  },
-  page: { limit: options.limit ?? 5 },
+) => resourceJson(base, `search/${mode}`, {
+  q: text,
+  limit: options.limit ?? 5,
+  offset: 0,
+  projectKey: typeof options.filters?.projectKey === "string" ? options.filters.projectKey : undefined,
+  provider: Array.isArray(options.filters?.providers)
+    ? options.filters.providers as readonly string[]
+    : undefined,
+  sessionId: typeof options.filters?.sessionId === "string" ? options.filters.sessionId : undefined,
+  role: typeof options.filters?.role === "string" ? options.filters.role : undefined,
+  agentName: typeof options.filters?.agentName === "string" ? options.filters.agentName : undefined,
+  agentRole: typeof options.filters?.agentRole === "string" ? options.filters.agentRole : undefined,
+  model: typeof options.filters?.model === "string" ? options.filters.model : undefined,
+  modelProvider: typeof options.filters?.modelProvider === "string" ? options.filters.modelProvider : undefined,
 });
 
 describe("CLI HTTP client <-> server contract", () => {
@@ -532,43 +538,30 @@ describe("CLI HTTP client <-> server contract", () => {
 
       // Read everything back over plain HTTP — the server's serving surface.
       const [sessions, messages, toolCalls, detail, status] = await Promise.all([
-        postQueryJson(base, {
-          kind: "sessions",
-          projection: {
-            detail: "detail",
-            fields: ["sessionId", "messageCount", "toolCallCount", "model", "modelProvider", "agentRole"],
-          },
-          page: { limit: 20 },
+        resourceJson(base, "sessions", { limit: 20, offset: 0 }).then(({ body }) => body),
+        resourceJson(base, "messages", {
+          sessionId: "contract-session", limit: 20, offset: 0,
         }).then(({ body }) => body),
-        postQueryJson(base, {
-          kind: "messages",
-          filters: { sessionId: "contract-session" },
-          projection: { detail: "summary", fields: ["text"] },
-          page: { limit: 20 },
-        }).then(({ body }) => body),
-        postQueryJson(base, {
-          kind: "toolCalls",
-          filters: { providers: ["codex"], toolName: "shell_command" },
-          projection: { detail: "summary", fields: ["toolCallId"] },
-          page: { limit: 20 },
+        resourceJson(base, "tool-calls", {
+          provider: "codex", toolName: "shell_command", limit: 20, offset: 0,
         }).then(({ body }) => body),
         fetch(`${base}/session-detail?sessionId=contract-session&messageLimit=1&eventLimit=1&usageLimit=1&edgeLimit=1&artifactLimit=1&contextLimit=1`).then((r) => r.json()),
         fetch(`${base}/status`).then((r) => r.json()),
       ]);
 
-      expect(sessions.items.map((row: { sessionId: string }) => row.sessionId)).toEqual(["contract-session"]);
-      expect(sessions.items[0].messageCount).toBe(2);
-      expect(sessions.items[0].toolCallCount).toBe(1);
-      expect(sessions.items[0]).toMatchObject({
+      expect(sessions.data.rows.map((row: { sessionId: string }) => row.sessionId)).toEqual(["contract-session"]);
+      expect(sessions.data.rows[0].messageCount).toBe(2);
+      expect(sessions.data.rows[0].toolCallCount).toBe(1);
+      expect(sessions.data.rows[0]).toMatchObject({
         model: "gpt-5.6-sol",
         modelProvider: "openai",
         agentRole: "builder",
       });
-      expect(messages.items.map((row: { text: string }) => row.text)).toEqual([
+      expect(messages.data.rows.map((row: { text: string }) => row.text)).toEqual([
         "contract handshake over http",
         "assistant contract reply",
       ]);
-      expect(toolCalls.items.map((row: { toolCallId: string }) => row.toolCallId)).toEqual(["contract-tool"]);
+      expect(toolCalls.data.rows.map((row: { toolCallId: string }) => row.toolCallId)).toEqual(["contract-tool"]);
       expect(detail).toMatchObject({
         ok: true,
         command: "session-detail",
@@ -723,19 +716,12 @@ describe("CLI HTTP client <-> server contract", () => {
 
       // Fail-closed proof: nothing was persisted; the boundary rejection wrote
       // zero rows, so the CLI client did NOT fall back to a local write.
-      const sessions = await postQueryJson(base, {
-        kind: "sessions",
-        projection: { detail: "summary", fields: ["sessionId"] },
-        page: { limit: 20 },
+      const sessions = await resourceJson(base, "sessions", { limit: 20, offset: 0 });
+      expect(sessions.body.data.rows).toEqual([]);
+      const messages = await resourceJson(base, "messages", {
+        sessionId: "contract-session", limit: 20, offset: 0,
       });
-      expect(sessions.body.items).toEqual([]);
-      const messages = await postQueryJson(base, {
-        kind: "messages",
-        filters: { sessionId: "contract-session" },
-        projection: { detail: "summary", fields: ["messageId"] },
-        page: { limit: 20 },
-      });
-      expect(messages.body.items).toEqual([]);
+      expect(messages.body.data.rows).toEqual([]);
     } finally {
       proc.kill();
       await proc.exited;
@@ -763,10 +749,10 @@ describe("CLI HTTP client <-> server contract", () => {
       const emptyLexical = await searchQueryJson(base, "handshake", "lexical");
       expect(emptyLexical.status).toBe(200);
       expect(emptyLexical.body).toMatchObject({
-        protocolVersion: "quasar.query/v1",
-        kind: "search",
+        ok: true,
+        command: "search/lexical",
       });
-      expect(emptyLexical.body.items).toEqual([]);
+      expect(emptyLexical.body.data.matches).toEqual([]);
 
       // /ready is cheap truth: lexical serves from the SQLite truth table;
       // semantic/fusion are disabled pending vector materialization (QSR-232).
@@ -860,7 +846,7 @@ describe("CLI HTTP client <-> server contract", () => {
         filters: { projectKey: "contract-project" },
       });
       expect(lexical.status).toBe(200);
-      expect(lexical.body.items.map((item: { text: string }) => item.text)).toEqual([
+      expect(lexical.body.data.matches.map((match: { row: { text: string } }) => match.row.text)).toEqual([
         "contract handshake over http",
       ]);
 
@@ -868,25 +854,22 @@ describe("CLI HTTP client <-> server contract", () => {
         filters: { role: "assistant" },
       });
       expect(roleSearch.status).toBe(200);
-      expect(roleSearch.body.items).toEqual([
-        expect.objectContaining({ role: "assistant", text: "assistant contract reply" }),
+      expect(roleSearch.body.data.matches).toEqual([
+        expect.objectContaining({
+          row: expect.objectContaining({ role: "assistant", text: "assistant contract reply" }),
+        }),
       ]);
 
       const hostileInput = "\" OR foo:bar - ()";
       const hostileQuery = await searchQueryJson(base, hostileInput, "lexical");
       expect(hostileQuery.status).toBe(200);
-      expect(Array.isArray(hostileQuery.body.items)).toBe(true);
+      expect(Array.isArray(hostileQuery.body.data.matches)).toBe(true);
 
-      const missingQuery = await postQueryJson(base, {
-        kind: "search",
-        mode: "lexical",
-        projection: { detail: "summary", fields: ["sessionId"] },
-        page: { limit: 5 },
-      });
+      const missingQuery = await resourceJson(base, "search/lexical", { limit: 5, offset: 0 });
       expect(missingQuery.status).toBe(400);
       expect(missingQuery.body).toMatchObject({
         ok: false,
-        route: "query",
+        route: "search/lexical",
         error: { type: "BadRequest" },
       });
 
@@ -908,18 +891,18 @@ describe("CLI HTTP client <-> server contract", () => {
       expect(semantic.status).toBe(503);
       expect(semantic.body).toMatchObject({
         ok: false,
-        route: "query",
+        route: "search/semantic",
         error: {
-          type: "ServiceUnavailable",
+          type: "SemanticDisabled",
         },
       });
       const fusion = await searchQueryJson(base, "handshake", "fusion");
       expect(fusion.status).toBe(503);
       expect(fusion.body).toMatchObject({
         ok: false,
-        route: "query",
+        route: "search/fusion",
         error: {
-          type: "ServiceUnavailable",
+          type: "SemanticDisabled",
         },
       });
 
@@ -982,43 +965,46 @@ describe("CLI HTTP client <-> server contract", () => {
       const semanticOn = await searchQueryJson(rebootBase, "handshake", "semantic");
       expect(semanticOn.status).toBe(200);
       expect(semanticOn.body).toMatchObject({
-        protocolVersion: "quasar.query/v1",
-        kind: "search",
+        ok: true,
+        command: "search/semantic",
       });
-      expect(semanticOn.body.items.map((item: { text: string }) => item.text)).toEqual([
+      expect(semanticOn.body.data.matches.map((match: { row: { text: string } }) => match.row.text)).toEqual([
         "contract handshake over http",
         "assistant contract reply",
       ]);
-      expect(semanticOn.body.items[0].score).toBeGreaterThan(0.99);
+      expect(semanticOn.body.data.matches[0].score).toBeGreaterThan(0.99);
 
       // Filtered semantic: SQL candidate-id set -> mask on the exact scan.
       const semanticFiltered = await searchQueryJson(rebootBase, "handshake", "semantic", {
         filters: { projectKey: "contract-project", role: "assistant" },
       });
       expect(semanticFiltered.status).toBe(200);
-      expect(semanticFiltered.body.items).toEqual([
-        expect.objectContaining({ role: "assistant", text: "assistant contract reply" }),
+      expect(semanticFiltered.body.data.matches).toEqual([
+        expect.objectContaining({
+          row: expect.objectContaining({ role: "assistant", text: "assistant contract reply" }),
+        }),
       ]);
 
       // Fusion: RRF over lexical + semantic lists; both rank the handshake
       // message first here, so it must fuse to the top.
       const fusionOn = await searchQueryJson(rebootBase, "handshake", "fusion");
       expect(fusionOn.status).toBe(200);
-      expect(fusionOn.body.items.length).toBeGreaterThanOrEqual(2);
-      expect(fusionOn.body.items[0].text).toBe("contract handshake over http");
+      expect(fusionOn.body.data.matches.length).toBeGreaterThanOrEqual(2);
+      expect(fusionOn.body.data.matches[0].row.text).toBe("contract handshake over http");
 
       // Embedder loss for an uncached query (SYNTHETIC_API_KEY is "" in this
       // test's env, so any cache-miss embed call fails immediately):
-      // QuerySpec semantic mode keeps its own 503 contract, while fusion mode
+      // The semantic resource keeps its own 503 contract, while fusion mode
       // degrades to the lexical leg alone.
       const uncachedQuery = "uncached embedder degrade probe";
       const semanticDegraded = await searchQueryJson(rebootBase, uncachedQuery, "semantic");
       expect(semanticDegraded.status).toBe(503);
-      expect(semanticDegraded.body.error.type).toBe("ServiceUnavailable");
+      expect(semanticDegraded.body.error.type).toBe("EmbeddingUnavailable");
 
       const fusionDegraded = await searchQueryJson(rebootBase, uncachedQuery, "fusion");
       expect(fusionDegraded.status).toBe(200);
-      expect(fusionDegraded.body.items).toEqual([]);
+      expect(fusionDegraded.body.data.matches).toEqual([]);
+      expect(fusionDegraded.body.data.degraded).toBe(true);
     } finally {
       proc.kill();
       await proc.exited;

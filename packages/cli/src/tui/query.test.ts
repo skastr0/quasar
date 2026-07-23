@@ -29,7 +29,7 @@ test("parseQuery leaves an invalid role token in the text", () => {
   expect(out.text).toBe("role:bogus hello");
 });
 
-test("parseQuery accepts every stored message role used by /query", () => {
+test("parseQuery accepts every stored message role used by query resources", () => {
   expect(parseQuery("role:user vector")).toMatchObject({ role: "user", text: "vector" });
   expect(parseQuery("role:assistant plan")).toMatchObject({ role: "assistant", text: "plan" });
   expect(parseQuery("role:reasoning vector")).toMatchObject({ role: "reasoning", text: "vector" });

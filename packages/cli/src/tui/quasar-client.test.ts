@@ -1,7 +1,5 @@
 import { expect, test } from "bun:test";
 
-import type { QuerySpec } from "@skastr0/quasar-protocol";
-
 import { messagesQuery, searchQuery, toolCallsQuery } from "../query-spec";
 import { parseMessages, parseProjects, parseSearch, parseToolCalls, QuasarClient } from "./quasar-client";
 
@@ -206,17 +204,18 @@ test("parseProjects keeps the distinct project endpoint contract", () => {
   expect(output.value[0]).toMatchObject({ displayName: "jido", projectKey: "git:github.com/agentjido/jido" });
 });
 
-test("QuasarClient paginates TUI transcript reads through bounded POST /query pages", async () => {
-  const requests: QuerySpec[] = [];
+test("QuasarClient paginates TUI transcript reads through bounded GET resource pages", async () => {
+  const requests: URL[] = [];
   const server = Bun.serve({
     port: 0,
-    fetch: async (request) => {
-      const spec = await request.json() as QuerySpec;
-      requests.push(spec);
-      if (spec.kind !== "messages") return new Response("wrong query kind", { status: 400 });
-      const start = spec.page.cursor === undefined ? 0 : 200;
-      const count = spec.page.cursor === undefined ? 200 : 1;
-      const items = Array.from({ length: count }, (_, offset) => ({
+    fetch: (request) => {
+      const url = new URL(request.url);
+      requests.push(url);
+      if (url.pathname !== "/messages") return new Response("wrong resource", { status: 400 });
+      const start = Number(url.searchParams.get("offset"));
+      const limit = Number(url.searchParams.get("limit"));
+      const count = start === 0 ? 200 : 1;
+      const rows = Array.from({ length: count }, (_, offset) => ({
         messageId: `m${start + offset}`,
         sessionId: "codex:s1",
         sequence: start + offset,
@@ -225,14 +224,16 @@ test("QuasarClient paginates TUI transcript reads through bounded POST /query pa
         timestamp: null,
       }));
       return Response.json({
-        protocolVersion: spec.protocolVersion,
-        kind: spec.kind,
-        projection: spec.projection,
-        page: {
-          returned: items.length,
-          ...(spec.page.cursor === undefined ? { nextCursor: "page-2" } : {}),
+        ok: true,
+        command: "messages",
+        data: {
+          rows,
+          page: {
+            limit,
+            offset: start,
+            nextOffset: start === 0 ? 200 : null,
+          },
         },
-        items,
       });
     },
   });
@@ -244,26 +245,47 @@ test("QuasarClient paginates TUI transcript reads through bounded POST /query pa
     if (!output.ok) return;
     expect(output.value).toHaveLength(201);
     expect(requests).toHaveLength(2);
-    expect(requests[0]?.page).toEqual({ limit: 200 });
-    expect(requests[1]?.page.limit).toBe(1);
-    expect(String(requests[1]?.page.cursor)).toBe("page-2");
+    expect(requests[0]?.pathname).toBe("/messages");
+    expect(requests[0]?.searchParams.get("limit")).toBe("200");
+    expect(requests[0]?.searchParams.get("offset")).toBe("0");
+    expect(requests[1]?.searchParams.get("limit")).toBe("200");
+    expect(requests[1]?.searchParams.get("offset")).toBe("200");
   } finally {
     server.stop(true);
   }
 }, 15_000);
 
-test("QuasarClient search requests stable message identity for TUI selection", async () => {
-  let requested: QuerySpec | undefined;
+test("QuasarClient search preserves bounded resource excerpts and stable message identity", async () => {
+  let requested: URL | undefined;
+  let requestedMethod: string | undefined;
   const server = Bun.serve({
     port: 0,
-    fetch: async (request) => {
-      requested = await request.json() as QuerySpec;
+    fetch: (request) => {
+      requested = new URL(request.url);
+      requestedMethod = request.method;
       return Response.json({
-        protocolVersion: requested.protocolVersion,
-        kind: requested.kind,
-        projection: requested.projection,
-        page: { returned: 0 },
-        items: [],
+        ok: true,
+        command: "search/lexical",
+        data: {
+          matches: [{
+            key: "m7",
+            score: 1.5,
+            row: {
+              messageId: "m7",
+              sessionId: "codex:s1",
+              sequence: 7,
+              projectKey: "quasar",
+              provider: "codex",
+              role: "assistant",
+              text: "bounded excerpt",
+              textTruncated: true,
+              textBytes: 1_200_000,
+            },
+          }],
+          page: { limit: 50, offset: 0, nextOffset: null },
+          receipt: {},
+          degraded: false,
+        },
       });
     },
   });
@@ -272,10 +294,13 @@ test("QuasarClient search requests stable message identity for TUI selection", a
     const output = await client.search("vector", "lexical");
 
     expect(output.ok).toBe(true);
-    expect(requested?.kind).toBe("search");
-    expect(requested?.projection.detail).toBe("detail");
-    expect(requested?.projection.fields).toContain("messageId");
-    expect(requested?.projection.fields).toContain("sequence");
+    if (!output.ok) return;
+    expect(output.value).toEqual([
+      expect.objectContaining({ key: "m7", seq: 7, text: "bounded excerpt" }),
+    ]);
+    expect(requestedMethod).toBe("GET");
+    expect(requested?.pathname).toBe("/search/lexical");
+    expect(requested?.searchParams.get("q")).toBe("vector");
   } finally {
     server.stop(true);
   }

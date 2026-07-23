@@ -4,8 +4,6 @@ import { join } from "node:path";
 
 import { describe, expect, test } from "bun:test";
 
-import type { QuerySpec } from "@skastr0/quasar-protocol";
-
 import packageJson from "../package.json";
 
 const packageRoot = join(import.meta.dir, "..");
@@ -63,13 +61,63 @@ const runCli = async (
   };
 };
 
-const emptyQueryResponse = (spec: QuerySpec) => ({
-  protocolVersion: spec.protocolVersion,
-  kind: spec.kind,
-  projection: spec.projection,
-  page: { returned: 0 },
-  items: [],
+const resourcePage = (url: URL, nextOffset: number | null = null) => ({
+  limit: Number(url.searchParams.get("limit")),
+  offset: Number(url.searchParams.get("offset")),
+  nextOffset,
 });
+
+const toolCallDetailRow = {
+  toolCallId: "call-1",
+  sessionId: "codex:s1",
+  projectKey: "quasar",
+  provider: "codex",
+  sequence: 3,
+  toolName: "exec_command",
+  timestamp: null,
+  status: "completed",
+  startedAt: null,
+  completedAt: null,
+  inputBytes: 13,
+  outputBytes: 2,
+  agentName: null,
+  agentRole: "builder",
+  model: "gpt-5.6-sol",
+  modelProvider: "openai",
+  inputText: "{\"cmd\":\"pwd\"}",
+  outputText: "ok",
+};
+
+const emptyResourceResponse = (
+  request: Request,
+  nextOffset: number | null = null,
+): Response => {
+  const url = new URL(request.url);
+  if (url.pathname === "/tool-call") {
+    return Response.json({
+      ok: true,
+      command: "tool-call",
+      data: { row: toolCallDetailRow },
+    });
+  }
+  if (url.pathname.startsWith("/search/")) {
+    return Response.json({
+      ok: true,
+      command: url.pathname.slice(1),
+      data: {
+        matches: [],
+        page: resourcePage(url, nextOffset),
+        receipt: {},
+        degraded: false,
+      },
+    });
+  }
+  return Response.json({
+    ok: true,
+    command: url.pathname.slice(1),
+    data: { rows: [], page: resourcePage(url, nextOffset) },
+  });
+};
 
 describe("CLI client/operator boundary", () => {
   test("help aliases are explicit", async () => {
@@ -129,15 +177,15 @@ describe("CLI client/operator boundary", () => {
     expect(result.json.error?.type).toBe("ConfigurationError");
   }, 15_000);
 
-  test("search validates and forwards structured filters to POST /query", async () => {
+  test("search validates and forwards structured filters to the canonical GET resource", async () => {
     let requestedUrl: URL | undefined;
-    let requestedSpec: QuerySpec | undefined;
+    let requestedMethod: string | undefined;
     const server = Bun.serve({
       port: 0,
-      fetch: async (request) => {
+      fetch: (request) => {
         requestedUrl = new URL(request.url);
-        requestedSpec = await request.json() as QuerySpec;
-        return Response.json(emptyQueryResponse(requestedSpec));
+        requestedMethod = request.method;
+        return emptyResourceResponse(request);
       },
     });
     try {
@@ -158,13 +206,14 @@ describe("CLI client/operator boundary", () => {
       });
 
       expect(result.exitCode).toBe(0);
-      expect(requestedUrl?.pathname).toBe("/query");
-      expect(requestedSpec).toMatchObject({
-        kind: "search",
-        text: "effect server",
-        mode: "lexical",
-        filters: { providers: ["codex"], model: "gpt-5.6-sol" },
-        projection: { detail: "summary", fields: ["sessionId", "provider", "text", "score"] },
+      expect(requestedMethod).toBe("GET");
+      expect(requestedUrl?.pathname).toBe("/search/lexical");
+      expect(requestedUrl?.searchParams.get("q")).toBe("effect server");
+      expect(requestedUrl?.searchParams.get("provider")).toBe("codex");
+      expect(requestedUrl?.searchParams.get("model")).toBe("gpt-5.6-sol");
+      expect(result.json.projection).toEqual({
+        detail: "summary",
+        fields: ["sessionId", "provider", "text", "score"],
       });
       expect(result.json.kind).toBe("search");
 
@@ -196,14 +245,13 @@ describe("CLI client/operator boundary", () => {
     }
   }, 15_000);
 
-  test("query accepts inline JSON, @file, and stdin as the same direct contract", async () => {
-    const received: QuerySpec[] = [];
+  test("query accepts inline JSON, @file, and stdin as the same local composition contract", async () => {
+    const received: URL[] = [];
     const server = Bun.serve({
       port: 0,
-      fetch: async (request) => {
-        const spec = await request.json() as QuerySpec;
-        received.push(spec);
-        return Response.json(emptyQueryResponse(spec));
+      fetch: (request) => {
+        received.push(new URL(request.url));
+        return emptyResourceResponse(request);
       },
     });
     const query = {
@@ -230,7 +278,9 @@ describe("CLI client/operator boundary", () => {
         expect(result.json.ok).toBeUndefined();
       }
       expect(received).toHaveLength(3);
-      expect(received.every((spec) => spec.kind === "sessions")).toBe(true);
+      expect(received.every((url) => url.pathname === "/sessions")).toBe(true);
+      expect(received.every((url) => url.searchParams.get("provider") === "codex")).toBe(true);
+      expect(received.every((url) => url.searchParams.get("limit") === "10")).toBe(true);
     } finally {
       server.stop(true);
     }
@@ -262,16 +312,16 @@ describe("CLI client/operator boundary", () => {
   }, 15_000);
 
   test("query-backed list commands use cursor projection and reject offset", async () => {
-    let requestedSpec: QuerySpec | undefined;
+    const requested: URL[] = [];
     const server = Bun.serve({
       port: 0,
-      fetch: async (request) => {
-        requestedSpec = await request.json() as QuerySpec;
-        return Response.json(emptyQueryResponse(requestedSpec));
+      fetch: (request) => {
+        requested.push(new URL(request.url));
+        return emptyResourceResponse(request, requested.length === 1 ? 25 : null);
       },
     });
     try {
-      const result = await runCli([
+      const args = [
         "sessions",
         "--provider",
         "codex,claude",
@@ -282,28 +332,41 @@ describe("CLI client/operator boundary", () => {
         "--detail",
         "--fields",
         "sessionId,provider,agentRole,modelProvider",
-        "--cursor",
-        "opaque-next",
         "--limit",
         "25",
-      ], {
+      ];
+      const first = await runCli(args, {
         QUASAR_SERVER_URL: `http://127.0.0.1:${server.port}`,
       });
 
-      expect(result.exitCode).toBe(0);
-      expect(requestedSpec).toMatchObject({
-        kind: "sessions",
-        filters: {
-          providers: ["codex", "claude"],
-          agentRole: "builder",
-          modelProvider: "openai",
-        },
-        projection: {
-          detail: "detail",
-          fields: ["sessionId", "provider", "agentRole", "modelProvider"],
-        },
-        page: { limit: 25, cursor: "opaque-next" },
+      expect(first.exitCode).toBe(0);
+      expect(requested[0]?.pathname).toBe("/sessions");
+      expect(Object.fromEntries(requested[0]?.searchParams ?? [])).toMatchObject({
+        provider: "codex,claude",
+        agentRole: "builder",
+        modelProvider: "openai",
+        limit: "25",
+        offset: "0",
       });
+      expect(first.json.projection).toEqual({
+        detail: "detail",
+        fields: ["sessionId", "provider", "agentRole", "modelProvider"],
+      });
+      const cursor = (first.json.page as { readonly nextCursor?: string }).nextCursor;
+      expect(typeof cursor).toBe("string");
+
+      const second = await runCli([...args, "--cursor", cursor!], {
+        QUASAR_SERVER_URL: `http://127.0.0.1:${server.port}`,
+      });
+      expect(second.exitCode).toBe(0);
+      expect(requested[1]?.searchParams.get("offset")).toBe("25");
+
+      const drifted = await runCli([...args, "--provider", "grok", "--cursor", cursor!], {
+        QUASAR_SERVER_URL: `http://127.0.0.1:${server.port}`,
+      });
+      expect(drifted.exitCode).toBe(1);
+      expect(drifted.json.error?.type).toBe("QueryInputError");
+      expect(requested).toHaveLength(2);
 
       const offset = await runCli(["sessions", "--offset", "25"]);
       expect(offset.exitCode).toBe(1);
@@ -319,83 +382,82 @@ describe("CLI client/operator boundary", () => {
   }, 15_000);
 
   test("tool-call lists omit bodies and id lookup requests detail", async () => {
-    const requested: QuerySpec[] = [];
+    const requested: URL[] = [];
     const server = Bun.serve({
       port: 0,
-      fetch: async (request) => {
-        const spec = await request.json() as QuerySpec;
-        requested.push(spec);
-        return Response.json(emptyQueryResponse(spec));
+      fetch: (request) => {
+        requested.push(new URL(request.url));
+        return emptyResourceResponse(request);
       },
     });
     const env = { QUASAR_SERVER_URL: `http://127.0.0.1:${server.port}` };
     try {
-      expect((await runCli(["tool-calls", "--session", "codex:s1"], env)).exitCode).toBe(0);
-      expect((await runCli(["tool-call", "--id", "call-1"], env)).exitCode).toBe(0);
+      const list = await runCli(["tool-calls", "--session", "codex:s1"], env);
+      const detail = await runCli(["tool-call", "--id", "call-1"], env);
+      expect(list.exitCode).toBe(0);
+      expect(detail.exitCode).toBe(0);
 
-      expect(requested[0]?.kind).toBe("toolCalls");
-      expect(requested[0]?.projection.detail).toBe("summary");
-      expect(requested[0]?.projection.fields).not.toContain("input");
-      expect(requested[0]?.projection.fields).not.toContain("output");
-      expect(requested[1]).toMatchObject({
-        kind: "toolCalls",
-        filters: { toolCallId: "call-1" },
-        projection: { detail: "detail" },
-        page: { limit: 1 },
+      expect(requested[0]?.pathname).toBe("/tool-calls");
+      expect(requested[0]?.searchParams.get("sessionId")).toBe("codex:s1");
+      expect(list.json.projection).toEqual(expect.objectContaining({ detail: "summary" }));
+      expect((list.json.projection as { fields: string[] }).fields).not.toContain("input");
+      expect((list.json.projection as { fields: string[] }).fields).not.toContain("output");
+      expect(requested[1]?.pathname).toBe("/tool-call");
+      expect(requested[1]?.searchParams.get("id")).toBe("call-1");
+      expect((detail.json.projection as { fields: string[] }).fields).toContain("input");
+      expect((detail.json.projection as { fields: string[] }).fields).toContain("output");
+      expect(detail.json.items?.[0]).toMatchObject({
+        toolCallId: "call-1",
+        input: { cmd: "pwd" },
+        output: "ok",
       });
-      expect(requested[1]?.projection.fields).toContain("input");
-      expect(requested[1]?.projection.fields).toContain("output");
+
+      const explicitBulkBody = await runCli(["tool-calls", "--detail", "--fields", "toolCallId,input"], env);
+      expect(explicitBulkBody.exitCode).toBe(1);
+      expect(explicitBulkBody.json.error?.type).toBe("QueryInputError");
+      expect(requested).toHaveLength(2);
     } finally {
       server.stop(true);
     }
   }, 15_000);
 
   test("option-shaped values stay data while repeated filters and detail remain explicit", async () => {
-    const requested: QuerySpec[] = [];
+    const requested: URL[] = [];
+    const results: Awaited<ReturnType<typeof runCli>>[] = [];
     const server = Bun.serve({
       port: 0,
-      fetch: async (request) => {
-        const spec = await request.json() as QuerySpec;
-        requested.push(spec);
-        return Response.json(emptyQueryResponse(spec));
+      fetch: (request) => {
+        requested.push(new URL(request.url));
+        return emptyResourceResponse(request);
       },
     });
     const env = { QUASAR_SERVER_URL: `http://127.0.0.1:${server.port}` };
     try {
-      expect((await runCli(["tool-calls", "--tool", "--detail"], env)).exitCode).toBe(0);
-      expect((await runCli([
+      results.push(await runCli(["tool-calls", "--tool", "--detail"], env));
+      results.push(await runCli([
         "sessions",
         "--provider",
         "codex",
         "--provider",
         "claude",
-      ], env)).exitCode).toBe(0);
-      expect((await runCli([
+      ], env));
+      results.push(await runCli([
         "tool-calls",
         "--tool",
         "Read",
         "--detail",
-      ], env)).exitCode).toBe(0);
+      ], env));
+      expect(results.every((result) => result.exitCode === 0)).toBe(true);
 
-      expect(requested[0]).toMatchObject({
-        kind: "toolCalls",
-        filters: { toolName: "--detail" },
-        projection: { detail: "summary" },
-      });
-      expect(requested[0]?.projection.fields).not.toContain("input");
-      expect(requested[0]?.projection.fields).not.toContain("output");
-      expect(requested[1]).toMatchObject({
-        kind: "sessions",
-        filters: { providers: ["codex", "claude"] },
-        projection: { detail: "summary" },
-      });
-      expect(requested[2]).toMatchObject({
-        kind: "toolCalls",
-        filters: { toolName: "Read" },
-        projection: { detail: "detail" },
-      });
-      expect(requested[2]?.projection.fields).toContain("input");
-      expect(requested[2]?.projection.fields).toContain("output");
+      expect(requested[0]?.pathname).toBe("/tool-calls");
+      expect(requested[0]?.searchParams.get("toolName")).toBe("--detail");
+      expect(requested[1]?.pathname).toBe("/sessions");
+      expect(requested[1]?.searchParams.get("provider")).toBe("codex,claude");
+      expect(requested[2]?.pathname).toBe("/tool-calls");
+      expect(requested[2]?.searchParams.get("toolName")).toBe("Read");
+      expect((results[0]?.json.projection as { fields: string[] }).fields).not.toContain("input");
+      expect((results[2]?.json.projection as { fields: string[] }).fields).not.toContain("input");
+      expect((results[2]?.json.projection as { fields: string[] }).fields).not.toContain("output");
     } finally {
       server.stop(true);
     }
