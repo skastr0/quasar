@@ -173,14 +173,17 @@ operator write ingest and daemon installs.
 The `quasar` CLI mirrors the HTTP API and is safe to wrap as MCP tools. The
 serving surface is read/search only:
 
-| Agent job | CLI wrapper | HTTP route | Filters |
+| Agent job | CLI wrapper | HTTP route | Filters / projection |
 | --- | --- | --- | --- |
 | Project list | `projects` | `GET /projects` | `limit`, `offset` |
-| Session list | `sessions` | `GET /sessions` | `projectKey`, `provider`, `limit`, `offset` |
-| Session read | `messages --session-id <id>` | `GET /messages` | `sessionId`, `limit` |
-| Search | `search --query <text> --mode lexical\|semantic\|fusion` | `GET /search/<mode>` | `q`/`query`, `projectKey`, `role=user\|assistant`, `limit`; all three modes serve live (`semantic`/`fusion` from the resident vector matrix) |
-| Tool-call list | `tool-calls` | `GET /tool-calls` | `sessionId`, `projectKey`, `provider`, `toolName`, `limit`, `offset` |
-| Tool-call read | `tool-call --id <id>` | `GET /tool-call` | `id` |
+| Session list | `sessions` | `POST /query` | project, providers, session, agent, assignment role, model/provider; `--fields`, `--detail`, opaque cursor |
+| Session read | `session --id <id>` | `GET /session-detail` | bounded message, tool-call, event, usage, edge, artifact, and execution-context sections |
+| Message list | `messages --session-id <id>` | `POST /query` | role/model filters; `--fields`, `--detail`, opaque cursor |
+| Search | `search --query <text> --mode lexical\|semantic\|fusion` | `POST /query` | project, providers, session, role, agent, assignment role, model/provider; all modes serve live |
+| Tool-call list | `tool-calls` | `POST /query` | session, project, providers, tool, agent, assignment role, model/provider; body-free summary by default |
+| Tool-call read | `tool-call --id <id>` | `POST /query` | detail projection returns full input/output |
+| Raw typed query | `query <inline-json\|@file\|->` | `POST /query` | strict `quasar.query/v1` request |
+| Contract discovery | `schema`, `examples` | local | JSON Schema and copyable request examples; no server required |
 | Remote ingest | `ingest --provider all` | `POST /ingest/session` | operator only; set `QUASAR_SERVER_URL` and `QUASAR_INGEST_TOKEN` |
 
 Notes for wrappers:
@@ -188,6 +191,12 @@ Notes for wrappers:
 - Use `projectKey` at the HTTP layer and `--project-key` at the CLI layer.
 - `role` applies to searchable message rows (`user`, `assistant`, `reasoning`);
   tool-call input/output remains structural/lexical evidence.
+- Provider filters accept `codex`, `claude`, `opencode`, `grok`, `kimi`,
+  `hermes`, `antigravity`, `omp`, `pi`, `cursor`, and `devin`.
+- Query-backed commands use opaque cursors. Numeric `--offset` is intentionally
+  rejected; carry the returned `nextCursor` into `--cursor`.
+- Keep tool enumeration on summary projection. Fetch `tool-call --id` only for
+  the payloads the agent actually needs.
 - Operator-only commands: agent wrappers should not expose ingest, embedding,
   maintenance, or backfill as default tools. Those remain operator actions.
 - If a wrapper cannot reach `QUASAR_SERVER_URL`, fail closed with a connection
@@ -295,8 +304,12 @@ export QUASAR_HERMES_ROOT="$HOME/.hermes"
 # First smoke test.
 quasar stats
 quasar search --mode lexical --query "quasar local server" --limit 3
+quasar schema query
+quasar examples query
 
-# Ingest this machine's corpus into the Mac mini server.
+# Ingest this machine's corpus into the Mac mini server. A normalization-version
+# upgrade replays unchanged sources through row-diff upserts once; it does not
+# recreate SQLite or duplicate canonical rows.
 quasar ingest --provider all --summary
 
 # Watch server-owned workers drain embeddings/indexing.
