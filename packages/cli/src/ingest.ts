@@ -404,17 +404,17 @@ const ingestProviderRemote = async (
         const searchDocuments = outcome.searchDocuments ?? summarizeSearchDocumentPolicy(mapped.messages);
         semanticEligible += searchDocuments.semanticEligible;
         ignored += searchDocuments.ignored;
-        // A limited walk cannot prove that every session sharing this physical
-        // source was seen. Persist file-level state only after unbounded walks.
+        // Stage the physical source stat. The provider walk may still fail on
+        // another session sharing this file, so nothing is persisted yet.
         if (options.limit === undefined) {
           const physicalPath = item.sourceUnit?.physicalPath ?? item.session.sourcePath;
           try {
             const fileStat = statSync(physicalPath);
-            manifestUpdates[physicalPath] = {
+            manifestCandidates.set(physicalPath, {
               mtimeMs: fileStat.mtimeMs,
               size: fileStat.size,
               normalizationVersion: NORMALIZATION_VERSION,
-            };
+            });
           } catch {
             // non-fatal: best-effort manifest update
           }
@@ -436,10 +436,11 @@ const ingestProviderRemote = async (
   // the server's current normalization fingerprint or was posted successfully.
   // This also converges shared-DB adapters whose per-session probe fingerprints
   // intentionally differ from the DB file stat. Limited walks cannot prove that
-  // unseen sessions are current, so they persist no file-level manifest state.
+  // unseen sessions are current, and failed walks must retry every sibling
+  // session, so neither persists file-level manifest state.
   if (options.limit === undefined && sessionsFailed === 0) {
     for (const [path, entry] of manifestCandidates) {
-      manifestUpdates[path] ??= entry;
+      manifestUpdates[path] = entry;
     }
   }
 
