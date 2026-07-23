@@ -903,7 +903,9 @@ const parseCandidate = async (
   );
   const files = fingerprintFiles(candidate);
   if (options.shouldReadFile !== undefined) {
-    const changed = files.some(({ path, stats }) => options.shouldReadFile?.(path, stats) !== false);
+    const changed = files
+      .map(({ path, stats }) => options.shouldReadFile?.(path, stats) !== false)
+      .includes(true);
     if (!changed) return { diagnostics: [] };
   }
   const fingerprint = cursorFingerprint(candidate, files);

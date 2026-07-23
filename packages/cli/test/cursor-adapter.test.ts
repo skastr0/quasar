@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -398,6 +398,39 @@ describe("Cursor Agent-KV adapter", () => {
     expect(probes).toHaveLength(1);
     expect(JSON.parse(probes[0]!.sourceFingerprint)).toHaveProperty("tag");
     expect(parseGated.sessions).toHaveLength(0);
+  });
+
+  test("stat gate evaluates every fingerprint file before parsing the candidate once", async () => {
+    const fixture = createStore("exhaustive-stat-gate");
+    const sidecarPath = join(fixture.dbPath, "..", "meta.json");
+    const expectedPaths = [
+      fixture.dbPath,
+      `${fixture.dbPath}-wal`,
+      `${fixture.dbPath}-shm`,
+      sidecarPath,
+    ].filter(existsSync);
+    expect(expectedPaths.length).toBeGreaterThan(1);
+    const statPaths: string[] = [];
+    const probes: { readonly sessionId: string; readonly sourceFingerprint: string }[] = [];
+
+    const result = await cursorAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { cursor: fixture.root },
+      shouldReadFile: (path) => {
+        statPaths.push(path);
+        return statPaths.length === 1;
+      },
+      shouldParseSession: (probe) => {
+        probes.push(probe);
+        return true;
+      },
+    });
+
+    expect(statPaths).toEqual(expectedPaths);
+    expect(new Set(statPaths).size).toBe(expectedPaths.length);
+    expect(probes).toHaveLength(1);
+    expect(result.sessions).toHaveLength(1);
   });
 
   test("closed block schema and message classifier reject malformed or unknown variants", () => {
