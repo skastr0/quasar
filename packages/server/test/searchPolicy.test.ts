@@ -58,6 +58,11 @@ const reasoningSession = (text: string): MappedSession => ({
     },
   ],
   toolCalls: [],
+  events: [],
+  usageRecords: [],
+  sessionEdges: [],
+  artifacts: [],
+  executionContexts: [],
 });
 
 describe("searchPolicy — reasoning role", () => {

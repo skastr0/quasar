@@ -79,6 +79,11 @@ const fixtureSession = (
     contentHash: `hash-${sessionId}-${seq}`,
   })),
   toolCalls: [],
+  events: [],
+  usageRecords: [],
+  sessionEdges: [],
+  artifacts: [],
+  executionContexts: [],
 });
 
 const vectorsFor = (session: MappedSession): MessageVectorUpsert[] =>

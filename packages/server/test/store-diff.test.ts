@@ -89,6 +89,11 @@ const session = (
   },
   messages: messages.map((row) => ({ ...row, projectKey: overrides.projectKey ?? row.projectKey })),
   toolCalls: toolCalls.map((row) => ({ ...row, projectKey: overrides.projectKey ?? row.projectKey })),
+  events: [],
+  usageRecords: [],
+  sessionEdges: [],
+  artifacts: [],
+  executionContexts: [],
 });
 
 const initialMessages = (count: number): MessageRow[] =>
@@ -135,6 +140,16 @@ const vectorRow = (row: MessageRow) => ({
   vector: [0.1, 0.2, 0.3],
 });
 
+const detailPages = {
+  messages: { limit: 100, offset: 0 },
+  toolCalls: { limit: 100, offset: 0 },
+  events: { limit: 100, offset: 0 },
+  usageRecords: { limit: 100, offset: 0 },
+  sessionEdges: { limit: 100, offset: 0 },
+  artifacts: { limit: 100, offset: 0 },
+  executionContexts: { limit: 100, offset: 0 },
+} as const;
+
 describe("upsertSession row-level diff", () => {
   test("fresh session inserts every row and stamps the real fingerprint", async () => {
     const path = sqlitePath();
@@ -167,6 +182,192 @@ describe("upsertSession row-level diff", () => {
     expect(result.staleProjection).toBe(false);
     expect(result.replay.messagesUnchanged).toBe(2);
     expect(result.upgraded).toBe(true);
+  });
+
+  test("typed source facts round-trip and a normalization replay replaces them transactionally", async () => {
+    const path = sqlitePath();
+    const base = session(initialMessages(2));
+    const rich: MappedSession = {
+      ...base,
+      session: {
+        ...base.session,
+        model: "gpt-5.6-sol",
+        modelProvider: "openai",
+        assignmentRole: "builder",
+      },
+      events: [{
+        id: "event-1",
+        sessionId: SESSION_ID,
+        sequence: 3,
+        machineId: "machine-diff",
+        provider: "codex",
+        agentName: "codex",
+        projectIdentityKey: PROJECT_KEY,
+        role: "assistant",
+        kind: "preamble",
+        contentText: "stored but not indexed",
+        contentBlocks: [],
+        rawReference: { sourcePath: "/hist/diff-session.jsonl", line: 1 },
+      }, {
+        id: "event-2",
+        sessionId: SESSION_ID,
+        sequence: 4,
+        machineId: "machine-diff",
+        provider: "codex",
+        agentName: "codex",
+        projectIdentityKey: PROJECT_KEY,
+        role: "assistant",
+        kind: "message",
+        contentText: "stored and indexed separately",
+        contentBlocks: [],
+        rawReference: { sourcePath: "/hist/diff-session.jsonl", line: 2 },
+      }],
+      usageRecords: [{
+        id: "usage-1",
+        sessionId: SESSION_ID,
+        machineId: "machine-diff",
+        provider: "codex",
+        agentName: "codex",
+        projectIdentityKey: PROJECT_KEY,
+        model: "gpt-5.6-sol",
+        inputTokens: 10,
+      }],
+      sessionEdges: [{
+        id: "edge-1",
+        sessionId: SESSION_ID,
+        machineId: "machine-diff",
+        provider: "codex",
+        agentName: "codex",
+        projectIdentityKey: PROJECT_KEY,
+        kind: "next",
+        fromEventId: "event-1",
+        toEventId: "event-2",
+      }],
+      artifacts: [{
+        id: "artifact-1",
+        sessionId: SESSION_ID,
+        eventId: "event-2",
+        machineId: "machine-diff",
+        provider: "codex",
+        agentName: "codex",
+        projectIdentityKey: PROJECT_KEY,
+        kind: "file",
+        path: "/tmp/result.txt",
+      }],
+      executionContexts: [{
+        id: "context-1",
+        sessionId: SESSION_ID,
+        sequence: 0,
+        scope: "session",
+        machineId: "machine-diff",
+        provider: "codex",
+        agentName: "codex",
+        projectIdentityKey: PROJECT_KEY,
+        model: "gpt-5.6-sol",
+        modelProvider: "openai",
+      }],
+      assignment: { nickname: "Laplace", role: "builder", path: "/root/diff", depth: 1 },
+    };
+    const replay: MappedSession = {
+      ...rich,
+      session: {
+        ...rich.session,
+        normalizationVersion: 3,
+        model: "gpt-5.6-terra",
+        assignmentRole: "reviewer",
+      },
+      events: [rich.events[1]!],
+      usageRecords: [],
+      sessionEdges: [],
+      artifacts: [],
+      executionContexts: [{ ...rich.executionContexts[0]!, model: "gpt-5.6-terra" }],
+      assignment: { ...rich.assignment, role: "reviewer" },
+    };
+    const result = await withStore(path, (store) =>
+      Effect.gen(function* () {
+        yield* store.upsertSession(rich);
+        yield* store.upsertSession(replay);
+        return yield* store.readSessionDetail(SESSION_ID, detailPages);
+      }));
+
+    expect(result).toBeDefined();
+    expect(result?.session).toMatchObject({
+      normalizationVersion: 3,
+      model: "gpt-5.6-terra",
+      modelProvider: "openai",
+      assignmentRole: "reviewer",
+    });
+    expect(result?.assignment).toMatchObject({ nickname: "Laplace", role: "reviewer", depth: 1 });
+    expect(result?.events.rows.map((row) => row.id)).toEqual(["event-2"]);
+    expect(result?.events.total).toBe(1);
+    expect(result?.usageRecords.total).toBe(0);
+    expect(result?.sessionEdges.total).toBe(0);
+    expect(result?.artifacts.total).toBe(0);
+    expect(result?.executionContexts.rows).toEqual([expect.objectContaining({ id: "context-1", model: "gpt-5.6-terra" })]);
+  });
+
+  test("an appended source event writes only the new fact row", async () => {
+    const path = sqlitePath();
+    const base = session(initialMessages(1));
+    const firstEvent: MappedSession["events"][number] = {
+      id: "event-1",
+      sessionId: SESSION_ID,
+      sequence: 1,
+      machineId: "machine-diff",
+      provider: "codex",
+      agentName: "codex",
+      projectIdentityKey: PROJECT_KEY,
+      role: "user",
+      kind: "message",
+      contentText: "first",
+      contentBlocks: [],
+      rawReference: { sourcePath: "/hist/diff-session.jsonl", line: 1 },
+    };
+    const appendedEvent: MappedSession["events"][number] = {
+      ...firstEvent,
+      id: "event-2",
+      sequence: 2,
+      role: "assistant",
+      contentText: "second",
+      rawReference: { sourcePath: "/hist/diff-session.jsonl", line: 2 },
+    };
+    await withStore(path, (store) =>
+      Effect.gen(function* () {
+        yield* store.upsertSession({ ...base, events: [firstEvent] });
+        yield* Effect.sync(() => {
+          const audit = new Database(path);
+          try {
+            audit.exec(`
+              CREATE TABLE source_fact_audit (action TEXT NOT NULL, id TEXT NOT NULL);
+              CREATE TRIGGER audit_session_event_insert AFTER INSERT ON session_events BEGIN
+                INSERT INTO source_fact_audit(action, id) VALUES ('insert', NEW.id);
+              END;
+              CREATE TRIGGER audit_session_event_update AFTER UPDATE ON session_events BEGIN
+                INSERT INTO source_fact_audit(action, id) VALUES ('update', NEW.id);
+              END;
+              CREATE TRIGGER audit_session_event_delete AFTER DELETE ON session_events BEGIN
+                INSERT INTO source_fact_audit(action, id) VALUES ('delete', OLD.id);
+              END;
+            `);
+          } finally {
+            audit.close();
+          }
+        });
+        yield* store.upsertSession({
+          ...base,
+          session: { ...base.session, sourceFingerprint: "fp-2" },
+          events: [firstEvent, appendedEvent],
+        });
+      }));
+
+    const audit = new Database(path, { readonly: true });
+    try {
+      expect(audit.query("SELECT action, id FROM source_fact_audit ORDER BY rowid").all()).toEqual([
+        { action: "insert", id: "event-2" },
+      ]);
+    } finally {
+      audit.close();
+    }
   });
 
   test("append touches only the new rows and preserves existing vectors", async () => {
@@ -209,6 +410,7 @@ describe("upsertSession row-level diff", () => {
     expect(second.messagesUpdated).toBe(1);
     expect(second.messagesInserted).toBe(0);
     expect(second.messagesUnchanged).toBe(19);
+    expect(second.invalidatedVectorKeys).toEqual([{ sessionId: SESSION_ID, seq: 10 }]);
     // the AD trigger dropped the edited row's vector; the other 19 survive
     expect(vectors.length).toBe(19);
     expect(vectors.some((row) => row.seq === 10)).toBe(false);
@@ -233,6 +435,9 @@ describe("upsertSession row-level diff", () => {
     expect(messagesCount(path)).toBe(18);
     expect(ftsCount(path)).toBe(18);
     expect(vectors.length).toBe(18);
+    expect(second.invalidatedVectorKeys).toEqual(
+      Array.from({ length: 12 }, (_, index) => ({ sessionId: SESSION_ID, seq: index + 19 })),
+    );
   });
 
   test("a project move rewrites every row with the new scope token", async () => {

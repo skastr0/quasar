@@ -235,6 +235,11 @@ describe("DurableQueue", () => {
       // seq 1 will get a vector (resolved); seq 2 stays vectorless (undone).
       messages: [message(1, "h1"), message(2, "h2")],
       toolCalls: [],
+      events: [],
+      usageRecords: [],
+      sessionEdges: [],
+      artifacts: [],
+      executionContexts: [],
     };
 
     const withBoth = <A>(run: (store: LocalStoreService, queue: DurableQueueService) => Effect.Effect<A, unknown, never>) =>

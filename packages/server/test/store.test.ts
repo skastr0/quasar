@@ -108,6 +108,11 @@ const mappedSession = (overrides: Partial<MappedSession["session"]> = {}): Mappe
       provider: overrides.provider ?? "codex",
     },
   ],
+  events: [],
+  usageRecords: [],
+  sessionEdges: [],
+  artifacts: [],
+  executionContexts: [],
 });
 
 describe("LocalStore", () => {

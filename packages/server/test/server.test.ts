@@ -78,6 +78,11 @@ const mappedSession = (overrides: { readonly fingerprint?: string; readonly firs
       provider: "codex",
     },
   ],
+  events: [],
+  usageRecords: [],
+  sessionEdges: [],
+  artifacts: [],
+  executionContexts: [],
 });
 
 const seed = (sqlite: string) =>
