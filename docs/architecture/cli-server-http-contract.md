@@ -34,6 +34,11 @@ server never imports CLI or provider-parser modules (enforced by
 | POST   | `/query`              | Execute the strict, projected, cursor-paginated query protocol.         |
 | GET    | `/projects`           | List project identities.                                                |
 | GET    | `/session-detail`     | Read bounded rich session sections, including raw normalized events.    |
+| GET    | `/sessions`           | List sessions with scoped filters.                                      |
+| GET    | `/messages`           | Read one session's messages in sequence order.                          |
+| GET    | `/tool-calls`         | List tool calls with scoped filters.                                    |
+| GET    | `/tool-call`          | Read one complete tool call.                                            |
+| GET    | `/search/*`           | Run lexical, semantic, or fusion search.                                |
 
 Both ingest endpoints require a bearer token. The server fails **closed**:
 
@@ -45,9 +50,9 @@ Both ingest endpoints require a bearer token. The server fails **closed**:
 
 `/ingest/session` accepts `?force=true` to bypass the unchanged-fingerprint
 skip. All read/serve/operator endpoints operate over server state only — there
-is no provider-history command on the server. The former read routes
-(`/sessions`, `/messages`, `/tool-calls`, `/tool-call`, and `/search/*`) were
-deleted; `/query` is the one structured read contract for those row sets.
+is no provider-history command on the server. Resource GET endpoints are the
+direct agent-facing read surface. `/query` remains registered only until its
+current in-tree consumers are moved back to those resource endpoints.
 
 ## Normalized payload shape
 

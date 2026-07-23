@@ -518,7 +518,41 @@ describe("HTTP server", () => {
       expect(statusBody.data.workers.workers).toEqual(["embeddings"]);
       expect(readyBody.data.modes).toEqual({ lexical: true, semantic: false, fusion: false });
       expect(sessionDetail.status).toBe(200);
-      expect(legacy.every((response) => response.status === 404)).toBe(true);
+      const [
+        legacySessions,
+        legacyMessages,
+        legacyToolCalls,
+        legacyToolCall,
+        legacyLexical,
+        legacySemantic,
+        legacyFusion,
+      ] = await Promise.all(legacy.map(async (response) => ({
+        status: response.status,
+        body: await response.json(),
+      })));
+      expect(legacySessions.status).toBe(200);
+      expect(legacySessions.body.data.rows[0]).toMatchObject({
+        sessionId: "codex:session-http",
+        model: "gpt-5.6-sol",
+        modelProvider: "openai",
+        assignmentRole: "builder",
+      });
+      expect(legacyMessages.status).toBe(200);
+      expect(legacyMessages.body.data.rows.map(
+        (row: { text: string }) => row.text,
+      )).toEqual(["hello over http", "assistant-only http memory"]);
+      expect(legacyToolCalls.status).toBe(200);
+      expect(legacyToolCalls.body.data.rows[0].id).toBe("tool-http");
+      expect(legacyToolCall.status).toBe(200);
+      expect(legacyToolCall.body.data.row.id).toBe("tool-http");
+      expect(legacyLexical.status).toBe(200);
+      expect(legacyLexical.body.data.matches.map(
+        (hit: { row: { text: string } }) => hit.row.text,
+      )).toEqual(["hello over http", "assistant-only http memory"]);
+      expect(legacySemantic.status).toBe(503);
+      expect(legacySemantic.body.error.type).toBe("SemanticDisabled");
+      expect(legacyFusion.status).toBe(503);
+      expect(legacyFusion.body.error.type).toBe("SemanticDisabled");
     } finally {
       proc.kill();
       await proc.exited;
