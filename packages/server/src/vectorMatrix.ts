@@ -23,7 +23,12 @@ import { performance } from "node:perf_hooks";
 import { Context, Deferred, Effect, Layer, Schema } from "effect";
 
 import { embeddingProfileFromEnv, type EmbeddingProfile } from "./embeddingProfiles";
-import { LocalStore, type MessageVectorMutationEvent, type MessageVectorUpsert } from "./store";
+import {
+  LocalStore,
+  type MessageVectorBlobRow,
+  type MessageVectorMutationEvent,
+  type MessageVectorUpsert,
+} from "./store";
 import { encodeFloat16Vector, VECTOR_BLOB_ENCODING } from "./vectorBlob";
 import { encodeQueryVectorF16, loadNativeSimsimdEffect, VectorKernelError } from "./vectorKernel";
 import {
@@ -97,6 +102,10 @@ export interface VectorMatrixSearchRequest {
   readonly projectKey?: string;
   readonly role?: string;
   readonly providers?: readonly string[];
+  /** Exact session allow-list used for filters whose metadata lives on the
+   * session row (agent assignment and model). The mask is applied before
+   * top-k selection, so a filtered hit cannot disappear behind global top-k. */
+  readonly sessionIds?: ReadonlySet<string>;
 }
 
 export interface VectorMatrixService {
@@ -665,6 +674,10 @@ export const makeVectorMatrixLayer = (
             limit: LOAD_PAGE_ROWS,
           });
           if (page.length === 0) break;
+          const validRows: Array<{
+            readonly row: MessageVectorBlobRow;
+            readonly slot: number;
+          }> = [];
           for (const row of page) {
             afterRowid = row.rowid;
             const slot = rowFor(row.sessionId, row.seq);
@@ -673,8 +686,35 @@ export const makeVectorMatrixLayer = (
               state.loadSkippedRows += 1;
               continue;
             }
+            validRows.push({ row, slot });
+          }
+
+          // Intern the page's handful of provider/role values once, then keep
+          // the 8k-row copy loop synchronous. Yielding an Effect per row here
+          // previously added scheduler work for every vector in the corpus.
+          for (const provider of new Set(validRows.map(({ row }) => row.provider))) {
+            yield* internU8Code(
+              "provider",
+              state.providerDict,
+              state.providerCodeByName,
+              provider,
+            );
+          }
+          for (const role of new Set(validRows.map(({ row }) => row.role))) {
+            yield* internU8Code(
+              "role",
+              state.roleDict,
+              state.roleCodeByName,
+              role,
+            );
+          }
+          for (const { row, slot } of validRows) {
             writeRowBytes(slot, row.vectorBlob);
-            yield* writeScopeCodes(slot, row.provider, row.role, row.projectKey);
+            state.providerCodes[slot] =
+              state.providerCodeByName.get(row.provider) ?? U8_DICT_OVERFLOW_CODE;
+            state.roleCodes[slot] =
+              state.roleCodeByName.get(row.role) ?? U8_DICT_OVERFLOW_CODE;
+            state.projectKeyCodes[slot] = internProjectKeyCode(row.projectKey);
             filled[slot] = 1;
           }
           if (page.length < LOAD_PAGE_ROWS) break;
@@ -794,7 +834,10 @@ export const makeVectorMatrixLayer = (
           }
           const rowCount = state.rowCount;
           const k = Math.min(Math.max(1, request.limit), MAX_TOP_K, rowCount);
-          const filtered = request.projectKey !== undefined || request.role !== undefined || request.providers !== undefined;
+          const filtered = request.projectKey !== undefined
+            || request.role !== undefined
+            || request.providers !== undefined
+            || request.sessionIds !== undefined;
           let mask: Uint8Array | undefined;
           if (filtered) {
             // Resolve each requested scope value to its in-matrix dictionary
@@ -816,12 +859,19 @@ export const makeVectorMatrixLayer = (
               );
               if (providerCodes.size === 0) return [] as const;
             }
+            if (request.sessionIds !== undefined && request.sessionIds.size === 0) {
+              return [] as const;
+            }
             mask = new Uint8Array(rowCount);
             let found = 0;
             for (let row = 0; row < rowCount; row += 1) {
               if (projectKeyCode !== undefined && state.projectKeyCodes[row] !== projectKeyCode) continue;
               if (roleCode !== undefined && state.roleCodes[row] !== roleCode) continue;
               if (providerCodes !== undefined && !providerCodes.has(state.providerCodes[row] ?? 0)) continue;
+              if (
+                request.sessionIds !== undefined
+                && !request.sessionIds.has(state.sessionIds[row]!)
+              ) continue;
               mask[row] = 1;
               found += 1;
             }

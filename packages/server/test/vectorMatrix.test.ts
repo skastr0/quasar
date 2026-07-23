@@ -291,6 +291,22 @@ describe("vectorMatrix filtered scan", () => {
           "codex:alpha:0",
           "codex:alpha:2",
         ]);
+
+        const sessionFiltered = yield* matrix.search({
+          vector: queryVector(),
+          limit: 10,
+          sessionIds: new Set(["codex:beta"]),
+        });
+        expect(sessionFiltered.map((hit) => hit.sessionId)).toEqual([
+          "codex:beta",
+          "codex:beta",
+          "codex:beta",
+        ]);
+        expect(yield* matrix.search({
+          vector: queryVector(),
+          limit: 10,
+          sessionIds: new Set(),
+        })).toEqual([]);
       }),
     );
   });
