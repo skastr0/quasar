@@ -107,11 +107,17 @@ export interface MessageVectorKey {
   readonly seq: number;
 }
 
-/** Fired after every successful message-vector write transaction with the
- * rows sqlite actually accepted, plus a fresh per-model row count so the
- * resident matrix can check watermark parity without owning SQL. */
-export interface MessageVectorWriteEvent {
-  readonly rows: readonly MessageVectorUpsert[];
+export interface MessageVectorDelete extends MessageVectorKey {
+  readonly model: string;
+}
+
+/** Fired after every successful vector mutation. Upserts carry the rows
+ * SQLite accepted plus exact per-model counts. Deletes carry the model/key
+ * rows observed immediately before the messages trigger removed them, so a
+ * resident matrix can invalidate without rescanning SQLite or rebooting. */
+export interface MessageVectorMutationEvent {
+  readonly upserts: readonly MessageVectorUpsert[];
+  readonly deletes: readonly MessageVectorDelete[];
   readonly sqliteRowsByModel: Readonly<Record<string, number>>;
 }
 
@@ -217,10 +223,11 @@ export interface LocalStoreService {
   readonly getMessagesBySessionSeq: (
     pairs: readonly MessageVectorKey[],
   ) => Effect.Effect<readonly MessageRow[], SqliteStoreError>;
-  /** Register THE (single, canonical) vector-write listener. Listener failures
-   * are contained: they log a named diagnostic and never fail the write. */
-  readonly registerMessageVectorWriteListener: (
-    listener: (event: MessageVectorWriteEvent) => Effect.Effect<void>,
+  /** Register THE (single, canonical) vector-mutation listener. Listener
+   * failures are contained: they log a named diagnostic and never fail the
+   * committed SQLite mutation. */
+  readonly registerMessageVectorMutationListener: (
+    listener: (event: MessageVectorMutationEvent) => Effect.Effect<void>,
   ) => void;
   readonly lexicalSearch: (request: {
     readonly query: string;
@@ -854,6 +861,9 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
         const selectMessageVectorCreated = db.prepare(
           "SELECT created_at AS createdAt FROM message_vectors WHERE model = ? AND session_id = ? AND seq = ?",
         );
+        const selectMessageVectorModels = db.prepare(
+          "SELECT model FROM message_vectors WHERE session_id = ? AND seq = ? ORDER BY model ASC",
+        );
         const upsertMessageVector = db.prepare(
           `INSERT INTO message_vectors(model, modality, session_id, seq, role, project_key, provider, content_hash, document_hash, dimensions, encoding, vector_blob, created_at, updated_at)
            SELECT $model, $modality, m.session_id, m.seq, m.role, m.project_key, $provider, m.content_hash, $documentHash, $dimensions, $encoding, $vectorBlob, $createdAt, $updatedAt
@@ -893,20 +903,28 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
         const countMessageVectorsForModel = db.prepare(
           "SELECT COUNT(*) AS count FROM message_vectors WHERE model = ?",
         );
-        let messageVectorWriteListener: ((event: MessageVectorWriteEvent) => Effect.Effect<void>) | undefined;
-        const notifyMessageVectorWrite = (acceptedRows: readonly MessageVectorUpsert[]): Effect.Effect<void> => {
-          if (messageVectorWriteListener === undefined || acceptedRows.length === 0) return Effect.void;
+        let messageVectorMutationListener:
+          ((event: MessageVectorMutationEvent) => Effect.Effect<void>) | undefined;
+        const notifyMessageVectorMutation = (event: {
+          readonly upserts?: readonly MessageVectorUpsert[];
+          readonly deletes?: readonly MessageVectorDelete[];
+        }): Effect.Effect<void> => {
+          const upserts = event.upserts ?? [];
+          const deletes = event.deletes ?? [];
+          if (messageVectorMutationListener === undefined || (upserts.length === 0 && deletes.length === 0)) {
+            return Effect.void;
+          }
           const sqliteRowsByModel: Record<string, number> = {};
-          for (const row of acceptedRows) {
+          for (const row of upserts) {
             if (sqliteRowsByModel[row.model] === undefined) {
               sqliteRowsByModel[row.model] = (countMessageVectorsForModel.get(row.model) as { count: number }).count;
             }
           }
-          return messageVectorWriteListener({ rows: acceptedRows, sqliteRowsByModel }).pipe(
+          return messageVectorMutationListener({ upserts, deletes, sqliteRowsByModel }).pipe(
             Effect.catchAllCause((cause) =>
-              Effect.logError("store.message_vector_write_listener_failed").pipe(
+              Effect.logError("store.message_vector_mutation_listener_failed").pipe(
                 Effect.annotateLogs({
-                  event: "store.message_vector_write_listener_failed",
+                  event: "store.message_vector_mutation_listener_failed",
                   at: new Date().toISOString(),
                   diagnostic: Cause.pretty(cause, { renderErrorCause: true }),
                 }),
@@ -914,6 +932,12 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
             ),
           );
         };
+        const vectorDeletesFor = (keys: readonly MessageVectorKey[]): MessageVectorDelete[] =>
+          keys.flatMap(({ sessionId, seq }) =>
+            (selectMessageVectorModels.all(sessionId, seq) as Array<{ readonly model: string }>).map(
+              ({ model }) => ({ model, sessionId, seq }),
+            ),
+          );
         // --- session diff apply ---
         // A changed session used to be applied as DELETE-all + reinsert-all in
         // one synchronous transaction: O(session length) FTS re-tokenization
@@ -1281,19 +1305,31 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               Effect.withSpan("ingest.diffHead"),
             );
             for (const chunk of chunked(plan.messageDeleteSeqs)) {
+              const keys = chunk.map((seq) => ({ sessionId: mapped.session.sessionId, seq }));
+              const vectorDeletes = yield* trySqlite(
+                "upsertSession.selectVectorDeletes",
+                () => vectorDeletesFor(keys),
+              );
               yield* trySqlite("upsertSession.deleteMessages", () => applyMessageDeleteChunk(mapped.session.sessionId, chunk)).pipe(
                 Effect.withSpan("ingest.chunk", {
                   attributes: { kind: "messageDelete", rows: chunk.length },
                 }),
               );
+              yield* notifyMessageVectorMutation({ deletes: vectorDeletes });
               yield* Effect.sleep("1 millis");
             }
             for (const chunk of chunked(plan.messageUpserts)) {
+              const keys = chunk.map(({ sessionId, seq }) => ({ sessionId, seq }));
+              const vectorDeletes = yield* trySqlite(
+                "upsertSession.selectVectorDeletes",
+                () => vectorDeletesFor(keys),
+              );
               yield* trySqlite("upsertSession.messages", () => applyMessageUpsertChunk(chunk)).pipe(
                 Effect.withSpan("ingest.chunk", {
                   attributes: { kind: "messageUpsert", rows: chunk.length },
                 }),
               );
+              yield* notifyMessageVectorMutation({ deletes: vectorDeletes });
               yield* Effect.sleep("1 millis");
             }
             for (const chunk of chunked(plan.toolCallDeleteIds)) {
@@ -1604,7 +1640,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
           upsertMessageVectors: (rows) =>
             Effect.gen(function* () {
               const acceptedRows = yield* trySqlite("upsertMessageVectors", () => replaceMessageVectors(rows));
-              yield* notifyMessageVectorWrite(acceptedRows);
+              yield* notifyMessageVectorMutation({ upserts: acceptedRows });
               return acceptedRows.length;
             }),
           listMessagesMissingVector: ({ model, limit }) =>
@@ -1857,8 +1893,8 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               }
               return rows;
             }),
-          registerMessageVectorWriteListener: (listener) => {
-            messageVectorWriteListener = listener;
+          registerMessageVectorMutationListener: (listener) => {
+            messageVectorMutationListener = listener;
           },
           lexicalSearch: ({ query, projectKey, role, providers, limit }) =>
             trySqlite("lexicalSearch", () => {

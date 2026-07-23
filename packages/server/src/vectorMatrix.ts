@@ -1,8 +1,8 @@
 // Per-model resident vector matrix (QSR rearchitecture D7).
 //
 // One contiguous f16 matrix in a growable SharedArrayBuffer, boot-loaded from
-// SQLite message_vectors and appended when new vectors are written through the
-// single store write site. No vector index, no background maintenance, no
+// SQLite message_vectors and kept current by the store's single vector-
+// mutation stream. No vector index, no background maintenance, no
 // state beyond the matrix + a watermark. Every query is an exact scan
 // (recall 1.0), sharded across worker threads running the simsimd f16 cosine
 // kernel (pure-JS fallback when no native library is available).
@@ -11,18 +11,19 @@
 // rows for the model. When it exists, appends keep it fresh (rows written
 // while the process runs are appended or overwritten in place). When boot
 // found nothing, semantic serving stays in its 503 degrade mode until the
-// next boot — appends never resurrect an empty matrix mid-process, which is
+// next boot — upserts never resurrect an empty matrix mid-process, which is
 // also what keeps the pinned HTTP contract (503 on empty-boot) stable.
 //
 // The matrix may run BEHIND SQLite (rows written mid-load behind the load
-// cursor, capacity exhaustion, deletes): semantic then serves what is loaded
-// — never a 503 once enabled — and the watermark records the drift honestly.
-// A reboot reconciles.
+// cursor or capacity exhaustion): semantic then serves what is loaded — never
+// a 503 once enabled — and the watermark records the drift honestly. Normal
+// message updates/deletes are applied online through exact model-key
+// invalidations; a reboot is not required for those mutations.
 import { performance } from "node:perf_hooks";
 import { Context, Deferred, Effect, Layer, Schema } from "effect";
 
 import { embeddingProfileFromEnv, type EmbeddingProfile } from "./embeddingProfiles";
-import { LocalStore, type MessageVectorUpsert, type MessageVectorWriteEvent } from "./store";
+import { LocalStore, type MessageVectorMutationEvent, type MessageVectorUpsert } from "./store";
 import { encodeFloat16Vector, VECTOR_BLOB_ENCODING } from "./vectorBlob";
 import { encodeQueryVectorF16, loadNativeSimsimdEffect, VectorKernelError } from "./vectorKernel";
 import {
@@ -337,12 +338,42 @@ export const makeVectorMatrixLayer = (
         state.bytes!.set(blob, row * rowBytes);
       };
 
-      // --- append path: the store's single vector-write site notifies here ---
-      const applyVectorWrites = (event: MessageVectorWriteEvent): Effect.Effect<void> => Effect.gen(function* () {
+      /** Remove one key in O(rowBytes) by moving the last active row into its
+       * slot. Every parallel metadata array and the reverse index moves with
+       * the bytes, so scans never retain a tombstone or stale key. */
+      const removeRow = (sessionId: string, seq: number): boolean => {
+        const row = rowFor(sessionId, seq);
+        if (row === undefined || state.rowCount === 0) return false;
+        const last = state.rowCount - 1;
+        const targetIndex = state.rowIndex.get(sessionId);
+        targetIndex?.delete(seq);
+        if (targetIndex !== undefined && targetIndex.size === 0) state.rowIndex.delete(sessionId);
+        if (row !== last) {
+          const movedSessionId = state.sessionIds[last]!;
+          const movedSeq = state.seqs[last]!;
+          state.bytes!.copyWithin(row * rowBytes, last * rowBytes, (last + 1) * rowBytes);
+          state.providerCodes[row] = state.providerCodes[last] ?? 0;
+          state.roleCodes[row] = state.roleCodes[last] ?? 0;
+          state.projectKeyCodes[row] = state.projectKeyCodes[last] ?? 0;
+          indexRow(movedSessionId, movedSeq, row);
+        }
+        state.sessionIds.pop();
+        state.seqs.pop();
+        state.rowCount = last;
+        return true;
+      };
+
+      // --- online mutation path: the store's single mutation site notifies here ---
+      const applyVectorMutations = (event: MessageVectorMutationEvent): Effect.Effect<void> => Effect.gen(function* () {
         if (state.closed || !state.enabled) return;
+        const deletes = event.deletes.filter((row) => row.model === model);
+        let removed = 0;
+        for (const row of deletes) {
+          if (removeRow(row.sessionId, row.seq)) removed += 1;
+        }
         let appended = 0;
         let overwritten = 0;
-        for (const row of event.rows) {
+        for (const row of event.upserts) {
           if (row.model !== model) continue;
           if (row.vector.length !== dimensions) {
             yield* Effect.logWarning("vector_matrix.append_rejected").pipe(
@@ -401,7 +432,10 @@ export const makeVectorMatrixLayer = (
         }
         state.appendedRows += appended;
         state.overwrittenRows += overwritten;
-        const sqliteRows = event.sqliteRowsByModel[model];
+        const sqliteRows = event.sqliteRowsByModel[model]
+          ?? (deletes.length > 0
+            ? Math.max(0, state.watermark.sqliteRows - deletes.length)
+            : undefined);
         if (sqliteRows !== undefined) {
           state.watermark = { matrixRows: state.rowCount, sqliteRows, checkedAt: nowIso() };
           if (sqliteRows !== state.rowCount) {
@@ -415,7 +449,7 @@ export const makeVectorMatrixLayer = (
             );
           }
         }
-        if (appended > 0 || overwritten > 0 || sqliteRows !== undefined) {
+        if (removed > 0 || appended > 0 || overwritten > 0 || sqliteRows !== undefined) {
           yield* publishMatrixWatermarkGauges({
             enabled: state.enabled,
             rows: state.rowCount,
@@ -729,7 +763,7 @@ export const makeVectorMatrixLayer = (
         Effect.ensuring(Deferred.succeed(loadedSignal, undefined)),
       );
 
-      store.registerMessageVectorWriteListener(applyVectorWrites);
+      store.registerMessageVectorMutationListener(applyVectorMutations);
       yield* Effect.forkScoped(load);
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {
