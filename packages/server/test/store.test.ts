@@ -125,6 +125,58 @@ describe("LocalStore", () => {
     expect(stats).toEqual({ projects: 0, sessions: 0, messages: 0, toolCalls: 0, ingestRuns: 0 });
   });
 
+  test("adds tool payload hashes without scanning bodies and forces one safe replay", async () => {
+    const path = sqlitePath();
+    const mapped = mappedSession({ normalizationVersion: 4 });
+    await withStore(path, (store) => store.upsertSession(mapped));
+
+    const legacy = new Database(path);
+    try {
+      legacy.exec("ALTER TABLE tool_calls DROP COLUMN input_hash");
+      legacy.exec("ALTER TABLE tool_calls DROP COLUMN output_hash");
+    } finally {
+      legacy.close();
+    }
+
+    await withStore(path, (store) => store.stats);
+    const migrated = new Database(path, { readonly: true });
+    try {
+      const session = migrated.query(
+        "SELECT normalization_version AS normalizationVersion FROM sessions WHERE session_id = ?",
+      ).get(mapped.session.sessionId) as { normalizationVersion: number };
+      const rows = migrated.query(
+        "SELECT input_hash AS inputHash, output_hash AS outputHash FROM tool_calls ORDER BY id",
+      ).all() as Array<{ inputHash: string; outputHash: string }>;
+      expect(session.normalizationVersion).toBe(2);
+      expect(rows.every((row) => row.inputHash === "" && row.outputHash === "")).toBe(true);
+    } finally {
+      migrated.close();
+    }
+
+    const replay = await withStore(path, (store) =>
+      Effect.gen(function* () {
+        const outcome = yield* store.upsertSession(mapped);
+        const unchanged = yield* store.hasSessionFingerprint(
+          mapped.session.sessionId,
+          mapped.session.sourceFingerprint,
+          mapped.session.normalizationVersion,
+        );
+        return { outcome, unchanged };
+      }));
+    expect(replay.outcome.toolCallsUpdated).toBe(2);
+    expect(replay.unchanged).toBe(true);
+
+    const refreshed = new Database(path, { readonly: true });
+    try {
+      const rows = refreshed.query(
+        "SELECT input_hash AS inputHash, output_hash AS outputHash FROM tool_calls ORDER BY id",
+      ).all() as Array<{ inputHash: string; outputHash: string }>;
+      expect(rows.every((row) => row.inputHash.length === 64 && row.outputHash.length === 64)).toBe(true);
+    } finally {
+      refreshed.close();
+    }
+  });
+
   test("upserts a session without duplicating child rows", async () => {
     const path = sqlitePath();
     const session = mappedSession();

@@ -108,6 +108,7 @@ describe("observability spans", () => {
   test("stage span names are asserted from real Effect.withSpan wiring", () => {
     const wiredSources = {
       "server.ts": readServerSrc("server.ts"),
+      "query.ts": readServerSrc("query.ts"),
       "search.ts": readServerSrc("search.ts"),
       "embeddings.ts": readServerSrc("embeddings.ts"),
       "vectorMatrix.ts": readServerSrc("vectorMatrix.ts"),
@@ -119,13 +120,15 @@ describe("observability spans", () => {
       Object.entries(wiredSources).map(([file, source]) => [file, extractWithSpanNames(source)]),
     ) as Record<keyof typeof wiredSources, string[]>;
 
-    // Parent route spans + readiness/fuse live on the HTTP handlers.
-    expect(byFile["server.ts"]).toEqual(
+    // One HTTP route span wraps the strict protocol adapter; search stages
+    // remain explicit inside the query executor.
+    expect(byFile["server.ts"]).toEqual(["query"]);
+    expect(byFile["query.ts"]).toEqual(
       expect.arrayContaining([
-        "search.lexical",
         "search.semantic",
         "search.fusion",
         "search.readiness",
+        "search.lexicalScan",
         "search.rrfFuse",
       ]),
     );
@@ -143,12 +146,12 @@ describe("observability spans", () => {
     // Contract lock: stage-level only — never invent per-row names.
     for (const name of unique) {
       expect(name.includes("row")).toBe(false);
-      expect(name.startsWith("search.") || name.startsWith("ingest.")).toBe(true);
+      expect(name === "query" || name.startsWith("search.") || name.startsWith("ingest.")).toBe(true);
     }
 
     // Required stable set (each must appear at least once in product wiring).
     const required = [
-      "search.lexical",
+      "query",
       "search.semantic",
       "search.fusion",
       "search.lexicalScan",
@@ -179,19 +182,14 @@ describe("observability spans", () => {
     expect(spanSites).toEqual(["search.matrixScan"]);
   });
 
-  test("SearchReceipt.traceId is gated by SEARCH_PROFILE or OTLP base URL in source", () => {
+  test("query responses stay protocol-only while search timing remains internal", () => {
     const server = readServerSrc("server.ts");
-    // Gate helpers — both paths must enable the receipt (and thus optionalTraceId).
-    expect(server).toContain('process.env.QUASAR_SEARCH_PROFILE === "1"');
-    expect(server).toContain("process.env.QUASAR_OTLP_BASE_URL");
-    expect(server).toMatch(
-      /searchReceiptEnabled\s*=\s*\(\)\s*:\s*boolean\s*=>\s*searchProfileEnabled\(\)\s*\|\|\s*otlpEnabled\(\)/,
-    );
-    expect(server).toContain("optionalTraceId");
-    expect(server).toContain("span.traceId");
-    // Receipt object spreads traceId when present; response omits receipt when gate is off.
-    expect(server).toContain("...(traceId !== undefined ? { traceId } : {})");
-    expect(server).toContain("receipt: searchReceiptEnabled() ? receipt : undefined");
+    const query = readServerSrc("query.ts");
+    expect(server).toContain('HttpRouter.post("/query", queryEndpoint)');
+    expect(server).toContain("return json(result.right)");
+    expect(query).toContain("recordSearchReceiptMetrics");
+    expect(query).not.toContain("traceId");
+    expect(query).not.toContain("receipt:");
   });
 });
 

@@ -94,6 +94,64 @@ export interface ToolCallRow {
   readonly provider: Provider;
 }
 
+/** Complete relational shape used by the QuerySpec adapter. Fields that may
+ * be absent in provider data stay explicit `null` so projection can preserve
+ * the requested key set exactly. */
+export interface QuerySessionRow {
+  readonly sessionId: string;
+  readonly projectKey: string;
+  readonly provider: Provider;
+  readonly title: string | null;
+  readonly startedAt: string | null;
+  readonly endedAt: string | null;
+  readonly agentName: string | null;
+  readonly model: string | null;
+  readonly modelProvider: string | null;
+  readonly messageCount: number;
+  readonly toolCallCount: number;
+  readonly parentSessionId: string | null;
+  readonly agentRole: string | null;
+  readonly agentPath: string | null;
+  readonly agentDepth: number | null;
+}
+
+export interface QueryMessageRow {
+  readonly messageId: string;
+  readonly sessionId: string;
+  readonly sequence: number;
+  readonly role: SessionRole;
+  readonly text: string;
+  readonly timestamp: string | null;
+  readonly projectKey: string;
+  readonly provider: Provider;
+  readonly title: string | null;
+  readonly agentName: string | null;
+  readonly agentRole: string | null;
+  readonly model: string | null;
+  readonly modelProvider: string | null;
+}
+
+export interface QueryToolCallRow {
+  readonly toolCallId: string;
+  readonly sessionId: string;
+  readonly projectKey: string;
+  readonly provider: Provider;
+  readonly sequence: number;
+  readonly toolName: string;
+  readonly timestamp: string | null;
+  readonly status: string | null;
+  readonly startedAt: string | null;
+  readonly completedAt: string | null;
+  readonly inputBytes: number;
+  readonly outputBytes: number;
+  readonly agentName: string | null;
+  readonly agentRole: string | null;
+  readonly model: string | null;
+  readonly modelProvider: string | null;
+  readonly inputText?: string;
+  readonly outputText?: string;
+}
+
 export interface AgentAssignment {
   readonly nickname?: string;
   readonly role?: string;
@@ -118,6 +176,7 @@ export type SessionEventKind =
 export type SessionRole =
   | "user"
   | "assistant"
+  | "reasoning"
   | "developer"
   | "system"
   | "tool"
