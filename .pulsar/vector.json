@@ -1,0 +1,14 @@
+{
+  "id": "quasar",
+  "domain": "typescript",
+  "description": "Quasar repository-owned analyzer configuration.",
+  "signal_overrides": {
+    "TS-DE-04": {
+      "config": {
+        "allow_dev_dependency_in_prod": [
+          "@skastr0/quasar-protocol"
+        ]
+      }
+    }
+  }
+}
