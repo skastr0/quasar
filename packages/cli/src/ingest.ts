@@ -61,6 +61,8 @@ export interface IngestOptions {
   readonly limit?: number;
   readonly force?: boolean;
   readonly ingestToken?: string;
+  /** Bound all remote lifecycle, fingerprint, and session writes. */
+  readonly timeoutMs?: number;
   /** Override path for the ingest manifest (default: QUASAR_DAEMON_HOME/ingest-manifest.json). */
   readonly manifestPath?: string;
 }
@@ -174,6 +176,7 @@ const diagnosticCode = (diagnostic: AdapterDiagnostic): string => {
 };
 const remoteWriteAttempts = 3;
 const remoteWriteRetryDelayMs = 250;
+const defaultHttpTimeoutMs = 60_000;
 
 class RemoteIngestError extends Error {
   override readonly name = "RemoteIngestError";
@@ -196,7 +199,7 @@ const retryableRemoteWriteError = (error: unknown): boolean => {
 const postMappedSessionOnce = async (
   base: string,
   mapped: MappedSession,
-  options: { readonly force?: boolean; readonly ingestToken?: string },
+  options: { readonly force?: boolean; readonly ingestToken?: string; readonly timeoutMs?: number },
 ): Promise<SessionIngestOutcome> => {
   const url = new URL("/ingest/session", base.endsWith("/") ? base : `${base}/`);
   if (options.force === true) url.searchParams.set("force", "true");
@@ -208,6 +211,7 @@ const postMappedSessionOnce = async (
     method: "POST",
     headers,
     body: JSON.stringify({ session: mapped }),
+    signal: AbortSignal.timeout(options.timeoutMs ?? defaultHttpTimeoutMs),
   });
   let body: { ok?: boolean; data?: { outcome?: SessionIngestOutcome }; error?: { message?: string } };
   try {
@@ -227,7 +231,7 @@ const postMappedSessionOnce = async (
 export const postMappedSession = async (
   base: string,
   mapped: MappedSession,
-  options: { readonly force?: boolean; readonly ingestToken?: string },
+  options: { readonly force?: boolean; readonly ingestToken?: string; readonly timeoutMs?: number },
 ): Promise<SessionIngestOutcome> => {
   for (let attempt = 1; attempt <= remoteWriteAttempts; attempt += 1) {
     try {
@@ -243,7 +247,7 @@ export const postMappedSession = async (
 export const postFingerprintProbe = async (
   base: string,
   probe: SessionParseProbe,
-  options: { readonly ingestToken?: string },
+  options: { readonly ingestToken?: string; readonly timeoutMs?: number },
 ): Promise<boolean> => {
   const url = new URL("/ingest/fingerprint", base.endsWith("/") ? base : `${base}/`);
   const headers: Record<string, string> = { "content-type": "application/json" };
@@ -256,12 +260,52 @@ export const postFingerprintProbe = async (
     body: JSON.stringify({
       probe: { ...probe, normalizationVersion: NORMALIZATION_VERSION },
     }),
+    signal: AbortSignal.timeout(options.timeoutMs ?? defaultHttpTimeoutMs),
   });
   const body = await response.json() as { ok?: boolean; data?: { unchanged?: boolean }; error?: { message?: string } };
   if (!response.ok || body.ok === false || typeof body.data?.unchanged !== "boolean") {
     throw new RemoteIngestError(body.error?.message ?? `remote fingerprint probe failed with HTTP ${response.status}`, response.status >= 500);
   }
   return body.data.unchanged;
+};
+
+interface IngestRunWrite {
+  readonly runId: string;
+  readonly provider: Provider | "all";
+  readonly status: "running" | "completed" | "failed";
+  readonly startedAt: string;
+  readonly completedAt?: string;
+  readonly sessionsSeen: number;
+  readonly sessionsWritten: number;
+  readonly sessionsSkipped: number;
+  readonly sessionsFailed: number;
+}
+
+export const postIngestRun = async (
+  base: string,
+  run: IngestRunWrite,
+  options: { readonly ingestToken?: string; readonly timeoutMs?: number },
+): Promise<void> => {
+  const url = new URL("/ingest/run", base.endsWith("/") ? base : `${base}/`);
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (options.ingestToken !== undefined && options.ingestToken.trim() !== "") {
+    headers["x-quasar-ingest-token"] = options.ingestToken;
+  }
+  const response = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ run }),
+    signal: AbortSignal.timeout(options.timeoutMs ?? defaultHttpTimeoutMs),
+  });
+  let body: { ok?: boolean; error?: { message?: string } };
+  try {
+    body = await response.json() as { ok?: boolean; error?: { message?: string } };
+  } catch {
+    throw new RemoteIngestError(`remote ingest run returned invalid JSON with HTTP ${response.status}`, response.status >= 500);
+  }
+  if (!response.ok || body.ok === false) {
+    throw new RemoteIngestError(body.error?.message ?? `remote ingest run failed with HTTP ${response.status}`, response.status >= 500);
+  }
 };
 
 const ingestProviderRemote = async (
@@ -479,9 +523,31 @@ export const ingestRemote = async (
   let merged: IngestManifest = { ...manifest };
 
   for (const provider of providers) {
-    const { report, manifestUpdates } = await ingestProviderRemote(provider, options, serverUrl, manifest);
-    reports.push(report);
-    merged = { ...merged, ...manifestUpdates };
+    const runId = crypto.randomUUID();
+    const startedAt = new Date().toISOString();
+    await postIngestRun(serverUrl, {
+      runId, provider, status: "running", startedAt,
+      sessionsSeen: 0, sessionsWritten: 0, sessionsSkipped: 0, sessionsFailed: 0,
+    }, options);
+    try {
+      const { report, manifestUpdates } = await ingestProviderRemote(provider, options, serverUrl, manifest);
+      await postIngestRun(serverUrl, {
+        runId, provider, status: report.sessionsFailed === 0 ? "completed" : "failed", startedAt,
+        completedAt: new Date().toISOString(),
+        sessionsSeen: report.sessionsSeen,
+        sessionsWritten: report.sessionsWritten,
+        sessionsSkipped: report.sessionsSkipped,
+        sessionsFailed: report.sessionsFailed,
+      }, options);
+      reports.push(report);
+      merged = { ...merged, ...manifestUpdates };
+    } catch (error) {
+      await postIngestRun(serverUrl, {
+        runId, provider, status: "failed", startedAt, completedAt: new Date().toISOString(),
+        sessionsSeen: 0, sessionsWritten: 0, sessionsSkipped: 0, sessionsFailed: 1,
+      }, options);
+      throw error;
+    }
   }
 
   // Persist only when there are new entries to record.

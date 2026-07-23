@@ -6,7 +6,7 @@ import { LocalServerConfig } from "./config";
 import { embeddingProviderFromEnv } from "./embeddingProfiles";
 import { ingestMappedSession } from "./ingest";
 import { ok } from "./json";
-import type { MappedSession } from "./model";
+import type { IngestRunRow, MappedSession } from "./model";
 import { Provider } from "./provider";
 import {
   executeResourceQuery,
@@ -78,6 +78,26 @@ const isSeq = (value: unknown): value is number =>
 
 const isNonNegativeInt = (value: unknown): value is number =>
   typeof value === "number" && Number.isInteger(value) && value >= 0;
+
+const isIngestRun = (value: unknown): value is IngestRunRow => {
+  if (!isRecord(value)) return false;
+  const keys = Object.keys(value);
+  const allowed = new Set(["runId", "provider", "status", "startedAt", "completedAt", "sessionsSeen", "sessionsWritten", "sessionsSkipped", "sessionsFailed"]);
+  const completedAtValid = value.completedAt === undefined || (isString(value.completedAt) && Number.isFinite(Date.parse(value.completedAt)));
+  const lifecycleValid = value.status === "running"
+    ? value.completedAt === undefined
+    : value.completedAt !== undefined && completedAtValid;
+  return keys.every((key) => allowed.has(key))
+    && isString(value.runId) && value.runId.trim() !== ""
+    && (value.provider === "all" || providers.has(value.provider as string))
+    && (value.status === "running" || value.status === "completed" || value.status === "failed")
+    && isString(value.startedAt) && Number.isFinite(Date.parse(value.startedAt))
+    && lifecycleValid
+    && isNonNegativeInt(value.sessionsSeen)
+    && isNonNegativeInt(value.sessionsWritten)
+    && isNonNegativeInt(value.sessionsSkipped)
+    && isNonNegativeInt(value.sessionsFailed);
+};
 
 const isFingerprintProbe = (value: unknown): value is {
   readonly sessionId: string;
@@ -678,6 +698,22 @@ const ingestSession = Effect.gen(function* () {
   return json(ok("ingest/session", { outcome }), { status });
 });
 
+const ingestRunWrite = Effect.gen(function* () {
+  const request = yield* HttpServerRequest.HttpServerRequest;
+  const requiredToken = configuredIngestToken();
+  if (requiredToken === undefined) return serviceUnavailable("ingest/run", "QUASAR_INGEST_TOKEN must be configured before remote ingest is enabled");
+  if (requestIngestToken(request) !== requiredToken) return unauthorized("ingest/run", "valid x-quasar-ingest-token header is required");
+  const bodyResult = yield* Effect.either(HttpServerRequest.schemaBodyJson(Schema.Unknown));
+  if (bodyResult._tag === "Left") return badRequest("ingest/run", "request body must be valid JSON");
+  const body = bodyResult.right;
+  if (!isRecord(body) || Object.keys(body).length !== 1 || !isIngestRun(body.run)) {
+    return badRequest("ingest/run", "JSON body must be { run: IngestRunRow } with strict lifecycle fields");
+  }
+  const store = yield* LocalStore;
+  yield* store.recordIngestRun(body.run);
+  return json(ok("ingest/run", { run: body.run }));
+});
+
 const booleanParam = (params: URLSearchParams, name: string, fallback: boolean): boolean => {
   const raw = params.get(name);
   if (raw === null) return fallback;
@@ -808,6 +844,7 @@ const routes = HttpRouter.empty.pipe(
   HttpRouter.get("/ingest-runs", ingestRuns),
   HttpRouter.get("/ingest-run", ingestRun),
   HttpRouter.post("/ingest/fingerprint", ingestFingerprint),
+  HttpRouter.post("/ingest/run", ingestRunWrite),
   HttpRouter.post("/ingest/session", ingestSession),
 );
 
