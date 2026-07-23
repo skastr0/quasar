@@ -86,6 +86,37 @@ describe("QuerySpec v1", () => {
     }
   });
 
+  test("accepts the normalized reasoning message role", () => {
+    expect(() => decodeQuerySpecSync({
+      protocolVersion: QUERY_PROTOCOL_VERSION,
+      kind: "messages",
+      filters: {
+        sessionId: "codex:example-session",
+        role: "reasoning",
+      },
+      projection: {
+        detail: "summary",
+        fields: ["messageId", "role", "text"],
+      },
+      page: { limit: 10 },
+    })).not.toThrow();
+
+    expect(() => decodeQueryResponseSync({
+      protocolVersion: QUERY_PROTOCOL_VERSION,
+      kind: "messages",
+      projection: {
+        detail: "summary",
+        fields: ["messageId", "role", "text"],
+      },
+      page: { returned: 1 },
+      items: [{
+        messageId: "codex:message:reasoning",
+        role: "reasoning",
+        text: "private chain omitted; normalized reasoning summary retained",
+      }],
+    })).not.toThrow();
+  });
+
   test("requires tool payload fields to use detail projection", () => {
     expect(() => decodeQuerySpecSync({
       protocolVersion: QUERY_PROTOCOL_VERSION,
