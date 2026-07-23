@@ -60,6 +60,7 @@ const mappedSession = (overrides: { readonly fingerprint?: string; readonly firs
     sourceFingerprint: overrides.fingerprint ?? "contract-fingerprint",
     host: "contract-host",
     identitySchemeVersion: 1,
+    normalizationVersion: 2,
     messageCount: 2,
     toolCallCount: 1,
   },

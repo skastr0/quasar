@@ -53,6 +53,7 @@ const mappedSession = (overrides: Partial<MappedSession["session"]> = {}): Mappe
     sourceFingerprint: overrides.sourceFingerprint ?? "fingerprint-a",
     host: overrides.host ?? "host-a",
     identitySchemeVersion: overrides.identitySchemeVersion ?? 1,
+    normalizationVersion: overrides.normalizationVersion ?? 2,
     ...(overrides.parentSessionId !== undefined
       ? { parentSessionId: overrides.parentSessionId }
       : {}),

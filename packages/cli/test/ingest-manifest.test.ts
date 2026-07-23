@@ -229,6 +229,41 @@ describe("ingest manifest", () => {
     }
   });
 
+  test("an older normalization version replays an unchanged file exactly once", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "quasar-manifest-test-"));
+    const manifestFilePath = join(dir, "ingest-manifest.json");
+    const physicalPath = join(dir, "session-versioned.jsonl");
+    writeFileSync(physicalPath, '{"id":"session-versioned"}\n', "utf8");
+
+    const s = session("manifest-versioned", physicalPath);
+    const server = startServer("tok");
+
+    try {
+      adaptersByProvider.set("claude", adapterFor([{ session: s, physicalPath }], []));
+      await ingestRemote(
+        { provider: "claude", ingestToken: "tok", manifestPath: manifestFilePath },
+        `http://127.0.0.1:${server.port}`,
+      );
+      const current = loadManifest(manifestFilePath);
+      writeFileSync(manifestFilePath, JSON.stringify({
+        ...current,
+        [physicalPath]: { ...current[physicalPath], normalizationVersion: 1 },
+      }));
+
+      const opened: string[] = [];
+      adaptersByProvider.set("claude", adapterFor([{ session: s, physicalPath }], opened));
+      await ingestRemote(
+        { provider: "claude", ingestToken: "tok", manifestPath: manifestFilePath },
+        `http://127.0.0.1:${server.port}`,
+      );
+
+      expect(opened).toEqual([physicalPath]);
+      expect(loadManifest(manifestFilePath)[physicalPath]?.normalizationVersion).toBe(2);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("--force bypasses manifest and re-processes all files", async () => {
     const dir = mkdtempSync(join(tmpdir(), "quasar-manifest-test-"));
     const manifestFilePath = join(dir, "ingest-manifest.json");
@@ -288,6 +323,7 @@ describe("ingest manifest", () => {
       const st = statSync(physicalPath);
       expect(saved[physicalPath]?.mtimeMs).toBe(st.mtimeMs);
       expect(saved[physicalPath]?.size).toBe(st.size);
+      expect(saved[physicalPath]?.normalizationVersion).toBe(2);
     } finally {
       server.stop(true);
     }

@@ -75,6 +75,7 @@ const sessionFixture = (sessionId: string, projectKey: string, messageCount: num
     updatedAt: "2026-07-01T10:05:00.000Z",
     sourcePath: `/tmp/${sessionId}.jsonl`,
     sourceFingerprint: `fp-${sessionId}`,
+    normalizationVersion: 2,
     host: "test-host",
     identitySchemeVersion: 1,
     messageCount,

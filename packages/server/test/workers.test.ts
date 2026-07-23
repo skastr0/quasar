@@ -45,6 +45,7 @@ const mappedSession = (): MappedSession => ({
     sourceFingerprint: "fingerprint-a",
     host: "host-a",
     identitySchemeVersion: 1,
+    normalizationVersion: 2,
     messageCount: 1,
     toolCallCount: 0,
   },

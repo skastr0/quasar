@@ -230,7 +230,7 @@ describe("DurableQueue", () => {
         sessionId: SID, projectKey: PK, provider: "codex", agentName: "codex", title: "Prune",
         startedAt: "2026-07-07T10:00:00.000Z", updatedAt: "2026-07-07T10:00:00.000Z",
         sourcePath: "/hist/prune.jsonl", sourceFingerprint: "fp", host: "h",
-        identitySchemeVersion: 1, messageCount: 2, toolCallCount: 0,
+        identitySchemeVersion: 1, normalizationVersion: 2, messageCount: 2, toolCallCount: 0,
       },
       // seq 1 will get a vector (resolved); seq 2 stays vectorless (undone).
       messages: [message(1, "h1"), message(2, "h2")],

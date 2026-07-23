@@ -8,6 +8,7 @@ import type {
 } from "./core/schemas";
 
 import type { MappedSession, MessageRole } from "./model";
+import { NORMALIZATION_VERSION } from "./normalization-version";
 
 const stringifyPayload = (value: unknown): string => {
   if (value === undefined || value === null) return "";
@@ -104,6 +105,7 @@ export const mapSession = (
       sourceFingerprint,
       host: session.host,
       identitySchemeVersion: session.identitySchemeVersion,
+      normalizationVersion: NORMALIZATION_VERSION,
       ...(parentSessionId !== undefined ? { parentSessionId } : {}),
       messageCount: messages.length,
       toolCallCount: toolCalls.length,

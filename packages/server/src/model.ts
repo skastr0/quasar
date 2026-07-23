@@ -52,6 +52,7 @@ export interface SessionRow {
   readonly sourceFingerprint: string;
   readonly host: string;
   readonly identitySchemeVersion: number;
+  readonly normalizationVersion: number;
   /** Canonical Quasar SessionId of the parent session when this session is a
    * subagent/child, recovered from a `kind="subagent_of"` SessionEdge — the
    * single canonical source of this column. (Never `kind="parent"`, which is

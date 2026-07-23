@@ -65,6 +65,7 @@ const fixtureSession = (
     sourceFingerprint: `fp-${sessionId}`,
     host: "host-test",
     identitySchemeVersion: 1,
+    normalizationVersion: 2,
     messageCount: texts.length,
     toolCallCount: 0,
   },

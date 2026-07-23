@@ -10,6 +10,7 @@ import { adaptersByProvider, stableAdapters } from "./adapters/registry";
 import type { SessionParseProbe } from "./adapters/types";
 import { mapSession } from "./map";
 import type { MappedSession, MessageRole } from "./model";
+import { NORMALIZATION_VERSION } from "./normalization-version";
 
 // ---------------------------------------------------------------------------
 // Ingest manifest — persistent stat cache for incremental ingest
@@ -18,6 +19,7 @@ import type { MappedSession, MessageRole } from "./model";
 export interface ManifestEntry {
   readonly mtimeMs: number;
   readonly size: number;
+  readonly normalizationVersion: number;
 }
 
 /** path -> { mtimeMs, size } recorded after a successful postMappedSession */
@@ -249,7 +251,9 @@ export const postFingerprintProbe = async (
   const response = await fetch(url, {
     method: "POST",
     headers,
-    body: JSON.stringify({ probe }),
+    body: JSON.stringify({
+      probe: { ...probe, normalizationVersion: NORMALIZATION_VERSION },
+    }),
   });
   const body = await response.json() as { ok?: boolean; data?: { unchanged?: boolean }; error?: { message?: string } };
   if (!response.ok || body.ok === false || typeof body.data?.unchanged !== "boolean") {
@@ -330,7 +334,9 @@ const ingestProviderRemote = async (
     : (path: string, stat: import("node:fs").Stats): boolean => {
         const entry = manifest[path];
         if (entry === undefined) return true;
-        return entry.mtimeMs !== stat.mtimeMs || entry.size !== stat.size;
+        return entry.normalizationVersion !== NORMALIZATION_VERSION
+          || entry.mtimeMs !== stat.mtimeMs
+          || entry.size !== stat.size;
       };
 
   const stream = adapter.stream({
@@ -391,7 +397,11 @@ const ingestProviderRemote = async (
         const physicalPath = item.sourceUnit?.physicalPath ?? item.session.sourcePath;
         try {
           const fileStat = statSync(physicalPath);
-          manifestUpdates[physicalPath] = { mtimeMs: fileStat.mtimeMs, size: fileStat.size };
+          manifestUpdates[physicalPath] = {
+            mtimeMs: fileStat.mtimeMs,
+            size: fileStat.size,
+            normalizationVersion: NORMALIZATION_VERSION,
+          };
         } catch {
           // non-fatal: best-effort manifest update
         }
@@ -450,7 +460,10 @@ export const ingestRemote = async (
 
   // Persist only when there are new entries to record.
   const hasUpdates = Object.keys(merged).length !== Object.keys(manifest).length
-    || Object.entries(merged).some(([k, v]) => manifest[k]?.mtimeMs !== v.mtimeMs || manifest[k]?.size !== v.size);
+    || Object.entries(merged).some(([k, v]) =>
+      manifest[k]?.mtimeMs !== v.mtimeMs
+      || manifest[k]?.size !== v.size
+      || manifest[k]?.normalizationVersion !== v.normalizationVersion);
   if (hasUpdates) {
     saveManifest(merged, options.manifestPath);
   }

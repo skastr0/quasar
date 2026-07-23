@@ -36,6 +36,7 @@ const mappedSession = (overrides: { readonly fingerprint?: string; readonly firs
     sourceFingerprint: overrides.fingerprint ?? "fingerprint-http",
     host: "host-http",
     identitySchemeVersion: 1,
+    normalizationVersion: 2,
     messageCount: 2,
     toolCallCount: 1,
   },

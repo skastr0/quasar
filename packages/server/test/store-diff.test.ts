@@ -83,6 +83,7 @@ const session = (
     sourceFingerprint: overrides.sourceFingerprint ?? "fp-1",
     host: "host-diff",
     identitySchemeVersion: 1,
+    normalizationVersion: overrides.normalizationVersion ?? 2,
     messageCount: messages.length,
     toolCallCount: toolCalls.length,
   },
@@ -147,6 +148,25 @@ describe("upsertSession row-level diff", () => {
     expect(outcome.changedMessages.length).toBe(5);
     expect(ftsCount(path)).toBe(5);
     expect(storedFingerprint(path)).toBe("fp-1");
+  });
+
+  test("normalization upgrades invalidate only the fingerprint gate", async () => {
+    const path = sqlitePath();
+    const rows = initialMessages(2);
+    const result = await withStore(path, (store) =>
+      Effect.gen(function* () {
+        yield* store.upsertSession(session(rows));
+        const current = yield* store.hasSessionFingerprint(SESSION_ID, "fp-1", 2);
+        const staleProjection = yield* store.hasSessionFingerprint(SESSION_ID, "fp-1", 3);
+        const replay = yield* store.upsertSession(session(rows, [], { normalizationVersion: 3 }));
+        const upgraded = yield* store.hasSessionFingerprint(SESSION_ID, "fp-1", 3);
+        return { current, staleProjection, replay, upgraded };
+      }));
+
+    expect(result.current).toBe(true);
+    expect(result.staleProjection).toBe(false);
+    expect(result.replay.messagesUnchanged).toBe(2);
+    expect(result.upgraded).toBe(true);
   });
 
   test("append touches only the new rows and preserves existing vectors", async () => {
@@ -258,9 +278,9 @@ describe("upsertSession row-level diff", () => {
     db.close();
     const { unchangedBefore, second, fingerprintMatches } = await withStore(path, (store) =>
       Effect.gen(function* () {
-        const unchangedBefore = yield* store.hasSessionFingerprint(SESSION_ID, "fp-2");
+        const unchangedBefore = yield* store.hasSessionFingerprint(SESSION_ID, "fp-2", 2);
         const second = yield* store.upsertSession(session(rows, [], { sourceFingerprint: "fp-2" }));
-        const fingerprintMatches = yield* store.hasSessionFingerprint(SESSION_ID, "fp-2");
+        const fingerprintMatches = yield* store.hasSessionFingerprint(SESSION_ID, "fp-2", 2);
         return { unchangedBefore, second, fingerprintMatches };
       }));
     // the sentinel never satisfies the fingerprint probe, so the daemon re-sends
