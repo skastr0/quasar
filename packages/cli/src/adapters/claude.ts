@@ -1,9 +1,16 @@
 import { basename, dirname, join } from "node:path";
 import { existsSync, statSync } from "node:fs";
+import { Schema } from "effect";
 
 import { collectAdapterStream, type SessionAdapter } from "./types";
 import { ClaudeSessionId, type SessionId } from "../core/identity";
-import type { SessionEdge, ToolCall, UsageRecord } from "../core/schemas";
+import type {
+  AgentAssignment,
+  ExecutionContextRecord,
+  SessionEdge,
+  ToolCall,
+  UsageRecord,
+} from "../core/schemas";
 import {
   buildSession,
   collectFiles,
@@ -27,6 +34,8 @@ import {
 } from "./common";
 import { type DecodeDiagnostic, isSignal } from "./harness-schema";
 import {
+  ClaudeAgentNameSchema,
+  ClaudeAgentSettingSchema,
   classifyClaudeRecord,
   isClaudeConversationRecord,
   type ClaudeKind,
@@ -128,6 +137,41 @@ type ClaudeEdgeDraft = Omit<
   SessionEdge,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
 >;
+type ClaudeExecutionContextDraft = Omit<
+  ExecutionContextRecord,
+  "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
+>;
+
+const decodeClaudeAgentName = Schema.decodeUnknownEither(ClaudeAgentNameSchema);
+const decodeClaudeAgentSetting = Schema.decodeUnknownEither(ClaudeAgentSettingSchema);
+
+const claudeAssignmentFromRecords = (
+  records: readonly Record<string, unknown>[],
+): AgentAssignment | undefined => {
+  let nickname: string | undefined;
+  let path: string | undefined;
+  for (const record of records) {
+    if (record.type === "agent-name") {
+      const decoded = decodeClaudeAgentName(record);
+      if (decoded._tag === "Right" && typeof decoded.right.agentName === "string") {
+        const value = decoded.right.agentName.trim();
+        if (value.length > 0) nickname = value;
+      }
+    }
+    if (record.type === "agent-setting") {
+      const decoded = decodeClaudeAgentSetting(record);
+      if (decoded._tag === "Right") {
+        const value = decoded.right.agentSetting.trim();
+        if (value.length > 0) path = value;
+      }
+    }
+  }
+  if (nickname === undefined && path === undefined) return undefined;
+  return {
+    ...(nickname !== undefined ? { nickname } : {}),
+    ...(path !== undefined ? { path } : {}),
+  };
+};
 
 const contentArray = (message: Record<string, unknown> | undefined) =>
   Array.isArray(message?.content) ? (message.content as unknown[]) : [];
@@ -418,6 +462,8 @@ const buildClaudeSessionFromFile = (
       : projectPathFromClaudeKey(projectKey);
   const nativeSessionId = claudeNativeSessionId(sourcePath, records);
   const sessionId = sessionIdFor("claude", nativeSessionId);
+  const assignment = claudeAssignmentFromRecords(records);
+  const agentName = assignment?.nickname ?? "claude-code";
   // SESSION lineage: a subagent/workflow-agent file is a FIRST-CLASS child
   // session whose parent is the MAIN session that spawned it. The parent main
   // session uuid is recoverable two ways — the in-record `sessionId` (which on a
@@ -448,6 +494,7 @@ const buildClaudeSessionFromFile = (
   }
   const toolCallsById = new Map<string, ClaudeToolCallDraft>();
   const usageRecords: ClaudeUsageDraft[] = [];
+  const executionContexts: ClaudeExecutionContextDraft[] = [];
   const nativeUuidToEventId = new Map<string, string>();
   // EVERY record's uuid -> parentUuid, across kept AND dropped records. The
   // event lineage map (nativeUuidToEventId) holds only KEPT events, so a kept
@@ -564,6 +611,20 @@ const buildClaudeSessionFromFile = (
       usageMessage,
     );
     if (usageRecord !== undefined) usageRecords.push(usageRecord);
+    const messageModel =
+      typeof usageMessage?.model === "string" && usageMessage.model.trim().length > 0
+        ? usageMessage.model.trim()
+        : undefined;
+    if (messageModel !== undefined) {
+      executionContexts.push({
+        id: scopedId(sessionId, "execution-context", "message", nativeEventId ?? lineNumber),
+        sequence,
+        scope: "turn",
+        ...(timestamp !== undefined ? { timestamp } : {}),
+        turnId: nativeEventId ?? eventId,
+        model: messageModel,
+      });
+    }
     const messageRole =
       conversation !== undefined
         ? conversation.message.role
@@ -588,7 +649,8 @@ const buildClaudeSessionFromFile = (
   }
   const session = buildSession({
     provider: "claude",
-    agentName: "claude-code",
+    agentName,
+    ...(assignment !== undefined ? { assignment } : {}),
     machine: options.machine,
     sessionId,
     nativeSessionId,
@@ -599,6 +661,7 @@ const buildClaudeSessionFromFile = (
     events,
     toolCalls: [...toolCallsById.values()],
     sessionEdges: [...subagentEdges, ...parentEdges],
+    executionContexts,
     usageRecords,
   });
   return { session, diagnostics };

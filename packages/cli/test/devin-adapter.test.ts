@@ -307,6 +307,39 @@ describe("Devin SQLite adapter", () => {
     expect(JSON.stringify(session)).not.toContain("DERIVED RENDERED COMMIT");
     expect(JSON.stringify(session)).not.toContain("opaque-signature-not-prose");
     expect(JSON.stringify(session)).not.toContain("devin-secret");
+    expect(
+      session.executionContexts.map(
+        ({ scope, sequence, turnId, model, permissionProfileType }) => ({
+          scope,
+          sequence,
+          turnId,
+          model,
+          permissionProfileType,
+        }),
+      ),
+    ).toEqual([
+      {
+        scope: "session",
+        sequence: 0,
+        turnId: undefined,
+        model: "synthetic-model",
+        permissionProfileType: "normal",
+      },
+      {
+        scope: "turn",
+        sequence: 3,
+        turnId: "assistant-reasoning",
+        model: "synthetic-model",
+        permissionProfileType: undefined,
+      },
+      {
+        scope: "turn",
+        sequence: 4,
+        turnId: "assistant-tools",
+        model: "synthetic-model",
+        permissionProfileType: undefined,
+      },
+    ]);
 
     expect(session.toolCalls.map((call) => [call.toolName, call.status])).toEqual([
       ["synthetic_success", "completed"],

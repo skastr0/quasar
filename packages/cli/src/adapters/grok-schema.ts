@@ -74,9 +74,10 @@ const Ts = Schema.optional(Schema.String);
  * `chat_history.jsonl`); this manifest is the SOLE record of the parent
  * relationship, so it is the only source of session-to-session lineage for grok.
  *
- * Only the three lineage-bearing fields are required; everything else in the real
- * file (description, prompt, status, timings, tool_calls, model id, ...) is
- * ignored. A manifest missing any required field is provider garbage: a NAMED
+ * Only the three lineage-bearing fields are required. The measured
+ * `effective_model_id` is retained when present; prose and telemetry fields
+ * (description, prompt, status, timings, tool_calls, ...) remain ignored. A
+ * manifest missing any required field is provider garbage: a NAMED
  * diagnostic + dropped record (never a half-built edge).
  */
 export const GrokSubagentManifest = Schema.Struct({
@@ -86,6 +87,8 @@ export const GrokSubagentManifest = Schema.Struct({
   child_session_id: Schema.NonEmptyString,
   /** The subagent role, projected onto the child session's `agentName`. */
   subagent_type: Schema.NonEmptyString,
+  /** Model selected for the child by the parent orchestration runtime. */
+  effective_model_id: Schema.optional(Schema.NonEmptyString),
 });
 export type GrokSubagentManifest = typeof GrokSubagentManifest.Type;
 

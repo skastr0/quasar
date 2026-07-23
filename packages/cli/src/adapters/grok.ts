@@ -3,7 +3,14 @@ import { basename, dirname, join } from "node:path";
 
 import { collectAdapterStream, type AdapterStreamItem, type SessionAdapter } from "./types";
 import { GrokSessionId, type SessionId } from "../core/identity";
-import type { Artifact, SessionEdge, SessionEvent, ToolCall } from "../core/schemas";
+import type {
+  AgentAssignment,
+  Artifact,
+  ExecutionContextRecord,
+  SessionEdge,
+  SessionEvent,
+  ToolCall,
+} from "../core/schemas";
 import {
   artifactIdFor,
   buildSession,
@@ -83,13 +90,21 @@ type GrokEdgeDraft = Omit<
   SessionEdge,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
 >;
+type GrokExecutionContextDraft = Omit<
+  ExecutionContextRecord,
+  "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
+>;
 
 /**
  * Lineage recovered for a grok CHILD session from its parent's subagent
  * manifest: the parent's native UUIDv7 and the subagent role. Keyed by the
  * child's native UUIDv7.
  */
-type GrokLineage = { readonly parentNativeId: string; readonly subagentType: string };
+type GrokLineage = {
+  readonly parentNativeId: string;
+  readonly subagentType: string;
+  readonly effectiveModelId?: string;
+};
 type GrokLineageMap = ReadonlyMap<string, { lineage: GrokLineage; manifestPath: string }>;
 
 /**
@@ -121,6 +136,9 @@ const buildGrokLineageMap = (
       lineage: {
         parentNativeId: manifest.parent_session_id,
         subagentType: manifest.subagent_type,
+        ...(manifest.effective_model_id !== undefined
+          ? { effectiveModelId: manifest.effective_model_id }
+          : {}),
       },
       manifestPath,
     });
@@ -579,11 +597,29 @@ const buildGrokSessionFromChatPath = (
   // known child, the subagent role names the agent (e.g. "explore") and we emit
   // the canonical `subagent_of` edge below; otherwise it is a top-level session.
   const lineage = lineageMap.get(basename(sessionDir))?.lineage;
-  const agentName =
-    lineage?.subagentType
-    ?? stringValue(summary.agent_name)
-    ?? stringValue(summary.current_model_id)
-    ?? "grok-build";
+  const summaryAgentName = stringValue(summary.agent_name);
+  const agentName = lineage?.subagentType ?? summaryAgentName ?? "grok-build";
+  const assignment: AgentAssignment | undefined =
+    lineage === undefined ? undefined : { role: lineage.subagentType };
+  const executionContexts: GrokExecutionContextDraft[] = [];
+  const effectiveModel = lineage?.effectiveModelId;
+  const summaryModel = stringValue(summary.current_model_id);
+  if (effectiveModel !== undefined) {
+    executionContexts.push({
+      id: scopedId(sessionId, "execution-context", "subagent-manifest"),
+      sequence: 0,
+      scope: "session",
+      model: effectiveModel,
+    });
+  }
+  if (summaryModel !== undefined) {
+    executionContexts.push({
+      id: scopedId(sessionId, "execution-context", "summary"),
+      sequence: executionContexts.length,
+      scope: "session",
+      model: summaryModel,
+    });
+  }
   const sessionEdges: GrokEdgeDraft[] = [];
   if (lineage !== undefined) {
     // Canonical lineage signal: a `subagent_of` SessionEdge whose `fromId` is the
@@ -657,6 +693,17 @@ const buildGrokSessionFromChatPath = (
         collectAssistantToolCalls(sessionId, eventId, record, toolCallsById) ??
         collectTool(eventId, record);
       const content = grokContentProjection(record);
+      const messageModel = stringValue(record.model_id);
+      if (messageModel !== undefined) {
+        executionContexts.push({
+          id: scopedId(sessionId, "execution-context", "chat", nativeEventId ?? lineNumber),
+          sequence: index,
+          scope: "turn",
+          ...(grokTime(record) !== undefined ? { timestamp: grokTime(record) } : {}),
+          turnId: nativeEventId ?? eventId,
+          model: messageModel,
+        });
+      }
       result.push({
         id: eventId,
         nativeEventId,
@@ -733,6 +780,21 @@ const buildGrokSessionFromChatPath = (
     if (!classified.emit) return [];
     const nativeEventId = typeof record.id === "string" ? record.id : undefined;
     const eventId = eventIdFor(sessionId, index, nativeEventId ?? `events:${lineNumber}`);
+    const eventModel = type === "turn_started" ? stringValue(record.model_id) : undefined;
+    if (eventModel !== undefined) {
+      const turnNumber =
+        typeof record.turn_number === "number" && Number.isInteger(record.turn_number)
+          ? String(record.turn_number)
+          : nativeEventId ?? eventId;
+      executionContexts.push({
+        id: scopedId(sessionId, "execution-context", "turn-started", lineNumber),
+        sequence: chatLines.length + index,
+        scope: "turn",
+        ...(grokTime(record) !== undefined ? { timestamp: grokTime(record) } : {}),
+        turnId: turnNumber,
+        model: eventModel,
+      });
+    }
     const toolCallId = collectTool(eventId, record);
     const content = grokContentProjection(record);
     return [
@@ -786,6 +848,7 @@ const buildGrokSessionFromChatPath = (
   const session = buildSession({
     provider: "grok",
     agentName,
+    ...(assignment !== undefined ? { assignment } : {}),
     machine: options.machine,
     sessionId,
     nativeSessionId,
@@ -798,6 +861,7 @@ const buildGrokSessionFromChatPath = (
     events,
     toolCalls: [...toolCallsById.values()],
     sessionEdges,
+    executionContexts,
     artifacts: existsSync(hunkPath)
       ? grokArtifacts(sessionId, sessionDir, hunkPath, decodeDiagnostics)
       : [],
