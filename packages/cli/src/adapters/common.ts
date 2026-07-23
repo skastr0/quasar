@@ -10,8 +10,10 @@ import { gitRemoteForPath } from "../core/git-identity";
 import { resolveProjectIdentity } from "../core/project-normalization";
 import { redactSensitive } from "../core/redaction";
 import type {
+  AgentAssignment,
   Artifact,
   ContentBlock,
+  ExecutionContextRecord,
   MachineIdentity,
   NormalizedSession,
   Provider,
@@ -83,6 +85,7 @@ const DROPPED_NATIVE_KEYS = new Set([
 type BuildSessionArgs = {
   readonly provider: Provider;
   readonly agentName: string;
+  readonly assignment?: AgentAssignment;
   readonly machine: MachineIdentity;
   /**
    * The canonical, machine- and path-INDEPENDENT session id. The adapter
@@ -112,6 +115,10 @@ type BuildSessionArgs = {
   >[];
   readonly sessionEdges?: Omit<
     SessionEdge,
+    "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
+  >[];
+  readonly executionContexts?: Omit<
+    ExecutionContextRecord,
     "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
   >[];
   readonly usageRecords?: Omit<
@@ -924,6 +931,14 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
     agentName: args.agentName,
     projectIdentityKey: projectIdentity.projectIdentityKey,
   }));
+  const executionContexts = (args.executionContexts ?? []).map((executionContext) => ({
+    ...executionContext,
+    sessionId: id,
+    machineId: args.machine.machineId,
+    provider: args.provider,
+    agentName: args.agentName,
+    projectIdentityKey: projectIdentity.projectIdentityKey,
+  }));
   const artifacts = (args.artifacts ?? []).map((artifact) => ({
     ...artifact,
     sessionId: id,
@@ -938,6 +953,7 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
     nativeSessionId: args.nativeSessionId,
     provider: args.provider,
     agentName: args.agentName,
+    ...(args.assignment !== undefined ? { assignment: args.assignment } : {}),
     machineId: args.machine.machineId,
     host: args.machine.hostname ?? "",
     identitySchemeVersion: IDENTITY_SCHEME_VERSION,
@@ -953,6 +969,7 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
     events,
     toolCalls,
     sessionEdges,
+    executionContexts,
     usageRecords,
     artifacts,
   };

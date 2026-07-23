@@ -24,19 +24,21 @@ import type { SessionEventKind } from "../core/schemas";
  * diagnostic — never a throw, never a silent coercion). "Data structures are the
  * project; a model rambling must never be mistaken for a legitimate response."
  *
- * Grounded 2026-06-21 against the real on-disk corpus (~/.codex/sessions/**,
+ * Grounded through 2026-07-22 against the real on-disk corpus (~/.codex/sessions/**,
  * ~/.codex/archived_sessions/**). The distinct record types (top-level `type`,
  * and for `response_item`/`event_msg` the `payload.type`) measured there:
  *
  *   top-level : session_meta, compacted, turn_context
  *   response_item.* : message, function_call, function_call_output,
- *     custom_tool_call, custom_tool_call_output, reasoning, local_shell_call,
+ *     agent_message, custom_tool_call, custom_tool_call_output, reasoning, local_shell_call,
  *     local_shell_call_output, web_search_call, tool_search_call,
  *     tool_search_output
  *   event_msg.* : token_count, agent_message, user_message, task_started,
  *     task_complete, turn_aborted, exec_command_end, patch_apply_end,
  *     mcp_tool_call_end, web_search_end, thread_goal_updated, context_compacted,
- *     item_completed, thread_name_updated, collab_agent_spawn_end,
+ *     item_completed, thread_name_updated, thread_settings_applied,
+ *     sub_agent_activity, thread_rolled_back,
+ *     collab_agent_spawn_end,
  *     collab_waiting_end, error
  *
  * Signal-vs-drop decisions (every type is EXPLICIT):
@@ -54,8 +56,11 @@ import type { SessionEventKind } from "../core/schemas";
  *                          previously misclassified as tool_call)
  *  - reasoning          -> signal reasoning
  *  - token_count        -> signal usage
- *  - agent_message      -> signal message (preamble for commentary; refined
- *                          locally by the adapter)
+ *  - response_item.agent_message -> signal system (typed agent activity)
+ *  - event_msg.agent_message -> signal message (preamble for commentary;
+ *                               refined locally by the adapter)
+ *  - sub_agent_activity /
+ *    thread_rolled_back -> signal lifecycle
  *  - user_message       -> signal message
  *  - task_started /
  *    task_complete /
@@ -65,7 +70,8 @@ import type { SessionEventKind } from "../core/schemas";
  *                          standalone only in the 40% sole-carrier case)
  *  - session_meta        -> signal system
  *  - compacted (top)     -> signal summary      (FIX: was unknown pass-through)
- *  - turn_context (top)  -> drop  codex.turn_context.provider_bookkeeping
+ *  - turn_context (top)  -> capture typed execution context; no event row
+ *  - thread_settings_applied -> capture typed execution context; no event row
  *  - exec_command_end    -> drop  codex.event_msg.exec_command_end.provider_bookkeeping
  *  - patch_apply_end     -> drop  codex.event_msg.patch_apply_end.provider_bookkeeping
  *  - thread_goal_updated -> drop  codex.event_msg.thread_goal_updated.provider_bookkeeping
@@ -141,6 +147,7 @@ const CodexSessionMetaPayloadSchema = Schema.Struct({
   working_dir: Schema.optional(Schema.NullOr(Schema.String)),
   originator: Schema.optional(Schema.NullOr(Schema.String)),
   cli_version: Schema.optional(Schema.NullOr(Schema.String)),
+  model_provider: Schema.optional(Schema.NullOr(Schema.String)),
   source: Schema.optional(Schema.NullOr(CodexSourceSchema)),
 });
 
@@ -184,6 +191,15 @@ const CodexMessagePayloadSchema = Schema.Struct({
   // Measured roles: user, assistant, developer.
   role: Schema.optional(Schema.NullOr(Schema.String)),
   content: Schema.optional(Schema.NullOr(CodexMessageContentSchema)),
+});
+
+const CodexResponseAgentMessagePayloadSchema = Schema.Struct({
+  type: Schema.Literal("agent_message"),
+  event_id: Schema.optional(Schema.NullOr(Schema.String)),
+  occurred_at_ms: Schema.optional(Schema.NullOr(Schema.Number)),
+  agent_thread_id: Schema.optional(Schema.NullOr(Schema.String)),
+  agent_path: Schema.optional(Schema.NullOr(Schema.String)),
+  kind: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
 const CodexFunctionCallPayloadSchema = Schema.Struct({
@@ -270,10 +286,20 @@ const CodexToolSearchOutputPayloadSchema = Schema.Struct({
 
 const CodexTokenUsageSchema = Schema.Struct({
   input_tokens: Schema.optional(Schema.NullOr(Schema.Number)),
+  inputTokens: Schema.optional(Schema.NullOr(Schema.Number)),
   cached_input_tokens: Schema.optional(Schema.NullOr(Schema.Number)),
+  cache_write_input_tokens: Schema.optional(Schema.NullOr(Schema.Number)),
+  cache_creation_input_tokens: Schema.optional(Schema.NullOr(Schema.Number)),
+  cacheCreationInputTokens: Schema.optional(Schema.NullOr(Schema.Number)),
+  cache_read_input_tokens: Schema.optional(Schema.NullOr(Schema.Number)),
+  cacheReadInputTokens: Schema.optional(Schema.NullOr(Schema.Number)),
   output_tokens: Schema.optional(Schema.NullOr(Schema.Number)),
+  outputTokens: Schema.optional(Schema.NullOr(Schema.Number)),
   reasoning_output_tokens: Schema.optional(Schema.NullOr(Schema.Number)),
+  reasoning_tokens: Schema.optional(Schema.NullOr(Schema.Number)),
+  reasoningTokens: Schema.optional(Schema.NullOr(Schema.Number)),
   total_tokens: Schema.optional(Schema.NullOr(Schema.Number)),
+  totalTokens: Schema.optional(Schema.NullOr(Schema.Number)),
 });
 
 const CodexTokenCountInfoSchema = Schema.Struct({
@@ -287,6 +313,8 @@ const CodexTokenCountPayloadSchema = Schema.Struct({
   info: Schema.optional(Schema.NullOr(CodexTokenCountInfoSchema)),
   rate_limits: Schema.optional(Schema.Unknown),
   model: Schema.optional(Schema.NullOr(Schema.String)),
+  model_provider: Schema.optional(Schema.NullOr(Schema.String)),
+  modelProvider: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
 const CodexAgentMessagePayloadSchema = Schema.Struct({
@@ -328,6 +356,20 @@ const CodexTurnAbortedPayloadSchema = Schema.Struct({
   reason: Schema.optional(Schema.NullOr(Schema.String)),
   completed_at: Schema.optional(Schema.NullOr(Schema.Number)),
   duration_ms: Schema.optional(Schema.NullOr(Schema.Number)),
+});
+
+const CodexSubAgentActivityPayloadSchema = Schema.Struct({
+  type: Schema.Literal("sub_agent_activity"),
+  event_id: Schema.optional(Schema.NullOr(Schema.String)),
+  occurred_at_ms: Schema.optional(Schema.NullOr(Schema.Number)),
+  agent_thread_id: Schema.optional(Schema.NullOr(Schema.String)),
+  agent_path: Schema.optional(Schema.NullOr(Schema.String)),
+  kind: Schema.optional(Schema.NullOr(Schema.String)),
+});
+
+const CodexThreadRolledBackPayloadSchema = Schema.Struct({
+  type: Schema.Literal("thread_rolled_back"),
+  num_turns: Schema.optional(Schema.NullOr(Schema.Number)),
 });
 
 // mcp_tool_call_end is a DUAL-CARRIER result. Measured 2026-06-21: 60% of
@@ -439,11 +481,31 @@ export const CodexCompactedSchema = Schema.Struct({
   payload: Schema.optional(Schema.NullOr(CodexCompactedPayloadSchema)),
 });
 
+const CodexCollaborationModeSchema = Schema.Struct({
+  mode: Schema.optional(Schema.NullOr(Schema.String)),
+  settings: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        reasoning_effort: Schema.optional(Schema.NullOr(Schema.String)),
+      }),
+    ),
+  ),
+});
+
+const CodexPermissionProfileSchema = Schema.Struct({
+  type: Schema.optional(Schema.NullOr(Schema.String)),
+});
+
 const CodexTurnContextPayloadSchema = Schema.Struct({
   turn_id: Schema.optional(Schema.NullOr(Schema.String)),
   cwd: Schema.optional(Schema.NullOr(Schema.String)),
   model: Schema.optional(Schema.NullOr(Schema.String)),
+  effort: Schema.optional(Schema.NullOr(Schema.String)),
   approval_policy: Schema.optional(Schema.NullOr(Schema.String)),
+  collaboration_mode: Schema.optional(Schema.NullOr(CodexCollaborationModeSchema)),
+  multi_agent_mode: Schema.optional(Schema.NullOr(Schema.String)),
+  personality: Schema.optional(Schema.NullOr(Schema.String)),
+  permission_profile: Schema.optional(Schema.NullOr(CodexPermissionProfileSchema)),
 });
 
 export const CodexTurnContextSchema = Schema.Struct({
@@ -451,6 +513,25 @@ export const CodexTurnContextSchema = Schema.Struct({
   timestamp: Schema.optional(Schema.NullOr(Schema.String)),
   payload: Schema.optional(Schema.NullOr(CodexTurnContextPayloadSchema)),
 });
+export type CodexTurnContext = typeof CodexTurnContextSchema.Type;
+
+const CodexThreadSettingsSchema = Schema.Struct({
+  model: Schema.optional(Schema.NullOr(Schema.String)),
+  model_provider_id: Schema.optional(Schema.NullOr(Schema.String)),
+  service_tier: Schema.optional(Schema.NullOr(Schema.String)),
+  approval_policy: Schema.optional(Schema.NullOr(Schema.String)),
+  reasoning_effort: Schema.optional(Schema.NullOr(Schema.String)),
+  collaboration_mode: Schema.optional(Schema.NullOr(CodexCollaborationModeSchema)),
+  personality: Schema.optional(Schema.NullOr(Schema.String)),
+  permission_profile: Schema.optional(Schema.NullOr(CodexPermissionProfileSchema)),
+});
+
+export const CodexThreadSettingsAppliedPayloadSchema = Schema.Struct({
+  type: Schema.Literal("thread_settings_applied"),
+  thread_settings: CodexThreadSettingsSchema,
+});
+export type CodexThreadSettingsAppliedPayload =
+  typeof CodexThreadSettingsAppliedPayloadSchema.Type;
 
 // ---------------------------------------------------------------------------
 // Declarative signal/drop dispatch.
@@ -569,13 +650,18 @@ export const CODEX_RECORD_REGISTRY: ReadonlyMap<string, CodexRecordEntry> = new 
     "turn_context",
     {
       schema: asSchema(CodexTurnContextSchema),
-      // Per-turn provider configuration snapshot — bookkeeping, no turn content.
-      verdict: dropReason("codex.turn_context.provider_bookkeeping"),
+      // Captured by the adapter as a typed execution context; never an event.
+      verdict: dropReason("codex.turn_context.captured_execution_context"),
       decodeFailedName: "codex.turn_context.decode_failed",
     },
   ],
   // response_item.* records.
   responseItemEntry("message", asSchema(CodexMessagePayloadSchema), signalKind("message")),
+  responseItemEntry(
+    "agent_message",
+    asSchema(CodexResponseAgentMessagePayloadSchema),
+    signalKind("system"),
+  ),
   responseItemEntry("function_call", asSchema(CodexFunctionCallPayloadSchema), signalKind("tool_call")),
   responseItemEntry(
     "function_call_output",
@@ -610,6 +696,22 @@ export const CODEX_RECORD_REGISTRY: ReadonlyMap<string, CodexRecordEntry> = new 
   eventMsgEntry("task_started", asSchema(CodexTaskStartedPayloadSchema), signalKind("lifecycle")),
   eventMsgEntry("task_complete", asSchema(CodexTaskCompletePayloadSchema), signalKind("lifecycle")),
   eventMsgEntry("turn_aborted", asSchema(CodexTurnAbortedPayloadSchema), signalKind("lifecycle")),
+  eventMsgEntry(
+    "sub_agent_activity",
+    asSchema(CodexSubAgentActivityPayloadSchema),
+    signalKind("lifecycle"),
+  ),
+  eventMsgEntry(
+    "thread_rolled_back",
+    asSchema(CodexThreadRolledBackPayloadSchema),
+    signalKind("lifecycle"),
+  ),
+  eventMsgEntry(
+    "thread_settings_applied",
+    asSchema(CodexThreadSettingsAppliedPayloadSchema),
+    // Captured by the adapter as a typed execution context; never an event.
+    dropReason("codex.event_msg.thread_settings_applied.captured_execution_context"),
+  ),
   eventMsgEntry(
     "mcp_tool_call_end",
     asSchema(CodexMcpToolCallEndPayloadSchema),

@@ -55,6 +55,7 @@
           "timestamp": "1970-01-01T00:00:01.001Z"
         }
       ],
+      "executionContexts": [],
       "host": "test-host",
       "id": "kimi:28ea89d550b9357ab9397417fc15afc4",
       "identitySchemeVersion": 1,

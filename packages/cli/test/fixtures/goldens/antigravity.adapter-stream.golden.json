@@ -53,6 +53,7 @@
           "timestamp": "2026-06-11T00:00:00.000Z"
         }
       ],
+      "executionContexts": [],
       "host": "test-host",
       "id": "antigravity:c72403d626d5a091447e25d4c19cc607",
       "identitySchemeVersion": 1,
