@@ -18,6 +18,7 @@ export interface SessionIngestOutcome {
   readonly messagesWritten: number;
   readonly toolCallsWritten: number;
   readonly jobsEnqueued: number;
+  /** Policy counts for the full mapped session, distinct from row-delta writes. */
   readonly searchDocuments?: SearchDocumentPolicyStats;
   readonly delta?: {
     readonly messagesDeleted: number;
