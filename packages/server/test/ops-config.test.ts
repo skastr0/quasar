@@ -28,7 +28,12 @@ describe("server ops config", () => {
     );
     expect(dockerfile).toContain("COPY scripts ./scripts");
     expect(dockerfile).toContain('CMD ["bun", "packages/server/src/main.ts"');
-    expect(dockerfile).toContain("/health");
+    // Docker health is readiness-only: /health and /status may query live
+    // storage/worker state and remain operator diagnostic endpoints.
+    expect(dockerfile).toContain("/ready");
+    expect(dockerfile).not.toMatch(/HEALTHCHECK[\\s\\S]*\/health/);
+    expect(compose).toContain('test: ["CMD", "curl", "-fsS", "http://127.0.0.1:6180/ready"]');
+    expect(compose).not.toMatch(/healthcheck:[\\s\\S]*\/health/);
     expect(dockerfile).not.toContain("packages/server/src/cli.ts");
   });
 
