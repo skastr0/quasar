@@ -129,7 +129,6 @@ const semanticSearch = (text: string, filters: ResourceFilters, candidateLimit: 
   });
 
 const RRF_K = 60;
-const MAX_SEARCH_CANDIDATES = 256;
 
 const fuseByReciprocalRank = (lexical: readonly SearchHit[], semantic: readonly SearchHit[]) => {
   const fused = new Map<string, { score: number; row: SearchHit["row"] }>();
@@ -163,9 +162,7 @@ const executeSearch = (request: Extract<ResourceQuery, { readonly kind: "search"
       yield* recordSearchReceiptMetrics(receipt);
       return { kind: "search" as const, matches: result.rows, page: result.page, receipt, degraded: false };
     }
-    const hasSessionFilters = request.filters.sessionId !== undefined || request.filters.agentName !== undefined
-      || request.filters.agentRole !== undefined || request.filters.model !== undefined || request.filters.modelProvider !== undefined;
-    const candidateLimit = Math.min(MAX_SEARCH_CANDIDATES, hasSessionFilters ? MAX_SEARCH_CANDIDATES : Math.max(target, 50));
+    const candidateLimit = Math.max(target, 50);
     if (request.mode === "semantic") {
       const searchStarted = performance.now();
       const outcome = yield* semanticSearch(request.text, request.filters, candidateLimit).pipe(Effect.withSpan("search.semantic"));

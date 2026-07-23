@@ -134,4 +134,22 @@ describe("HTTP server resources", () => {
       expect(legacy.status).toBe(404);
     } finally { proc.kill(); await proc.exited; }
   }, 15_000);
+
+  test("search excerpts preserve UTF-8 boundaries inside the byte limit", async () => {
+    const dir = tempDir();
+    const sqlite = join(dir, "quasar.sqlite");
+    const text = `${"a".repeat(1_999)}€ boundary`;
+    await seed(sqlite, [mappedSession({ firstText: text })]);
+    const { proc, base } = startServer(sqlite);
+    try {
+      await waitFor(`${base}/health`);
+      const response = await fetch(`${base}/search/lexical?q=boundary`).then((result) => result.json());
+      const row = response.data.matches[0].row as { text: string; textBytes: number; textTruncated: boolean };
+      expect(row.text).toBe("a".repeat(1_999));
+      expect(Buffer.byteLength(row.text)).toBeLessThanOrEqual(2_000);
+      expect(row.text).not.toContain("�");
+      expect(row.textBytes).toBe(Buffer.byteLength(text));
+      expect(row.textTruncated).toBe(true);
+    } finally { proc.kill(); await proc.exited; }
+  }, 15_000);
 });

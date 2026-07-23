@@ -190,9 +190,11 @@ const query = (
     readonly mode: "lexical" | "semantic" | "fusion";
     readonly filters?: Record<string, unknown>;
     readonly limit?: number;
+    readonly offset?: number;
   },
 ) => {
   const params = new URLSearchParams({ q: options.text, limit: String(options.limit ?? 10) });
+  if (options.offset !== undefined) params.set("offset", String(options.offset));
   for (const [key, value] of Object.entries(options.filters ?? {})) params.set(key, String(value));
   return fetchJson(`${base}/search/${options.mode}?${params}`);
 };
@@ -313,6 +315,22 @@ describe("semantic serving from the resident matrix", () => {
       expect(fusionKeys[0]).toBe("codex:alpha:0:assistant");
       expect(fusionKeys.length).toBe(3);
       expect(fusion.body.data.matches[0].score).toBeGreaterThanOrEqual(fusion.body.data.matches[1].score);
+
+      // Offset paging must widen both candidate legs beyond the requested page;
+      // a fixed 256-hit candidate window would make this page empty.
+      for (const mode of ["semantic", "fusion"] as const) {
+        const deepPage = await query(base, {
+          text: "query angle=0.1",
+          mode,
+          limit: 2,
+          offset: 256,
+        });
+        expect(deepPage.status).toBe(200);
+        expect(deepPage.body.data.page).toEqual({ limit: 2, offset: 256, nextOffset: 258 });
+        expect(deepPage.body.data.matches).toHaveLength(2);
+        expect(deepPage.body.data.matches.every((item: { row: { sessionId: string } }) => item.row.sessionId === "codex:distractors"))
+          .toBe(true);
+      }
 
       // Embedder loss while the matrix is resident: semantic mode is
       // EmbeddingUnavailable (503), never SemanticDisabled, and lexical is untouched.

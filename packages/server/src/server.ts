@@ -534,12 +534,24 @@ const toolCall = Effect.gen(function* () {
 
 const SEARCH_TEXT_MAXIMUM_BYTES = 2_000;
 
+const utf8PrefixAtMost = (text: string, maximumBytes: number) => {
+  let bytes = 0;
+  let end = 0;
+  for (const codePoint of text) {
+    const codePointBytes = Buffer.byteLength(codePoint);
+    if (bytes + codePointBytes > maximumBytes) break;
+    bytes += codePointBytes;
+    end += codePoint.length;
+  }
+  return text.slice(0, end);
+};
+
 const searchResultRow = (match: { readonly key: string; readonly score: number; readonly row: Record<string, unknown> }) => {
   const text = String(match.row.text ?? "");
   const textBytes = Buffer.byteLength(text);
   const truncated = textBytes > SEARCH_TEXT_MAXIMUM_BYTES;
   const excerpt = truncated
-    ? Buffer.from(text).subarray(0, SEARCH_TEXT_MAXIMUM_BYTES).toString("utf8")
+    ? utf8PrefixAtMost(text, SEARCH_TEXT_MAXIMUM_BYTES)
     : text;
   return {
     key: match.key,
