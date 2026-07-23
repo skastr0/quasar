@@ -253,6 +253,60 @@ describe("ingestRemote", () => {
     }
   });
 
+  test("remote ingest retries an uncertain successful acknowledgement with a null JSON body", async () => {
+    adaptersByProvider.set("claude", adapterFor([session("remote-null-ack")]));
+    let writeAttempts = 0;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: async (request) => {
+        const path = new URL(request.url).pathname;
+        if (path === "/ingest/fingerprint") {
+          return Response.json({ ok: true, data: { unchanged: false } });
+        }
+        if (path === "/ingest/run") {
+          return Response.json({ ok: true, data: {} });
+        }
+        writeAttempts += 1;
+        if (writeAttempts === 1) return Response.json(null);
+        const payload = await request.json() as {
+          readonly session: {
+            readonly session: { readonly sessionId: string };
+            readonly messages: readonly unknown[];
+            readonly toolCalls: readonly unknown[];
+          };
+        };
+        return Response.json({
+          ok: true,
+          data: {
+            outcome: {
+              sessionId: payload.session.session.sessionId,
+              status: "ok",
+              messagesWritten: payload.session.messages.length,
+              toolCallsWritten: payload.session.toolCalls.length,
+              jobsEnqueued: payload.session.messages.length,
+            },
+          },
+        });
+      },
+    });
+
+    try {
+      const reports = await ingestRemote(
+        { provider: "claude" },
+        `http://127.0.0.1:${server.port}`,
+      );
+
+      expect(writeAttempts).toBe(2);
+      expect(reports[0]).toMatchObject({
+        sessionsWritten: 1,
+        sessionsFailed: 0,
+      });
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("completed lifecycle acknowledgement uncertainty does not rewrite a successful provider run", async () => {
     adaptersByProvider.set("claude", adapterFor([session("completed-ack")]));
     const runs: Array<Record<string, unknown>> = [];
