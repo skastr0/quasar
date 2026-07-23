@@ -81,6 +81,7 @@ const session = (id = "session-a"): NormalizedSession => ({
     },
   ],
   sessionEdges: [],
+  executionContexts: [],
   usageRecords: [],
   artifacts: [],
 });

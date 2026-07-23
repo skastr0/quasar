@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { adaptersByProvider } from "../src/adapters/registry";
 import type { AdapterDiscoverOptions, SessionAdapter } from "../src/adapters/types";
 import { ingestRemote, loadManifest } from "../src/ingest";
+import { NORMALIZATION_VERSION } from "../src/normalization-version";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -58,6 +59,7 @@ const session = (id: string, sourcePath: string): NormalizedSession => ({
   ],
   toolCalls: [],
   sessionEdges: [],
+  executionContexts: [],
   usageRecords: [],
   artifacts: [],
 });
@@ -258,7 +260,7 @@ describe("ingest manifest", () => {
       );
 
       expect(opened).toEqual([physicalPath]);
-      expect(loadManifest(manifestFilePath)[physicalPath]?.normalizationVersion).toBe(2);
+      expect(loadManifest(manifestFilePath)[physicalPath]?.normalizationVersion).toBe(NORMALIZATION_VERSION);
     } finally {
       server.stop(true);
     }
@@ -323,7 +325,7 @@ describe("ingest manifest", () => {
       const st = statSync(physicalPath);
       expect(saved[physicalPath]?.mtimeMs).toBe(st.mtimeMs);
       expect(saved[physicalPath]?.size).toBe(st.size);
-      expect(saved[physicalPath]?.normalizationVersion).toBe(2);
+      expect(saved[physicalPath]?.normalizationVersion).toBe(NORMALIZATION_VERSION);
     } finally {
       server.stop(true);
     }

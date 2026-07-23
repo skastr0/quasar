@@ -446,6 +446,7 @@ describe("work-item regression: event-level kind=parent edge must not corrupt pa
       events: [],
       toolCalls: [],
       usageRecords: [],
+      executionContexts: [],
       artifacts: [],
       sessionEdges: [
         {
@@ -488,6 +489,7 @@ describe("work-item regression: event-level kind=parent edge must not corrupt pa
       events: [],
       toolCalls: [],
       usageRecords: [],
+      executionContexts: [],
       artifacts: [],
       sessionEdges: [
         {
