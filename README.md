@@ -1,6 +1,7 @@
 # Quasar
 
-Status: pre-release, under an active v2 rebuild.
+Status: the 0.5 CLI and local-server contract are operational; Quasar remains
+pre-1.0 while its storage and protocol contracts settle.
 
 Quasar is a local-first repository for AI agent sessions. It ingests local
 agent histories, normalizes them into session and tool-call rows, and serves
@@ -57,7 +58,7 @@ Tailscale Service hostname for `svc:quasar`, not the Mac mini device IP. Remote
 write ingest and daemon installs also require `ingestToken` in that config, or
 `QUASAR_INGEST_TOKEN` / `--ingest-token`.
 
-Once published, install the CLI package with:
+Install the CLI package with:
 
 ```bash
 npm install -g @skastr0/quasar-cli

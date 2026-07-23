@@ -8,6 +8,36 @@ formats may still change.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-23
+
+### Added
+
+- First-class paginated HTTP resources and CLI reads for sessions, messages,
+  tool calls, projects, and lexical, semantic, and fusion search.
+- A local `quasar query` composition contract with typed filters, projections,
+  field selection, cursor pagination, schema discovery, and JSON pipeline input.
+- Normalized model, model-provider, assignment, execution-context, usage,
+  artifact, event, and provenance data for provider sessions, including Codex.
+- Durable ingest-run inspection and idempotent source-fingerprint replay.
+
+### Changed
+
+- CLI and TUI reads now share one canonical GET-resource adapter. Bulk tool-call
+  reads remain body-free; full structured input and output are fetched by ID.
+- Session re-ingest applies convergent row-level diffs and leaves incomplete
+  provider walks replayable without rebuilding or duplicating the database.
+- Search and filtered read paths use serving-aligned SQLite indexes and avoid
+  temporary sorts; semantic search remains a resident exact-scan vector matrix.
+
+### Fixed
+
+- Restored `/sessions`, `/messages`, `/tool-calls`, and `/search/*` as stable
+  resource endpoints while keeping the redundant HTTP `POST /query` absent.
+- Valid session ingest envelopes larger than Bun's default request-body limit
+  now reach Quasar's measured-data validation boundary.
+- Bun connection-refused, timeout, reset, and closed-socket failures use one
+  bounded three-attempt retry policy across CLI resource reads.
+
 ## [0.3.4] - 2026-07-07
 
 ### Changed

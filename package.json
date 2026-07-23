@@ -39,9 +39,10 @@
     "build:npm-packages": "bun run --cwd packages/cli build:npm-packages",
     "install:dev": "bun run --cwd packages/cli build && bun run --cwd packages/cli install:dev",
     "pack:dry-run": "bun scripts/pack-npm.mjs",
+    "verify:npm-runtime-graph": "bun scripts/verify-npm-runtime-graph.mjs",
     "lint:npm-packages": "bun scripts/lint-npm-packages.mjs",
     "publish:npm": "bun scripts/publish-npm.mjs",
-    "release:check": "bun run verify && bun run build && bun run build:npm-packages && bun run pack:dry-run && bun audit && bun run lint:npm-packages"
+    "release:check": "bun run verify && bun run build && bun run build:npm-packages && bun run pack:dry-run && bun run verify:npm-runtime-graph && bun run lint:npm-packages"
   },
   "devDependencies": {
     "publint": "^0.3.21",

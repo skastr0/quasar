@@ -1,9 +1,5 @@
 # Release Checklist
 
-Publishing is paused until the v2 product gates are green (see
-`docs/architecture/quasar-effect-server-plan-2026-06-18.md`). Public artifacts
-must describe a working system, not aspirations.
-
 Quasar uses CI-first npm publishing for the CLI package. Do not publish locally
 unless the maintainer explicitly approves a specific package/version exception.
 
@@ -35,18 +31,22 @@ Each trusted publisher must match:
 
 Use `npm trust list <package>` before tagging when the packages exist.
 
-## First Publish
+## Release
 
-1. Verify the target package names and npm scope ownership.
-2. Configure the GitHub `release` environment with maintainer approval.
-3. Configure npm trusted publishers for every CLI/platform package.
-4. Run `bun run verify`.
-5. Run `bun run --cwd packages/cli build:npm-packages`.
-6. Inspect `npm pack --dry-run` for `.release/npm/*` and `packages/cli`.
-7. Commit the release prep.
-8. Push the repository and release tag only after explicit maintainer approval.
-9. Approve the protected `release` environment for the publish workflow.
-10. Verify clean installs:
+1. Confirm the target version is unpublished for the CLI wrapper and all four
+   platform packages.
+2. Set the CLI package version, its four optional platform dependency versions,
+   and the CLI runtime version to the same value.
+3. Regenerate `bun.lock`; never hand-edit its package resolutions.
+4. Run `bun install --frozen-lockfile --cpu='*' --os='*'`.
+5. Run `bun run release:check`.
+6. Commit the release prep and open a pull request to `main`.
+7. Require green CI on the pull request and again on the merged `main` commit.
+8. Create and push the annotated tag `v<package-version>` at that merged commit.
+   The publish workflow rejects tags that do not exactly match package metadata.
+9. Approve the protected `release` environment and require the publish workflow
+   to finish successfully.
+10. Verify all five exact registry versions, provenance, and clean installs:
 
 ```bash
 npx --package @skastr0/quasar-cli quasar --version
