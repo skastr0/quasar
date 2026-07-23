@@ -213,11 +213,14 @@ const postMappedSessionOnce = async (
     body: JSON.stringify({ session: mapped }),
     signal: AbortSignal.timeout(options.timeoutMs ?? defaultHttpTimeoutMs),
   });
-  let body: { ok?: boolean; data?: { outcome?: SessionIngestOutcome }; error?: { message?: string } };
+  let body: { ok?: boolean; data?: { outcome?: SessionIngestOutcome }; error?: { message?: string } } | null;
   try {
-    body = await response.json() as { ok?: boolean; data?: { outcome?: SessionIngestOutcome }; error?: { message?: string } };
+    body = await response.json() as { ok?: boolean; data?: { outcome?: SessionIngestOutcome }; error?: { message?: string } } | null;
   } catch {
-    throw new RemoteIngestError(`remote ingest returned invalid JSON with HTTP ${response.status}`, response.status >= 500);
+    throw new RemoteIngestError(`remote ingest returned invalid JSON with HTTP ${response.status}`, response.ok || response.status >= 500);
+  }
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    throw new RemoteIngestError(`remote ingest returned a non-object JSON body with HTTP ${response.status}`, response.ok || response.status >= 500);
   }
   if (!response.ok || body.ok === false || body.data?.outcome === undefined) {
     throw new RemoteIngestError(
@@ -262,7 +265,15 @@ export const postFingerprintProbe = async (
     }),
     signal: AbortSignal.timeout(options.timeoutMs ?? defaultHttpTimeoutMs),
   });
-  const body = await response.json() as { ok?: boolean; data?: { unchanged?: boolean }; error?: { message?: string } };
+  let body: { ok?: boolean; data?: { unchanged?: boolean }; error?: { message?: string } } | null;
+  try {
+    body = await response.json() as { ok?: boolean; data?: { unchanged?: boolean }; error?: { message?: string } } | null;
+  } catch {
+    throw new RemoteIngestError(`remote fingerprint probe returned invalid JSON with HTTP ${response.status}`, response.ok || response.status >= 500);
+  }
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    throw new RemoteIngestError(`remote fingerprint probe returned a non-object JSON body with HTTP ${response.status}`, response.ok || response.status >= 500);
+  }
   if (!response.ok || body.ok === false || typeof body.data?.unchanged !== "boolean") {
     throw new RemoteIngestError(body.error?.message ?? `remote fingerprint probe failed with HTTP ${response.status}`, response.status >= 500);
   }
@@ -297,11 +308,14 @@ const postIngestRunOnce = async (
     body: JSON.stringify({ run }),
     signal: AbortSignal.timeout(options.timeoutMs ?? defaultHttpTimeoutMs),
   });
-  let body: { ok?: boolean; error?: { message?: string } };
+  let body: { ok?: boolean; error?: { message?: string } } | null;
   try {
-    body = await response.json() as { ok?: boolean; error?: { message?: string } };
+    body = await response.json() as { ok?: boolean; error?: { message?: string } } | null;
   } catch {
-    throw new RemoteIngestError(`remote ingest run returned invalid JSON with HTTP ${response.status}`, response.status >= 500);
+    throw new RemoteIngestError(`remote ingest run returned invalid JSON with HTTP ${response.status}`, response.ok || response.status >= 500);
+  }
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    throw new RemoteIngestError(`remote ingest run returned a non-object JSON body with HTTP ${response.status}`, response.ok || response.status >= 500);
   }
   if (!response.ok || body.ok === false) {
     throw new RemoteIngestError(body.error?.message ?? `remote ingest run failed with HTTP ${response.status}`, response.status >= 500);
