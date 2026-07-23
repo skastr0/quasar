@@ -862,6 +862,66 @@ describe("LocalStore", () => {
     }
   });
 
+  test("served read queries use their ordering indexes without temp sorts", async () => {
+    const path = sqlitePath();
+    await withStore(
+      path,
+      (store) =>
+        Effect.gen(function* () {
+          yield* store.upsertSession(mappedSession());
+        }),
+    );
+
+    const db = new Database(path, { readonly: true });
+    try {
+      const sessionPlan = db.query(
+        `EXPLAIN QUERY PLAN
+         SELECT session_id
+         FROM sessions
+         ORDER BY COALESCE(updated_at, started_at, '') DESC, session_id ASC
+         LIMIT ? OFFSET ?`,
+      ).all(10, 0) as Array<{ readonly detail: string }>;
+      const sessionDetails = sessionPlan.map((row) => row.detail);
+      expect(sessionDetails.some((detail) => detail.includes("sessions_by_recency_order"))).toBe(true);
+      expect(sessionDetails.some((detail) => detail.includes("USE TEMP B-TREE"))).toBe(false);
+
+      const lexicalPlan = db.query(
+        `EXPLAIN QUERY PLAN
+         SELECT
+           messages_fts.key,
+           bm25(messages_fts) AS rank,
+           m.session_id,
+           m.seq,
+           m.role,
+           m.project_key,
+           s.provider,
+           m.text,
+           m.content_hash,
+           s.title,
+           s.agent_name,
+           s.assignment_role,
+           s.model,
+           s.model_provider,
+           m.ts
+         FROM messages_fts
+         JOIN messages AS m
+           ON m.session_id = messages_fts.session_id
+          AND m.seq = messages_fts.seq
+          AND m.role = messages_fts.role
+         JOIN sessions AS s
+           ON s.session_id = m.session_id
+         WHERE messages_fts MATCH ?
+         ORDER BY messages_fts.rank ASC
+         LIMIT ? OFFSET ?`,
+      ).all(fts5QueryForText("message"), 10, 0) as Array<{ readonly detail: string }>;
+      const lexicalDetails = lexicalPlan.map((row) => row.detail);
+      expect(lexicalDetails.some((detail) => detail.includes("VIRTUAL TABLE INDEX 32"))).toBe(true);
+      expect(lexicalDetails.some((detail) => detail.includes("USE TEMP B-TREE"))).toBe(false);
+    } finally {
+      db.close();
+    }
+  });
+
   test("reads a single tool call by id", async () => {
     const path = sqlitePath();
     const toolCall = await withStore(

@@ -722,6 +722,8 @@ const migrate = (db: Database): readonly StoreMigrationLog[] => {
     CREATE INDEX IF NOT EXISTS sessions_by_project ON sessions(project_key, updated_at);
     CREATE INDEX IF NOT EXISTS sessions_by_provider ON sessions(provider, updated_at);
     CREATE INDEX IF NOT EXISTS sessions_by_source ON sessions(source_path, source_fingerprint);
+    CREATE INDEX IF NOT EXISTS sessions_by_recency_order
+      ON sessions(COALESCE(updated_at, started_at, '') DESC, session_id ASC);
     CREATE TABLE IF NOT EXISTS messages (
       session_id TEXT NOT NULL,
       seq INTEGER NOT NULL,
@@ -2409,7 +2411,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                   JOIN sessions AS s
                     ON s.session_id = m.session_id
                   WHERE ${filters.join(" AND ")}
-                  ORDER BY rank ASC, messages_fts.key ASC
+                  ORDER BY messages_fts.rank ASC
                   LIMIT ? OFFSET ?`,
                 )
                 .all(...args, positiveInt(limit, 10), rowOffset) as Array<{
