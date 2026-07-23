@@ -36,9 +36,18 @@ const mappedSession = (overrides: { readonly fingerprint?: string; readonly firs
     sourceFingerprint: overrides.fingerprint ?? "fingerprint-http",
     host: "host-http",
     identitySchemeVersion: 1,
-    normalizationVersion: 2,
+    normalizationVersion: 4,
+    model: "gpt-5.6-sol",
+    modelProvider: "openai",
+    assignmentRole: "builder",
     messageCount: 2,
     toolCallCount: 1,
+  },
+  assignment: {
+    nickname: "server-query",
+    role: "builder",
+    path: "/root/server-query",
+    depth: 1,
   },
   messages: [
     {
@@ -85,15 +94,17 @@ const mappedSession = (overrides: { readonly fingerprint?: string; readonly firs
   executionContexts: [],
 });
 
-const seed = (sqlite: string) =>
+const seedSessions = (sqlite: string, sessions: readonly MappedSession[]) =>
   Effect.runPromise(
     Effect.scoped(
       Effect.gen(function* () {
         const store = yield* LocalStore;
-        yield* store.upsertSession(mappedSession());
+        for (const session of sessions) yield* store.upsertSession(session);
       }).pipe(Effect.provide(makeLocalStoreLayer(sqlite))),
     ),
   );
+
+const seed = (sqlite: string) => seedSessions(sqlite, [mappedSession()]);
 
 const waitFor = async (url: string) => {
   const deadline = Date.now() + 5_000;
@@ -108,6 +119,19 @@ const waitFor = async (url: string) => {
   }
   throw new Error(`server did not become ready: ${url}`);
 };
+
+const postQuery = (
+  port: number,
+  body: Record<string, unknown>,
+) => fetch(`http://127.0.0.1:${port}/query`, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify(body),
+});
+
+const queryBase = {
+  protocolVersion: "quasar.query/v1",
+} as const;
 
 describe("HTTP server", () => {
   test("accepts authenticated remote session ingest, skips unchanged fingerprints, and honors force", async () => {
@@ -145,7 +169,13 @@ describe("HTTP server", () => {
         headers: { "content-type": "application/json", "x-quasar-ingest-token": token },
         body: JSON.stringify({ session: mappedSession({ firstText: "forced http rewrite" }) }),
       }).then((response) => response.json());
-      const messages = await fetch(`http://127.0.0.1:${port}/messages?sessionId=codex%3Asession-http`).then((response) => response.json());
+      const messages = await postQuery(port, {
+        ...queryBase,
+        kind: "messages",
+        filters: { sessionId: "codex:session-http" },
+        projection: { detail: "summary", fields: ["text"] },
+        page: { limit: 100 },
+      }).then((response) => response.json());
       const status = await fetch(`http://127.0.0.1:${port}/status`).then((response) => response.json());
 
       expect(first.data.outcome.status).toBe("ok");
@@ -154,7 +184,7 @@ describe("HTTP server", () => {
       expect(first.data.outcome.jobsEnqueued).toBe(2);
       expect(second.data.outcome.status).toBe("skipped");
       expect(forced.data.outcome.status).toBe("ok");
-      expect(messages.data.rows.map((row: { text: string }) => row.text)).toEqual(["forced http rewrite", "assistant-only http memory"]);
+      expect(messages.items.map((row: { text: string }) => row.text)).toEqual(["forced http rewrite", "assistant-only http memory"]);
       // 2 jobs from the first ingest + 1 for the forced rewrite's new content
       // hash (the unchanged row's key dedups; the stale-hash job later no-ops
       // against the content-hash guard on message_vectors writes).
@@ -224,31 +254,67 @@ describe("HTTP server", () => {
         }),
       });
       // The boundary rejection must have written zero rows: nothing persisted.
-      const sessionsAfter = await fetch(`http://127.0.0.1:${port}/sessions`).then((r) => r.json());
+      const sessionsAfter = await postQuery(port, {
+        ...queryBase,
+        kind: "sessions",
+        projection: { detail: "summary", fields: ["sessionId"] },
+        page: { limit: 100 },
+      }).then((response) => response.json());
 
       expect(missingToken.status).toBe(401);
       expect(malformed.status).toBe(400);
       expect(wrongShape.status).toBe(400);
       expect(unknownProviderResponse.status).toBe(400);
       expect(unknownRoleResponse.status).toBe(400);
-      expect(sessionsAfter.data.rows).toEqual([]);
+      expect(sessionsAfter.items).toEqual([]);
     } finally {
       proc.kill();
       await proc.exited;
     }
   });
 
-  test("serves local read APIs from SQLite truth", async () => {
+  test("serves the strict projected query contract from SQLite truth", async () => {
     const dir = tempDir();
     const sqlite = join(dir, "quasar.sqlite");
-    await seed(sqlite);
+    const inputText = JSON.stringify({ payload: "i".repeat(50_000) });
+    const outputText = JSON.stringify({ payload: "o".repeat(50_000) });
+    const rich = mappedSession();
+    const minimal: MappedSession = {
+      project: rich.project,
+      session: {
+        ...rich.session,
+        sessionId: "codex:session-minimal",
+        agentName: "codex-minimal",
+        title: undefined,
+        sourcePath: "/history/codex-session-minimal.jsonl",
+        sourceFingerprint: "fingerprint-minimal",
+        model: undefined,
+        modelProvider: undefined,
+        assignmentRole: undefined,
+        messageCount: 0,
+        toolCallCount: 0,
+      },
+      messages: [],
+      toolCalls: [],
+      events: [],
+      usageRecords: [],
+      sessionEdges: [],
+      artifacts: [],
+      executionContexts: [],
+    };
+    await seedSessions(sqlite, [
+      {
+        ...rich,
+        toolCalls: [{ ...rich.toolCalls[0]!, inputText, outputText }],
+      },
+      minimal,
+    ]);
 
     const port = 20_000 + Math.floor(Math.random() * 20_000);
     const proc = Bun.spawn(["bun", "run", "src/main.ts", "--host", "127.0.0.1", "--port", String(port)], {
       cwd: join(import.meta.dir, ".."),
       env: {
         ...process.env,
-        QUASAR_SEARCH_PROFILE: "1",
         QUASAR_LOCAL_SQLITE: sqlite,
         QUASAR_QUERY_EMBEDDING_PROVIDER: "synthetic",
       },
@@ -258,166 +324,201 @@ describe("HTTP server", () => {
 
     try {
       await waitFor(`http://127.0.0.1:${port}/health`);
-      const [
-        projects,
-        messages,
-        toolCalls,
-        wrongProviderToolCalls,
-        toolCall,
-        missingToolCallId,
-        search,
-        roleSearch,
-        providerSearch,
-        wrongProviderSearch,
-        projectSearch,
-        wrongProjectSearch,
-        statusBody,
-        readyBody,
-        semanticBody,
-        fusionBody,
-      ] = await Promise.all([
-        fetch(`http://127.0.0.1:${port}/projects`).then((response) => response.json()),
-        fetch(`http://127.0.0.1:${port}/messages?sessionId=codex%3Asession-http`).then((response) => response.json()),
-        fetch(`http://127.0.0.1:${port}/tool-calls?provider=codex&toolName=shell_command`).then((response) => response.json()),
-        fetch(`http://127.0.0.1:${port}/tool-calls?provider=grok&toolName=shell_command`).then((response) => response.json()),
-        fetch(`http://127.0.0.1:${port}/tool-call?id=tool-http`).then((response) => response.json()),
-        fetch(`http://127.0.0.1:${port}/tool-call`).then((response) => response.json()),
-        fetch(`http://127.0.0.1:${port}/search/lexical?q=hello`).then((response) => response.json()),
-        fetch(`http://127.0.0.1:${port}/search/lexical?q=http&role=assistant`).then((response) => response.json()),
-        fetch(`http://127.0.0.1:${port}/search/lexical?q=http&provider=codex`).then((response) => response.json()),
-        fetch(`http://127.0.0.1:${port}/search/lexical?q=http&provider=grok`).then((response) => response.json()),
-        fetch(`http://127.0.0.1:${port}/search/lexical?q=http&projectKey=project-http`).then((response) => response.json()),
-        fetch(`http://127.0.0.1:${port}/search/lexical?q=http&projectKey=project-other`).then((response) => response.json()),
+      const projects = await fetch(`http://127.0.0.1:${port}/projects`).then((response) => response.json());
+      const sessions = await postQuery(port, {
+        ...queryBase,
+        kind: "sessions",
+        filters: {
+          projectKey: "project-http",
+          providers: ["codex"],
+          agentRole: "builder",
+          model: "gpt-5.6-sol",
+          modelProvider: "openai",
+        },
+        projection: {
+          detail: "detail",
+          fields: ["sessionId", "model", "modelProvider", "agentRole", "agentPath", "agentDepth"],
+        },
+        page: { limit: 20 },
+      }).then((response) => response.json());
+      const firstPage = await postQuery(port, {
+        ...queryBase,
+        kind: "messages",
+        filters: { sessionId: "codex:session-http" },
+        projection: {
+          detail: "detail",
+          fields: ["messageId", "text", "model", "modelProvider", "agentRole"],
+        },
+        page: { limit: 1 },
+      }).then((response) => response.json());
+      const secondPage = await postQuery(port, {
+        ...queryBase,
+        kind: "messages",
+        filters: { sessionId: "codex:session-http" },
+        projection: {
+          detail: "detail",
+          fields: ["messageId", "text", "model", "modelProvider", "agentRole"],
+        },
+        page: { limit: 1, cursor: firstPage.page.nextCursor },
+      }).then((response) => response.json());
+      const mismatchedCursor = await postQuery(port, {
+        ...queryBase,
+        kind: "messages",
+        filters: { sessionId: "codex:session-http", role: "assistant" },
+        projection: {
+          detail: "detail",
+          fields: ["messageId", "text", "model", "modelProvider", "agentRole"],
+        },
+        page: { limit: 1, cursor: firstPage.page.nextCursor },
+      });
+      const summaryResponse = await postQuery(port, {
+        ...queryBase,
+        kind: "toolCalls",
+        filters: { toolCallId: "tool-http" },
+        projection: {
+          detail: "summary",
+          fields: ["toolCallId", "status", "inputBytes", "outputBytes"],
+        },
+        page: { limit: 1 },
+      });
+      const summaryText = await summaryResponse.text();
+      const toolSummary = JSON.parse(summaryText);
+      const toolDetail = await postQuery(port, {
+        ...queryBase,
+        kind: "toolCalls",
+        filters: { toolCallId: "tool-http" },
+        projection: {
+          detail: "detail",
+          fields: ["toolCallId", "input", "output", "error"],
+        },
+        page: { limit: 1 },
+      }).then((response) => response.json());
+      const nullProjection = await postQuery(port, {
+        ...queryBase,
+        kind: "sessions",
+        filters: { sessionId: "codex:session-minimal" },
+        projection: {
+          detail: "detail",
+          fields: ["sessionId", "model", "modelProvider", "agentRole", "agentPath", "agentDepth"],
+        },
+        page: { limit: 1 },
+      }).then((response) => response.json());
+      const lexical = await postQuery(port, {
+        ...queryBase,
+        kind: "search",
+        text: "http",
+        mode: "lexical",
+        filters: {
+          role: "assistant",
+          agentRole: "builder",
+          model: "gpt-5.6-sol",
+          modelProvider: "openai",
+        },
+        projection: {
+          detail: "detail",
+          fields: ["sessionId", "text", "role", "model", "modelProvider", "agentRole"],
+        },
+        page: { limit: 20 },
+      }).then((response) => response.json());
+      const strictUnknown = await postQuery(port, {
+        ...queryBase,
+        kind: "sessions",
+        projection: { detail: "summary", fields: ["sessionId"] },
+        page: { limit: 1 },
+        unknownField: true,
+      });
+      const semantic = await postQuery(port, {
+        ...queryBase,
+        kind: "search",
+        text: "http",
+        mode: "semantic",
+        projection: { detail: "summary", fields: ["sessionId", "text", "score"] },
+        page: { limit: 20 },
+      });
+      const fusion = await postQuery(port, {
+        ...queryBase,
+        kind: "search",
+        text: "http",
+        mode: "fusion",
+        projection: { detail: "summary", fields: ["sessionId", "text", "score"] },
+        page: { limit: 20 },
+      });
+      const [statusBody, readyBody, sessionDetail, ...legacy] = await Promise.all([
         fetch(`http://127.0.0.1:${port}/status`).then((response) => response.json()),
-        fetch(`http://127.0.0.1:${port}/ready`).then(async (response) => [response.status, await response.json()] as const),
-        fetch(`http://127.0.0.1:${port}/search/semantic?q=http`).then(async (response) => [response.status, await response.json()] as const),
-        fetch(`http://127.0.0.1:${port}/search/fusion?q=http`).then(async (response) => [response.status, await response.json()] as const),
+        fetch(`http://127.0.0.1:${port}/ready`).then((response) => response.json()),
+        fetch(`http://127.0.0.1:${port}/session-detail?sessionId=codex%3Asession-http`),
+        ...[
+          "/sessions",
+          "/messages?sessionId=codex%3Asession-http",
+          "/tool-calls",
+          "/tool-call?id=tool-http",
+          "/search/lexical?q=http",
+          "/search/semantic?q=http",
+          "/search/fusion?q=http",
+        ].map((path) => fetch(`http://127.0.0.1:${port}${path}`)),
       ]);
 
       expect(projects.data.rows.map((row: { projectKey: string }) => row.projectKey)).toEqual(["project-http"]);
-      expect(messages.data.rows.map((row: { text: string }) => row.text)).toEqual(["hello over http", "assistant-only http memory"]);
-      expect(toolCalls.data.rows.map((row: { id: string }) => row.id)).toEqual(["tool-http"]);
-      expect(wrongProviderToolCalls.data.rows).toEqual([]);
-      expect(toolCall.data.row.toolName).toBe("shell_command");
-      expect(missingToolCallId.ok).toBe(false);
-      expect(missingToolCallId.error.type).toBe("BadRequest");
-      expect(search.data.receipt).toMatchObject({ route: "search/lexical", mode: "lexical", query: "hello" });
-      expect(typeof search.data.receipt.startedAt).toBe("string");
-      expect(typeof search.data.receipt.completedAt).toBe("string");
-      // QUASAR_SEARCH_PROFILE=1 → receipt carries the parent span's traceId.
-      expect(typeof search.data.receipt.traceId).toBe("string");
-      expect(search.data.receipt.traceId.length).toBeGreaterThan(0);
-      expect(statusBody.data.lance).toBeUndefined();
+      expect(sessions.items).toEqual([{
+        sessionId: "codex:session-http",
+        model: "gpt-5.6-sol",
+        modelProvider: "openai",
+        agentRole: "builder",
+        agentPath: "/root/server-query",
+        agentDepth: 1,
+      }]);
+      expect(Object.keys(sessions.items[0]).sort()).toEqual([...sessions.projection.fields].sort());
+      expect(firstPage.items[0]).toEqual({
+        messageId: "codex:session-http:1",
+        text: "hello over http",
+        model: "gpt-5.6-sol",
+        modelProvider: "openai",
+        agentRole: "builder",
+      });
+      expect(typeof firstPage.page.nextCursor).toBe("string");
+      expect(secondPage.items[0].text).toBe("assistant-only http memory");
+      expect(secondPage.page.nextCursor).toBeUndefined();
+      expect(mismatchedCursor.status).toBe(400);
+      expect(summaryResponse.status).toBe(200);
+      expect(summaryText.length).toBeLessThan(2_000);
+      expect(Object.keys(toolSummary.items[0]).sort()).toEqual(
+        ["toolCallId", "status", "inputBytes", "outputBytes"].sort(),
+      );
+      expect(toolSummary.items[0]).toEqual({
+        toolCallId: "tool-http",
+        status: "ok",
+        inputBytes: Buffer.byteLength(inputText),
+        outputBytes: Buffer.byteLength(outputText),
+      });
+      expect(toolDetail.items[0].input).toEqual({ payload: "i".repeat(50_000) });
+      expect(toolDetail.items[0].output).toEqual({ payload: "o".repeat(50_000) });
+      expect(toolDetail.items[0].error).toBeNull();
+      expect(nullProjection.items[0]).toEqual({
+        sessionId: "codex:session-minimal",
+        model: null,
+        modelProvider: null,
+        agentRole: null,
+        agentPath: null,
+        agentDepth: null,
+      });
+      expect(lexical.items).toEqual([{
+        sessionId: "codex:session-http",
+        text: "assistant-only http memory",
+        role: "assistant",
+        model: "gpt-5.6-sol",
+        modelProvider: "openai",
+        agentRole: "builder",
+      }]);
+      expect(strictUnknown.status).toBe(400);
+      expect((await strictUnknown.json()).error.type).toBe("BadRequest");
+      expect(semantic.status).toBe(503);
+      expect((await semantic.json()).error.type).toBe("ServiceUnavailable");
+      expect(fusion.status).toBe(503);
+      expect((await fusion.json()).error.type).toBe("ServiceUnavailable");
       expect(statusBody.data.workers.workers).toEqual(["embeddings"]);
-      expect(readyBody[0]).toBe(200);
-      expect(readyBody[1]).toMatchObject({
-        ok: true,
-        data: {
-          modes: { lexical: true, semantic: false, fusion: false },
-          reason: "semantic pending vector materialization",
-        },
-      });
-      expect(semanticBody[0]).toBe(503);
-      expect(semanticBody[1]).toEqual({
-        ok: false,
-        route: "search/semantic",
-        error: {
-          type: "SemanticDisabled",
-          message: "semantic search disabled pending vector materialization (QSR-232)",
-        },
-      });
-      expect(fusionBody[0]).toBe(503);
-      expect(fusionBody[1]).toMatchObject({ ok: false, route: "search/fusion", error: { type: "SemanticDisabled" } });
-      expect(search.data.matches.map((hit: { row: { text: string } }) => hit.row.text)).toEqual(["hello over http"]);
-      expect(roleSearch.data.matches.map((hit: { row: { text: string } }) => hit.row.text)).toEqual(["assistant-only http memory"]);
-      expect(providerSearch.data.matches.map((hit: { row: { text: string } }) => hit.row.text).sort()).toEqual([
-        "assistant-only http memory",
-        "hello over http",
-      ]);
-      expect(wrongProviderSearch.data.matches).toEqual([]);
-      expect(projectSearch.data.matches.map((hit: { row: { text: string } }) => hit.row.text).sort()).toEqual([
-        "assistant-only http memory",
-        "hello over http",
-      ]);
-      expect(wrongProjectSearch.data.matches).toEqual([]);
-    } finally {
-      proc.kill();
-      await proc.exited;
-    }
-  }, 15_000);
-});
-
-describe("SearchReceipt.traceId gates", () => {
-  const spawnServer = (env: Record<string, string>) => {
-    const dir = tempDir();
-    const sqlite = join(dir, "quasar.sqlite");
-    const port = 20_000 + Math.floor(Math.random() * 20_000);
-    const proc = Bun.spawn(["bun", "run", "src/main.ts", "--host", "127.0.0.1", "--port", String(port)], {
-      cwd: join(import.meta.dir, ".."),
-      env: {
-        ...process.env,
-        // Explicitly clear both gates unless the case re-enables them.
-        QUASAR_SEARCH_PROFILE: "",
-        QUASAR_OTLP_BASE_URL: "",
-        QUASAR_LOCAL_SQLITE: sqlite,
-        QUASAR_QUERY_EMBEDDING_PROVIDER: "synthetic",
-        ...env,
-      },
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-    return { dir, sqlite, port, proc };
-  };
-
-  const lexicalReceipt = async (port: number) => {
-    const body = await fetch(`http://127.0.0.1:${port}/search/lexical?q=hello`).then((r) => r.json());
-    return body as { ok: boolean; data?: { receipt?: { traceId?: string; mode?: string } } };
-  };
-
-  test("QUASAR_SEARCH_PROFILE=1 puts non-empty traceId on the receipt", async () => {
-    const { sqlite, port, proc } = spawnServer({ QUASAR_SEARCH_PROFILE: "1" });
-    try {
-      await seed(sqlite);
-      await waitFor(`http://127.0.0.1:${port}/health`);
-      const body = await lexicalReceipt(port);
-      expect(body.ok).toBe(true);
-      expect(body.data?.receipt?.mode).toBe("lexical");
-      expect(typeof body.data?.receipt?.traceId).toBe("string");
-      expect((body.data?.receipt?.traceId ?? "").length).toBeGreaterThan(0);
-    } finally {
-      proc.kill();
-      await proc.exited;
-    }
-  }, 15_000);
-
-  test("QUASAR_OTLP_BASE_URL alone puts non-empty traceId on the receipt", async () => {
-    // Point at a dead collector: export may fail, but the gate still enables
-    // receipt + currentSpan.traceId (Layer wiring is independent of export success).
-    const { sqlite, port, proc } = spawnServer({
-      QUASAR_OTLP_BASE_URL: "http://127.0.0.1:9",
-    });
-    try {
-      await seed(sqlite);
-      await waitFor(`http://127.0.0.1:${port}/health`);
-      const body = await lexicalReceipt(port);
-      expect(body.ok).toBe(true);
-      expect(body.data?.receipt?.mode).toBe("lexical");
-      expect(typeof body.data?.receipt?.traceId).toBe("string");
-      expect((body.data?.receipt?.traceId ?? "").length).toBeGreaterThan(0);
-    } finally {
-      proc.kill();
-      await proc.exited;
-    }
-  }, 15_000);
-
-  test("neither SEARCH_PROFILE nor OTLP omits the receipt entirely", async () => {
-    const { sqlite, port, proc } = spawnServer({});
-    try {
-      await seed(sqlite);
-      await waitFor(`http://127.0.0.1:${port}/health`);
-      const body = await lexicalReceipt(port);
-      expect(body.ok).toBe(true);
-      expect(body.data?.receipt).toBeUndefined();
+      expect(readyBody.data.modes).toEqual({ lexical: true, semantic: false, fusion: false });
+      expect(sessionDetail.status).toBe(200);
+      expect(legacy.every((response) => response.status === 404)).toBe(true);
     } finally {
       proc.kill();
       await proc.exited;

@@ -521,6 +521,46 @@ describe("upsertSession row-level diff", () => {
     expect(stored.output).toContain("streamed continuation bytes");
   });
 
+  test("same-length tool payload mutations converge by content hash", async () => {
+    const path = sqlitePath();
+    const rows = initialMessages(1);
+    const before = toolCall("tc-same-length", 1, {
+      inputText: "aaaa",
+      outputText: "1111",
+    });
+    const after = {
+      ...before,
+      inputText: "bbbb",
+      outputText: "2222",
+    };
+    const outcome = await withStore(path, (store) =>
+      Effect.gen(function* () {
+        yield* store.upsertSession(session(rows, [before]));
+        return yield* store.upsertSession(session(rows, [after], {
+          sourceFingerprint: "fp-2",
+        }));
+      }));
+
+    expect(outcome.toolCallsUpdated).toBe(1);
+    expect(outcome.toolCallsUnchanged).toBe(0);
+    const db = new Database(path, { readonly: true });
+    const stored = db.query(`
+      SELECT input_text AS inputText, output_text AS outputText,
+             input_hash AS inputHash, output_hash AS outputHash
+      FROM tool_calls WHERE id = ?
+    `).get(before.id) as {
+      inputText: string;
+      outputText: string;
+      inputHash: string;
+      outputHash: string;
+    };
+    db.close();
+    expect(stored.inputText).toBe("bbbb");
+    expect(stored.outputText).toBe("2222");
+    expect(stored.inputHash).toHaveLength(64);
+    expect(stored.outputHash).toHaveLength(64);
+  });
+
   test("a role change on an existing seq rewrites the row", async () => {
     const path = sqlitePath();
     const rows = initialMessages(4);

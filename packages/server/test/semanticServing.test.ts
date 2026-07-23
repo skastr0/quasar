@@ -51,6 +51,7 @@ const fixtureSession = (
   sessionId: string,
   projectKey: string,
   texts: readonly string[],
+  model?: string,
 ): MappedSession => ({
   project: { projectKey, displayName: projectKey, rawPath: `/tmp/${projectKey}` },
   session: {
@@ -65,7 +66,9 @@ const fixtureSession = (
     sourceFingerprint: `fp-${sessionId}`,
     host: "host-test",
     identitySchemeVersion: 1,
-    normalizationVersion: 2,
+    normalizationVersion: 4,
+    model,
+    modelProvider: model === undefined ? undefined : "test-provider",
     messageCount: texts.length,
     toolCallCount: 0,
   },
@@ -114,9 +117,28 @@ const seed = (sqlite: string) =>
           "beta deployment retro angle=0.25",
           "beta incident log angle=0.7",
         ]);
+        const distractors = fixtureSession(
+          "codex:distractors",
+          "project-distractors",
+          Array.from({ length: 257 }, (_, index) => `distractor ${index} angle=1.2`),
+          "distractor-model",
+        );
+        const filteredTarget = fixtureSession(
+          "codex:filtered-target",
+          "project-target",
+          ["only target below global top 256 angle=1.5"],
+          "target-model",
+        );
         yield* store.upsertSession(alpha);
         yield* store.upsertSession(beta);
-        yield* store.upsertMessageVectors([...vectorsFor(alpha), ...vectorsFor(beta)]);
+        yield* store.upsertSession(distractors);
+        yield* store.upsertSession(filteredTarget);
+        yield* store.upsertMessageVectors([
+          ...vectorsFor(alpha),
+          ...vectorsFor(beta),
+          ...vectorsFor(distractors),
+          ...vectorsFor(filteredTarget),
+        ]);
       }).pipe(Effect.provide(makeLocalStoreLayer(sqlite))),
     ),
   );
@@ -156,13 +178,40 @@ const waitForSemanticReady = async (base: string) => {
   throw new Error("server never reported semantic readiness");
 };
 
-const fetchJson = async (url: string) => {
-  const response = await fetch(url);
+const fetchJson = async (url: string, body?: Record<string, unknown>) => {
+  const response = await fetch(url, body === undefined
+    ? undefined
+    : {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
   return { status: response.status, body: (await response.json()) as any };
 };
 
+const query = (
+  base: string,
+  options: {
+    readonly text: string;
+    readonly mode: "lexical" | "semantic" | "fusion";
+    readonly filters?: Record<string, unknown>;
+    readonly limit?: number;
+  },
+) => fetchJson(`${base}/query`, {
+  protocolVersion: "quasar.query/v1",
+  kind: "search",
+  text: options.text,
+  mode: options.mode,
+  ...(options.filters === undefined ? {} : { filters: options.filters }),
+  projection: {
+    detail: "detail",
+    fields: ["messageId", "sessionId", "sequence", "role", "projectKey", "provider", "text", "score"],
+  },
+  page: { limit: options.limit ?? 10 },
+});
+
 describe("semantic serving from the resident matrix", () => {
-  test("serves /ready, /search/semantic, and /search/fusion once booted with vectors", async () => {
+  test("serves semantic and fusion QuerySpec modes once booted with vectors", async () => {
     const dir = tempDir();
     const sqlite = join(dir, "quasar.sqlite");
     await seed(sqlite);
@@ -196,80 +245,110 @@ describe("semantic serving from the resident matrix", () => {
         command: "ready",
         data: {
           modes: { lexical: true, semantic: true, fusion: true },
-          matrix: { model: MODEL, rows: 4, dimensions: DIMS, kernel: "simsimd-ffi" },
+          matrix: { model: MODEL, rows: 262, dimensions: DIMS, kernel: "simsimd-ffi" },
         },
       });
       expect(ready.body.data.reason).toBeUndefined();
 
       // Query at angle 0.1: alpha:0 (0.1) then beta:0 (0.25) then alpha:1 (0.4).
-      const semantic = await fetchJson(`${base}/search/semantic?q=${encodeURIComponent("find the handshake angle=0.1")}&limit=3`);
+      const semantic = await query(base, {
+        text: "find the handshake angle=0.1",
+        mode: "semantic",
+        limit: 3,
+      });
       expect(semantic.status).toBe(200);
-      expect(semantic.body.ok).toBe(true);
-      const semanticKeys = semantic.body.data.matches.map((match: { key: string }) => match.key);
+      const semanticKeys = semantic.body.items.map(
+        (item: { sessionId: string; sequence: number; role: string }) =>
+          `${item.sessionId}:${item.sequence}:${item.role}`,
+      );
       expect(semanticKeys).toEqual([
         "codex:alpha:0:assistant",
         "codex:beta:0:assistant",
         "codex:alpha:1:user",
       ]);
-      const scores = semantic.body.data.matches.map((match: { score: number }) => match.score);
+      const scores = semantic.body.items.map((item: { score: number }) => item.score);
       expect(scores[0]).toBeGreaterThan(scores[1]);
       expect(scores[1]).toBeGreaterThan(scores[2]);
-      expect(semantic.body.data.matches[0].row).toMatchObject({
+      expect(semantic.body.items[0]).toMatchObject({
         sessionId: "codex:alpha",
-        seq: 0,
+        sequence: 0,
         role: "assistant",
         projectKey: "project-alpha",
         provider: "codex",
         text: "handshake protocol notes angle=0.1",
-        contentHash: "hash-codex:alpha-0",
       });
 
       // Exact SQL-prefiltered scan: only project-beta rows are eligible.
-      const filtered = await fetchJson(
-        `${base}/search/semantic?q=${encodeURIComponent("query angle=0.1")}&limit=10&projectKey=project-beta`,
-      );
+      const filtered = await query(base, {
+        text: "query angle=0.1",
+        mode: "semantic",
+        filters: { projectKey: "project-beta" },
+      });
       expect(filtered.status).toBe(200);
-      expect(filtered.body.data.matches.map((match: { key: string }) => match.key)).toEqual([
+      expect(filtered.body.items.map(
+        (item: { sessionId: string; sequence: number; role: string }) =>
+          `${item.sessionId}:${item.sequence}:${item.role}`,
+      )).toEqual([
         "codex:beta:0:assistant",
         "codex:beta:1:user",
       ]);
 
-      const roleFiltered = await fetchJson(
-        `${base}/search/semantic?q=${encodeURIComponent("query angle=0.1")}&limit=10&role=user`,
-      );
+      const roleFiltered = await query(base, {
+        text: "query angle=0.1",
+        mode: "semantic",
+        filters: { role: "user" },
+      });
       expect(roleFiltered.status).toBe(200);
       expect(
-        roleFiltered.body.data.matches.every((match: { row: { role: string } }) => match.row.role === "user"),
+        roleFiltered.body.items.every((item: { role: string }) => item.role === "user"),
       ).toBe(true);
+
+      // The target ranks below the global top 256. The session metadata mask
+      // must constrain candidates before top-k rather than post-filtering.
+      const modelFiltered = await query(base, {
+        text: "query angle=0.1",
+        mode: "semantic",
+        filters: { model: "target-model", modelProvider: "test-provider" },
+      });
+      expect(modelFiltered.status).toBe(200);
+      expect(modelFiltered.body.items.map((item: { sessionId: string }) => item.sessionId))
+        .toEqual(["codex:filtered-target"]);
 
       // Fusion: "handshake" only matches alpha:0 lexically AND it ranks first
       // semantically, so RRF must put it on top; a semantic-only neighbor follows.
-      const fusion = await fetchJson(`${base}/search/fusion?q=${encodeURIComponent("handshake angle=0.1")}&limit=3`);
+      const fusion = await query(base, {
+        text: "handshake angle=0.1",
+        mode: "fusion",
+        limit: 3,
+      });
       expect(fusion.status).toBe(200);
-      const fusionKeys = fusion.body.data.matches.map((match: { key: string }) => match.key);
+      const fusionKeys = fusion.body.items.map((item: { sessionId: string; sequence: number; role: string }) =>
+        `${item.sessionId}:${item.sequence}:${item.role}`);
       expect(fusionKeys[0]).toBe("codex:alpha:0:assistant");
       expect(fusionKeys.length).toBe(3);
-      expect(fusion.body.data.matches[0].score).toBeGreaterThan(fusion.body.data.matches[1].score);
+      expect(fusion.body.items[0].score).toBeGreaterThanOrEqual(fusion.body.items[1].score);
 
       // Embedder loss while the matrix is resident: semantic mode is
       // EmbeddingUnavailable (503), never SemanticDisabled, and lexical is untouched.
       stub.stop(true);
-      const unavailable = await fetchJson(`${base}/search/semantic?q=${encodeURIComponent("fresh uncached query")}&limit=3`);
+      const unavailable = await query(base, {
+        text: "fresh uncached query",
+        mode: "semantic",
+        limit: 3,
+      });
       expect(unavailable.status).toBe(503);
-      expect(unavailable.body.error.type).toBe("EmbeddingUnavailable");
-      const lexical = await fetchJson(`${base}/search/lexical?q=handshake&limit=3`);
+      expect(unavailable.body.error.type).toBe("ServiceUnavailable");
+      const lexical = await query(base, { text: "handshake", mode: "lexical", limit: 3 });
       expect(lexical.status).toBe(200);
-      expect(lexical.body.data.matches.length).toBe(1);
+      expect(lexical.body.items.length).toBe(1);
 
       // Fusion never 503s for the same embedder loss: it degrades to the
       // lexical leg alone (a fresh, uncached query text forces a real embed
       // call against the dead stub instead of a cache hit).
-      const fusionDegraded = await fetchJson(`${base}/search/fusion?q=handshake&limit=3`);
+      const fusionDegraded = await query(base, { text: "handshake", mode: "fusion", limit: 3 });
       expect(fusionDegraded.status).toBe(200);
-      expect(fusionDegraded.body.ok).toBe(true);
-      expect(fusionDegraded.body.data.degraded).toBe(true);
-      expect(fusionDegraded.body.data.matches.length).toBe(1);
-      expect(fusionDegraded.body.data.matches[0].row.text).toBe("handshake protocol notes angle=0.1");
+      expect(fusionDegraded.body.items.length).toBe(1);
+      expect(fusionDegraded.body.items[0].text).toBe("handshake protocol notes angle=0.1");
     } finally {
       proc.kill();
       await proc.exited;

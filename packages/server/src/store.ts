@@ -12,6 +12,9 @@ import type {
   Page,
   PageWindow,
   ProjectRow,
+  QueryMessageRow,
+  QuerySessionRow,
+  QueryToolCallRow,
   SessionDetail,
   SessionDetailPageOptions,
   SessionEdgeRow,
@@ -164,6 +167,57 @@ export interface LocalStoreService {
     readonly limit?: number;
     readonly offset?: number;
   }) => Effect.Effect<readonly SessionRow[], SqliteStoreError>;
+  readonly querySessions: (options: {
+    readonly projectKey?: string;
+    readonly providers?: readonly string[];
+    readonly sessionId?: string;
+    readonly agentName?: string;
+    readonly agentRole?: string;
+    readonly model?: string;
+    readonly modelProvider?: string;
+    readonly limit: number;
+    readonly offset: number;
+  }) => Effect.Effect<readonly QuerySessionRow[], SqliteStoreError>;
+  readonly querySessionIds: (options: {
+    readonly projectKey?: string;
+    readonly providers?: readonly string[];
+    readonly sessionId?: string;
+    readonly agentName?: string;
+    readonly agentRole?: string;
+    readonly model?: string;
+    readonly modelProvider?: string;
+  }) => Effect.Effect<readonly string[], SqliteStoreError>;
+  readonly queryMessages: (options: {
+    readonly sessionId: string;
+    readonly role?: string;
+    readonly model?: string;
+    readonly modelProvider?: string;
+    readonly limit: number;
+    readonly offset: number;
+  }) => Effect.Effect<readonly QueryMessageRow[], SqliteStoreError>;
+  readonly queryToolCalls: (options: {
+    readonly projectKey?: string;
+    readonly providers?: readonly string[];
+    readonly sessionId?: string;
+    readonly toolCallId?: string;
+    readonly toolName?: string;
+    readonly agentName?: string;
+    readonly agentRole?: string;
+    readonly model?: string;
+    readonly modelProvider?: string;
+    readonly includeInput: boolean;
+    readonly includeOutput: boolean;
+    readonly limit: number;
+    readonly offset: number;
+  }) => Effect.Effect<readonly QueryToolCallRow[], SqliteStoreError>;
+  readonly queryMessagesBySessionSeq: (options: {
+    readonly pairs: readonly MessageVectorKey[];
+    readonly sessionId?: string;
+    readonly agentName?: string;
+    readonly agentRole?: string;
+    readonly model?: string;
+    readonly modelProvider?: string;
+  }) => Effect.Effect<readonly QueryMessageRow[], SqliteStoreError>;
   readonly readSessionDetail: (
     sessionId: string,
     pages: SessionDetailPageOptions,
@@ -234,7 +288,13 @@ export interface LocalStoreService {
     readonly projectKey?: string;
     readonly role?: string;
     readonly providers?: readonly string[];
+    readonly sessionId?: string;
+    readonly agentName?: string;
+    readonly agentRole?: string;
+    readonly model?: string;
+    readonly modelProvider?: string;
     readonly limit?: number;
+    readonly offset?: number;
   }) => Effect.Effect<readonly SearchHit[], SqliteStoreError>;
   readonly close: Effect.Effect<void>;
 }
@@ -620,6 +680,8 @@ const migrate = (db: Database): readonly StoreMigrationLog[] => {
       status TEXT,
       input_text TEXT NOT NULL,
       output_text TEXT NOT NULL,
+      input_hash TEXT NOT NULL,
+      output_hash TEXT NOT NULL,
       started_at TEXT,
       completed_at TEXT,
       project_key TEXT NOT NULL,
@@ -750,6 +812,27 @@ const migrate = (db: Database): readonly StoreMigrationLog[] => {
   if (!toolCallColumns.has("event_id")) {
     db.exec("ALTER TABLE tool_calls ADD COLUMN event_id TEXT");
   }
+  const missingToolPayloadHashes = !toolCallColumns.has("input_hash")
+    || !toolCallColumns.has("output_hash");
+  if (!toolCallColumns.has("input_hash")) {
+    db.exec("ALTER TABLE tool_calls ADD COLUMN input_hash TEXT NOT NULL DEFAULT ''");
+  }
+  if (!toolCallColumns.has("output_hash")) {
+    db.exec("ALTER TABLE tool_calls ADD COLUMN output_hash TEXT NOT NULL DEFAULT ''");
+  }
+  if (missingToolPayloadHashes) {
+    // Do not scan the potentially large payload columns during migration.
+    // Empty hashes deliberately compare unequal on the next canonical normalization
+    // replay. Lowering only sessions that own tool calls makes the fingerprint
+    // probe request that one idempotent refresh, after which the normal session
+    // head restores the current version and every row carries exact hashes.
+    db.exec(`
+      UPDATE sessions
+      SET normalization_version = 2
+      WHERE normalization_version >= 3
+        AND session_id IN (SELECT DISTINCT session_id FROM tool_calls)
+    `);
+  }
   // Source-fact hashes make the full desired-state payload cheap to converge:
   // appends write only new/changed rows, while normalization replays can still
   // delete facts that disappeared. Empty hashes force one safe refresh for a
@@ -781,6 +864,9 @@ const count = (db: Database, table: string): number =>
 
 const lexicalRankScore = (index: number): number =>
   1 / (index + 1);
+
+const sha256Text = (text: string): string =>
+  createHash("sha256").update(text).digest("hex");
 
 export class LocalStore extends Context.Tag("@quasar/LocalStore")<
   LocalStore,
@@ -823,10 +909,6 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
         const insertMessage = db.prepare(
           `INSERT INTO messages(session_id, seq, role, text, ts, project_key, content_hash, project_scope_token)
            VALUES ($sessionId, $seq, $role, $text, $ts, $projectKey, $contentHash, $projectScopeToken)`,
-        );
-        const insertToolCall = db.prepare(
-          `INSERT INTO tool_calls(id, session_id, event_id, seq, tool_name, status, input_text, output_text, started_at, completed_at, project_key, provider)
-           VALUES ($id, $sessionId, $eventId, $seq, $toolName, $status, $inputText, $outputText, $startedAt, $completedAt, $projectKey, $provider)`,
         );
         const deleteSessionEvent = db.prepare("DELETE FROM session_events WHERE session_id = ? AND id = ?");
         const upsertSessionEvent = db.prepare(
@@ -957,7 +1039,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
         const selectToolCallDiffRows = db.prepare(
           `SELECT id, event_id AS eventId, seq, tool_name AS toolName, status, started_at AS startedAt, completed_at AS completedAt,
                   project_key AS projectKey, provider,
-                  length(CAST(input_text AS BLOB)) AS inputBytes, length(CAST(output_text AS BLOB)) AS outputBytes
+                  input_hash AS inputHash, output_hash AS outputHash
            FROM tool_calls WHERE session_id = ?`,
         );
         const selectSessionEventDiffRows = db.prepare(
@@ -978,9 +1060,9 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
         const deleteMessageRow = db.prepare("DELETE FROM messages WHERE session_id = ? AND seq = ?");
         const deleteToolCallRow = db.prepare("DELETE FROM tool_calls WHERE id = ?");
         const upsertToolCall = db.prepare(
-          `INSERT INTO tool_calls(id, session_id, event_id, seq, tool_name, status, input_text, output_text, started_at, completed_at, project_key, provider)
-           VALUES ($id, $sessionId, $eventId, $seq, $toolName, $status, $inputText, $outputText, $startedAt, $completedAt, $projectKey, $provider)
-           ON CONFLICT(id) DO UPDATE SET session_id = excluded.session_id, event_id = excluded.event_id, seq = excluded.seq, tool_name = excluded.tool_name, status = excluded.status, input_text = excluded.input_text, output_text = excluded.output_text, started_at = excluded.started_at, completed_at = excluded.completed_at, project_key = excluded.project_key, provider = excluded.provider`,
+          `INSERT INTO tool_calls(id, session_id, event_id, seq, tool_name, status, input_text, output_text, input_hash, output_hash, started_at, completed_at, project_key, provider)
+           VALUES ($id, $sessionId, $eventId, $seq, $toolName, $status, $inputText, $outputText, $inputHash, $outputHash, $startedAt, $completedAt, $projectKey, $provider)
+           ON CONFLICT(id) DO UPDATE SET session_id = excluded.session_id, event_id = excluded.event_id, seq = excluded.seq, tool_name = excluded.tool_name, status = excluded.status, input_text = excluded.input_text, output_text = excluded.output_text, input_hash = excluded.input_hash, output_hash = excluded.output_hash, started_at = excluded.started_at, completed_at = excluded.completed_at, project_key = excluded.project_key, provider = excluded.provider`,
         );
         const stampSessionFingerprint = db.prepare(
           "UPDATE sessions SET source_fingerprint = ? WHERE session_id = ?",
@@ -1005,8 +1087,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
           readonly deleteIds: readonly string[];
         }
 
-        const sourceFactHash = (json: string): string =>
-          createHash("sha256").update(json).digest("hex");
+        const sourceFactHash = sha256Text;
 
         const diffSourceFacts = <A extends { readonly id: string }>(
           incoming: readonly A[],
@@ -1091,7 +1172,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
           const existingToolCalls = selectToolCallDiffRows.all(mapped.session.sessionId) as Array<{
             id: string; eventId: string | null; seq: number; toolName: string; status: string | null;
             startedAt: string | null; completedAt: string | null;
-            projectKey: string; provider: string; inputBytes: number; outputBytes: number;
+            projectKey: string; provider: string; inputHash: string; outputHash: string;
           }>;
           const existingById = new Map(existingToolCalls.map((row) => [row.id, row]));
           const incomingIds = new Set(mapped.toolCalls.map((row) => row.id));
@@ -1105,12 +1186,6 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               toolCallsInserted += 1;
               toolCallUpserts.push(toolCall);
             } else if (
-              // Byte lengths stand in for the input/output text themselves so
-              // unchanged tool calls never load their (potentially large)
-              // payloads. A same-length in-place content mutation with
-              // identical metadata would slip through; harness tool calls are
-              // append-only in practice, and a mutated session's messages
-              // still carry content hashes that force the session through here.
               existing.seq !== toolCall.seq
               || existing.eventId !== (toolCall.eventId ?? null)
               || existing.toolName !== toolCall.toolName
@@ -1119,8 +1194,8 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               || existing.completedAt !== (toolCall.completedAt ?? null)
               || existing.projectKey !== toolCall.projectKey
               || existing.provider !== toolCall.provider
-              || existing.inputBytes !== Buffer.byteLength(toolCall.inputText, "utf8")
-              || existing.outputBytes !== Buffer.byteLength(toolCall.outputText, "utf8")
+              || existing.inputHash !== sha256Text(toolCall.inputText)
+              || existing.outputHash !== sha256Text(toolCall.outputText)
             ) {
               toolCallsUpdated += 1;
               toolCallUpserts.push(toolCall);
@@ -1275,6 +1350,8 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               $status: toolCall.status ?? null,
               $inputText: toolCall.inputText,
               $outputText: toolCall.outputText,
+              $inputHash: sha256Text(toolCall.inputText),
+              $outputHash: sha256Text(toolCall.outputText),
               $startedAt: toolCall.startedAt ?? null,
               $completedAt: toolCall.completedAt ?? null,
               $projectKey: toolCall.projectKey,
@@ -1502,6 +1579,49 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
           };
         };
 
+        const querySessionColumns = `
+          s.session_id AS sessionId,
+          s.project_key AS projectKey,
+          s.provider,
+          s.title,
+          s.started_at AS startedAt,
+          s.updated_at AS endedAt,
+          s.agent_name AS agentName,
+          s.model,
+          s.model_provider AS modelProvider,
+          s.message_count AS messageCount,
+          s.tool_call_count AS toolCallCount,
+          s.parent_session_id AS parentSessionId,
+          s.assignment_role AS agentRole,
+          s.assignment_path AS agentPath,
+          s.assignment_depth AS agentDepth
+        `;
+        const queryMessageColumns = `
+          m.session_id || ':' || CAST(m.seq AS TEXT) AS messageId,
+          m.session_id AS sessionId,
+          m.seq AS sequence,
+          m.role,
+          m.text,
+          m.ts AS timestamp,
+          m.project_key AS projectKey,
+          s.provider,
+          s.title,
+          s.agent_name AS agentName,
+          s.assignment_role AS agentRole,
+          s.model,
+          s.model_provider AS modelProvider
+        `;
+        const pushProviderFilter = (
+          filters: string[],
+          args: Array<string | number>,
+          column: string,
+          providers: readonly string[] | undefined,
+        ) => {
+          if (providers === undefined) return;
+          filters.push(`${column} IN (${providers.map(() => "?").join(", ")})`);
+          args.push(...providers);
+        };
+
         return {
           dbPath: path,
           listProjects: (options = {}) =>
@@ -1553,6 +1673,216 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               return db
                 .query(`SELECT session_id AS sessionId, project_key AS projectKey, provider, agent_name AS agentName, title, started_at AS startedAt, updated_at AS updatedAt, source_path AS sourcePath, source_fingerprint AS sourceFingerprint, host, identity_scheme_version AS identitySchemeVersion, normalization_version AS normalizationVersion, model, model_provider AS modelProvider, assignment_role AS assignmentRole, parent_session_id AS parentSessionId, message_count AS messageCount, tool_call_count AS toolCallCount FROM sessions${where} ORDER BY COALESCE(updated_at, started_at, '') DESC LIMIT ? OFFSET ?`)
                 .all(...args, limit, offset) as SessionRow[];
+            }),
+          querySessions: (options) =>
+            trySqlite("querySessions", () => {
+              const filters: string[] = [];
+              const args: Array<string | number> = [];
+              if (options.projectKey !== undefined) {
+                filters.push("s.project_key = ?");
+                args.push(options.projectKey);
+              }
+              pushProviderFilter(filters, args, "s.provider", options.providers);
+              if (options.sessionId !== undefined) {
+                filters.push("s.session_id = ?");
+                args.push(options.sessionId);
+              }
+              if (options.agentName !== undefined) {
+                filters.push("s.agent_name = ?");
+                args.push(options.agentName);
+              }
+              if (options.agentRole !== undefined) {
+                filters.push("s.assignment_role = ?");
+                args.push(options.agentRole);
+              }
+              if (options.model !== undefined) {
+                filters.push("s.model = ?");
+                args.push(options.model);
+              }
+              if (options.modelProvider !== undefined) {
+                filters.push("s.model_provider = ?");
+                args.push(options.modelProvider);
+              }
+              const where = filters.length === 0 ? "" : `WHERE ${filters.join(" AND ")}`;
+              return db.query(`
+                SELECT ${querySessionColumns}
+                FROM sessions AS s
+                ${where}
+                ORDER BY COALESCE(s.updated_at, s.started_at, '') DESC, s.session_id ASC
+                LIMIT ? OFFSET ?
+              `).all(...args, options.limit, options.offset) as QuerySessionRow[];
+            }),
+          querySessionIds: (options) =>
+            trySqlite("querySessionIds", () => {
+              const filters: string[] = [];
+              const args: Array<string | number> = [];
+              if (options.projectKey !== undefined) {
+                filters.push("s.project_key = ?");
+                args.push(options.projectKey);
+              }
+              pushProviderFilter(filters, args, "s.provider", options.providers);
+              if (options.sessionId !== undefined) {
+                filters.push("s.session_id = ?");
+                args.push(options.sessionId);
+              }
+              if (options.agentName !== undefined) {
+                filters.push("s.agent_name = ?");
+                args.push(options.agentName);
+              }
+              if (options.agentRole !== undefined) {
+                filters.push("s.assignment_role = ?");
+                args.push(options.agentRole);
+              }
+              if (options.model !== undefined) {
+                filters.push("s.model = ?");
+                args.push(options.model);
+              }
+              if (options.modelProvider !== undefined) {
+                filters.push("s.model_provider = ?");
+                args.push(options.modelProvider);
+              }
+              const where = filters.length === 0 ? "" : `WHERE ${filters.join(" AND ")}`;
+              const rows = db.query(`
+                SELECT s.session_id AS sessionId
+                FROM sessions AS s
+                ${where}
+                ORDER BY s.session_id ASC
+              `).all(...args) as Array<{ readonly sessionId: string }>;
+              return rows.map(({ sessionId }) => sessionId);
+            }),
+          queryMessages: (options) =>
+            trySqlite("queryMessages", () => {
+              const filters = ["m.session_id = ?"];
+              const args: Array<string | number> = [options.sessionId];
+              if (options.role !== undefined) {
+                filters.push("m.role = ?");
+                args.push(options.role);
+              }
+              if (options.model !== undefined) {
+                filters.push("s.model = ?");
+                args.push(options.model);
+              }
+              if (options.modelProvider !== undefined) {
+                filters.push("s.model_provider = ?");
+                args.push(options.modelProvider);
+              }
+              return db.query(`
+                SELECT ${queryMessageColumns}
+                FROM messages AS m
+                JOIN sessions AS s ON s.session_id = m.session_id
+                WHERE ${filters.join(" AND ")}
+                ORDER BY m.seq ASC
+                LIMIT ? OFFSET ?
+              `).all(...args, options.limit, options.offset) as QueryMessageRow[];
+            }),
+          queryToolCalls: (options) =>
+            trySqlite("queryToolCalls", () => {
+              const filters: string[] = [];
+              const args: Array<string | number> = [];
+              if (options.projectKey !== undefined) {
+                filters.push("t.project_key = ?");
+                args.push(options.projectKey);
+              }
+              pushProviderFilter(filters, args, "t.provider", options.providers);
+              if (options.sessionId !== undefined) {
+                filters.push("t.session_id = ?");
+                args.push(options.sessionId);
+              }
+              if (options.toolCallId !== undefined) {
+                filters.push("t.id = ?");
+                args.push(options.toolCallId);
+              }
+              if (options.toolName !== undefined) {
+                filters.push("t.tool_name = ?");
+                args.push(options.toolName);
+              }
+              if (options.agentName !== undefined) {
+                filters.push("s.agent_name = ?");
+                args.push(options.agentName);
+              }
+              if (options.agentRole !== undefined) {
+                filters.push("s.assignment_role = ?");
+                args.push(options.agentRole);
+              }
+              if (options.model !== undefined) {
+                filters.push("s.model = ?");
+                args.push(options.model);
+              }
+              if (options.modelProvider !== undefined) {
+                filters.push("s.model_provider = ?");
+                args.push(options.modelProvider);
+              }
+              const where = filters.length === 0 ? "" : `WHERE ${filters.join(" AND ")}`;
+              const payloadColumns = [
+                ...(options.includeInput ? ["t.input_text AS inputText"] : []),
+                ...(options.includeOutput ? ["t.output_text AS outputText"] : []),
+              ];
+              return db.query(`
+                SELECT
+                  t.id AS toolCallId,
+                  t.session_id AS sessionId,
+                  t.project_key AS projectKey,
+                  t.provider,
+                  t.seq AS sequence,
+                  t.tool_name AS toolName,
+                  COALESCE(t.started_at, t.completed_at) AS timestamp,
+                  t.status,
+                  t.started_at AS startedAt,
+                  t.completed_at AS completedAt,
+                  length(CAST(t.input_text AS BLOB)) AS inputBytes,
+                  length(CAST(t.output_text AS BLOB)) AS outputBytes,
+                  s.agent_name AS agentName,
+                  s.assignment_role AS agentRole,
+                  s.model,
+                  s.model_provider AS modelProvider
+                  ${payloadColumns.length === 0 ? "" : `, ${payloadColumns.join(", ")}`}
+                FROM tool_calls AS t
+                JOIN sessions AS s ON s.session_id = t.session_id
+                ${where}
+                ORDER BY t.session_id ASC, t.seq ASC, t.id ASC
+                LIMIT ? OFFSET ?
+              `).all(...args, options.limit, options.offset) as QueryToolCallRow[];
+            }),
+          queryMessagesBySessionSeq: (options) =>
+            trySqlite("queryMessagesBySessionSeq", () => {
+              const filters = ["m.session_id = ?", "m.seq = ?"];
+              const trailingArgs: string[] = [];
+              if (options.sessionId !== undefined) {
+                filters.push("m.session_id = ?");
+                trailingArgs.push(options.sessionId);
+              }
+              if (options.agentName !== undefined) {
+                filters.push("s.agent_name = ?");
+                trailingArgs.push(options.agentName);
+              }
+              if (options.agentRole !== undefined) {
+                filters.push("s.assignment_role = ?");
+                trailingArgs.push(options.agentRole);
+              }
+              if (options.model !== undefined) {
+                filters.push("s.model = ?");
+                trailingArgs.push(options.model);
+              }
+              if (options.modelProvider !== undefined) {
+                filters.push("s.model_provider = ?");
+                trailingArgs.push(options.modelProvider);
+              }
+              const statement = db.prepare(`
+                SELECT ${queryMessageColumns}
+                FROM messages AS m
+                JOIN sessions AS s ON s.session_id = m.session_id
+                WHERE ${filters.join(" AND ")}
+              `);
+              const rows: QueryMessageRow[] = [];
+              for (const pair of options.pairs) {
+                const row = statement.get(
+                  pair.sessionId,
+                  pair.seq,
+                  ...trailingArgs,
+                ) as QueryMessageRow | null;
+                if (row !== null) rows.push(row);
+              }
+              return rows;
             }),
           getMessage: ({ sessionId, seq, contentHash }) =>
             trySqlite("getMessage", () =>
@@ -1896,7 +2226,19 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
           registerMessageVectorMutationListener: (listener) => {
             messageVectorMutationListener = listener;
           },
-          lexicalSearch: ({ query, projectKey, role, providers, limit }) =>
+          lexicalSearch: ({
+            query,
+            projectKey,
+            role,
+            providers,
+            sessionId,
+            agentName,
+            agentRole,
+            model,
+            modelProvider,
+            limit,
+            offset,
+          }) =>
             trySqlite("lexicalSearch", () => {
               // The single-provider case narrows the MATCH itself via the
               // provider scope token (real FTS-index narrowing); a multi-provider
@@ -1919,9 +2261,32 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                 args.push(role);
               }
               if (providers !== undefined && providers.length > 0) {
-                filters.push(`messages_fts.provider IN (${providers.map(() => "?").join(", ")})`);
+                filters.push(`s.provider IN (${providers.map(() => "?").join(", ")})`);
                 args.push(...providers);
               }
+              if (sessionId !== undefined) {
+                filters.push("s.session_id = ?");
+                args.push(sessionId);
+              }
+              if (agentName !== undefined) {
+                filters.push("s.agent_name = ?");
+                args.push(agentName);
+              }
+              if (agentRole !== undefined) {
+                filters.push("s.assignment_role = ?");
+                args.push(agentRole);
+              }
+              if (model !== undefined) {
+                filters.push("s.model = ?");
+                args.push(model);
+              }
+              if (modelProvider !== undefined) {
+                filters.push("s.model_provider = ?");
+                args.push(modelProvider);
+              }
+              const rowOffset = Number.isInteger(offset) && offset !== undefined && offset >= 0
+                ? offset
+                : 0;
               const rows = db
                 .query(
                   `SELECT
@@ -1931,19 +2296,27 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                     m.seq AS seq,
                     m.role AS role,
                     m.project_key AS projectKey,
-                    messages_fts.provider AS provider,
+                    s.provider AS provider,
                     m.text AS text,
-                    m.content_hash AS contentHash
+                    m.content_hash AS contentHash,
+                    s.title,
+                    s.agent_name AS agentName,
+                    s.assignment_role AS agentRole,
+                    s.model,
+                    s.model_provider AS modelProvider,
+                    m.ts AS timestamp
                   FROM messages_fts
                   JOIN messages AS m
                     ON m.session_id = messages_fts.session_id
                    AND m.seq = messages_fts.seq
                    AND m.role = messages_fts.role
+                  JOIN sessions AS s
+                    ON s.session_id = m.session_id
                   WHERE ${filters.join(" AND ")}
                   ORDER BY rank ASC, messages_fts.key ASC
-                  LIMIT ?`,
+                  LIMIT ? OFFSET ?`,
                 )
-                .all(...args, positiveInt(limit, 10)) as Array<{
+                .all(...args, positiveInt(limit, 10), rowOffset) as Array<{
                   key: string;
                   rank: number;
                   sessionId: string;
@@ -1953,19 +2326,33 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                   provider: string;
                   text: string;
                   contentHash: string;
+                  title: string | null;
+                  agentName: string;
+                  agentRole: string | null;
+                  model: string | null;
+                  modelProvider: string | null;
+                  timestamp: string | null;
                 }>;
               return rows.map((row, index) => ({
                 key: row.key,
-                score: lexicalRankScore(index),
+                score: lexicalRankScore(rowOffset + index),
                 row: {
                   key: row.key,
+                  messageId: `${row.sessionId}:${row.seq}`,
                   sessionId: row.sessionId,
                   seq: row.seq,
+                  sequence: row.seq,
                   role: row.role,
                   projectKey: row.projectKey,
                   provider: row.provider,
                   text: row.text,
                   contentHash: row.contentHash,
+                  title: row.title,
+                  agentName: row.agentName,
+                  agentRole: row.agentRole,
+                  model: row.model,
+                  modelProvider: row.modelProvider,
+                  timestamp: row.timestamp,
                 },
               }));
             }),

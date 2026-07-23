@@ -119,7 +119,7 @@ describe("server ops config", () => {
     const clientConfig = readFileSync(join(repoRoot, "packages/cli/src/client-config.ts"), "utf8");
     const runbook = readFileSync(join(repoRoot, "docs/operations/server-docker-tailscale.md"), "utf8");
 
-    expect(cli).toContain("tool-calls [--session-id id] [--project-key key] [--provider name] [--tool-name name] [--limit n] [--offset n]");
+    expect(cli).toContain("tool-calls [--session id] [--project key] [--provider name[,name]]");
     expect(cli).toContain("tool-call --id id");
     expect(cli).toContain("[--role user|assistant|reasoning]");
     expect(cli).toContain("daemon install --server https://<quasar-service-tailnet-hostname> --ingest-token <token> [--interval-seconds 60]");
@@ -129,10 +129,10 @@ describe("server ops config", () => {
     expect(clientConfig).toContain("serverUrl");
     expect(clientConfig).toContain("ingestToken");
     expect(runbook).toContain("Agent / MCP serving contract");
-    expect(runbook).toContain("GET /search/<mode>");
+    expect(runbook).toContain("POST /query");
     expect(runbook).toContain("remote write ingest fails closed before provider scanning");
-    expect(runbook).toContain("projectKey`, `role=user\\|assistant`, `limit");
-    expect(runbook).toContain("sessionId`, `projectKey`, `provider`, `toolName`, `limit`, `offset");
+    expect(runbook).toContain("opaque cursor");
+    expect(runbook).toContain("body-free summary by default");
     expect(runbook).toContain("Operator-only commands");
   });
 });
