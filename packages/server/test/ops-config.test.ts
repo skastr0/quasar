@@ -23,6 +23,9 @@ describe("server ops config", () => {
     expect(dockerfile).toContain("bake-onnx-model");
     expect(compose).toContain("SYNTHETIC_API_KEY: ${SYNTHETIC_API_KEY:-}");
     expect(dockerfile).not.toContain("QUASAR_SEARCH_DATA_DIR");
+    expect(dockerfile).toContain(
+      "COPY packages/protocol/package.json packages/protocol/package.json",
+    );
     expect(dockerfile).toContain("COPY scripts ./scripts");
     expect(dockerfile).toContain('CMD ["bun", "packages/server/src/main.ts"');
     expect(dockerfile).toContain("/health");
