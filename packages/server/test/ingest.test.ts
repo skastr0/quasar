@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { Deferred, Effect, Either, Layer } from "effect";
+import { Effect, Either, Layer } from "effect";
 
 import { enqueueDownstreamJobs, ingestMappedSession } from "../src/ingest";
 import type { MappedSession } from "../src/model";
@@ -99,39 +99,31 @@ describe("enqueueDownstreamJobs", () => {
     expect(jobs.length).toBe(2);
   });
 
-  test("a partial fan-out failure leaves the fingerprint stale and the next ingest converges every required job", async () => {
+  test("an atomic fan-out failure leaves the fingerprint stale and the next ingest converges every required job", async () => {
     const sqlite = join(tempDir(), "quasar.sqlite");
     const queueLayer = makeDurableQueueLayer(sqlite);
-    const failSecondEnqueueLayer = Layer.effect(
+    const failFirstBatchLayer = Layer.effect(
       DurableQueue,
       Effect.gen(function* () {
         const queue = yield* DurableQueue;
-        const firstDurable = yield* Deferred.make<void>();
-        let enqueueAttempt = 0;
+        let batchAttempt = 0;
         return DurableQueue.of({
           ...queue,
-          enqueue: (job) =>
+          enqueueBatch: (jobs) =>
             Effect.suspend(() => {
-              enqueueAttempt += 1;
-              if (enqueueAttempt === 1) {
-                return queue.enqueue(job).pipe(
-                  Effect.tap(() => Deferred.succeed(firstDurable, undefined)),
-                );
+              batchAttempt += 1;
+              if (batchAttempt === 1) {
+                return Effect.fail(new DurableQueueError({
+                  operation: "enqueueBatch",
+                  message: "injected atomic batch failure",
+                }));
               }
-              if (enqueueAttempt === 2) {
-                return Deferred.await(firstDurable).pipe(
-                  Effect.andThen(Effect.fail(new DurableQueueError({
-                    operation: "enqueue",
-                    message: "injected second enqueue failure",
-                  }))),
-                );
-              }
-              return queue.enqueue(job);
+              return queue.enqueueBatch(jobs);
             }),
         });
       }),
     ).pipe(Layer.provide(queueLayer));
-    const layer = Layer.merge(makeLocalStoreLayer(sqlite), failSecondEnqueueLayer);
+    const layer = Layer.merge(makeLocalStoreLayer(sqlite), failFirstBatchLayer);
     const mapped = duplicateContentSession();
 
     const result = await Effect.runPromise(
@@ -158,7 +150,7 @@ describe("enqueueDownstreamJobs", () => {
 
     expect(Either.isLeft(result.first)).toBe(true);
     expect(result.freshAfterFailure).toBe(false);
-    expect(result.queueAfterFailure).toEqual({ pending: 1, leased: 0, failed: 0 });
+    expect(result.queueAfterFailure).toEqual({ pending: 0, leased: 0, failed: 0 });
     expect(result.second).toMatchObject({
       status: "ok",
       messagesWritten: 0,

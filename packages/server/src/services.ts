@@ -39,17 +39,23 @@ export interface PruneFailedReport {
  * kind is a fossil from a removed feature and is safe to prune. */
 const LIVE_QUEUE_KINDS = ["embed-message"] as const;
 
+export interface QueueJobInput {
+  readonly kind: string;
+  readonly payload: unknown;
+  readonly idempotencyKey?: string;
+  readonly nextRunAt?: string;
+  readonly maxAttempts?: number;
+}
+
 export interface DurableQueueService {
   /** Enqueue idempotently. An explicit enqueue of a terminal job key creates
    * fresh pending work atomically: completed and failed rows are replaced,
    * while pending and leased rows remain untouched. */
-  readonly enqueue: (job: {
-    readonly kind: string;
-    readonly payload: unknown;
-    readonly idempotencyKey?: string;
-    readonly nextRunAt?: string;
-    readonly maxAttempts?: number;
-  }) => Effect.Effect<QueueJobRow, DurableQueueError>;
+  readonly enqueue: (job: QueueJobInput) => Effect.Effect<QueueJobRow, DurableQueueError>;
+  /** Enqueue one session's complete fan-out in a single transaction. The
+   * batch is all-or-nothing, and each row keeps the same terminal-revival and
+   * pending/leased idempotency semantics as `enqueue`. */
+  readonly enqueueBatch: (jobs: readonly QueueJobInput[]) => Effect.Effect<readonly QueueJobRow[], DurableQueueError>;
   readonly leaseBatch: (options: {
     readonly workerId: string;
     readonly kind?: string;
@@ -330,14 +336,15 @@ export const makeDurableQueueLayer = (path = sqlitePath()): Layer.Layer<DurableQ
              AND json_extract(payload_json, '$.embeddingProfile') = ?
            GROUP BY status`,
         );
-        const enqueueJob = db.transaction((job: {
+        interface PreparedQueueJob {
           readonly kind: string;
           readonly payloadJson: string;
           readonly idempotencyKey: string | null;
           readonly maxAttempts: number;
           readonly nextRunAt: string;
           readonly at: string;
-        }) => {
+        }
+        const enqueueJobInTransaction = (job: PreparedQueueJob): QueueJobRow => {
           const jobId = crypto.randomUUID();
           if (job.idempotencyKey !== null) {
             db.prepare(
@@ -358,21 +365,30 @@ export const makeDurableQueueLayer = (path = sqlitePath()): Layer.Layer<DurableQ
             ? selectJobById.get(jobId)
             : selectJobByIdempotencyKey.get(job.idempotencyKey);
           return rowToJob(row as Record<string, unknown>);
-        });
+        };
+        const enqueueJob = db.transaction(enqueueJobInTransaction);
+        const enqueueJobs = db.transaction((jobs: readonly PreparedQueueJob[]) =>
+          jobs.map(enqueueJobInTransaction));
+        const prepareJobs = (jobs: readonly QueueJobInput[]): PreparedQueueJob[] => {
+          const at = nowIso();
+          return jobs.map((job) => ({
+            kind: job.kind,
+            payloadJson: JSON.stringify(job.payload),
+            idempotencyKey: job.idempotencyKey ?? null,
+            maxAttempts: job.maxAttempts ?? 5,
+            nextRunAt: job.nextRunAt ?? at,
+            at,
+          }));
+        };
 
         return DurableQueue.of({
           enqueue: (job) =>
             queueTry("enqueue", () => {
-              const at = nowIso();
-              return enqueueJob({
-                kind: job.kind,
-                payloadJson: JSON.stringify(job.payload),
-                idempotencyKey: job.idempotencyKey ?? null,
-                maxAttempts: job.maxAttempts ?? 5,
-                nextRunAt: job.nextRunAt ?? at,
-                at,
-              });
+              const prepared = prepareJobs([job])[0]!;
+              return enqueueJob(prepared);
             }),
+          enqueueBatch: (jobs) =>
+            queueTry("enqueueBatch", () => jobs.length === 0 ? [] : enqueueJobs(prepareJobs(jobs))),
           leaseBatch: ({ workerId, kind, limit, leaseMs, now = nowIso() }) =>
             queueTry("leaseBatch", () => leaseReady({ workerId, kind, limit, leaseUntil: addMs(now, leaseMs), now })),
           ack: (jobId, now = nowIso()) =>
