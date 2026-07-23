@@ -68,6 +68,7 @@ const Provider = Schema.Literal(
 const SessionRole = Schema.Literal(
   "user",
   "assistant",
+  "reasoning",
   "developer",
   "system",
   "tool",
