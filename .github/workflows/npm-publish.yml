@@ -1,7 +1,6 @@
 name: Publish CLI to npm
 
 on:
-  workflow_dispatch:
   push:
     tags:
       - "v*"
@@ -31,15 +30,16 @@ jobs:
           package-manager-cache: false
 
       - name: Install
-        run: bun install --frozen-lockfile
+        run: bun install --frozen-lockfile --cpu='*' --os='*'
 
-      - name: Verify static package surface
-        run: bun run verify:static
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          package_version="$(node -p "require('./packages/cli/package.json').version")"
+          test "${GITHUB_REF_NAME}" = "v${package_version}"
 
-      - run: bun run --cwd packages/cli build:npm-packages
-
-      - name: Inspect package contents
-        run: bun run pack:dry-run
+      - name: Verify release
+        run: bun run release:check
 
       - name: Publish packages
         run: bun run publish:npm
