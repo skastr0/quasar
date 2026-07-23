@@ -13,6 +13,7 @@ import { ingestFailureError, ingestReportPayload } from "./ingest-report";
 import { ingestRemote } from "./ingest";
 import { fail, ok, writeJson } from "./json";
 import {
+  fetchWithRetry,
   protocolContract,
   protocolExampleList,
   readQueryArgument,
@@ -368,25 +369,6 @@ const urlFor = (base: string, path: string, params: Record<string, string | unde
 
 const httpTimeoutMs = () => positiveInt(arg("--timeout-ms") ?? process.env.QUASAR_HTTP_TIMEOUT_MS, 60_000);
 
-const isTransientFetchError = (error: unknown): boolean => {
-  const message = error instanceof Error ? error.message : String(error);
-  return /socket|closed|ECONNRESET|ETIMEDOUT|terminated/i.test(message);
-};
-
-const fetchWithRetry = async (url: URL): Promise<Response> => {
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      return await fetch(url, { signal: AbortSignal.timeout(httpTimeoutMs()) });
-    } catch (error) {
-      lastError = error;
-      if (!isTransientFetchError(error) || attempt === 2) break;
-      await Bun.sleep(250 * (attempt + 1));
-    }
-  }
-  throw lastError;
-};
-
 const requireServer = (name: string): string | undefined => {
   const base = server();
   if (base !== undefined) return base;
@@ -407,7 +389,9 @@ const fetchServerJson = async (name: string, path: string, params: Record<string
   const base = requireServer(name);
   if (base === undefined) return;
   try {
-    const response = await fetchWithRetry(urlFor(base, path, params));
+    const response = await fetchWithRetry(urlFor(base, path, params), {
+      timeoutMs: httpTimeoutMs(),
+    });
     const body = await response.json();
     if (!response.ok) process.exitCode = 1;
     return body;
