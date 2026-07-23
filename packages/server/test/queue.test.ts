@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { Effect, Layer } from "effect";
+import { Effect, Either, Layer } from "effect";
 
 import { DurableQueue, makeDurableQueueLayer } from "../src/services";
 import type { DurableQueueService } from "../src/services";
@@ -36,6 +36,39 @@ const withQueue = <A>(path: string, run: (queue: DurableQueueService) => Effect.
   );
 
 describe("DurableQueue", () => {
+  test("enqueueBatch is atomic and preserves per-key idempotency", async () => {
+    const path = sqlitePath();
+    const [first, second, failedStats, finalStats] = await withQueue(
+      path,
+      (queue) =>
+        Effect.gen(function* () {
+          const first = yield* queue.enqueueBatch([
+            { kind: "embed", payload: { messageId: "a" }, idempotencyKey: "embed:a" },
+            { kind: "embed", payload: { messageId: "b" }, idempotencyKey: "embed:b" },
+          ]);
+          const second = yield* queue.enqueueBatch([
+            { kind: "embed", payload: { messageId: "a" }, idempotencyKey: "embed:a" },
+            { kind: "embed", payload: { messageId: "b" }, idempotencyKey: "embed:b" },
+          ]);
+          const failed = yield* Effect.either(queue.enqueueBatch([
+            { kind: "embed", payload: { messageId: "c" }, idempotencyKey: "embed:c" },
+            { kind: "embed", payload: { value: 1n }, idempotencyKey: "embed:invalid" },
+          ]));
+          const failedStats = yield* queue.stats;
+          expect(Either.isLeft(failed)).toBe(true);
+          yield* queue.enqueueBatch([
+            { kind: "embed", payload: { messageId: "c" }, idempotencyKey: "embed:c" },
+          ]);
+          const finalStats = yield* queue.stats;
+          return [first, second, failedStats, finalStats] as const;
+        }),
+    );
+
+    expect(first.map((job) => job.jobId)).toEqual(second.map((job) => job.jobId));
+    expect(failedStats).toEqual({ pending: 2, leased: 0, failed: 0 });
+    expect(finalStats).toEqual({ pending: 3, leased: 0, failed: 0 });
+  });
+
   test("idempotency keys return the existing queued job", async () => {
     const path = sqlitePath();
     const [first, second, stats] = await withQueue(

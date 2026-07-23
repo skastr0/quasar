@@ -34,24 +34,19 @@ export const enqueueDownstreamJobs = (queue: DurableQueueService, rows: readonly
     const embeddingJobNamespace = embeddingProfileJobNamespace(embeddingProfileFromEnv());
     const embeddingMaxAttempts = EMBEDDING_JOB_MAX_ATTEMPTS;
     const messages = rows.filter(isSemanticSearchDocument);
-    yield* Effect.forEach(
-      messages,
-      (message) =>
-        queue.enqueue({
-          kind: "embed-message",
-          payload: {
-            sessionId: message.sessionId,
-            seq: message.seq,
-            role: message.role,
-            projectKey: message.projectKey,
-            contentHash: message.contentHash,
-            embeddingProfile: embeddingJobNamespace,
-          },
-          idempotencyKey: `embed-message:${embeddingJobNamespace}:${message.sessionId}:${message.seq}:${message.contentHash}`,
-          maxAttempts: embeddingMaxAttempts,
-        }),
-      { concurrency: 16 },
-    );
+    yield* queue.enqueueBatch(messages.map((message) => ({
+      kind: "embed-message",
+      payload: {
+        sessionId: message.sessionId,
+        seq: message.seq,
+        role: message.role,
+        projectKey: message.projectKey,
+        contentHash: message.contentHash,
+        embeddingProfile: embeddingJobNamespace,
+      },
+      idempotencyKey: `embed-message:${embeddingJobNamespace}:${message.sessionId}:${message.seq}:${message.contentHash}`,
+      maxAttempts: embeddingMaxAttempts,
+    })));
     return messages.length;
   });
 
