@@ -1669,7 +1669,12 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
           s.parent_session_id AS parentSessionId,
           s.assignment_role AS agentRole,
           s.assignment_path AS agentPath,
-          s.assignment_depth AS agentDepth
+          s.assignment_depth AS agentDepth,
+          s.source_path AS sourcePath,
+          s.source_fingerprint AS sourceFingerprint,
+          s.host,
+          s.identity_scheme_version AS identitySchemeVersion,
+          s.normalization_version AS normalizationVersion
         `;
         const queryMessageColumns = `
           m.session_id || ':' || CAST(m.seq AS TEXT) AS messageId,

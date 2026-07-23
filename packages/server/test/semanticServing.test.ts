@@ -178,14 +178,8 @@ const waitForSemanticReady = async (base: string) => {
   throw new Error("server never reported semantic readiness");
 };
 
-const fetchJson = async (url: string, body?: Record<string, unknown>) => {
-  const response = await fetch(url, body === undefined
-    ? undefined
-    : {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
+const fetchJson = async (url: string) => {
+  const response = await fetch(url);
   return { status: response.status, body: (await response.json()) as any };
 };
 
@@ -197,18 +191,11 @@ const query = (
     readonly filters?: Record<string, unknown>;
     readonly limit?: number;
   },
-) => fetchJson(`${base}/query`, {
-  protocolVersion: "quasar.query/v1",
-  kind: "search",
-  text: options.text,
-  mode: options.mode,
-  ...(options.filters === undefined ? {} : { filters: options.filters }),
-  projection: {
-    detail: "detail",
-    fields: ["messageId", "sessionId", "sequence", "role", "projectKey", "provider", "text", "score"],
-  },
-  page: { limit: options.limit ?? 10 },
-});
+) => {
+  const params = new URLSearchParams({ q: options.text, limit: String(options.limit ?? 10) });
+  for (const [key, value] of Object.entries(options.filters ?? {})) params.set(key, String(value));
+  return fetchJson(`${base}/search/${options.mode}?${params}`);
+};
 
 describe("semantic serving from the resident matrix", () => {
   test("serves semantic and fusion QuerySpec modes once booted with vectors", async () => {
@@ -250,6 +237,9 @@ describe("semantic serving from the resident matrix", () => {
       });
       expect(ready.body.data.reason).toBeUndefined();
 
+      const legacyQuery = await fetch(`${base}/query`, { method: "POST" });
+      expect(legacyQuery.status).toBe(404);
+
       // Query at angle 0.1: alpha:0 (0.1) then beta:0 (0.25) then alpha:1 (0.4).
       const semantic = await query(base, {
         text: "find the handshake angle=0.1",
@@ -257,25 +247,21 @@ describe("semantic serving from the resident matrix", () => {
         limit: 3,
       });
       expect(semantic.status).toBe(200);
-      const semanticKeys = semantic.body.items.map(
-        (item: { sessionId: string; sequence: number; role: string }) =>
-          `${item.sessionId}:${item.sequence}:${item.role}`,
+      const semanticKeys = semantic.body.data.matches.map(
+        (item: { row: { sessionId: string; sequence: number; role: string } }) =>
+          `${item.row.sessionId}:${item.row.sequence}:${item.row.role}`,
       );
       expect(semanticKeys).toEqual([
         "codex:alpha:0:assistant",
         "codex:beta:0:assistant",
         "codex:alpha:1:user",
       ]);
-      const scores = semantic.body.items.map((item: { score: number }) => item.score);
+      const scores = semantic.body.data.matches.map((item: { score: number }) => item.score);
       expect(scores[0]).toBeGreaterThan(scores[1]);
       expect(scores[1]).toBeGreaterThan(scores[2]);
-      expect(semantic.body.items[0]).toMatchObject({
-        sessionId: "codex:alpha",
-        sequence: 0,
-        role: "assistant",
-        projectKey: "project-alpha",
-        provider: "codex",
-        text: "handshake protocol notes angle=0.1",
+      expect(semantic.body.data.matches[0].row).toMatchObject({
+        sessionId: "codex:alpha", sequence: 0, role: "assistant", projectKey: "project-alpha",
+        provider: "codex", text: "handshake protocol notes angle=0.1",
       });
 
       // Exact SQL-prefiltered scan: only project-beta rows are eligible.
@@ -285,9 +271,9 @@ describe("semantic serving from the resident matrix", () => {
         filters: { projectKey: "project-beta" },
       });
       expect(filtered.status).toBe(200);
-      expect(filtered.body.items.map(
-        (item: { sessionId: string; sequence: number; role: string }) =>
-          `${item.sessionId}:${item.sequence}:${item.role}`,
+      expect(filtered.body.data.matches.map(
+        (item: { row: { sessionId: string; sequence: number; role: string } }) =>
+          `${item.row.sessionId}:${item.row.sequence}:${item.row.role}`,
       )).toEqual([
         "codex:beta:0:assistant",
         "codex:beta:1:user",
@@ -300,7 +286,7 @@ describe("semantic serving from the resident matrix", () => {
       });
       expect(roleFiltered.status).toBe(200);
       expect(
-        roleFiltered.body.items.every((item: { role: string }) => item.role === "user"),
+        roleFiltered.body.data.matches.every((item: { row: { role: string } }) => item.row.role === "user"),
       ).toBe(true);
 
       // The target ranks below the global top 256. The session metadata mask
@@ -311,7 +297,7 @@ describe("semantic serving from the resident matrix", () => {
         filters: { model: "target-model", modelProvider: "test-provider" },
       });
       expect(modelFiltered.status).toBe(200);
-      expect(modelFiltered.body.items.map((item: { sessionId: string }) => item.sessionId))
+      expect(modelFiltered.body.data.matches.map((item: { row: { sessionId: string } }) => item.row.sessionId))
         .toEqual(["codex:filtered-target"]);
 
       // Fusion: "handshake" only matches alpha:0 lexically AND it ranks first
@@ -322,11 +308,11 @@ describe("semantic serving from the resident matrix", () => {
         limit: 3,
       });
       expect(fusion.status).toBe(200);
-      const fusionKeys = fusion.body.items.map((item: { sessionId: string; sequence: number; role: string }) =>
-        `${item.sessionId}:${item.sequence}:${item.role}`);
+      const fusionKeys = fusion.body.data.matches.map((item: { row: { sessionId: string; sequence: number; role: string } }) =>
+        `${item.row.sessionId}:${item.row.sequence}:${item.row.role}`);
       expect(fusionKeys[0]).toBe("codex:alpha:0:assistant");
       expect(fusionKeys.length).toBe(3);
-      expect(fusion.body.items[0].score).toBeGreaterThanOrEqual(fusion.body.items[1].score);
+      expect(fusion.body.data.matches[0].score).toBeGreaterThanOrEqual(fusion.body.data.matches[1].score);
 
       // Embedder loss while the matrix is resident: semantic mode is
       // EmbeddingUnavailable (503), never SemanticDisabled, and lexical is untouched.
@@ -337,18 +323,18 @@ describe("semantic serving from the resident matrix", () => {
         limit: 3,
       });
       expect(unavailable.status).toBe(503);
-      expect(unavailable.body.error.type).toBe("ServiceUnavailable");
+      expect(unavailable.body.error.type).toBe("EmbeddingUnavailable");
       const lexical = await query(base, { text: "handshake", mode: "lexical", limit: 3 });
       expect(lexical.status).toBe(200);
-      expect(lexical.body.items.length).toBe(1);
+      expect(lexical.body.data.matches.length).toBe(1);
 
       // Fusion never 503s for the same embedder loss: it degrades to the
       // lexical leg alone (a fresh, uncached query text forces a real embed
       // call against the dead stub instead of a cache hit).
       const fusionDegraded = await query(base, { text: "handshake", mode: "fusion", limit: 3 });
       expect(fusionDegraded.status).toBe(200);
-      expect(fusionDegraded.body.items.length).toBe(1);
-      expect(fusionDegraded.body.items[0].text).toBe("handshake protocol notes angle=0.1");
+      expect(fusionDegraded.body.data.matches.length).toBe(1);
+      expect(fusionDegraded.body.data.matches[0].row.text).toBe("handshake protocol notes angle=0.1");
     } finally {
       proc.kill();
       await proc.exited;
