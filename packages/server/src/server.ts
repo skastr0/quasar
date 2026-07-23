@@ -5,6 +5,7 @@ import { Effect, Layer, ParseResult, Schema } from "effect";
 
 import { LocalServerConfig } from "./config";
 import { embeddingProviderFromEnv } from "./embeddingProfiles";
+import { providerFromSessionId } from "./fts5";
 import { ingestMappedSession } from "./ingest";
 import { ok } from "./json";
 import type { MappedSession } from "./model";
@@ -16,15 +17,17 @@ import {
   QuerySemanticDisabledError,
 } from "./query";
 import { AppLayer } from "./runtime";
+import { DerivedSearch } from "./search";
 import { DurableQueue, Embeddings, IngestCoordinator, WorkerSupervisor } from "./services";
-import { LocalStore } from "./store";
-import { VectorMatrix } from "./vectorMatrix";
+import { LocalStore, type LocalStoreService, type SearchHit } from "./store";
+import { VectorMatrix, type VectorMatrixHit } from "./vectorMatrix";
 import {
   publishEmbeddingReadiness,
   publishMatrixWatermarkGauges,
   publishQueueGauges,
   publishQueueKindGauges,
   recordIngestOutcome,
+  recordSearchReceiptMetrics,
   statusMetricsPayload,
 } from "./metrics";
 
@@ -33,6 +36,25 @@ const json = (value: unknown, options?: { readonly status?: number }) =>
 
 const badRequest = (route: string, message: string) =>
   json({ ok: false, route, error: { type: "BadRequest", message } }, { status: 400 });
+
+const semanticDisabled = (route: string) =>
+  json(
+    {
+      ok: false,
+      route,
+      error: {
+        type: "SemanticDisabled",
+        message: "semantic search disabled pending vector materialization",
+      },
+    },
+    { status: 503 },
+  );
+
+const embeddingUnavailable = (route: string, message: string) =>
+  json(
+    { ok: false, route, error: { type: "EmbeddingUnavailable", message } },
+    { status: 503 },
+  );
 
 const unauthorized = (route: string, message: string) =>
   json({ ok: false, route, error: { type: "Unauthorized", message } }, { status: 401 });
@@ -422,6 +444,23 @@ const projects = Effect.gen(function* () {
   return json(ok("projects", { rows }));
 });
 
+// Resource reads are first-class HTTP endpoints. Keep their stable envelopes
+// directly usable by CLIs, agents, curl, and browser diagnostics.
+const sessions = Effect.gen(function* () {
+  const store = yield* LocalStore;
+  const params = yield* query;
+  const rows = yield* store.listSessions({
+    provider: params.get("provider") ?? undefined,
+    projectKey: params.get("projectKey") ?? undefined,
+    model: params.get("model") ?? undefined,
+    modelProvider: params.get("modelProvider") ?? undefined,
+    assignmentRole: params.get("assignmentRole") ?? undefined,
+    limit: positiveInt(params, "limit", 100),
+    offset: positiveInt(params, "offset", 0),
+  });
+  return json(ok("sessions", { rows }));
+});
+
 const sessionDetail = Effect.gen(function* () {
   const store = yield* LocalStore;
   const params = yield* query;
@@ -451,6 +490,437 @@ const sessionDetail = Effect.gen(function* () {
     ? notFound("session-detail", `session not found: ${sessionId}`)
     : json(ok("session-detail", detail));
 });
+
+const messages = Effect.gen(function* () {
+  const store = yield* LocalStore;
+  const params = yield* query;
+  const sessionId = params.get("sessionId");
+  if (sessionId === null || sessionId.trim() === "") {
+    return badRequest("messages", "sessionId is required");
+  }
+  const rows = yield* store.readMessages(
+    sessionId,
+    positiveInt(params, "limit", 1_000),
+  );
+  return json(ok("messages", { sessionId, rows }));
+});
+
+const toolCalls = Effect.gen(function* () {
+  const store = yield* LocalStore;
+  const params = yield* query;
+  const rows = yield* store.listToolCalls({
+    sessionId: params.get("sessionId") ?? undefined,
+    projectKey: params.get("projectKey") ?? undefined,
+    provider: params.get("provider") ?? undefined,
+    toolName: params.get("toolName") ?? undefined,
+    limit: positiveInt(params, "limit", 100),
+    offset: positiveInt(params, "offset", 0),
+  });
+  return json(ok("tool-calls", { rows }));
+});
+
+const toolCall = Effect.gen(function* () {
+  const store = yield* LocalStore;
+  const params = yield* query;
+  const id = params.get("id");
+  if (id === null || id.trim() === "") {
+    return badRequest("tool-call", "id is required");
+  }
+  const row = yield* store.getToolCall(id);
+  return row === undefined
+    ? notFound("tool-call", `tool call not found: ${id}`)
+    : json(ok("tool-call", { row }));
+});
+
+type SearchMode = "lexical" | "semantic" | "fusion";
+
+interface SearchReceipt {
+  readonly route: string;
+  readonly mode: SearchMode;
+  readonly query: string;
+  readonly limit: number;
+  readonly statusCode: number;
+  readonly startedAt: string;
+  readonly completedAt: string;
+  readonly readinessMs: number;
+  readonly searchMs: number;
+  readonly totalMs: number;
+  readonly residualMs: number;
+  readonly matches: number;
+  readonly tableName?: string;
+  readonly embedMs?: number;
+  readonly degraded?: boolean;
+  readonly traceId?: string;
+}
+
+const searchProfileEnabled = (): boolean =>
+  process.env.QUASAR_SEARCH_PROFILE === "1";
+
+const otlpEnabled = (): boolean => {
+  const baseUrl = process.env.QUASAR_OTLP_BASE_URL?.trim();
+  return baseUrl !== undefined && baseUrl !== "";
+};
+
+const searchReceiptEnabled = (): boolean =>
+  searchProfileEnabled() || otlpEnabled();
+
+const optionalTraceId: Effect.Effect<string | undefined> = Effect.gen(
+  function* () {
+    if (!searchReceiptEnabled()) return undefined;
+    return yield* Effect.currentSpan.pipe(
+      Effect.map((span) => span.traceId),
+      Effect.orElseSucceed(() => undefined as string | undefined),
+    );
+  },
+);
+
+const emitSearchProfile = (profile: SearchReceipt) =>
+  Effect.gen(function* () {
+    yield* recordSearchReceiptMetrics({
+      mode: profile.mode,
+      readinessMs: profile.readinessMs,
+      searchMs: profile.searchMs,
+      embedMs: profile.embedMs,
+      totalMs: profile.totalMs,
+    });
+    if (!searchProfileEnabled()) return;
+    yield* Effect.logInfo("search.profile").pipe(
+      Effect.annotateLogs({
+        event: "search.profile",
+        at: new Date().toISOString(),
+        ...profile,
+      }),
+    );
+  });
+
+const parseProviders = (
+  params: URLSearchParams,
+): readonly string[] | undefined => {
+  const raw = params.get("provider");
+  if (raw === null || raw.trim() === "") return undefined;
+  const list = raw
+    .split(",")
+    .map((provider) => provider.trim())
+    .filter((provider) => provider.length > 0);
+  return list.length > 0 ? list : undefined;
+};
+
+const lexicalSearch = Effect.gen(function* () {
+  const routeStarted = performance.now();
+  const startedAt = new Date().toISOString();
+  const search = yield* DerivedSearch;
+  const params = yield* query;
+  const text = params.get("q") ?? params.get("query");
+  if (text === null || text.trim() === "") {
+    return badRequest("search/lexical", "q is required");
+  }
+  const limit = positiveInt(params, "limit", 10);
+  const searchStarted = performance.now();
+  const matches = yield* search.lexicalSearch({
+    query: text,
+    projectKey: params.get("projectKey") ?? undefined,
+    role: params.get("role") ?? undefined,
+    providers: parseProviders(params),
+    limit,
+  });
+  const searchMs = Math.round(performance.now() - searchStarted);
+  const totalMs = Math.round(performance.now() - routeStarted);
+  const traceId = yield* optionalTraceId;
+  const receipt: SearchReceipt = {
+    route: "search/lexical",
+    mode: "lexical",
+    query: text,
+    limit,
+    statusCode: 200,
+    startedAt,
+    completedAt: new Date().toISOString(),
+    readinessMs: 0,
+    searchMs,
+    totalMs,
+    residualMs: Math.max(0, totalMs - searchMs),
+    matches: matches.length,
+    ...(traceId !== undefined ? { traceId } : {}),
+  };
+  yield* emitSearchProfile(receipt);
+  return json(ok("search/lexical", {
+    matches,
+    receipt: searchReceiptEnabled() ? receipt : undefined,
+  }));
+}).pipe(Effect.withSpan("search.lexical"));
+
+const assembleSemanticMatches = (
+  store: LocalStoreService,
+  hits: readonly VectorMatrixHit[],
+): Effect.Effect<readonly SearchHit[], unknown> =>
+  Effect.gen(function* () {
+    if (hits.length === 0) return [];
+    const rows = yield* store.getMessagesBySessionSeq(
+      hits.map((hit) => ({ sessionId: hit.sessionId, seq: hit.seq })),
+    );
+    const byKey = new Map(
+      rows.map((row) => [`${row.sessionId}\0${row.seq}`, row]),
+    );
+    const matches: SearchHit[] = [];
+    for (const hit of hits) {
+      const row = byKey.get(`${hit.sessionId}\0${hit.seq}`);
+      if (row === undefined) continue;
+      const key = `${row.sessionId}:${row.seq}:${row.role}`;
+      matches.push({
+        key,
+        score: hit.score,
+        row: {
+          key,
+          sessionId: row.sessionId,
+          seq: row.seq,
+          role: row.role,
+          projectKey: row.projectKey,
+          provider: providerFromSessionId(row.sessionId),
+          text: row.text,
+          contentHash: row.contentHash,
+        },
+      });
+    }
+    return matches;
+  });
+
+interface SemanticQueryOutcome {
+  readonly matches: readonly SearchHit[];
+  readonly embedMs: number;
+  readonly searchMs: number;
+}
+
+const runSemanticQuery = (options: {
+  readonly text: string;
+  readonly limit: number;
+  readonly model: string;
+  readonly projectKey?: string;
+  readonly role?: string;
+  readonly providers?: readonly string[];
+}) =>
+  Effect.gen(function* () {
+    const [matrix, embeddings, store] = yield* Effect.all([
+      VectorMatrix,
+      Embeddings,
+      LocalStore,
+    ]);
+    const embedStarted = performance.now();
+    const vector = yield* embeddings.embedText(options.text);
+    const embedMs = Math.round(performance.now() - embedStarted);
+    const searchStarted = performance.now();
+    const hits = yield* matrix.search({
+      vector,
+      limit: options.limit,
+      projectKey: options.projectKey,
+      role: options.role,
+      providers: options.providers,
+    });
+    const matches = yield* assembleSemanticMatches(store, hits);
+    const searchMs = Math.round(performance.now() - searchStarted);
+    return { matches, embedMs, searchMs } satisfies SemanticQueryOutcome;
+  });
+
+const semanticSearch = Effect.gen(function* () {
+  const routeStarted = performance.now();
+  const startedAt = new Date().toISOString();
+  const matrix = yield* VectorMatrix;
+  const readinessStarted = performance.now();
+  const matrixStatus = yield* matrix.status.pipe(
+    Effect.withSpan("search.readiness"),
+  );
+  const readinessMs = Math.round(performance.now() - readinessStarted);
+  if (!matrixStatus.enabled) return semanticDisabled("search/semantic");
+  const params = yield* query;
+  const text = params.get("q") ?? params.get("query");
+  if (text === null || text.trim() === "") {
+    return badRequest("search/semantic", "q is required");
+  }
+  const limit = positiveInt(params, "limit", 10);
+  const outcome = yield* runSemanticQuery({
+    text,
+    limit,
+    model: matrixStatus.model,
+    projectKey: params.get("projectKey") ?? undefined,
+    role: params.get("role") ?? undefined,
+    providers: parseProviders(params),
+  }).pipe(Effect.either);
+  if (outcome._tag === "Left") {
+    const failure = outcome.left;
+    if (
+      typeof failure === "object"
+      && failure !== null
+      && (failure as { _tag?: string })._tag === "VectorMatrixDisabledError"
+    ) {
+      return semanticDisabled("search/semantic");
+    }
+    if (
+      typeof failure === "object"
+      && failure !== null
+      && (failure as { _tag?: string })._tag === "VectorMatrixError"
+    ) {
+      return yield* Effect.fail(failure);
+    }
+    return embeddingUnavailable(
+      "search/semantic",
+      failure instanceof Error ? failure.message : String(failure),
+    );
+  }
+  const totalMs = Math.round(performance.now() - routeStarted);
+  const traceId = yield* optionalTraceId;
+  const receipt: SearchReceipt = {
+    route: "search/semantic",
+    mode: "semantic",
+    query: text,
+    limit,
+    statusCode: 200,
+    startedAt,
+    completedAt: new Date().toISOString(),
+    readinessMs,
+    searchMs: outcome.right.searchMs,
+    totalMs,
+    residualMs: Math.max(
+      0,
+      totalMs - outcome.right.searchMs - outcome.right.embedMs - readinessMs,
+    ),
+    matches: outcome.right.matches.length,
+    embedMs: outcome.right.embedMs,
+    ...(traceId !== undefined ? { traceId } : {}),
+  };
+  yield* emitSearchProfile(receipt);
+  return json(ok("search/semantic", {
+    matches: outcome.right.matches,
+    receipt: searchReceiptEnabled() ? receipt : undefined,
+  }));
+}).pipe(Effect.withSpan("search.semantic"));
+
+const RRF_K = 60;
+const FUSION_POOL = 50;
+
+const fuseByReciprocalRank = (
+  lexical: readonly SearchHit[],
+  semantic: readonly SearchHit[],
+  limit: number,
+): readonly SearchHit[] => {
+  const fused = new Map<
+    string,
+    { score: number; row: SearchHit["row"] }
+  >();
+  const contribute = (hits: readonly SearchHit[]) => {
+    for (let rank = 0; rank < hits.length; rank += 1) {
+      const hit = hits[rank]!;
+      const entry = fused.get(hit.key);
+      const contribution = 1 / (RRF_K + rank + 1);
+      if (entry === undefined) {
+        fused.set(hit.key, { score: contribution, row: hit.row });
+      } else {
+        entry.score += contribution;
+      }
+    }
+  };
+  contribute(lexical);
+  contribute(semantic);
+  return [...fused.entries()]
+    .map(([key, entry]) => ({ key, score: entry.score, row: entry.row }))
+    .sort(
+      (left, right) =>
+        right.score - left.score || (left.key < right.key ? -1 : 1),
+    )
+    .slice(0, limit);
+};
+
+const fusionSearch = Effect.gen(function* () {
+  const routeStarted = performance.now();
+  const startedAt = new Date().toISOString();
+  const matrix = yield* VectorMatrix;
+  const readinessStarted = performance.now();
+  const matrixStatus = yield* matrix.status.pipe(
+    Effect.withSpan("search.readiness"),
+  );
+  const readinessMs = Math.round(performance.now() - readinessStarted);
+  if (!matrixStatus.enabled) return semanticDisabled("search/fusion");
+  const params = yield* query;
+  const text = params.get("q") ?? params.get("query");
+  if (text === null || text.trim() === "") {
+    return badRequest("search/fusion", "q is required");
+  }
+  const limit = positiveInt(params, "limit", 10);
+  const pool = Math.max(limit, FUSION_POOL);
+  const projectKey = params.get("projectKey") ?? undefined;
+  const role = params.get("role") ?? undefined;
+  const providers = parseProviders(params);
+  const search = yield* DerivedSearch;
+  const searchStarted = performance.now();
+  const [lexicalHits, semanticOutcome] = yield* Effect.all(
+    [
+      search.lexicalSearch({
+        query: text,
+        projectKey,
+        role,
+        providers,
+        limit: pool,
+      }),
+      runSemanticQuery({
+        text,
+        limit: pool,
+        model: matrixStatus.model,
+        projectKey,
+        role,
+        providers,
+      }).pipe(Effect.either),
+    ],
+    { concurrency: "unbounded" },
+  );
+  let semanticMatches: readonly SearchHit[] = [];
+  let embedMs: number | undefined;
+  let degradedReason: string | undefined;
+  if (semanticOutcome._tag === "Left") {
+    const failure = semanticOutcome.left;
+    if (
+      typeof failure === "object"
+      && failure !== null
+      && (failure as { _tag?: string })._tag === "VectorMatrixError"
+    ) {
+      return yield* Effect.fail(failure);
+    }
+    degradedReason = failure instanceof Error
+      ? failure.message
+      : String(failure);
+  } else {
+    semanticMatches = semanticOutcome.right.matches;
+    embedMs = semanticOutcome.right.embedMs;
+  }
+  const matches = yield* Effect.sync(() =>
+    fuseByReciprocalRank(lexicalHits, semanticMatches, limit)).pipe(
+    Effect.withSpan("search.rrfFuse"),
+  );
+  const searchMs = Math.round(performance.now() - searchStarted);
+  const totalMs = Math.round(performance.now() - routeStarted);
+  const degraded = degradedReason !== undefined;
+  const traceId = yield* optionalTraceId;
+  const receipt: SearchReceipt = {
+    route: "search/fusion",
+    mode: "fusion",
+    query: text,
+    limit,
+    statusCode: 200,
+    startedAt,
+    completedAt: new Date().toISOString(),
+    readinessMs,
+    searchMs,
+    totalMs,
+    residualMs: Math.max(0, totalMs - searchMs - readinessMs),
+    matches: matches.length,
+    embedMs,
+    degraded: degraded || undefined,
+    ...(traceId !== undefined ? { traceId } : {}),
+  };
+  yield* emitSearchProfile(receipt);
+  return json(ok("search/fusion", {
+    matches,
+    degraded: degraded || undefined,
+    degradedReason,
+    receipt: searchReceiptEnabled() ? receipt : undefined,
+  }));
+}).pipe(Effect.withSpan("search.fusion"));
 
 const queryEndpoint = Effect.gen(function* () {
   const bodyResult = yield* HttpServerRequest.schemaBodyJson(Schema.Unknown).pipe(
@@ -706,7 +1176,14 @@ const routes = HttpRouter.empty.pipe(
   HttpRouter.get("/ready", ready),
   HttpRouter.get("/status", status),
   HttpRouter.get("/projects", projects),
+  HttpRouter.get("/sessions", sessions),
   HttpRouter.get("/session-detail", sessionDetail),
+  HttpRouter.get("/messages", messages),
+  HttpRouter.get("/tool-calls", toolCalls),
+  HttpRouter.get("/tool-call", toolCall),
+  HttpRouter.get("/search/lexical", lexicalSearch),
+  HttpRouter.get("/search/semantic", semanticSearch),
+  HttpRouter.get("/search/fusion", fusionSearch),
   HttpRouter.post("/query", queryEndpoint),
   HttpRouter.get("/ingest-runs", ingestRuns),
   HttpRouter.get("/ingest-run", ingestRun),
