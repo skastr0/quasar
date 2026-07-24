@@ -5,7 +5,6 @@ import {
   AMP_LIST_PAGE_SIZE,
   AMP_MAX_LIST_PAGES,
   ampAdapter,
-  readAmp,
   type AmpRunner,
   type AmpStreamOptions,
 } from "../src/adapters/amp";
@@ -32,6 +31,8 @@ const MACHINE_B = {
   platform: "linux",
 };
 const NOW = "2026-07-24T12:00:00.000Z";
+
+const readAmp = (options: AmpStreamOptions) => ampAdapter.read(options);
 
 const THREAD_A = "T-recent-0001";
 const THREAD_B = "T-recent-0002";

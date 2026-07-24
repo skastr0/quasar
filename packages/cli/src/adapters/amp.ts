@@ -901,7 +901,3 @@ export const ampAdapter: SessionAdapter = {
   read: async (options) => collectAdapterStream(streamAmp(options as AmpStreamOptions)),
   stream: (options) => streamAmp(options as AmpStreamOptions),
 };
-
-/** Test/entry helper that accepts injectable runner options without casts. */
-export const readAmp = (options: AmpStreamOptions) =>
-  collectAdapterStream(streamAmp(options));

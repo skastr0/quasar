@@ -39,6 +39,9 @@
     "goldens:update": "QUASAR_UPDATE_ADAPTER_GOLDENS=1 bun test test/adapter-golden-lock.test.ts",
     "tui:snapshot": "bun scripts/tui-snapshot.tsx"
   },
+  "dependencies": {
+    "effect": "^3.21.2"
+  },
   "optionalDependencies": {
     "@skastr0/quasar-cli-darwin-arm64": "0.5.0",
     "@skastr0/quasar-cli-darwin-x64": "0.5.0",
