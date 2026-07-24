@@ -45,7 +45,9 @@ import {
 // ---------------------------------------------------------------------------
 
 const SOURCE_ROOT = "https://ampcode.com/threads";
-const LIST_PAGE_SIZE = 500;
+/** Page size for `amp threads list --limit`. Exported for multi-page tests. */
+export const AMP_LIST_PAGE_SIZE = 500;
+const LIST_PAGE_SIZE = AMP_LIST_PAGE_SIZE;
 const MAX_LIST_PAGES = 100;
 const WATERMARK_GUARD_MS = 60 * 60 * 1_000;
 const DEFAULT_EXPORT_SPACING_MS = 3_000;
@@ -203,21 +205,54 @@ const oldestUpdatedMs = (entries: readonly AmpThreadListEntry[]): number | undef
 };
 
 /**
+ * Grounded contract (measured against live `amp threads list --json` 2026-07-24):
+ * pages are returned `updated`-descending. Early-stop on watermark is only sound
+ * under that order — if a page is not descending we disable early-stop for the
+ * rest of the walk so recent threads on later pages are not silently dropped.
+ */
+const isUpdatedDescending = (entries: readonly AmpThreadListEntry[]): boolean => {
+  let previousMs: number | undefined;
+  for (const entry of entries) {
+    const ms = parseUpdatedMs(entry.updated);
+    if (ms === undefined) continue;
+    if (previousMs !== undefined && ms > previousMs) return false;
+    previousMs = ms;
+  }
+  return true;
+};
+
+type EnumerateThreadsResult = {
+  readonly threads: readonly AmpThreadListEntry[];
+  readonly listFailed: boolean;
+  /** True when watermark early-stop truncated enumeration (after one guard page). */
+  readonly earlyStop: boolean;
+  /** True when a list page was not updated-descending; early-stop was disabled. */
+  readonly orderAssumptionViolated: boolean;
+};
+
+/**
  * Paginate `amp threads list --json --limit 500`.
- * With a high watermark, stop when a page's oldest `updated` is below
- * watermark − 60 minutes, then fetch one guard page and stop.
+ *
+ * With a high watermark, and only while pages remain updated-descending:
+ * stop when a page's oldest `updated` is below watermark − 60 minutes, then
+ * fetch one guard page and halt. Early-stop skips threads that never reach
+ * shouldParseSession — omit highWatermark (ingest `--force`) for a full walk.
  */
 const enumerateThreads = (
   runner: AmpRunner,
   highWatermark: string | undefined,
   diagnostics: DecodeDiagnostic[],
-): { readonly threads: readonly AmpThreadListEntry[]; readonly listFailed: boolean } => {
+): EnumerateThreadsResult => {
   const collected: AmpThreadListEntry[] = [];
   const watermarkMs =
     highWatermark !== undefined ? parseUpdatedMs(highWatermark) : undefined;
   const cutoffMs =
     watermarkMs !== undefined ? watermarkMs - WATERMARK_GUARD_MS : undefined;
-  let guardPageRemaining = 0;
+  /** After a page trips the cutoff, fetch exactly one more page then halt. */
+  let expectingGuardPage = false;
+  let earlyStop = false;
+  let orderAssumptionViolated = false;
+  let listOrderTrusted = true;
 
   for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
     const offset = page * LIST_PAGE_SIZE;
@@ -231,7 +266,12 @@ const enumerateThreads = (
       String(offset),
     ]);
     if (!result.ok) {
-      return { threads: collected, listFailed: true };
+      return {
+        threads: collected,
+        listFailed: true,
+        earlyStop,
+        orderAssumptionViolated,
+      };
     }
     const parsed = parseJson(result.stdout);
     if (parsed === undefined) {
@@ -239,7 +279,12 @@ const enumerateThreads = (
         name: "amp.list.invalid_json",
         message: "amp threads list returned unparseable JSON.",
       });
-      return { threads: collected, listFailed: true };
+      return {
+        threads: collected,
+        listFailed: true,
+        earlyStop,
+        orderAssumptionViolated,
+      };
     }
     const rawEntries = listArrayFrom(parsed);
     const pageEntries: AmpThreadListEntry[] = [];
@@ -253,18 +298,28 @@ const enumerateThreads = (
     }
     collected.push(...pageEntries);
 
+    // Guard page (full or short) always ends enumeration after the cutoff trip.
+    if (expectingGuardPage) {
+      earlyStop = true;
+      break;
+    }
+
     if (rawEntries.length < LIST_PAGE_SIZE) break;
 
-    if (cutoffMs !== undefined) {
-      if (guardPageRemaining > 0) {
-        guardPageRemaining -= 1;
-        break;
-      }
-      const oldest = oldestUpdatedMs(pageEntries);
-      if (oldest !== undefined && oldest < cutoffMs) {
-        // One extra page after the stop condition, then halt.
-        guardPageRemaining = 1;
-      }
+    if (cutoffMs === undefined) continue;
+
+    // Early-stop requires updated-descending pages; otherwise keep walking.
+    if (!isUpdatedDescending(pageEntries)) {
+      listOrderTrusted = false;
+      orderAssumptionViolated = true;
+      continue;
+    }
+    if (!listOrderTrusted) continue;
+
+    const oldest = oldestUpdatedMs(pageEntries);
+    if (oldest !== undefined && oldest < cutoffMs) {
+      // One extra page after the stop condition, then halt.
+      expectingGuardPage = true;
     }
   }
 
@@ -275,7 +330,12 @@ const enumerateThreads = (
     const rightMs = parseUpdatedMs(right.updated) ?? 0;
     return rightMs - leftMs || left.id.localeCompare(right.id);
   });
-  return { threads, listFailed: false };
+  return {
+    threads,
+    listFailed: false,
+    earlyStop,
+    orderAssumptionViolated,
+  };
 };
 
 // ---------------------------------------------------------------------------
@@ -618,13 +678,35 @@ async function* streamAmp(options: AmpStreamOptions): AsyncGenerator<AdapterStre
   };
 
   const listDiagnostics: DecodeDiagnostic[] = [];
-  const { threads, listFailed } = enumerateThreads(
+  const { threads, listFailed, earlyStop, orderAssumptionViolated } = enumerateThreads(
     runner,
     options.highWatermark,
     listDiagnostics,
   );
   for (const diagnostic of listDiagnostics) {
     yield { type: "diagnostic", diagnostic: schemaDiagnostic(SOURCE_ROOT, diagnostic) };
+  }
+  if (orderAssumptionViolated) {
+    yield {
+      type: "diagnostic",
+      diagnostic: adapterDiagnostic(
+        SOURCE_ROOT,
+        "amp.list.order_not_descending",
+        "Amp thread list page was not updated-descending; watermark early-stop disabled for this walk so later pages are still enumerated.",
+        "unsupported",
+      ),
+    };
+  }
+  if (earlyStop) {
+    yield {
+      type: "diagnostic",
+      diagnostic: adapterDiagnostic(
+        SOURCE_ROOT,
+        "amp.list.early_stop",
+        "Amp thread list enumeration stopped after watermark cutoff (+1 guard page). Threads older than the window were not enumerated and never reach shouldParseSession. Use --force for a full walk.",
+        "unsupported",
+      ),
+    };
   }
   if (listFailed && threads.length === 0) {
     yield {
