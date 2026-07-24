@@ -48,7 +48,12 @@ const SOURCE_ROOT = "https://ampcode.com/threads";
 /** Page size for `amp threads list --limit`. Exported for multi-page tests. */
 export const AMP_LIST_PAGE_SIZE = 500;
 const LIST_PAGE_SIZE = AMP_LIST_PAGE_SIZE;
-const MAX_LIST_PAGES = 100;
+/**
+ * Hard cap on list pagination. Hitting it is a truncated walk — not a complete
+ * corpus — and must emit `amp.list.page_cap_reached` (no silent truncation).
+ * Exported so tests can assert the production default without re-deriving it.
+ */
+export const AMP_MAX_LIST_PAGES = 100;
 const WATERMARK_GUARD_MS = 60 * 60 * 1_000;
 const DEFAULT_EXPORT_SPACING_MS = 3_000;
 const MAX_EXPORT_ATTEMPTS = 5;
@@ -79,6 +84,12 @@ export type AmpStreamOptions = AdapterDiscoverOptions & {
   readonly ampSleep?: (ms: number) => Promise<void>;
   /** Spacing between sequential exports. Defaults to 3s. */
   readonly exportSpacingMs?: number;
+  /**
+   * Override for list pagination page cap (production default:
+   * {@link AMP_MAX_LIST_PAGES}). Tests use a small value so a truncated walk is
+   * cheap to assert; not a product knob.
+   */
+  readonly maxListPages?: number;
 };
 
 const resolveAmpBinary = (): string | undefined => {
@@ -228,6 +239,13 @@ type EnumerateThreadsResult = {
   readonly earlyStop: boolean;
   /** True when a list page was not updated-descending; early-stop was disabled. */
   readonly orderAssumptionViolated: boolean;
+  /**
+   * True when enumeration stopped because `maxListPages` was exhausted without a
+   * short terminal page or armed early-stop — a truncated walk, not a complete one.
+   */
+  readonly pageCapReached: boolean;
+  /** Pages successfully fetched before exit (for the page-cap diagnostic message). */
+  readonly pagesFetched: number;
 };
 
 /**
@@ -237,11 +255,15 @@ type EnumerateThreadsResult = {
  * stop when a page's oldest `updated` is below watermark − 60 minutes, then
  * fetch one guard page and halt. Early-stop skips threads that never reach
  * shouldParseSession — omit highWatermark (ingest `--force`) for a full walk.
+ *
+ * Exhausting `maxListPages` without a short page or early-stop sets
+ * `pageCapReached` so callers can emit a named truncation diagnostic.
  */
 const enumerateThreads = (
   runner: AmpRunner,
   highWatermark: string | undefined,
   diagnostics: DecodeDiagnostic[],
+  maxListPages: number,
 ): EnumerateThreadsResult => {
   const collected: AmpThreadListEntry[] = [];
   const watermarkMs =
@@ -253,8 +275,11 @@ const enumerateThreads = (
   let earlyStop = false;
   let orderAssumptionViolated = false;
   let listOrderTrusted = true;
+  let pagesFetched = 0;
+  /** True when the loop exited because a short (terminal) page was returned. */
+  let sawShortPage = false;
 
-  for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
+  for (let page = 0; page < maxListPages; page += 1) {
     const offset = page * LIST_PAGE_SIZE;
     const result = runner([
       "threads",
@@ -271,6 +296,8 @@ const enumerateThreads = (
         listFailed: true,
         earlyStop,
         orderAssumptionViolated,
+        pageCapReached: false,
+        pagesFetched,
       };
     }
     const parsed = parseJson(result.stdout);
@@ -284,6 +311,8 @@ const enumerateThreads = (
         listFailed: true,
         earlyStop,
         orderAssumptionViolated,
+        pageCapReached: false,
+        pagesFetched,
       };
     }
     const rawEntries = listArrayFrom(parsed);
@@ -297,6 +326,7 @@ const enumerateThreads = (
       if (isSignal(decision)) pageEntries.push(decision.value);
     }
     collected.push(...pageEntries);
+    pagesFetched += 1;
 
     // Guard page (full or short) always ends enumeration after the cutoff trip.
     if (expectingGuardPage) {
@@ -304,7 +334,10 @@ const enumerateThreads = (
       break;
     }
 
-    if (rawEntries.length < LIST_PAGE_SIZE) break;
+    if (rawEntries.length < LIST_PAGE_SIZE) {
+      sawShortPage = true;
+      break;
+    }
 
     if (cutoffMs === undefined) continue;
 
@@ -323,6 +356,11 @@ const enumerateThreads = (
     }
   }
 
+  // Cap hit = walked maxListPages full pages without a short terminal page or
+  // early-stop. Distinguishable from a complete walk so callers can surface
+  // truncation (no silent partial corpus).
+  const pageCapReached = !earlyStop && !sawShortPage && pagesFetched >= maxListPages;
+
   const byId = new Map<string, AmpThreadListEntry>();
   for (const thread of collected) byId.set(thread.id, thread);
   const threads = [...byId.values()].sort((left, right) => {
@@ -335,6 +373,8 @@ const enumerateThreads = (
     listFailed: false,
     earlyStop,
     orderAssumptionViolated,
+    pageCapReached,
+    pagesFetched,
   };
 };
 
@@ -342,11 +382,19 @@ const enumerateThreads = (
 // Fingerprint + path helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Opaque change signal for the server fingerprint gate.
+ *
+ * Includes `messageCount` so content growth that fails to bump `updated`
+ * still invalidates the tag and re-exports. `updated` alone is not assumed
+ * to be a contractual last-activity guarantee.
+ */
 const fingerprintForThread = (thread: AmpThreadListEntry): UnitFingerprint => ({
   tag: stableJsonHash({
     updated: thread.updated,
     title: thread.title ?? null,
     tree: thread.tree ?? null,
+    messageCount: thread.messageCount ?? null,
   }),
 });
 
@@ -678,11 +726,15 @@ async function* streamAmp(options: AmpStreamOptions): AsyncGenerator<AdapterStre
   };
 
   const listDiagnostics: DecodeDiagnostic[] = [];
-  const { threads, listFailed, earlyStop, orderAssumptionViolated } = enumerateThreads(
-    runner,
-    options.highWatermark,
-    listDiagnostics,
-  );
+  const maxListPages = options.maxListPages ?? AMP_MAX_LIST_PAGES;
+  const {
+    threads,
+    listFailed,
+    earlyStop,
+    orderAssumptionViolated,
+    pageCapReached,
+    pagesFetched,
+  } = enumerateThreads(runner, options.highWatermark, listDiagnostics, maxListPages);
   for (const diagnostic of listDiagnostics) {
     yield { type: "diagnostic", diagnostic: schemaDiagnostic(SOURCE_ROOT, diagnostic) };
   }
@@ -704,6 +756,17 @@ async function* streamAmp(options: AmpStreamOptions): AsyncGenerator<AdapterStre
         SOURCE_ROOT,
         "amp.list.early_stop",
         "Amp thread list enumeration stopped after watermark cutoff (+1 guard page). Threads older than the window were not enumerated and never reach shouldParseSession. Use --force for a full walk.",
+        "unsupported",
+      ),
+    };
+  }
+  if (pageCapReached) {
+    yield {
+      type: "diagnostic",
+      diagnostic: adapterDiagnostic(
+        SOURCE_ROOT,
+        "amp.list.page_cap_reached",
+        `Amp thread list enumeration hit the page cap (${pagesFetched} full pages × ${LIST_PAGE_SIZE}); walk is truncated, not complete. Raise maxListPages or use --force with a higher cap once the corpus is dogfooded.`,
         "unsupported",
       ),
     };

@@ -3,11 +3,13 @@ import { Schema } from "effect";
 
 import {
   AMP_LIST_PAGE_SIZE,
+  AMP_MAX_LIST_PAGES,
   ampAdapter,
   readAmp,
   type AmpRunner,
   type AmpStreamOptions,
 } from "../src/adapters/amp";
+import { stableJsonHash } from "../src/core/hash";
 import { AmpExportSchema, AmpThreadListEntrySchema } from "../src/adapters/amp-schema";
 import { sessionIdFor } from "../src/adapters/common";
 import { adaptersByProvider, stableAdapters } from "../src/adapters/registry";
@@ -261,6 +263,56 @@ describe("amp fingerprint round-trip", () => {
     });
     expect(result.sessions).toHaveLength(0);
     expect(exportCalls).toHaveLength(0);
+  });
+
+  test("messageCount participates in fingerprint tag (content growth without updated bump)", async () => {
+    // Same updated/title/tree; only messageCount differs → tag must change so the
+    // fingerprint gate re-exports when content grows without an updated bump.
+    const base = {
+      id: "T-fp-base",
+      title: "Same title",
+      updated: "2026-07-20T12:00:00.000Z",
+      tree: "file:///Users/dev/projects/widget",
+      messageCount: 4,
+    };
+    const grown = { ...base, id: "T-fp-grown", messageCount: 5 };
+    const probes: string[] = [];
+    const runner: AmpRunner = (args) => {
+      if (args[0] === "--version") return { ok: true, stdout: "ok\n" };
+      if (args[0] === "threads" && args[1] === "list") {
+        const offsetIndex = args.indexOf("--offset");
+        const offset = offsetIndex >= 0 ? Number(args[offsetIndex + 1]) : 0;
+        return { ok: true, stdout: JSON.stringify(offset === 0 ? [base, grown] : []) };
+      }
+      return { ok: false, reason: "command_failed" };
+    };
+    await readAmp({
+      machine: MACHINE_A,
+      now: NOW,
+      ampRunner: runner,
+      ampSleep: noSleep,
+      exportSpacingMs: 0,
+      shouldParseSession: (probe) => {
+        probes.push(probe.sourceFingerprint);
+        return false;
+      },
+    });
+    expect(probes).toHaveLength(2);
+    expect(probes[0]).not.toBe(probes[1]);
+    // Also prove the production hash formula includes messageCount explicitly.
+    const tagWithCount = stableJsonHash({
+      updated: base.updated,
+      title: base.title,
+      tree: base.tree,
+      messageCount: base.messageCount,
+    });
+    const tagWithoutCount = stableJsonHash({
+      updated: base.updated,
+      title: base.title,
+      tree: base.tree,
+    });
+    expect(tagWithCount).not.toBe(tagWithoutCount);
+    expect(probes[0]).toBe(JSON.stringify({ tag: tagWithCount }));
   });
 
   test("absent shouldParseSession (force) still exports", async () => {
@@ -792,6 +844,68 @@ describe("amp highWatermark pagination", () => {
       false,
     );
     expect(result.sessions.map((s) => s.nativeSessionId)).toEqual(["T-after-scram"]);
+  });
+
+  test("page cap emits amp.list.page_cap_reached (truncated walk is observable)", async () => {
+    // Production default is AMP_MAX_LIST_PAGES; tests inject a tiny cap so a
+    // truncated walk is cheap. Two full pages with maxListPages=2 exhausts the
+    // cap without a short terminal page or early-stop.
+    expect(AMP_MAX_LIST_PAGES).toBeGreaterThan(1);
+    const cap = 2;
+    const offsets: number[] = [];
+    const runner: AmpRunner = (args) => {
+      if (args[0] === "--version") return { ok: true, stdout: "ok\n" };
+      if (args[0] === "threads" && args[1] === "list") {
+        const offsetIndex = args.indexOf("--offset");
+        const offset = offsetIndex >= 0 ? Number(args[offsetIndex + 1]) : 0;
+        offsets.push(offset);
+        const pageIndex = offset / AMP_LIST_PAGE_SIZE;
+        // Always return a full page so the short-page exit never fires.
+        return {
+          ok: true,
+          stdout: JSON.stringify(
+            makeListPage(pageIndex, Date.parse("2026-07-20T12:00:00.000Z") - pageIndex * 1e9, 60_000),
+          ),
+        };
+      }
+      // Fingerprint gate will skip exports; no export path needed.
+      return { ok: false, reason: "command_failed" };
+    };
+
+    const result = await readAmp({
+      machine: MACHINE_A,
+      now: NOW,
+      ampRunner: runner,
+      ampSleep: noSleep,
+      exportSpacingMs: 0,
+      maxListPages: cap,
+      // No highWatermark → no early-stop; walk until cap.
+      shouldParseSession: () => false,
+    });
+
+    expect(offsets).toEqual([0, AMP_LIST_PAGE_SIZE]);
+    expect(
+      result.diagnostics.some((d) => diagnosticName(d) === "amp.list.page_cap_reached"),
+    ).toBe(true);
+    // Short/complete walk diagnostics must not fire for a pure cap truncation.
+    expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.early_stop")).toBe(
+      false,
+    );
+  });
+
+  test("short terminal page is a complete walk (no page_cap_reached)", async () => {
+    const result = await readAmp({
+      machine: MACHINE_A,
+      now: NOW,
+      ampRunner: fixtureRunner(),
+      ampSleep: noSleep,
+      exportSpacingMs: 0,
+      maxListPages: 2,
+      shouldParseSession: () => false,
+    });
+    expect(
+      result.diagnostics.some((d) => diagnosticName(d) === "amp.list.page_cap_reached"),
+    ).toBe(false);
   });
 });
 
