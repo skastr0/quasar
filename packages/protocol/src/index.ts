@@ -60,6 +60,7 @@ const Provider = Schema.Literal(
   "pi",
   "cursor",
   "devin",
+  "amp",
 ).annotations({
   identifier: "QuasarProvider",
   description: "A provider supported by the Quasar query protocol v1.",

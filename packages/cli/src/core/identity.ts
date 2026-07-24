@@ -41,6 +41,9 @@ export const CursorSessionId = Brand.nominal<CursorSessionId>();
 export type DevinSessionId = string & Brand.Brand<"DevinSessionId">;
 export const DevinSessionId = Brand.nominal<DevinSessionId>();
 
+export type AmpSessionId = string & Brand.Brand<"AmpSessionId">;
+export const AmpSessionId = Brand.nominal<AmpSessionId>();
+
 /**
  * The union of every harness-native session id. `sessionIdFor` accepts only a
  * value of this union, so a bare `string` does not type-check as input.
@@ -56,7 +59,8 @@ export type NativeSessionId =
   | PiSessionId
   | CursorSessionId
   | DevinSessionId
-  | AntigravitySessionId;
+  | AntigravitySessionId
+  | AmpSessionId;
 
 /**
  * The canonical Quasar session id. Machine- and path-INDEPENDENT: derived from

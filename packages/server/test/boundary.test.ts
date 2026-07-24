@@ -35,7 +35,7 @@ describe("server package boundary", () => {
 });
 
 describe("ingest boundary contract is locked", () => {
-  test("provider enum is exactly the eleven supported providers", () => {
+  test("provider enum is exactly the twelve supported providers", () => {
     expect([...Provider.literals]).toEqual([
       "codex",
       "claude",
@@ -48,6 +48,7 @@ describe("ingest boundary contract is locked", () => {
       "pi",
       "cursor",
       "devin",
+      "amp",
     ]);
   });
 

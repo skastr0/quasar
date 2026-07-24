@@ -860,7 +860,7 @@ if (missingValueOption !== undefined) {
   }
   case "help": {
     const commands = [
-      "ingest --provider all|codex|claude|opencode|grok|kimi|hermes|antigravity|omp|pi|cursor|devin [--server url] [--limit n] [--force] [--summary]",
+      "ingest --provider all|codex|claude|opencode|grok|kimi|hermes|antigravity|omp|pi|cursor|devin|amp [--server url] [--limit n] [--force] [--summary]",
       "daemon install --server https://<quasar-service-tailnet-hostname> --ingest-token <token> [--interval-seconds 60]",
       "daemon status",
       "daemon uninstall",
