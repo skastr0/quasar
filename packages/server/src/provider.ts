@@ -12,5 +12,6 @@ export const Provider = Schema.Literal(
   "pi",
   "cursor",
   "devin",
+  "amp",
 );
 export type Provider = typeof Provider.Type;
