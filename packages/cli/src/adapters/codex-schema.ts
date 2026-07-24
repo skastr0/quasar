@@ -25,10 +25,15 @@ import type { SessionEventKind } from "../core/schemas";
  * project; a model rambling must never be mistaken for a legitimate response."
  *
  * Grounded through 2026-07-22 against the real on-disk corpus (~/.codex/sessions/**,
- * ~/.codex/archived_sessions/**). The distinct record types (top-level `type`,
+ * ~/.codex/archived_sessions/**), and re-measured 2026-07-24 for the pre-envelope
+ * legacy rollout shape (31 MacBook rollouts: bare top-level `message` /
+ * `function_call` / `function_call_output` / `reasoning` with zero
+ * `response_item` wrappers). The distinct record types (top-level `type`,
  * and for `response_item`/`event_msg` the `payload.type`) measured there:
  *
  *   top-level : session_meta, compacted, turn_context
+ *   legacy_response_item.* (pre-envelope rollouts): message, function_call,
+ *     function_call_output, reasoning — same payload schemas as response_item.*
  *   response_item.* : message, function_call, function_call_output,
  *     agent_message, custom_tool_call, custom_tool_call_output, reasoning, local_shell_call,
  *     local_shell_call_output, web_search_call, tool_search_call,
@@ -567,9 +572,32 @@ const dropReason = (reason: string) => (_value: unknown): CodexClassification =>
   drop(reason);
 
 /**
+ * Pre-envelope Codex rollouts write response-item payloads at the top level
+ * (`{ type: "message", ... }`) instead of wrapping them as
+ * `{ type: "response_item", payload: { type: "message", ... } }`. Measured on
+ * the MacBook corpus (2026-07-24): only these four top-level types appear in
+ * that shape, and only inside `legacy_header_v1` rollouts.
+ */
+export const CODEX_LEGACY_TOP_LEVEL_RESPONSE_ITEM_TYPES = [
+  "message",
+  "function_call",
+  "function_call_output",
+  "reasoning",
+] as const;
+
+export type CodexLegacyTopLevelResponseItemType =
+  (typeof CODEX_LEGACY_TOP_LEVEL_RESPONSE_ITEM_TYPES)[number];
+
+const LEGACY_TOP_LEVEL_RESPONSE_ITEM_TYPE_SET: ReadonlySet<string> = new Set(
+  CODEX_LEGACY_TOP_LEVEL_RESPONSE_ITEM_TYPES,
+);
+
+/**
  * The discriminator key for a record: top-level `type`, except `response_item`
  * and `event_msg` envelopes whose meaningful type lives at `payload.type`,
  * surfaced as `response_item.<payload.type>` / `event_msg.<payload.type>`.
+ * Bare pre-envelope response-item payloads surface as
+ * `legacy_response_item.<type>`.
  */
 export const codexDiscriminatorOf = (record: unknown): string | undefined => {
   if (record === null || typeof record !== "object") return undefined;
@@ -584,13 +612,17 @@ export const codexDiscriminatorOf = (record: unknown): string | undefined => {
     if (typeof payloadType !== "string") return top;
     return `${top}.${payloadType}`;
   }
+  if (LEGACY_TOP_LEVEL_RESPONSE_ITEM_TYPE_SET.has(top)) {
+    return `legacy_response_item.${top}`;
+  }
   return top;
 };
 
 /**
  * For a `response_item`/`event_msg` envelope, the schema models the PAYLOAD, so
- * decode the payload; for a top-level record, decode the whole record. This
- * keeps each payload schema focused on its own fields.
+ * decode the payload; for a top-level record (including pre-envelope
+ * `legacy_response_item.*`), decode the whole record. This keeps each payload
+ * schema focused on its own fields.
  */
 const subjectFor = (discriminator: string, record: unknown): unknown => {
   if (discriminator.startsWith("response_item.") || discriminator.startsWith("event_msg.")) {
@@ -608,6 +640,24 @@ const responseItemEntry = (
 ): [string, CodexRecordEntry] => [
   `response_item.${payloadType}`,
   { schema, verdict, decodeFailedName: `codex.response_item.${payloadType}.decode_failed` },
+];
+
+/**
+ * Pre-envelope top-level response items share payload schemas and verdicts with
+ * `response_item.*`, but keep a distinct discriminator so unmodeled bare types
+ * stay fail-closed and diagnostics stay attributable.
+ */
+const legacyResponseItemEntry = (
+  payloadType: CodexLegacyTopLevelResponseItemType,
+  schema: Schema.Schema<unknown, unknown>,
+  verdict: (value: unknown) => CodexClassification,
+): [string, CodexRecordEntry] => [
+  `legacy_response_item.${payloadType}`,
+  {
+    schema,
+    verdict,
+    decodeFailedName: `codex.legacy_response_item.${payloadType}.decode_failed`,
+  },
 ];
 
 const eventMsgEntry = (
@@ -688,6 +738,27 @@ export const CODEX_RECORD_REGISTRY: ReadonlyMap<string, CodexRecordEntry> = new 
     asSchema(CodexToolSearchOutputPayloadSchema),
     // FIX: tool_search_output is a tool RESULT (the returned tools), not a call.
     signalKind("tool_result"),
+  ),
+  // Pre-envelope legacy rollouts: same payload shapes, written at top level.
+  legacyResponseItemEntry(
+    "message",
+    asSchema(CodexMessagePayloadSchema),
+    signalKind("message"),
+  ),
+  legacyResponseItemEntry(
+    "function_call",
+    asSchema(CodexFunctionCallPayloadSchema),
+    signalKind("tool_call"),
+  ),
+  legacyResponseItemEntry(
+    "function_call_output",
+    asSchema(CodexFunctionCallOutputPayloadSchema),
+    signalKind("tool_result"),
+  ),
+  legacyResponseItemEntry(
+    "reasoning",
+    asSchema(CodexReasoningPayloadSchema),
+    signalKind("reasoning"),
   ),
   // event_msg.* records.
   eventMsgEntry("token_count", asSchema(CodexTokenCountPayloadSchema), signalKind("usage")),

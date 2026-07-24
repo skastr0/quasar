@@ -17,6 +17,7 @@ import type {
   UsageRecord,
 } from "../core/schemas";
 import {
+  CODEX_LEGACY_TOP_LEVEL_RESPONSE_ITEM_TYPES,
   CODEX_SESSION_META_DECODE_FAILED,
   CodexSessionMetaSchema,
   CodexThreadSettingsAppliedPayloadSchema,
@@ -48,6 +49,10 @@ import {
 } from "./common";
 
 type CodexRecord = Record<string, unknown>;
+
+const LEGACY_TOP_LEVEL_RESPONSE_ITEM_TYPE_SET: ReadonlySet<string> = new Set(
+  CODEX_LEGACY_TOP_LEVEL_RESPONSE_ITEM_TYPES,
+);
 type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
 type CodexToolCallDraft = Omit<
   ToolCall,
@@ -754,6 +759,13 @@ const legacySessionIdFromHeader = (value: unknown, path: string): string | undef
   return id === filenameUuid(path) ? id : undefined;
 };
 
+/**
+ * Measured legacy header shape (pre-`session_meta` rollouts): untyped first
+ * record with `id` + `timestamp` + `instructions` + `git`. Corpus 2026-07-24:
+ * `instructions` is a string on most headers and `null` on a minority (4 of 31
+ * MacBook legacy files) — never an object. Reject any other type as shape
+ * breach so null is accepted without inventing unmeasured variants.
+ */
 const isLegacyHeaderRecord = (record: CodexRecord): boolean =>
   record.type === undefined &&
   hasOwn(record, "id") &&
@@ -761,7 +773,7 @@ const isLegacyHeaderRecord = (record: CodexRecord): boolean =>
   hasOwn(record, "instructions") &&
   hasOwn(record, "git") &&
   typeof record.timestamp === "string" &&
-  typeof record.instructions === "string" &&
+  (record.instructions === null || typeof record.instructions === "string") &&
   record.git !== null &&
   typeof record.git === "object" &&
   !Array.isArray(record.git);
@@ -1167,9 +1179,6 @@ async function* streamCodexSessionFromFile(
         ? (value as Record<string, unknown>)
         : {};
     const nativeType = typeof record.type === "string" ? record.type : "unknown";
-    const payloadValue = record.payload;
-    const payloadRecord = payloadRecordFrom(payloadValue);
-    const payloadType = payloadTypeFrom(payloadRecord);
     const timestamp = typeof record.timestamp === "string" ? record.timestamp : undefined;
     // Route EVERY record through the declarative fail-closed classifier.
     // It returns a SIGNAL (kept, with a mapped SessionEventKind) or a DROP
@@ -1190,9 +1199,18 @@ async function* streamCodexSessionFromFile(
       currentModelProvider = executionContext.modelProvider ?? currentModelProvider;
     }
     if (!isSignal(classification)) continue;
+    // Envelope records (`response_item` / `event_msg`) carry content under
+    // `payload`. Pre-envelope legacy response items are the payload themselves
+    // — use the decoded classification value so content/role/tool projection
+    // sees the same shape as a wrapped response_item payload.
+    const envelopePayload = record.payload;
+    const contentSubject =
+      envelopePayload !== undefined ? envelopePayload : classification.value;
+    const payloadRecord = payloadRecordFrom(contentSubject);
+    const payloadType = payloadTypeFrom(payloadRecord);
     const content =
       codexActivityContent(nativeType, payloadType, payloadRecord) ??
-      projectSessionNativeValue(payloadValue);
+      projectSessionNativeValue(contentSubject);
     const kind = refineCodexSignalKind(payloadType, payloadRecord, classification.kind);
     const role = codexRoleFrom(payloadRecord, classification.kind, payloadType);
     const payloadCallId = callIdFromPayload(payloadRecord);
@@ -1245,6 +1263,15 @@ async function* streamCodexSessionFromFile(
     // NON-NEGOTIABLE: no prose-vs-json gate, no reformatting — leaf is kept verbatim.
     const leafText = codexMessageText(payloadType, payloadRecord);
     const resolvedContentText = leafText !== undefined ? leafText : compactText(content);
+    // Pre-envelope top-level response items share the payload `type` with the
+    // record `type`; tag them `legacy_response_item.<type>` so provenance does
+    // not collapse to the ambiguous `message.message` form.
+    const nativeTypeRef =
+      envelopePayload === undefined &&
+      payloadType !== undefined &&
+      LEGACY_TOP_LEVEL_RESPONSE_ITEM_TYPE_SET.has(payloadType)
+        ? `legacy_response_item.${payloadType}`
+        : codexNativeType(nativeType, payloadType);
     slice.events.push({
       id: eventId,
       nativeEventId,
@@ -1259,7 +1286,7 @@ async function* streamCodexSessionFromFile(
       rawReference: {
         sourcePath,
         line: lineNumber,
-        nativeType: codexNativeType(nativeType, payloadType),
+        nativeType: nativeTypeRef,
       },
     });
   }
