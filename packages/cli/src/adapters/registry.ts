@@ -1,3 +1,4 @@
+import { ampAdapter } from "./amp";
 import { antigravityAdapter } from "./antigravity";
 import { claudeAdapter } from "./claude";
 import { codexAdapter } from "./codex";
@@ -10,6 +11,10 @@ import { ompAdapter } from "./omp";
 import { piAdapter } from "./pi";
 import { opencodeAdapter } from "./opencode";
 
+/**
+ * Stable adapters included in `ingest --provider all`. Amp is intentionally
+ * excluded until dogfooded — reachable only via `--provider amp`.
+ */
 export const stableAdapters = [
   codexAdapter,
   claudeAdapter,
@@ -24,6 +29,8 @@ export const stableAdapters = [
   devinAdapter,
 ] as const;
 
+const gatedAdapters = [ampAdapter] as const;
+
 export const adaptersByProvider = new Map(
-  stableAdapters.map((adapter) => [adapter.provider, adapter]),
+  [...stableAdapters, ...gatedAdapters].map((adapter) => [adapter.provider, adapter]),
 );
