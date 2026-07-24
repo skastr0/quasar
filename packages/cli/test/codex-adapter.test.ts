@@ -175,6 +175,71 @@ const legacyHeaderLines = (id: string = FIXTURE_UUID) =>
     }),
   ].join("\n");
 
+/**
+ * Measured pre-envelope legacy rollout (2026-07-24 MacBook corpus): header with
+ * optional null `instructions`, then bare top-level response-item payloads —
+ * no `response_item` wrapper. Real files never mix bare payloads with wrapped
+ * ones; this fixture matches that exclusive shape.
+ */
+const directLegacyHeaderLines = (id: string = FIXTURE_UUID) =>
+  [
+    line({
+      id,
+      timestamp: NOW,
+      instructions: "qsr fabricated legacy header",
+      git: {
+        branch: "main",
+        commit_hash: "0fab0000fab0",
+        repository_url: "git@github.com:skastr0/quasar-legacy.git",
+      },
+    }),
+    line({
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "qsr fabricated direct legacy human turn" }],
+    }),
+    line({
+      type: "reasoning",
+      summary: [],
+      encrypted_content: "gAAAAAB-qsr-fab-cipher",
+    }),
+    line({
+      type: "function_call",
+      call_id: "qsrfab_legacy_call_a",
+      name: "shell",
+      arguments: "{\"command\":\"echo qsr-fab\"}",
+    }),
+    line({
+      type: "function_call_output",
+      call_id: "qsrfab_legacy_call_a",
+      output: "qsr-fab",
+    }),
+    line({
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "qsr fabricated direct legacy assistant reply" }],
+    }),
+  ].join("\n");
+
+const nullInstructionsLegacyHeaderLines = (id: string = FIXTURE_UUID) =>
+  [
+    line({
+      id,
+      timestamp: NOW,
+      instructions: null,
+      git: {
+        branch: "main",
+        commit_hash: "0fab0000fab0",
+        repository_url: "git@github.com:skastr0/quasar-legacy.git",
+      },
+    }),
+    line({
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "qsr fabricated null instructions human turn" }],
+    }),
+  ].join("\n");
+
 const diagnosticCode = (diagnostic: { readonly details?: unknown } | undefined): string | undefined => {
   const details = diagnostic?.details;
   if (details === null || typeof details !== "object") return undefined;
@@ -1006,6 +1071,78 @@ describe("codex adapter", () => {
     }
   });
 
+  test("maps direct legacy header records without response_item wrappers", async () => {
+    const legacyRoot = mkdtempSync(join(tmpdir(), "quasar-codex-direct-legacy-"));
+    try {
+      const dir = join(legacyRoot, "sessions", "2025", "08", "21");
+      mkdirSync(dir, { recursive: true });
+      const legacyUuid = "0fab0000-fab0-4fab-8fab-000000000041";
+      writeFileSync(
+        join(dir, rolloutFilename("2025-08-21T12-34-07", legacyUuid)),
+        directLegacyHeaderLines(legacyUuid),
+      );
+
+      const result = await codexAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { codex: legacyRoot },
+      });
+
+      expect(result.sessions).toHaveLength(1);
+      const session = result.sessions[0]!;
+      expect(session.nativeSessionId).toBe(legacyUuid);
+      expect(session.events.map((event) => event.kind)).toEqual([
+        "message",
+        "reasoning",
+        "tool_call",
+        "tool_result",
+        "message",
+      ]);
+      expect(session.events.map((event) => event.rawReference.nativeType)).toEqual([
+        "legacy_response_item.message",
+        "legacy_response_item.reasoning",
+        "legacy_response_item.function_call",
+        "legacy_response_item.function_call_output",
+        "legacy_response_item.message",
+      ]);
+      expect(session.toolCalls).toHaveLength(1);
+      expect(session.toolCalls[0]?.toolName).toBe("shell");
+      expect(JSON.stringify(session)).not.toContain("gAAAAAB-qsr-fab-cipher");
+      expect(result.diagnostics.at(-1)?.message).toContain("legacy_header_v1=1");
+    } finally {
+      rmSync(legacyRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("accepts legacy header rollout with null instructions when id and filename match", async () => {
+    const legacyRoot = mkdtempSync(join(tmpdir(), "quasar-codex-null-instructions-legacy-"));
+    try {
+      const dir = join(legacyRoot, "sessions", "2025", "09", "07");
+      mkdirSync(dir, { recursive: true });
+      const legacyUuid = "0fab0000-fab0-4fab-8fab-000000000051";
+      writeFileSync(
+        join(dir, rolloutFilename("2025-09-07T01-56-35", legacyUuid)),
+        nullInstructionsLegacyHeaderLines(legacyUuid),
+      );
+
+      const result = await codexAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { codex: legacyRoot },
+      });
+
+      expect(result.sessions).toHaveLength(1);
+      expect(result.sessions[0]!.nativeSessionId).toBe(legacyUuid);
+      expect(result.sessions[0]!.events).toHaveLength(1);
+      expect(result.sessions[0]!.events[0]!.kind).toBe("message");
+      expect(result.sessions[0]!.projectIdentity.projectIdentityKey).toBe(
+        "git:github.com/skastr0/quasar-legacy",
+      );
+    } finally {
+      rmSync(legacyRoot, { recursive: true, force: true });
+    }
+  });
+
   test("rejects legacy header rollout when top-level id is not a UUID", async () => {
     const legacyRoot = mkdtempSync(join(tmpdir(), "quasar-codex-legacy-id-reject-"));
     try {
@@ -1462,6 +1599,10 @@ const assertSchemaValid = (record: Record<string, unknown>) => {
 const responseItem = (payload: Record<string, unknown>) =>
   assertSchemaValid({ timestamp: NOW, type: "response_item", payload });
 
+/** A minimal, schema-valid pre-envelope legacy top-level response item. */
+const legacyResponseItem = (payload: Record<string, unknown>) =>
+  assertSchemaValid(payload);
+
 /** A minimal, schema-valid event_msg envelope. */
 const eventMsg = (payload: Record<string, unknown>) =>
   assertSchemaValid({ timestamp: NOW, type: "event_msg", payload });
@@ -1549,6 +1690,43 @@ describe("codex full data fidelity — declarative signal/drop per record type",
       name: "response_item.reasoning",
       kind: "reasoning",
       record: responseItem({ type: "reasoning", summary: [], encrypted_content: "gAAAAAB-x" }),
+    },
+    {
+      name: "legacy_response_item.message",
+      kind: "message",
+      record: legacyResponseItem({
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "qsr fabricated legacy message" }],
+      }),
+    },
+    {
+      name: "legacy_response_item.function_call",
+      kind: "tool_call",
+      record: legacyResponseItem({
+        type: "function_call",
+        call_id: "qsrfab_legacy_call_a",
+        name: "shell",
+        arguments: "{}",
+      }),
+    },
+    {
+      name: "legacy_response_item.function_call_output",
+      kind: "tool_result",
+      record: legacyResponseItem({
+        type: "function_call_output",
+        call_id: "qsrfab_legacy_call_a",
+        output: "ok",
+      }),
+    },
+    {
+      name: "legacy_response_item.reasoning",
+      kind: "reasoning",
+      record: legacyResponseItem({
+        type: "reasoning",
+        summary: [],
+        encrypted_content: "gAAAAAB-legacy-x",
+      }),
     },
     {
       name: "response_item.web_search_call",
