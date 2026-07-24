@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Schema } from "effect";
 
 import {
+  AMP_LIST_PAGE_SIZE,
   ampAdapter,
   readAmp,
   type AmpRunner,
@@ -9,7 +10,6 @@ import {
 } from "../src/adapters/amp";
 import { AmpExportSchema, AmpThreadListEntrySchema } from "../src/adapters/amp-schema";
 import { sessionIdFor } from "../src/adapters/common";
-import { isSignal } from "../src/adapters/harness-schema";
 import { adaptersByProvider, stableAdapters } from "../src/adapters/registry";
 import { AmpSessionId } from "../src/core/identity";
 import { NormalizedSession } from "../src/core/schemas";
@@ -508,38 +508,290 @@ describe("amp fail-closed boundary", () => {
 // Watermark pagination
 // ---------------------------------------------------------------------------
 
+/** Build a full list page of size LIST_PAGE_SIZE, updated-descending from startMs. */
+const makeListPage = (
+  pageIndex: number,
+  startMs: number,
+  stepMs: number,
+  extra?: ReadonlyArray<{ readonly id: string; readonly updated: string }>,
+): unknown[] => {
+  const entries: unknown[] = [];
+  for (let i = 0; i < AMP_LIST_PAGE_SIZE; i += 1) {
+    const ms = startMs - i * stepMs;
+    entries.push({
+      id: `T-p${pageIndex}-${String(i).padStart(4, "0")}`,
+      title: `Thread p${pageIndex}-${i}`,
+      updated: new Date(ms).toISOString(),
+      tree: "file:///Users/dev/projects/widget",
+      messageCount: 1,
+    });
+  }
+  if (extra !== undefined) {
+    for (const item of extra) {
+      // Replace last slots so page stays full when we need a full page.
+      const slot = entries.length - 1 - (extra.indexOf(item) % entries.length);
+      entries[slot] = {
+        id: item.id,
+        title: item.id,
+        updated: item.updated,
+        tree: "file:///Users/dev/projects/widget",
+        messageCount: 1,
+      };
+    }
+  }
+  // Re-sort desc by updated so the page remains order-sound for early-stop.
+  entries.sort((left, right) => {
+    const leftMs = Date.parse((left as { updated: string }).updated);
+    const rightMs = Date.parse((right as { updated: string }).updated);
+    return rightMs - leftMs;
+  });
+  return entries;
+};
+
+const diagnosticName = (d: { details?: unknown }): string | undefined => {
+  if (d.details === undefined || typeof d.details !== "object" || d.details === null) {
+    return undefined;
+  }
+  const name = (d.details as { diagnostic?: unknown }).diagnostic;
+  return typeof name === "string" ? name : undefined;
+};
+
 describe("amp highWatermark pagination", () => {
-  test("stops after the page whose oldest updated is below watermark-60m, plus one guard page", async () => {
+  test("multi-page: trigger page + exactly one guard page, then stop; in-window guard thread enumerated", async () => {
+    // Watermark W; cutoff = W - 60m. Page 0 stays above cutoff; page 1's oldest
+    // falls below cutoff (triggers stop); page 2 is the single guard page.
+    const watermark = "2026-07-15T12:00:00.000Z";
+    const cutoffMs = Date.parse(watermark) - 60 * 60 * 1_000;
+    const GUARD_IN_WINDOW_ID = "T-guard-in-window";
+    const GUARD_IN_WINDOW_UPDATED = new Date(cutoffMs + 30 * 60 * 1_000).toISOString();
+
+    // Page 0: newest at Jul 20, step 5min → oldest still well above cutoff.
+    const page0Start = Date.parse("2026-07-20T12:00:00.000Z");
+    // Page 1: starts just below page0's oldest, ends below cutoff.
+    const page0Oldest = page0Start - (AMP_LIST_PAGE_SIZE - 1) * 5 * 60 * 1_000;
+    const page1Start = page0Oldest - 5 * 60 * 1_000;
+    // Ensure page1 oldest is below cutoff by using a larger step.
+    const page1Step = Math.max(
+      5 * 60 * 1_000,
+      Math.ceil((page1Start - (cutoffMs - 2 * 60 * 60 * 1_000)) / (AMP_LIST_PAGE_SIZE - 1)),
+    );
+
+    const page0 = makeListPage(0, page0Start, 5 * 60 * 1_000);
+    const page1 = makeListPage(1, page1Start, page1Step);
+    // Guard page: short page including a thread still inside the window.
+    const page2 = [
+      {
+        id: GUARD_IN_WINDOW_ID,
+        title: "Guard in-window thread",
+        updated: GUARD_IN_WINDOW_UPDATED,
+        tree: "file:///Users/dev/projects/widget",
+        messageCount: 1,
+      },
+      {
+        id: "T-guard-old",
+        title: "Guard old thread",
+        updated: new Date(cutoffMs - 3 * 60 * 60 * 1_000).toISOString(),
+        tree: "file:///Users/dev/projects/old",
+        messageCount: 1,
+      },
+    ];
+
+    // Sanity: page1 oldest is below cutoff so early-stop triggers.
+    const page1Oldest = Date.parse((page1[page1.length - 1] as { updated: string }).updated);
+    expect(page1Oldest).toBeLessThan(cutoffMs);
+    const page0OldestActual = Date.parse(
+      (page0[page0.length - 1] as { updated: string }).updated,
+    );
+    expect(page0OldestActual).toBeGreaterThanOrEqual(cutoffMs);
+
     const offsets: number[] = [];
-    // Three pages of 500 would be heavy; use a custom runner that reports
-    // page size 500 via repeating entries, then short-circuit via watermark.
-    // Simpler: page size is fixed at 500 in the adapter; for a short fixture
-    // with watermark far in the future we still get all entries on page 0.
-    // Verify that a watermark AFTER all threads still returns them (backfill
-    // within window), and a watermark in the far past still lists at least
-    // page 0 + optional guard.
     const runner: AmpRunner = (args) => {
       if (args[0] === "--version") return { ok: true, stdout: "ok\n" };
       if (args[0] === "threads" && args[1] === "list") {
         const offsetIndex = args.indexOf("--offset");
         const offset = offsetIndex >= 0 ? Number(args[offsetIndex + 1]) : 0;
         offsets.push(offset);
-        // Always a short page in fixtures.
-        return { ok: true, stdout: JSON.stringify(offset === 0 ? listPage : []) };
+        if (offset === 0) return { ok: true, stdout: JSON.stringify(page0) };
+        if (offset === AMP_LIST_PAGE_SIZE) {
+          return { ok: true, stdout: JSON.stringify(page1) };
+        }
+        if (offset === AMP_LIST_PAGE_SIZE * 2) {
+          return { ok: true, stdout: JSON.stringify(page2) };
+        }
+        // Must not be requested after guard page.
+        return { ok: true, stdout: JSON.stringify([]) };
       }
-      return fixtureRunner()(args);
+      if (args[0] === "threads" && args[1] === "export") {
+        const id = args[2] ?? "";
+        return {
+          ok: true,
+          stdout: JSON.stringify({ v: 24, id, messages: [], created: 1_746_000_000_000 }),
+        };
+      }
+      return { ok: false, reason: "command_failed" };
     };
+
+    // Only export the in-window guard thread so we can assert it was enumerated
+    // without exporting ~1000 other threads.
     const result = await readAmp({
       machine: MACHINE_A,
       now: NOW,
       ampRunner: runner,
       ampSleep: noSleep,
       exportSpacingMs: 0,
-      highWatermark: "2026-07-20T12:00:00.000Z",
-      limit: 10,
+      highWatermark: watermark,
+      shouldParseSession: (probe) =>
+        probe.sessionId === sessionIdFor("amp", AmpSessionId(GUARD_IN_WINDOW_ID)),
     });
-    expect(offsets[0]).toBe(0);
-    expect(result.sessions.length).toBeGreaterThanOrEqual(1);
+
+    expect(offsets).toEqual([0, AMP_LIST_PAGE_SIZE, AMP_LIST_PAGE_SIZE * 2]);
+    expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.early_stop")).toBe(
+      true,
+    );
+    expect(result.sessions.map((s) => s.nativeSessionId)).toEqual([GUARD_IN_WINDOW_ID]);
+  });
+
+  test("without highWatermark (force path) walks past where early-stop would cut", async () => {
+    const watermark = "2026-07-15T12:00:00.000Z";
+    const cutoffMs = Date.parse(watermark) - 60 * 60 * 1_000;
+    const page0Start = Date.parse("2026-07-20T12:00:00.000Z");
+    const page0Oldest = page0Start - (AMP_LIST_PAGE_SIZE - 1) * 5 * 60 * 1_000;
+    const page1Start = page0Oldest - 5 * 60 * 1_000;
+    const page1Step = Math.max(
+      5 * 60 * 1_000,
+      Math.ceil((page1Start - (cutoffMs - 2 * 60 * 60 * 1_000)) / (AMP_LIST_PAGE_SIZE - 1)),
+    );
+    const page0 = makeListPage(0, page0Start, 5 * 60 * 1_000);
+    const page1 = makeListPage(1, page1Start, page1Step);
+    // Page 2 continues with more threads — only fetched when watermark is absent.
+    const page2 = makeListPage(
+      2,
+      Date.parse((page1[page1.length - 1] as { updated: string }).updated) - 5 * 60 * 1_000,
+      5 * 60 * 1_000,
+    );
+    // Short terminal page.
+    const page3 = [
+      {
+        id: "T-force-tail",
+        title: "Force tail",
+        updated: "2026-01-01T00:00:00.000Z",
+        tree: "file:///Users/dev/projects/old",
+        messageCount: 1,
+      },
+    ];
+
+    const offsets: number[] = [];
+    const runner: AmpRunner = (args) => {
+      if (args[0] === "--version") return { ok: true, stdout: "ok\n" };
+      if (args[0] === "threads" && args[1] === "list") {
+        const offsetIndex = args.indexOf("--offset");
+        const offset = offsetIndex >= 0 ? Number(args[offsetIndex + 1]) : 0;
+        offsets.push(offset);
+        if (offset === 0) return { ok: true, stdout: JSON.stringify(page0) };
+        if (offset === AMP_LIST_PAGE_SIZE) {
+          return { ok: true, stdout: JSON.stringify(page1) };
+        }
+        if (offset === AMP_LIST_PAGE_SIZE * 2) {
+          return { ok: true, stdout: JSON.stringify(page2) };
+        }
+        if (offset === AMP_LIST_PAGE_SIZE * 3) {
+          return { ok: true, stdout: JSON.stringify(page3) };
+        }
+        return { ok: true, stdout: JSON.stringify([]) };
+      }
+      return { ok: false, reason: "command_failed" };
+    };
+
+    // No highWatermark — same as ingest --force for Amp.
+    const result = await readAmp({
+      machine: MACHINE_A,
+      now: NOW,
+      ampRunner: runner,
+      ampSleep: noSleep,
+      exportSpacingMs: 0,
+      shouldParseSession: () => false,
+    });
+
+    expect(offsets).toEqual([
+      0,
+      AMP_LIST_PAGE_SIZE,
+      AMP_LIST_PAGE_SIZE * 2,
+      AMP_LIST_PAGE_SIZE * 3,
+    ]);
+    expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.early_stop")).toBe(
+      false,
+    );
+    expect(result.sessions).toHaveLength(0);
+  });
+
+  test("non-descending list page disables early-stop and emits order diagnostic", async () => {
+    const watermark = "2026-07-15T12:00:00.000Z";
+    // Full page deliberately NOT updated-descending.
+    const scrambled = Array.from({ length: AMP_LIST_PAGE_SIZE }, (_, i) => ({
+      id: `T-scram-${i}`,
+      title: `scram ${i}`,
+      // Ascending order — violates the contract.
+      updated: new Date(Date.parse("2026-01-01T00:00:00.000Z") + i * 60_000).toISOString(),
+      tree: "file:///Users/dev/projects/widget",
+      messageCount: 1,
+    }));
+    const shortTail = [
+      {
+        id: "T-after-scram",
+        title: "after",
+        updated: "2026-07-20T12:00:00.000Z",
+        tree: "file:///Users/dev/projects/widget",
+        messageCount: 1,
+      },
+    ];
+
+    const offsets: number[] = [];
+    const runner: AmpRunner = (args) => {
+      if (args[0] === "--version") return { ok: true, stdout: "ok\n" };
+      if (args[0] === "threads" && args[1] === "list") {
+        const offsetIndex = args.indexOf("--offset");
+        const offset = offsetIndex >= 0 ? Number(args[offsetIndex + 1]) : 0;
+        offsets.push(offset);
+        if (offset === 0) return { ok: true, stdout: JSON.stringify(scrambled) };
+        if (offset === AMP_LIST_PAGE_SIZE) {
+          return { ok: true, stdout: JSON.stringify(shortTail) };
+        }
+        return { ok: true, stdout: JSON.stringify([]) };
+      }
+      if (args[0] === "threads" && args[1] === "export") {
+        return {
+          ok: true,
+          stdout: JSON.stringify({
+            v: 24,
+            id: args[2],
+            messages: [],
+            created: 1_746_000_000_000,
+          }),
+        };
+      }
+      return { ok: false, reason: "command_failed" };
+    };
+
+    const result = await readAmp({
+      machine: MACHINE_A,
+      now: NOW,
+      ampRunner: runner,
+      ampSleep: noSleep,
+      exportSpacingMs: 0,
+      highWatermark: watermark,
+      shouldParseSession: (probe) =>
+        probe.sessionId === sessionIdFor("amp", AmpSessionId("T-after-scram")),
+    });
+
+    // Early-stop disabled → walks to short page (offset 500), not stop after page 0.
+    expect(offsets).toEqual([0, AMP_LIST_PAGE_SIZE]);
+    expect(
+      result.diagnostics.some((d) => diagnosticName(d) === "amp.list.order_not_descending"),
+    ).toBe(true);
+    expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.early_stop")).toBe(
+      false,
+    );
+    expect(result.sessions.map((s) => s.nativeSessionId)).toEqual(["T-after-scram"]);
   });
 });
 
@@ -553,10 +805,6 @@ describe("amp-schema decode", () => {
     expect(entry._tag).toBe("Right");
     const exported = Schema.decodeUnknownEither(AmpExportSchema)(recentExport);
     expect(exported._tag).toBe("Right");
-    if (isSignal({ _tag: "signal", kind: "x", value: 1 })) {
-      // harness smoke
-      expect(true).toBe(true);
-    }
   });
 
   test("empty id list entry fails closed", () => {
