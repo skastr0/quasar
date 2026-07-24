@@ -286,7 +286,9 @@ export const postFingerprintProbe = async (
  * Best-effort high watermark for remote list pagination (Amp). Reads the most
  * recently updated session for a provider via GET /sessions?provider=&limit=1
  * and returns its `endedAt` (updated_at). Failures return undefined so ingest
- * falls back to a full list walk; correctness still rests on shouldParseSession.
+ * falls back to a full list walk. Ingest must omit this under `--force` so
+ * early-stop cannot hide older threads; threads never enumerated never reach
+ * shouldParseSession.
  */
 export const getProviderHighWatermark = async (
   base: string,
@@ -465,8 +467,10 @@ const ingestProviderRemote = async (
         return shouldRead;
       };
 
-  const highWatermark = provider === "amp"
-    ? await getProviderHighWatermark(serverUrl, "amp", options)
+  // --force must walk the full remote list; watermark early-stop would hide
+  // older threads that never reach shouldParseSession.
+  const highWatermark = provider === "amp" && options.force !== true
+    ? await getProviderHighWatermark(serverUrl, provider, options)
     : undefined;
 
   const stream = adapter.stream({
