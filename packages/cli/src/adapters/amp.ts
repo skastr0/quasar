@@ -1,5 +1,6 @@
-import { execFileSync, type ExecFileSyncOptions } from "node:child_process";
+import { execFile, type ExecFileOptions } from "node:child_process";
 import { existsSync } from "node:fs";
+import { promisify } from "node:util";
 
 import { gitRemoteForPath } from "../core/git-identity";
 import { stableJsonHash } from "../core/hash";
@@ -75,7 +76,7 @@ export type AmpRunResult =
     };
 
 /** Runs one amp subcommand and returns its stdout, fail-soft. */
-export type AmpRunner = (args: readonly string[]) => AmpRunResult;
+export type AmpRunner = (args: readonly string[]) => AmpRunResult | Promise<AmpRunResult>;
 
 export type AmpStreamOptions = AdapterDiscoverOptions & {
   /** Injected in tests so no real amp process is ever spawned. */
@@ -105,20 +106,22 @@ const resolveAmpBinary = (): string | undefined => {
 const isRateLimitedMessage = (text: string): boolean =>
   /\b429\b|rate.?limit|too many requests/i.test(text);
 
-const defaultAmpRunner: AmpRunner = (args) => {
+const execFileAsync = promisify(execFile);
+
+const defaultAmpRunner: AmpRunner = async (args) => {
   const binary = resolveAmpBinary();
   if (binary === undefined) return { ok: false, reason: "missing_binary" };
   if (binary !== "amp" && !existsSync(binary)) {
     return { ok: false, reason: "missing_binary" };
   }
   try {
-    const options: ExecFileSyncOptions = {
+    const options: ExecFileOptions = {
       encoding: "utf8",
       timeout: 120_000,
-      maxBuffer: Number.MAX_SAFE_INTEGER,
+      maxBuffer: 1024 * 1024 * 1024,
     };
-    const stdout = execFileSync(binary, [...args], options);
-    return { ok: true, stdout: typeof stdout === "string" ? stdout : String(stdout) };
+    const { stdout } = await execFileAsync(binary, [...args], options);
+    return { ok: true, stdout: typeof stdout === "string" ? stdout : stdout.toString("utf8") };
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     if (isRateLimitedMessage(detail)) {
@@ -259,12 +262,12 @@ type EnumerateThreadsResult = {
  * Exhausting `maxListPages` without a short page or early-stop sets
  * `pageCapReached` so callers can emit a named truncation diagnostic.
  */
-const enumerateThreads = (
+const enumerateThreads = async (
   runner: AmpRunner,
   highWatermark: string | undefined,
   diagnostics: DecodeDiagnostic[],
   maxListPages: number,
-): EnumerateThreadsResult => {
+): Promise<EnumerateThreadsResult> => {
   const collected: AmpThreadListEntry[] = [];
   const watermarkMs =
     highWatermark !== undefined ? parseUpdatedMs(highWatermark) : undefined;
@@ -281,7 +284,7 @@ const enumerateThreads = (
 
   for (let page = 0; page < maxListPages; page += 1) {
     const offset = page * LIST_PAGE_SIZE;
-    const result = runner([
+    const result = await runner([
       "threads",
       "list",
       "--json",
@@ -686,7 +689,7 @@ const exportThread = async (
   sleep: (ms: number) => Promise<void>,
 ): Promise<AmpRunResult> => {
   for (let attempt = 0; attempt < MAX_EXPORT_ATTEMPTS; attempt += 1) {
-    const result = runner(["threads", "export", threadId]);
+    const result = await runner(["threads", "export", threadId]);
     if (result.ok) return result;
     if (result.reason === "missing_binary") return result;
     if (attempt === MAX_EXPORT_ATTEMPTS - 1) return result;
@@ -706,7 +709,7 @@ async function* streamAmp(options: AmpStreamOptions): AsyncGenerator<AdapterStre
   const exportSpacingMs = options.exportSpacingMs ?? DEFAULT_EXPORT_SPACING_MS;
 
   // Cheap reachability probe — missing CLI yields one diagnostic and returns.
-  const probe = runner(["--version"]);
+  const probe = await runner(["--version"]);
   if (!probe.ok && probe.reason === "missing_binary") {
     yield {
       type: "diagnostic",
@@ -734,7 +737,7 @@ async function* streamAmp(options: AmpStreamOptions): AsyncGenerator<AdapterStre
     orderAssumptionViolated,
     pageCapReached,
     pagesFetched,
-  } = enumerateThreads(runner, options.highWatermark, listDiagnostics, maxListPages);
+  } = await enumerateThreads(runner, options.highWatermark, listDiagnostics, maxListPages);
   for (const diagnostic of listDiagnostics) {
     yield { type: "diagnostic", diagnostic: schemaDiagnostic(SOURCE_ROOT, diagnostic) };
   }
