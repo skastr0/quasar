@@ -204,8 +204,9 @@ where session_id = 'devin-fixture061' and node_id = 1;
   }
 
   test("hostile matrix covers all adapters", () => {
-    expect(new Set(allProviders)).toEqual(
-      new Set(stableAdapters.map((adapter) => adapter.provider)),
+    // Stable adapters only — gated providers (amp) are excluded from this matrix.
+    expect(new Set(allProviders as readonly string[])).toEqual(
+      new Set(stableAdapters.map((adapter) => adapter.provider as string)),
     );
   });
 });
