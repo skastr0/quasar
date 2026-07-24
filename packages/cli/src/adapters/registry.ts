@@ -28,8 +28,9 @@ import { opencodeAdapter } from "./opencode";
  *
  * On promotion: move `ampAdapter` into this array, set `stable: true`, delete
  * `gatedAdapters`, and drop this comment block. Owner: project maintainer.
- * Track as a Forge backlog glyph when Tower is available (filed after QSR-274
- * review: "Promote Amp adapter from gatedAdapters into stableAdapters").
+ * Durable owner-of-record: Forge backlog glyph QSR-275 ("Promote Amp adapter
+ * from gatedAdapters into stableAdapters"). Promotion is human-signoff only —
+ * never agent-promoted.
  */
 export const stableAdapters = [
   codexAdapter,
