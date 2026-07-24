@@ -27,9 +27,13 @@ export interface AdapterDiscoverOptions {
   readonly skip?: number;
   /**
    * Optional pagination bound for remote list sources (e.g. Amp threads).
-   * When present, adapters may stop listing once list metadata is older than
-   * this watermark (with a guard window). Correctness still rests on
-   * `shouldParseSession`; the watermark is an optimization only.
+   * When present, adapters may stop listing once a page's oldest `updated`
+   * falls below this watermark (minus a guard window), then fetch one extra
+   * page. Early-stop is only sound if the remote list is ordered
+   * `updated`-descending; threads never enumerated never reach
+   * `shouldParseSession`. Omit under `--force` so a full walk is possible.
+   * For threads that ARE enumerated, `shouldParseSession` remains the
+   * per-session skip gate.
    */
   readonly highWatermark?: string;
   /**
