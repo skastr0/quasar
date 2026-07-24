@@ -26,6 +26,13 @@ export interface AdapterDiscoverOptions {
   readonly limit?: number;
   readonly skip?: number;
   /**
+   * Optional pagination bound for remote list sources (e.g. Amp threads).
+   * When present, adapters may stop listing once list metadata is older than
+   * this watermark (with a guard window). Correctness still rests on
+   * `shouldParseSession`; the watermark is an optimization only.
+   */
+  readonly highWatermark?: string;
+  /**
    * Pre-parse gate. Returning false means the adapter MUST skip the expensive
    * build/yield for that session. Absent (the default) preserves today's
    * behavior: every discovered session is parsed and yielded.
