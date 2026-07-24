@@ -694,6 +694,8 @@ export const buildFixtureFor = (provider: AdapterProvider, root: string): Adapte
       return buildCursorFixture(root);
     case "devin":
       return buildDevinFixture(root);
+    case "amp":
+      throw new Error("amp is a remote CLI adapter and is not covered by the filesystem fixture harness");
   }
 };
 
