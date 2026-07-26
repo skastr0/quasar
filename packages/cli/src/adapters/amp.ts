@@ -7,6 +7,7 @@ import { stableJsonHash } from "../core/hash";
 import { AmpSessionId, type SessionId } from "../core/identity";
 import type {
   AdapterDiagnostic,
+  ContentBlock,
   SessionEventKind,
   SessionRole,
   ToolCall,
@@ -534,6 +535,7 @@ type AmpEventDraft = {
   readonly kind: SessionEventKind;
   readonly contentText?: string;
   readonly contentSource?: NativeValue;
+  readonly contentBlocks?: readonly ContentBlock[];
   readonly toolCallId?: string;
   readonly rawReference: {
     readonly sourcePath: string;
@@ -758,7 +760,7 @@ const buildAmpSession = (
           isoFromBlockTime(block.finalTime) ?? isoFromBlockTime(block.startTime);
         const eventId = eventIdFor(sessionId, seq, `${messageIndex}:${blockIndex}:tool_result`);
         const outputValue = toolResultOutput(block.run as Record<string, unknown> | undefined);
-        const output = projectToolPayloadNativeValue(outputValue);
+        const output = projectToolPayloadNativeValue(block.run);
         const existing = toolCallsById.get(block.toolUseID);
         const toolCallId = existing?.id ?? scopedId(sessionId, "tool", block.toolUseID);
         const merged: AmpToolCallDraft = {
@@ -834,12 +836,38 @@ const buildAmpSession = (
           sourcePath: imageDecision.value.sourcePath,
         });
         if (sourceRef !== undefined) {
+          const eventId = eventIdFor(sessionId, seq, `${messageIndex}:${blockIndex}:image`);
+          const source = imageDecision.value.source;
+          const uri =
+            source !== null && typeof source === "object" && !Array.isArray(source)
+            && typeof (source as { readonly url?: unknown }).url === "string"
+              ? (source as { readonly url: string }).url
+              : undefined;
+          events.push({
+            id: eventId,
+            sequence: seq,
+            role,
+            kind: "message",
+            contentBlocks: [{
+              id: scopedId(sessionId, "content", `${messageIndex}:${blockIndex}`),
+              sequence: blockIndex,
+              kind: "image",
+              ...(imageDecision.value.sourcePath !== undefined ? { path: imageDecision.value.sourcePath } : {}),
+              ...(uri !== undefined ? { uri } : {}),
+              metadata: sourceRef,
+            }],
+            rawReference: { sourcePath: url, line, nativeType: "image" },
+          });
           artifacts.push({
             id: scopedId(sessionId, "artifact", `${messageIndex}:${blockIndex}`),
             kind: "image",
+            eventId,
             sourcePath: url,
             sourceRef,
           });
+          seq += 1;
+        } else {
+          hasFatalBlockError = true;
         }
         continue;
       }

@@ -491,7 +491,9 @@ describe("amp content mapping", () => {
       cacheCreationInputTokens: 6,
     });
     expect(session.artifacts).toHaveLength(2);
-    expect(session.artifacts[0]).toMatchObject({ kind: "image", sourceRef: { sourcePath: "image.png" } });
+    const imageEvent = session.events.find((event) => event.contentBlocks.some((block) => block.kind === "image"));
+    expect(imageEvent?.contentBlocks[0]).toMatchObject({ kind: "image", path: "image.png", uri: "https://images.example.test/image.png" });
+    expect(session.artifacts[0]).toMatchObject({ kind: "image", eventId: imageEvent?.id, sourceRef: { sourcePath: "image.png" } });
     expect(session.artifacts[1]).toMatchObject({ kind: "usage_metadata", sourceRef: { maxInputTokens: 100, totalInputTokens: 23 } });
   });
 
@@ -505,6 +507,30 @@ describe("amp content mapping", () => {
     });
     expect(result.sessions).toHaveLength(0);
     expect(result.diagnostics.find((d) => diagnosticName(d) === "amp.block.unknown")?.status).toBe("error");
+  });
+
+  test("image without a stable source fails closed", async () => {
+    const result = await read(MACHINE_A, {
+      ampRunner: fixtureRunner({ [THREAD_A]: { ...recentExport, messages: [{ role: "assistant", content: [{ type: "image" }] }] } }),
+      limit: 1,
+      shouldParseSession: (probe) => probe.sessionId === sessionIdFor("amp", AmpSessionId(THREAD_A)),
+    });
+    expect(result.sessions).toHaveLength(0);
+    expect(result.diagnostics.find((d) => diagnosticName(d) === "amp.block.image.decode_failed")?.status).toBe("error");
+  });
+
+  test("tool results retain full run payload while event text stays projected", async () => {
+    const run = { status: "failed", result: { exitCode: 17, output: "stderr text", content: [{ type: "json", value: { retained: true } }] } };
+    const result = await read(MACHINE_A, {
+      ampRunner: fixtureRunner({ [THREAD_A]: { ...recentExport, messages: [
+        { role: "assistant", content: [{ type: "tool_use", id: "TU-full", name: "shell", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", toolUseID: "TU-full", run }] },
+      ] } }),
+      limit: 1,
+    });
+    const tool = result.sessions[0]!.toolCalls[0]!;
+    expect(tool.output).toMatchObject({ status: "failed", result: { exitCode: 17, output: "stderr text", content: [{ type: "json", value: { retained: true } }] } });
+    expect(result.sessions[0]!.events.find((event) => event.kind === "tool_result")?.contentText).toBe("stderr text");
   });
 
   test("selected block-schema failures and invalid messages fail closed", async () => {
