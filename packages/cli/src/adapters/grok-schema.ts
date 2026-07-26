@@ -645,8 +645,8 @@ export type GrokSummary = typeof GrokSummary.Type;
  * drop reason (DROP). There is no third option; nothing falls through.
  */
 type ChatEntry =
-  | { readonly schema: Schema.Schema<any, any>; readonly kind: SessionEventKind }
-  | { readonly schema: Schema.Schema<any, any>; readonly dropReason: string };
+  | { readonly schema: Schema.Schema.AnyNoContext; readonly kind: SessionEventKind }
+  | { readonly schema: Schema.Schema.AnyNoContext; readonly dropReason: string };
 
 /**
  * chat_history.jsonl declarative dispatch. Note `reasoning` is dynamic: a record
