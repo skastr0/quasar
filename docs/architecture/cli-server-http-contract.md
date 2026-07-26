@@ -88,8 +88,8 @@ interface MappedSession {
 
 The server rejects anything outside these at the ingest boundary:
 
-- **Provider enum — exactly eleven literals:** `codex`, `claude`, `opencode`,
-  `grok`, `kimi`, `hermes`, `antigravity`, `omp`, `pi`, `cursor`, `devin`
+- **Provider enum — exactly twelve literals:** `codex`, `claude`, `opencode`,
+  `grok`, `kimi`, `hermes`, `antigravity`, `omp`, `pi`, `cursor`, `devin`, `amp`
   (`packages/server/src/provider.ts`).
 - **Message-role allowlist — exactly three:** `user`, `assistant`, `reasoning`.
 - **Self-consistency:** `messages.length === session.messageCount`,
@@ -152,7 +152,7 @@ projection with a field allowlist, and a bounded page. The CLI dispatches the
 kind to the corresponding GET resource, applies projection locally, and emits
 the typed `quasar.query/v1` response. Its opaque cursor is a shape-bound local
 encoding of the resource offset; the server sees only `limit` and `offset`.
-Provider filters accept all eleven provider literals. Session-backed filters
+Provider filters accept all twelve provider literals. Session-backed filters
 include project, provider, session, agent name/role, model, and model provider;
 tool queries additionally accept tool name. A targeted tool-call id dispatches
 to `/tool-call`.

@@ -4,12 +4,12 @@ import { dirname, join } from "node:path";
 
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { stableAdapters } from "../src/adapters/registry";
 import {
   adapterFor,
   buildFixtureFor,
   canonicalizeItems,
   collectStreamItems,
+  filesystemAdapterProviders,
   type AdapterProvider,
 } from "./adapter-test-harness";
 
@@ -24,7 +24,7 @@ afterEach(() => {
 });
 
 describe("adapter stream golden lock", () => {
-  for (const { provider } of stableAdapters) {
+  for (const provider of filesystemAdapterProviders) {
     test(`${provider} full stream matches committed golden`, async () => {
       const root = mkdtempSync(join(tmpdir(), `quasar-${provider}-golden-`));
       tempRoots.push(root);

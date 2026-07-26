@@ -11,6 +11,7 @@ import {
   adapterFor,
   appendText,
   buildFixtureFor,
+  filesystemAdapterProviders,
   rewriteCursorFixtureUserMessage,
   type AdapterFixture,
   type AdapterProvider,
@@ -203,10 +204,14 @@ where session_id = 'devin-fixture061' and node_id = 1;
     }, 15_000);
   }
 
-  test("hostile matrix covers all adapters", () => {
-    // Stable adapters only — gated providers (amp) are excluded from this matrix.
+  test("hostile matrix covers every filesystem adapter", () => {
     expect(new Set(allProviders as readonly string[])).toEqual(
-      new Set(stableAdapters.map((adapter) => adapter.provider as string)),
+      new Set(filesystemAdapterProviders),
     );
+    expect(
+      stableAdapters
+        .map((adapter) => adapter.provider)
+        .filter((provider) => !(filesystemAdapterProviders as readonly string[]).includes(provider)),
+    ).toEqual(["amp"]);
   });
 });
