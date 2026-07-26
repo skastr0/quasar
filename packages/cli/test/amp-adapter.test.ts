@@ -567,6 +567,113 @@ describe("amp content mapping", () => {
     ]);
   });
 
+  test("preserves observed session configuration, response phase, block facts, and image time", async () => {
+    const toolStart = "2026-07-20T12:01:00.000Z";
+    const toolFinal = "2026-07-20T12:01:02.000Z";
+    const resultFinal = "2026-07-20T12:01:05.000Z";
+    const imageSentAt = 1_753_012_900_000;
+    const exported = {
+      ...recentExport,
+      reasoningEffort: "high",
+      agentMode: "deep",
+      activatedSkills: [{ name: "review" }],
+      archived: true,
+      meta: { ...recentExport.meta, agentMode: "deep" },
+      messages: [
+        {
+          role: "assistant",
+          protocolMessageID: "protocol-source-facts",
+          meta: { openAIResponsePhase: "final_answer" },
+          state: { type: "cancelled", stopReason: "end_turn" },
+          content: [
+            {
+              type: "thinking",
+              thinking: "Observed reasoning.",
+              startTime: "2026-07-20T12:00:58.000Z",
+              finalTime: "2026-07-20T12:00:59.000Z",
+              provider: "openai",
+              blockState: "streaming",
+            },
+            {
+              type: "tool_use",
+              id: "TU-source-facts",
+              name: "shell",
+              input: { command: "pwd" },
+              startTime: toolStart,
+              finalTime: toolFinal,
+              complete: true,
+              blockState: "complete",
+              providerToolUseId: "provider-tool-source-facts",
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [{
+            type: "tool_result",
+            toolUseID: "TU-source-facts",
+            run: { status: "cancelled", result: { output: "cancelled" } },
+            startTime: "2026-07-20T12:01:03.000Z",
+            finalTime: resultFinal,
+            blockState: "complete",
+          }],
+        },
+        {
+          role: "user",
+          meta: { sentAt: imageSentAt },
+          content: [{ type: "image", sourcePath: "observed.png" }],
+        },
+      ],
+    };
+
+    const result = await read(MACHINE_A, {
+      ampRunner: fixtureRunner({ [THREAD_A]: exported }),
+      limit: 1,
+    });
+    const session = result.sessions[0]!;
+    expect(session.executionContexts).toEqual([
+      expect.objectContaining({ scope: "session", reasoningEffort: "high" }),
+    ]);
+    expect(session.artifacts.find((artifact) => artifact.kind === "amp_session_configuration")?.sourceRef).toEqual({
+      agentMode: "deep",
+      metaAgentMode: "deep",
+      activatedSkills: [{ name: "review" }],
+      archived: true,
+    });
+    const thinking = session.events.find((event) => event.kind === "reasoning");
+    expect(thinking?.contentBlocks[0]?.metadata).toEqual({
+      startTime: "2026-07-20T12:00:58.000Z",
+      finalTime: "2026-07-20T12:00:59.000Z",
+      provider: "openai",
+      blockState: "streaming",
+      openAIResponsePhase: "final_answer",
+      state: { type: "cancelled", stopReason: "end_turn" },
+    });
+    const toolCallEvent = session.events.find((event) => event.kind === "tool_call");
+    expect(toolCallEvent?.contentBlocks[0]?.metadata).toMatchObject({
+      startTime: toolStart,
+      finalTime: toolFinal,
+      complete: true,
+      blockState: "complete",
+      providerToolUseId: "provider-tool-source-facts",
+      openAIResponsePhase: "final_answer",
+    });
+    expect(session.toolCalls[0]).toMatchObject({
+      status: "cancelled",
+      startedAt: toolStart,
+      completedAt: resultFinal,
+    });
+    const image = session.events.find((event) =>
+      event.contentBlocks.some((block) => block.kind === "image"));
+    expect(image?.timestamp).toBe(new Date(imageSentAt).toISOString());
+
+    const mapped = mapSession(session, "source-facts-fingerprint");
+    expect(mapped.events.find((event) => event.id === thinking?.id)?.contentBlocks[0]?.metadata).toEqual(
+      thinking?.contentBlocks[0]?.metadata,
+    );
+    expect(mapped.executionContexts[0]?.reasoningEffort).toBe("high");
+  });
+
   test("unknown content blocks fail closed for the affected session", async () => {
     const result = await read(MACHINE_A, {
       ampRunner: fixtureRunner({
