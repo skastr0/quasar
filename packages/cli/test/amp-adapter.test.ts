@@ -181,11 +181,11 @@ const read = (machine: typeof MACHINE_A, options: Partial<AmpStreamOptions> = {}
 // Registry gating
 // ---------------------------------------------------------------------------
 
-describe("amp registry gating", () => {
-  test("amp is resolvable by provider key but excluded from stableAdapters / all", () => {
+describe("amp registry", () => {
+  test("amp is stable and included in the all-provider set", () => {
     expect(adaptersByProvider.get("amp")).toBe(ampAdapter);
-    expect(stableAdapters.map((adapter) => adapter.provider)).not.toContain("amp");
-    expect(ampAdapter.stable).toBe(false);
+    expect(stableAdapters.map((adapter) => adapter.provider)).toContain("amp");
+    expect(ampAdapter.stable).toBe(true);
     expect(ampAdapter.provider).toBe("amp");
     expect(ampAdapter.id).toBe("amp-threads-cli");
   });

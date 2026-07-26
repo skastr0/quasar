@@ -14,7 +14,21 @@ export const MACHINE = {
 
 export const NOW = "2026-06-11T00:00:00.000Z";
 
-export type AdapterProvider = (typeof stableAdapters)[number]["provider"];
+export const filesystemAdapterProviders = [
+  "codex",
+  "claude",
+  "opencode",
+  "grok",
+  "hermes",
+  "kimi",
+  "antigravity",
+  "omp",
+  "pi",
+  "cursor",
+  "devin",
+] as const;
+
+export type AdapterProvider = (typeof filesystemAdapterProviders)[number];
 
 export type AdapterFixture = {
   readonly provider: AdapterProvider;
@@ -694,8 +708,6 @@ export const buildFixtureFor = (provider: AdapterProvider, root: string): Adapte
       return buildCursorFixture(root);
     case "devin":
       return buildDevinFixture(root);
-    case "amp":
-      throw new Error("amp is a remote CLI adapter and is not covered by the filesystem fixture harness");
   }
 };
 

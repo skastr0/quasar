@@ -6,12 +6,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import * as fc from "effect/FastCheck";
 
-import { stableAdapters } from "../src/adapters/registry";
 import type { AdapterDiagnostic, NormalizedSession } from "../src/core/schemas";
 import {
   adapterFor,
   appendText,
   buildFixtureFor,
+  filesystemAdapterProviders,
   rewriteCursorFixtureUserMessage,
   type AdapterFixture,
   type AdapterProvider,
@@ -178,7 +178,7 @@ describe("adapter property invariants", () => {
   test("mutated provider records never throw, never emit unknown-kind, and named drops stay named", async () => {
     await fc.assert(
       fc.asyncProperty(
-        fc.constantFrom(...stableAdapters.map((adapter) => adapter.provider)),
+        fc.constantFrom(...filesystemAdapterProviders),
         fc.constantFrom<MutationKind>("drop_required_field", "wrong_type", "unknown_type"),
         async (provider, mutation) => {
           const root = mkdtempSync(join(tmpdir(), `quasar-${provider}-property-`));

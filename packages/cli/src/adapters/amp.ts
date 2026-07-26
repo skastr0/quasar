@@ -1230,7 +1230,7 @@ export const ampAdapter: SessionAdapter = {
   id: "amp-threads-cli",
   provider: "amp",
   displayName: "Amp threads",
-  stable: false,
+  stable: true,
   defaultRoot: () => SOURCE_ROOT,
   read: async (options) => collectAdapterStream(streamAmp(options as AmpStreamOptions)),
   stream: (options) => streamAmp(options as AmpStreamOptions),
