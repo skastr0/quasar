@@ -71,18 +71,23 @@ export interface SessionRow {
 
 export interface MessageRow {
   readonly sessionId: string;
+  readonly eventId: string;
   readonly seq: number;
   readonly role: MessageRole;
   readonly text: string;
   readonly ts?: string;
   readonly projectKey: string;
   readonly contentHash: string;
+  readonly executionContextId?: string;
+  readonly model?: string;
+  readonly modelProvider?: string;
+  readonly reasoningEffort?: string;
 }
 
 export interface ToolCallRow {
   readonly id: string;
   readonly sessionId: string;
-  readonly eventId?: string;
+  readonly eventId: string;
   readonly seq: number;
   readonly toolName: string;
   readonly status?: string;
@@ -92,6 +97,10 @@ export interface ToolCallRow {
   readonly completedAt?: string;
   readonly projectKey: string;
   readonly provider: Provider;
+  readonly executionContextId?: string;
+  readonly model?: string;
+  readonly modelProvider?: string;
+  readonly reasoningEffort?: string;
 }
 
 /** Complete relational shape used by the QuerySpec adapter. Fields that may
@@ -134,10 +143,13 @@ export interface QueryMessageRow {
   readonly agentRole: string | null;
   readonly model: string | null;
   readonly modelProvider: string | null;
+  readonly executionContextId: string | null;
+  readonly reasoningEffort: string | null;
 }
 
 export interface QueryToolCallRow {
   readonly toolCallId: string;
+  readonly eventId: string;
   readonly sessionId: string;
   readonly projectKey: string;
   readonly provider: Provider;
@@ -153,6 +165,8 @@ export interface QueryToolCallRow {
   readonly agentRole: string | null;
   readonly model: string | null;
   readonly modelProvider: string | null;
+  readonly executionContextId: string | null;
+  readonly reasoningEffort: string | null;
   readonly inputText?: string;
   readonly outputText?: string;
 }

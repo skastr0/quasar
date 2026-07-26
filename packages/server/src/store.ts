@@ -727,19 +727,24 @@ const migrate = (db: Database): readonly StoreMigrationLog[] => {
       ON sessions(COALESCE(updated_at, started_at, '') DESC, session_id ASC);
     CREATE TABLE IF NOT EXISTS messages (
       session_id TEXT NOT NULL,
+      event_id TEXT NOT NULL,
       seq INTEGER NOT NULL,
       role TEXT NOT NULL,
       text TEXT NOT NULL,
       ts TEXT,
       project_key TEXT NOT NULL,
       content_hash TEXT NOT NULL,
+      execution_context_id TEXT,
+      model TEXT,
+      model_provider TEXT,
+      reasoning_effort TEXT,
       PRIMARY KEY (session_id, seq)
     );
     CREATE INDEX IF NOT EXISTS messages_by_project ON messages(project_key, session_id, seq);
     CREATE TABLE IF NOT EXISTS tool_calls (
       id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL,
-      event_id TEXT,
+      event_id TEXT NOT NULL,
       seq INTEGER NOT NULL,
       tool_name TEXT NOT NULL,
       status TEXT,
@@ -750,7 +755,11 @@ const migrate = (db: Database): readonly StoreMigrationLog[] => {
       started_at TEXT,
       completed_at TEXT,
       project_key TEXT NOT NULL,
-      provider TEXT NOT NULL
+      provider TEXT NOT NULL,
+      execution_context_id TEXT,
+      model TEXT,
+      model_provider TEXT,
+      reasoning_effort TEXT
     );
     CREATE INDEX IF NOT EXISTS tool_calls_by_session ON tool_calls(session_id, seq);
     CREATE INDEX IF NOT EXISTS tool_calls_by_project_tool ON tool_calls(project_key, tool_name, session_id, seq);
@@ -872,6 +881,31 @@ const migrate = (db: Database): readonly StoreMigrationLog[] => {
   if (!sessionColumns.has("parent_session_id")) {
     db.exec("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT");
   }
+  const messageColumns = new Set(
+    (db.query("PRAGMA table_info(messages)").all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (!messageColumns.has("event_id")) {
+    db.exec("ALTER TABLE messages ADD COLUMN event_id TEXT");
+  }
+  if (!messageColumns.has("execution_context_id")) {
+    db.exec("ALTER TABLE messages ADD COLUMN execution_context_id TEXT");
+  }
+  if (!messageColumns.has("model")) {
+    db.exec("ALTER TABLE messages ADD COLUMN model TEXT");
+  }
+  if (!messageColumns.has("model_provider")) {
+    db.exec("ALTER TABLE messages ADD COLUMN model_provider TEXT");
+  }
+  if (!messageColumns.has("reasoning_effort")) {
+    db.exec("ALTER TABLE messages ADD COLUMN reasoning_effort TEXT");
+  }
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS messages_by_event
+      ON messages(session_id, event_id)
+      WHERE event_id IS NOT NULL
+  `);
   const toolCallColumns = new Set(
     (db.query("PRAGMA table_info(tool_calls)").all() as { name: string }[]).map(
       (column) => column.name,
@@ -879,6 +913,18 @@ const migrate = (db: Database): readonly StoreMigrationLog[] => {
   );
   if (!toolCallColumns.has("event_id")) {
     db.exec("ALTER TABLE tool_calls ADD COLUMN event_id TEXT");
+  }
+  if (!toolCallColumns.has("execution_context_id")) {
+    db.exec("ALTER TABLE tool_calls ADD COLUMN execution_context_id TEXT");
+  }
+  if (!toolCallColumns.has("model")) {
+    db.exec("ALTER TABLE tool_calls ADD COLUMN model TEXT");
+  }
+  if (!toolCallColumns.has("model_provider")) {
+    db.exec("ALTER TABLE tool_calls ADD COLUMN model_provider TEXT");
+  }
+  if (!toolCallColumns.has("reasoning_effort")) {
+    db.exec("ALTER TABLE tool_calls ADD COLUMN reasoning_effort TEXT");
   }
   const missingToolPayloadHashes = !toolCallColumns.has("input_hash")
     || !toolCallColumns.has("output_hash");
@@ -975,8 +1021,8 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
            ON CONFLICT(session_id) DO UPDATE SET project_key = excluded.project_key, provider = excluded.provider, agent_name = excluded.agent_name, title = excluded.title, started_at = excluded.started_at, updated_at = excluded.updated_at, source_path = excluded.source_path, source_fingerprint = excluded.source_fingerprint, host = excluded.host, identity_scheme_version = excluded.identity_scheme_version, normalization_version = excluded.normalization_version, model = excluded.model, model_provider = excluded.model_provider, assignment_nickname = excluded.assignment_nickname, assignment_role = excluded.assignment_role, assignment_path = excluded.assignment_path, assignment_depth = excluded.assignment_depth, parent_session_id = excluded.parent_session_id, message_count = excluded.message_count, tool_call_count = excluded.tool_call_count`,
         );
         const insertMessage = db.prepare(
-          `INSERT INTO messages(session_id, seq, role, text, ts, project_key, content_hash, project_scope_token)
-           VALUES ($sessionId, $seq, $role, $text, $ts, $projectKey, $contentHash, $projectScopeToken)`,
+          `INSERT INTO messages(session_id, event_id, seq, role, text, ts, project_key, content_hash, project_scope_token, execution_context_id, model, model_provider, reasoning_effort)
+           VALUES ($sessionId, $eventId, $seq, $role, $text, $ts, $projectKey, $contentHash, $projectScopeToken, $executionContextId, $model, $modelProvider, $reasoningEffort)`,
         );
         const deleteSessionEvent = db.prepare("DELETE FROM session_events WHERE session_id = ? AND id = ?");
         const upsertSessionEvent = db.prepare(
@@ -1102,11 +1148,17 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
         // anywhere mid-apply is healed by the next daemon tick re-sending.
         const INGEST_CHUNK_ROWS = 64;
         const selectMessageDiffRows = db.prepare(
-          "SELECT seq, role, content_hash AS contentHash, project_key AS projectKey, ts FROM messages WHERE session_id = ?",
+          `SELECT event_id AS eventId, seq, role, content_hash AS contentHash,
+                  project_key AS projectKey, ts,
+                  execution_context_id AS executionContextId,
+                  model, model_provider AS modelProvider,
+                  reasoning_effort AS reasoningEffort
+           FROM messages WHERE session_id = ?`,
         );
         const selectToolCallDiffRows = db.prepare(
           `SELECT id, event_id AS eventId, seq, tool_name AS toolName, status, started_at AS startedAt, completed_at AS completedAt,
-                  project_key AS projectKey, provider,
+                  project_key AS projectKey, provider, execution_context_id AS executionContextId,
+                  model, model_provider AS modelProvider, reasoning_effort AS reasoningEffort,
                   input_hash AS inputHash, output_hash AS outputHash
            FROM tool_calls WHERE session_id = ?`,
         );
@@ -1131,9 +1183,9 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
         const deleteMessageRow = db.prepare("DELETE FROM messages WHERE session_id = ? AND seq = ?");
         const deleteToolCallRow = db.prepare("DELETE FROM tool_calls WHERE id = ?");
         const upsertToolCall = db.prepare(
-          `INSERT INTO tool_calls(id, session_id, event_id, seq, tool_name, status, input_text, output_text, input_hash, output_hash, started_at, completed_at, project_key, provider)
-           VALUES ($id, $sessionId, $eventId, $seq, $toolName, $status, $inputText, $outputText, $inputHash, $outputHash, $startedAt, $completedAt, $projectKey, $provider)
-           ON CONFLICT(id) DO UPDATE SET session_id = excluded.session_id, event_id = excluded.event_id, seq = excluded.seq, tool_name = excluded.tool_name, status = excluded.status, input_text = excluded.input_text, output_text = excluded.output_text, input_hash = excluded.input_hash, output_hash = excluded.output_hash, started_at = excluded.started_at, completed_at = excluded.completed_at, project_key = excluded.project_key, provider = excluded.provider`,
+          `INSERT INTO tool_calls(id, session_id, event_id, seq, tool_name, status, input_text, output_text, input_hash, output_hash, started_at, completed_at, project_key, provider, execution_context_id, model, model_provider, reasoning_effort)
+           VALUES ($id, $sessionId, $eventId, $seq, $toolName, $status, $inputText, $outputText, $inputHash, $outputHash, $startedAt, $completedAt, $projectKey, $provider, $executionContextId, $model, $modelProvider, $reasoningEffort)
+           ON CONFLICT(id) DO UPDATE SET session_id = excluded.session_id, event_id = excluded.event_id, seq = excluded.seq, tool_name = excluded.tool_name, status = excluded.status, input_text = excluded.input_text, output_text = excluded.output_text, input_hash = excluded.input_hash, output_hash = excluded.output_hash, started_at = excluded.started_at, completed_at = excluded.completed_at, project_key = excluded.project_key, provider = excluded.provider, execution_context_id = excluded.execution_context_id, model = excluded.model, model_provider = excluded.model_provider, reasoning_effort = excluded.reasoning_effort`,
         );
         const finalizeSessionFingerprint = db.prepare(
           `UPDATE sessions
@@ -1220,7 +1272,9 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
           } | null;
           const requiresDownstreamReplay = applyState?.sourceFingerprint.startsWith("applying:") ?? false;
           const existingMessages = selectMessageDiffRows.all(mapped.session.sessionId) as Array<{
-            seq: number; role: string; contentHash: string; projectKey: string; ts: string | null;
+            eventId: string | null; seq: number; role: string; contentHash: string;
+            projectKey: string; ts: string | null; executionContextId: string | null;
+            model: string | null; modelProvider: string | null; reasoningEffort: string | null;
           }>;
           const existingBySeq = new Map(existingMessages.map((row) => [row.seq, row]));
           const incomingSeqs = new Set(mapped.messages.map((row) => row.seq));
@@ -1234,10 +1288,15 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               messagesInserted += 1;
               messageUpserts.push(message);
             } else if (
-              existing.contentHash !== message.contentHash
+              existing.eventId !== message.eventId
+              || existing.contentHash !== message.contentHash
               || existing.role !== message.role
               || existing.projectKey !== message.projectKey
               || existing.ts !== (message.ts ?? null)
+              || existing.executionContextId !== (message.executionContextId ?? null)
+              || existing.model !== (message.model ?? null)
+              || existing.modelProvider !== (message.modelProvider ?? null)
+              || existing.reasoningEffort !== (message.reasoningEffort ?? null)
             ) {
               messagesUpdated += 1;
               messageUpserts.push(message);
@@ -1252,7 +1311,9 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
           const existingToolCalls = selectToolCallDiffRows.all(mapped.session.sessionId) as Array<{
             id: string; eventId: string | null; seq: number; toolName: string; status: string | null;
             startedAt: string | null; completedAt: string | null;
-            projectKey: string; provider: string; inputHash: string; outputHash: string;
+            projectKey: string; provider: string; executionContextId: string | null;
+            model: string | null; modelProvider: string | null; reasoningEffort: string | null;
+            inputHash: string; outputHash: string;
           }>;
           const existingById = new Map(existingToolCalls.map((row) => [row.id, row]));
           const incomingIds = new Set(mapped.toolCalls.map((row) => row.id));
@@ -1267,13 +1328,17 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               toolCallUpserts.push(toolCall);
             } else if (
               existing.seq !== toolCall.seq
-              || existing.eventId !== (toolCall.eventId ?? null)
+              || existing.eventId !== toolCall.eventId
               || existing.toolName !== toolCall.toolName
               || existing.status !== (toolCall.status ?? null)
               || existing.startedAt !== (toolCall.startedAt ?? null)
               || existing.completedAt !== (toolCall.completedAt ?? null)
               || existing.projectKey !== toolCall.projectKey
               || existing.provider !== toolCall.provider
+              || existing.executionContextId !== (toolCall.executionContextId ?? null)
+              || existing.model !== (toolCall.model ?? null)
+              || existing.modelProvider !== (toolCall.modelProvider ?? null)
+              || existing.reasoningEffort !== (toolCall.reasoningEffort ?? null)
               || existing.inputHash !== sha256Text(toolCall.inputText)
               || existing.outputHash !== sha256Text(toolCall.outputText)
             ) {
@@ -1407,6 +1472,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
             deleteMessageRow.run(message.sessionId, message.seq);
             insertMessage.run({
               $sessionId: message.sessionId,
+              $eventId: message.eventId,
               $seq: message.seq,
               $role: message.role,
               $text: message.text,
@@ -1414,6 +1480,10 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               $projectKey: message.projectKey,
               $contentHash: message.contentHash,
               $projectScopeToken: ftsProjectScopeToken(message.projectKey),
+              $executionContextId: message.executionContextId ?? null,
+              $model: message.model ?? null,
+              $modelProvider: message.modelProvider ?? null,
+              $reasoningEffort: message.reasoningEffort ?? null,
             });
           }
         });
@@ -1425,7 +1495,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
             upsertToolCall.run({
               $id: toolCall.id,
               $sessionId: toolCall.sessionId,
-              $eventId: toolCall.eventId ?? null,
+              $eventId: toolCall.eventId,
               $seq: toolCall.seq,
               $toolName: toolCall.toolName,
               $status: toolCall.status ?? null,
@@ -1437,6 +1507,10 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               $completedAt: toolCall.completedAt ?? null,
               $projectKey: toolCall.projectKey,
               $provider: toolCall.provider,
+              $executionContextId: toolCall.executionContextId ?? null,
+              $model: toolCall.model ?? null,
+              $modelProvider: toolCall.modelProvider ?? null,
+              $reasoningEffort: toolCall.reasoningEffort ?? null,
             });
           }
         });
@@ -1624,10 +1698,10 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
             }
             : undefined;
           const messageRows = db.query(
-            "SELECT session_id AS sessionId, seq, role, text, ts, project_key AS projectKey, content_hash AS contentHash FROM messages WHERE session_id = ? ORDER BY seq ASC LIMIT ? OFFSET ?",
+            "SELECT session_id AS sessionId, event_id AS eventId, seq, role, text, ts, project_key AS projectKey, content_hash AS contentHash, execution_context_id AS executionContextId, model, model_provider AS modelProvider, reasoning_effort AS reasoningEffort FROM messages WHERE session_id = ? ORDER BY seq ASC LIMIT ? OFFSET ?",
           ).all(sessionId, pages.messages.limit, pages.messages.offset) as MessageRow[];
           const toolCallRows = db.query(
-            "SELECT id, session_id AS sessionId, event_id AS eventId, seq, tool_name AS toolName, status, input_text AS inputText, output_text AS outputText, started_at AS startedAt, completed_at AS completedAt, project_key AS projectKey, provider FROM tool_calls WHERE session_id = ? ORDER BY seq ASC, id ASC LIMIT ? OFFSET ?",
+            "SELECT id, session_id AS sessionId, event_id AS eventId, seq, tool_name AS toolName, status, input_text AS inputText, output_text AS outputText, started_at AS startedAt, completed_at AS completedAt, project_key AS projectKey, provider, execution_context_id AS executionContextId, model, model_provider AS modelProvider, reasoning_effort AS reasoningEffort FROM tool_calls WHERE session_id = ? ORDER BY seq ASC, id ASC LIMIT ? OFFSET ?",
           ).all(sessionId, pages.toolCalls.limit, pages.toolCalls.offset) as ToolCallRow[];
           const eventRows = (db.query(
             "SELECT event_json AS json FROM session_events WHERE session_id = ? ORDER BY sequence ASC, id ASC LIMIT ? OFFSET ?",
@@ -1680,7 +1754,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
           s.normalization_version AS normalizationVersion
         `;
         const queryMessageColumns = `
-          m.session_id || ':' || CAST(m.seq AS TEXT) AS messageId,
+          COALESCE(m.event_id, m.session_id || ':' || CAST(m.seq AS TEXT)) AS messageId,
           m.session_id AS sessionId,
           m.seq AS sequence,
           m.role,
@@ -1691,8 +1765,10 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
           s.title,
           s.agent_name AS agentName,
           s.assignment_role AS agentRole,
-          s.model,
-          s.model_provider AS modelProvider
+          m.model,
+          m.model_provider AS modelProvider,
+          m.execution_context_id AS executionContextId,
+          m.reasoning_effort AS reasoningEffort
         `;
         const pushProviderFilter = (
           filters: string[],
@@ -1832,13 +1908,19 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                 filters.push("s.assignment_role = ?");
                 args.push(options.agentRole);
               }
+              const messageContextFilters: string[] = [];
               if (options.model !== undefined) {
-                filters.push("s.model = ?");
+                messageContextFilters.push("m.model = ?");
                 args.push(options.model);
               }
               if (options.modelProvider !== undefined) {
-                filters.push("s.model_provider = ?");
+                messageContextFilters.push("m.model_provider = ?");
                 args.push(options.modelProvider);
+              }
+              if (messageContextFilters.length > 0) {
+                filters.push(
+                  `EXISTS (SELECT 1 FROM messages AS m WHERE m.session_id = s.session_id AND ${messageContextFilters.join(" AND ")})`,
+                );
               }
               const where = filters.length === 0 ? "" : `WHERE ${filters.join(" AND ")}`;
               const rows = db.query(`
@@ -1858,11 +1940,11 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                 args.push(options.role);
               }
               if (options.model !== undefined) {
-                filters.push("s.model = ?");
+                filters.push("m.model = ?");
                 args.push(options.model);
               }
               if (options.modelProvider !== undefined) {
-                filters.push("s.model_provider = ?");
+                filters.push("m.model_provider = ?");
                 args.push(options.modelProvider);
               }
               return db.query(`
@@ -1904,11 +1986,11 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                 args.push(options.agentRole);
               }
               if (options.model !== undefined) {
-                filters.push("s.model = ?");
+                filters.push("t.model = ?");
                 args.push(options.model);
               }
               if (options.modelProvider !== undefined) {
-                filters.push("s.model_provider = ?");
+                filters.push("t.model_provider = ?");
                 args.push(options.modelProvider);
               }
               const where = filters.length === 0 ? "" : `WHERE ${filters.join(" AND ")}`;
@@ -1919,6 +2001,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               return db.query(`
                 SELECT
                   t.id AS toolCallId,
+                  COALESCE(t.event_id, t.id) AS eventId,
                   t.session_id AS sessionId,
                   t.project_key AS projectKey,
                   t.provider,
@@ -1932,8 +2015,10 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                   length(CAST(t.output_text AS BLOB)) AS outputBytes,
                   s.agent_name AS agentName,
                   s.assignment_role AS agentRole,
-                  s.model,
-                  s.model_provider AS modelProvider
+                  t.model,
+                  t.model_provider AS modelProvider,
+                  t.execution_context_id AS executionContextId,
+                  t.reasoning_effort AS reasoningEffort
                   ${payloadColumns.length === 0 ? "" : `, ${payloadColumns.join(", ")}`}
                 FROM tool_calls AS t
                 JOIN sessions AS s ON s.session_id = t.session_id
@@ -1959,11 +2044,11 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                 trailingArgs.push(options.agentRole);
               }
               if (options.model !== undefined) {
-                filters.push("s.model = ?");
+                filters.push("m.model = ?");
                 trailingArgs.push(options.model);
               }
               if (options.modelProvider !== undefined) {
-                filters.push("s.model_provider = ?");
+                filters.push("m.model_provider = ?");
                 trailingArgs.push(options.modelProvider);
               }
               const statement = db.prepare(`
@@ -1986,13 +2071,13 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
           getMessage: ({ sessionId, seq, contentHash }) =>
             trySqlite("getMessage", () =>
               db
-                .query("SELECT session_id AS sessionId, seq, role, text, ts, project_key AS projectKey, content_hash AS contentHash FROM messages WHERE session_id = ? AND seq = ? AND content_hash = ?")
+                .query("SELECT session_id AS sessionId, event_id AS eventId, seq, role, text, ts, project_key AS projectKey, content_hash AS contentHash, execution_context_id AS executionContextId, model, model_provider AS modelProvider, reasoning_effort AS reasoningEffort FROM messages WHERE session_id = ? AND seq = ? AND content_hash = ?")
                 .get(sessionId, seq, contentHash) as MessageRow | undefined,
             ),
           readMessages: (sessionId, limit) =>
             trySqlite("readMessages", () =>
               db
-                .query("SELECT session_id AS sessionId, seq, role, text, ts, project_key AS projectKey, content_hash AS contentHash FROM messages WHERE session_id = ? ORDER BY seq ASC LIMIT ?")
+                .query("SELECT session_id AS sessionId, event_id AS eventId, seq, role, text, ts, project_key AS projectKey, content_hash AS contentHash, execution_context_id AS executionContextId, model, model_provider AS modelProvider, reasoning_effort AS reasoningEffort FROM messages WHERE session_id = ? ORDER BY seq ASC LIMIT ?")
                 .all(sessionId, limit) as MessageRow[],
             ),
           listToolCalls: ({ sessionId, projectKey, provider, toolName, limit, offset = 0 }) =>
@@ -2017,13 +2102,13 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               }
               const where = filters.length > 0 ? ` WHERE ${filters.join(" AND ")}` : "";
               return db
-                .query(`SELECT id, session_id AS sessionId, event_id AS eventId, seq, tool_name AS toolName, status, input_text AS inputText, output_text AS outputText, started_at AS startedAt, completed_at AS completedAt, project_key AS projectKey, provider FROM tool_calls${where} ORDER BY session_id ASC, seq ASC LIMIT ? OFFSET ?`)
+                .query(`SELECT id, session_id AS sessionId, event_id AS eventId, seq, tool_name AS toolName, status, input_text AS inputText, output_text AS outputText, started_at AS startedAt, completed_at AS completedAt, project_key AS projectKey, provider, execution_context_id AS executionContextId, model, model_provider AS modelProvider, reasoning_effort AS reasoningEffort FROM tool_calls${where} ORDER BY session_id ASC, seq ASC LIMIT ? OFFSET ?`)
                 .all(...args, limit, offset) as ToolCallRow[];
             }),
           getToolCall: (id) =>
             trySqlite("getToolCall", () =>
               db
-                .query("SELECT id, session_id AS sessionId, event_id AS eventId, seq, tool_name AS toolName, status, input_text AS inputText, output_text AS outputText, started_at AS startedAt, completed_at AS completedAt, project_key AS projectKey, provider FROM tool_calls WHERE id = ?")
+                .query("SELECT id, session_id AS sessionId, event_id AS eventId, seq, tool_name AS toolName, status, input_text AS inputText, output_text AS outputText, started_at AS startedAt, completed_at AS completedAt, project_key AS projectKey, provider, execution_context_id AS executionContextId, model, model_provider AS modelProvider, reasoning_effort AS reasoningEffort FROM tool_calls WHERE id = ?")
                 .get(id) as ToolCallRow | undefined,
             ),
           recordIngestRun: (run) =>
@@ -2085,12 +2170,17 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                 .query(
                   `SELECT
                     m.session_id AS sessionId,
+                    m.event_id AS eventId,
                     m.seq,
                     m.role,
                     m.text,
                     m.ts,
                     m.project_key AS projectKey,
-                    m.content_hash AS contentHash
+                    m.content_hash AS contentHash,
+                    m.execution_context_id AS executionContextId,
+                    m.model,
+                    m.model_provider AS modelProvider,
+                    m.reasoning_effort AS reasoningEffort
                   FROM messages AS m
                   WHERE m.role IN ('user', 'assistant', 'reasoning')
                     AND NOT EXISTS (
@@ -2320,7 +2410,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
           getMessagesBySessionSeq: (pairs) =>
             trySqlite("getMessagesBySessionSeq", () => {
               const selectMessage = db.prepare(
-                "SELECT session_id AS sessionId, seq, role, text, ts, project_key AS projectKey, content_hash AS contentHash FROM messages WHERE session_id = ? AND seq = ?",
+                "SELECT session_id AS sessionId, event_id AS eventId, seq, role, text, ts, project_key AS projectKey, content_hash AS contentHash, execution_context_id AS executionContextId, model, model_provider AS modelProvider, reasoning_effort AS reasoningEffort FROM messages WHERE session_id = ? AND seq = ?",
               );
               const rows: MessageRow[] = [];
               for (const pair of pairs) {
@@ -2383,11 +2473,11 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                 args.push(agentRole);
               }
               if (model !== undefined) {
-                filters.push("s.model = ?");
+                filters.push("m.model = ?");
                 args.push(model);
               }
               if (modelProvider !== undefined) {
-                filters.push("s.model_provider = ?");
+                filters.push("m.model_provider = ?");
                 args.push(modelProvider);
               }
               const rowOffset = Number.isInteger(offset) && offset !== undefined && offset >= 0
@@ -2408,8 +2498,11 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                     s.title,
                     s.agent_name AS agentName,
                     s.assignment_role AS agentRole,
-                    s.model,
-                    s.model_provider AS modelProvider,
+                    m.model,
+                    m.model_provider AS modelProvider,
+                    m.event_id AS eventId,
+                    m.execution_context_id AS executionContextId,
+                    m.reasoning_effort AS reasoningEffort,
                     m.ts AS timestamp
                   FROM messages_fts
                   JOIN messages AS m
@@ -2437,14 +2530,17 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                   agentRole: string | null;
                   model: string | null;
                   modelProvider: string | null;
+                  eventId: string | null;
+                  executionContextId: string | null;
+                  reasoningEffort: string | null;
                   timestamp: string | null;
                 }>;
               return rows.map((row, index) => ({
-                key: row.key,
+                key: row.eventId ?? row.key,
                 score: lexicalRankScore(rowOffset + index),
                 row: {
                   key: row.key,
-                  messageId: `${row.sessionId}:${row.seq}`,
+                  messageId: row.eventId ?? `${row.sessionId}:${row.seq}`,
                   sessionId: row.sessionId,
                   seq: row.seq,
                   sequence: row.seq,
@@ -2458,6 +2554,8 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                   agentRole: row.agentRole,
                   model: row.model,
                   modelProvider: row.modelProvider,
+                  executionContextId: row.executionContextId,
+                  reasoningEffort: row.reasoningEffort,
                   timestamp: row.timestamp,
                 },
               }));

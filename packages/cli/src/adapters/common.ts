@@ -912,10 +912,11 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
     explicitProjectKey: args.explicitProjectKey,
   });
   const id = args.sessionId;
-  const events = args.events.map(({ contentBlocks, contentSource, contentText, ...event }) => {
+  const events = args.events.map(({ contentBlocks, contentSource, contentText, ...event }, sequence) => {
     const projectedText = compactText(contentText);
     return {
       ...event,
+      sequence,
       ...(projectedText !== undefined ? { contentText: projectedText } : {}),
       sessionId: id,
       machineId: args.machine.machineId,
@@ -958,14 +959,27 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
     agentName: args.agentName,
     projectIdentityKey: projectIdentity.projectIdentityKey,
   }));
-  const executionContexts = (args.executionContexts ?? []).map((executionContext) => ({
-    ...executionContext,
-    sessionId: id,
-    machineId: args.machine.machineId,
-    provider: args.provider,
-    agentName: args.agentName,
-    projectIdentityKey: projectIdentity.projectIdentityKey,
-  }));
+  const eventSequenceByTurnId = new Map<string, number>();
+  for (const event of events) {
+    eventSequenceByTurnId.set(event.id, event.sequence);
+    if (event.nativeEventId !== undefined) {
+      eventSequenceByTurnId.set(event.nativeEventId, event.sequence);
+    }
+  }
+  const executionContexts = (args.executionContexts ?? []).map((executionContext) => {
+    const eventSequence = executionContext.turnId === undefined
+      ? undefined
+      : eventSequenceByTurnId.get(executionContext.turnId);
+    return {
+      ...executionContext,
+      ...(eventSequence !== undefined ? { sequence: eventSequence } : {}),
+      sessionId: id,
+      machineId: args.machine.machineId,
+      provider: args.provider,
+      agentName: args.agentName,
+      projectIdentityKey: projectIdentity.projectIdentityKey,
+    };
+  });
   const artifacts = (args.artifacts ?? []).map((artifact) => ({
     ...artifact,
     sessionId: id,

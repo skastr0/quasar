@@ -70,6 +70,7 @@ const resourcePage = (url: URL, nextOffset: number | null = null) => ({
 const toolCallDetailRow = {
   toolCallId: "call-1",
   sessionId: "codex:s1",
+  eventId: "event-call-1",
   projectKey: "quasar",
   provider: "codex",
   sequence: 3,
@@ -82,8 +83,10 @@ const toolCallDetailRow = {
   outputBytes: 2,
   agentName: null,
   agentRole: "builder",
+  executionContextId: null,
   model: "gpt-5.6-sol",
   modelProvider: "openai",
+  reasoningEffort: null,
   inputText: "{\"cmd\":\"pwd\"}",
   outputText: "ok",
 };

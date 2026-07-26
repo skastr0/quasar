@@ -83,6 +83,7 @@ const sessionFixture = (sessionId: string, projectKey: string, messageCount: num
   },
   messages: Array.from({ length: messageCount }, (_, seq) => ({
     sessionId,
+    eventId: `${sessionId}:event:${seq}`,
     seq,
     role: seq % 2 === 0 ? ("assistant" as const) : ("user" as const),
     text: `message ${seq} of ${sessionId}`,

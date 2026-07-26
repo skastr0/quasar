@@ -45,8 +45,8 @@ const duplicateContentSession = (): MappedSession => ({
     toolCallCount: 0,
   },
   messages: [
-    { sessionId: "session-a", seq: 1, role: "user", text: "identical", projectKey: "project-a", contentHash: "dup-hash" },
-    { sessionId: "session-a", seq: 2, role: "user", text: "identical", projectKey: "project-a", contentHash: "dup-hash" },
+    { sessionId: "session-a", eventId: "event-1", seq: 1, role: "user", text: "identical", projectKey: "project-a", contentHash: "dup-hash" },
+    { sessionId: "session-a", eventId: "event-2", seq: 2, role: "user", text: "identical", projectKey: "project-a", contentHash: "dup-hash" },
   ],
   toolCalls: [],
   events: [],

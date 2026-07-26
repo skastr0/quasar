@@ -9,7 +9,14 @@ import type {
   UnitFingerprint,
 } from "./types";
 import { OpenCodeSessionId, type SessionId } from "../core/identity";
-import type { Artifact, SessionEdge, SessionRole, ToolCall, UsageRecord } from "../core/schemas";
+import type {
+  Artifact,
+  ExecutionContextRecord,
+  SessionEdge,
+  SessionRole,
+  ToolCall,
+  UsageRecord,
+} from "../core/schemas";
 import {
   artifactIdFor,
   buildSession,
@@ -210,6 +217,10 @@ type OpenCodeToolCallDraft = Omit<
 >;
 type OpenCodeUsageDraft = Omit<
   UsageRecord,
+  "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
+>;
+type OpenCodeExecutionContextDraft = Omit<
+  ExecutionContextRecord,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
 >;
 type OpenCodeEdgeDraft = Omit<
@@ -582,6 +593,27 @@ const usageFromMessage = (
   };
 };
 
+const executionContextFromMessage = (
+  sessionId: SessionId,
+  eventId: string,
+  sequence: number,
+  data: Record<string, NativeValue | undefined>,
+): OpenCodeExecutionContextDraft | undefined => {
+  const model = stringValue(data.modelID);
+  const modelProvider = stringValue(data.providerID);
+  if (model === undefined && modelProvider === undefined) return undefined;
+  const timestamp = dateFromNestedTime(data.time, "created");
+  return {
+    id: scopedId(sessionId, "execution-context", eventId),
+    sequence,
+    scope: "turn",
+    turnId: eventId,
+    ...(timestamp !== undefined ? { timestamp } : {}),
+    ...(model !== undefined ? { model } : {}),
+    ...(modelProvider !== undefined ? { modelProvider } : {}),
+  };
+};
+
 const sumNumbers = (values: readonly (number | undefined)[]) => {
   const present = values.filter((value): value is number => value !== undefined);
   return present.length === 0
@@ -617,7 +649,6 @@ const collectArtifacts = (
 const eventFromMessage = (
   dbPath: string,
   message: OpenCodeMessageRow,
-  index: number,
   parts: ClassifiedPart[],
   sessionId: SessionId,
   diagnostics: DecodeDiagnostic[],
@@ -646,7 +677,9 @@ const eventFromMessage = (
     const kind = partKind(part);
     return kind === "tool_call" || kind === "tool_result";
   });
-  const eventId = eventIdFor(sessionId, index, message.id);
+  const mainSequence = sequenceRef.current;
+  sequenceRef.current += 1;
+  const eventId = eventIdFor(sessionId, mainSequence, message.id);
   // contentText for the assistant event: type==="text" parts ONLY.
   // type==="reasoning" parts are excluded here; they surface as a separate
   // kind="reasoning"/role="thinking" event so reasoning is role-filterable in
@@ -660,7 +693,7 @@ const eventFromMessage = (
   const mainEvent = {
     id: eventId,
     nativeEventId: message.id,
-    sequence: index,
+    sequence: mainSequence,
     timestamp: new Date(message.time_created).toISOString(),
     role,
     kind: isToolTurn ? ("tool_call" as const) : ("message" as const),
@@ -727,7 +760,13 @@ const eventFromMessage = (
     eventId,
     parentId: typeof data.parentID === "string" ? data.parentID : undefined,
     toolCalls: collectToolCalls(parts, sessionId, message.id, eventId),
-    usageRecord: usageFromMessage(sessionId, eventId, index, data),
+    usageRecord: usageFromMessage(sessionId, eventId, mainSequence, data),
+    executionContext: executionContextFromMessage(
+      sessionId,
+      eventId,
+      mainSequence,
+      data,
+    ),
     artifacts: collectArtifacts(sessionId, dbPath, eventId, parts),
     events,
   };
@@ -764,6 +803,7 @@ const buildOpenCodeSessionFromRows = (
 ) => {
   const toolCalls: Omit<ToolCall, "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey">[] = [];
   const usageRecords: OpenCodeUsageDraft[] = [];
+  const executionContexts: OpenCodeExecutionContextDraft[] = [];
   const sessionEdges: OpenCodeEdgeDraft[] = [];
   const artifacts: OpenCodeArtifactDraft[] = [];
   const nativeSessionId = OpenCodeSessionId(sessionRow.id);
@@ -798,15 +838,13 @@ const buildOpenCodeSessionFromRows = (
   // DBs without the column) carry no agent: fall back to the provider name.
   const agentName = stringValue(sessionRow.agent) ?? "opencode";
   const messageIdToEventId = new Map<string, string>();
-  // Sequence counter shared across all eventFromMessage calls so co-occurring
-  // reasoning events get distinct, dense sequence numbers beyond the message
-  // index space.  Starts at messages.length so there is no collision.
-  const sequenceRef = { current: messages.length };
-  const events = messages.flatMap((message, index) => {
+  // One counter covers main and co-occurring reasoning events so returned
+  // order and canonical sequence are the same coordinate system.
+  const sequenceRef = { current: 0 };
+  const events = messages.flatMap((message) => {
     const result = eventFromMessage(
       dbPath,
       message,
-      index,
       partsByMessage.get(message.id) ?? [],
       sessionId,
       diagnostics,
@@ -825,6 +863,7 @@ const buildOpenCodeSessionFromRows = (
     }
     toolCalls.push(...result.toolCalls);
     if (result.usageRecord !== undefined) usageRecords.push(result.usageRecord);
+    if (result.executionContext !== undefined) executionContexts.push(result.executionContext);
     artifacts.push(...result.artifacts);
     return result.events;
   });
@@ -842,6 +881,7 @@ const buildOpenCodeSessionFromRows = (
     events,
     toolCalls,
     sessionEdges,
+    executionContexts,
     usageRecords,
     artifacts,
   });

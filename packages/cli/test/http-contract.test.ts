@@ -15,7 +15,7 @@
  * state, and that the derived lexical search index serves it.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,6 +24,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 
 import { postFingerprintProbe, postMappedSession } from "../src/ingest";
+import { opencodeAdapter } from "../src/adapters/opencode";
 import { mapSession } from "../src/map";
 import type { MappedSession } from "../src/model";
 import type { NormalizedSession } from "../src/core/schemas";
@@ -75,7 +76,7 @@ const mappedSession = (overrides: {
     host: "contract-host",
     identitySchemeVersion: 1,
     normalizationVersion: overrides.normalizationVersion ?? NORMALIZATION_VERSION,
-    model: "gpt-5.6-sol",
+    model: "gpt-5.6-terra",
     modelProvider: "openai",
     assignmentRole: "builder",
     messageCount: 2,
@@ -84,21 +85,31 @@ const mappedSession = (overrides: {
   messages: [
     {
       sessionId: "contract-session",
-      seq: 1,
+      eventId: "contract-event-user",
+      seq: 0,
       role: "user",
       text: overrides.firstText ?? "contract handshake over http",
       ts: "2026-06-18T10:00:30.000Z",
       projectKey: "contract-project",
       contentHash: "contract-hash-1",
+      executionContextId: "contract-context-1",
+      model: "gpt-5.6-sol",
+      modelProvider: "openai",
+      reasoningEffort: "high",
     },
     {
       sessionId: "contract-session",
-      seq: 2,
+      eventId: "contract-event-assistant",
+      seq: 1,
       role: "assistant",
       text: "assistant contract reply",
       ts: "2026-06-18T10:00:35.000Z",
       projectKey: "contract-project",
       contentHash: "contract-hash-2",
+      executionContextId: "contract-context-2",
+      model: "gpt-5.6-terra",
+      modelProvider: "openai",
+      reasoningEffort: "high",
     },
   ],
   toolCalls: [
@@ -106,7 +117,7 @@ const mappedSession = (overrides: {
       id: "contract-tool",
       sessionId: "contract-session",
       eventId: "contract-event-tool",
-      seq: 3,
+      seq: 2,
       toolName: "shell_command",
       status: "ok",
       inputText: exactToolInputText,
@@ -115,6 +126,10 @@ const mappedSession = (overrides: {
       completedAt: "2026-06-18T10:00:41.000Z",
       projectKey: "contract-project",
       provider: "codex",
+      executionContextId: "contract-context-2",
+      model: "gpt-5.6-terra",
+      modelProvider: "openai",
+      reasoningEffort: "high",
     },
   ],
   events: [
@@ -122,7 +137,7 @@ const mappedSession = (overrides: {
       id: "contract-event-user",
       sessionId: "contract-session",
       nativeEventId: "native-user",
-      sequence: 10,
+      sequence: 0,
       timestamp: "2026-06-18T10:00:30.000Z",
       machineId: "machine-contract",
       provider: "codex",
@@ -140,10 +155,26 @@ const mappedSession = (overrides: {
       rawReference: { sourcePath: "/history/contract-session.jsonl", line: 1 },
     },
     {
+      id: "contract-event-assistant",
+      sessionId: "contract-session",
+      nativeEventId: "native-assistant",
+      sequence: 1,
+      timestamp: "2026-06-18T10:00:35.000Z",
+      machineId: "machine-contract",
+      provider: "codex",
+      agentName: "codex",
+      projectIdentityKey: "contract-project",
+      role: "assistant",
+      kind: "message",
+      contentText: "assistant contract reply",
+      contentBlocks: [],
+      rawReference: { sourcePath: "/history/contract-session.jsonl", line: 2 },
+    },
+    {
       id: "contract-event-tool",
       sessionId: "contract-session",
       nativeEventId: "native-tool",
-      sequence: 12,
+      sequence: 2,
       timestamp: "2026-06-18T10:00:40.000Z",
       machineId: "machine-contract",
       provider: "codex",
@@ -154,7 +185,7 @@ const mappedSession = (overrides: {
       contentText: "shell_command",
       contentBlocks: [],
       toolCallId: "contract-tool",
-      rawReference: { sourcePath: "/history/contract-session.jsonl", line: 2 },
+      rawReference: { sourcePath: "/history/contract-session.jsonl", line: 3 },
     },
   ],
   usageRecords: [
@@ -182,7 +213,7 @@ const mappedSession = (overrides: {
       agentName: "codex",
       projectIdentityKey: "contract-project",
       timestamp: "2026-06-18T10:00:41.000Z",
-      model: "gpt-5.6-sol",
+      model: "gpt-5.6-terra",
       modelProvider: "openai",
       inputTokens: 30,
       outputTokens: 10,
@@ -199,7 +230,7 @@ const mappedSession = (overrides: {
       projectIdentityKey: "contract-project",
       kind: "next",
       fromEventId: "contract-event-user",
-      toEventId: "contract-event-tool",
+      toEventId: "contract-event-assistant",
     },
     {
       id: "contract-edge-2",
@@ -209,7 +240,7 @@ const mappedSession = (overrides: {
       agentName: "codex",
       projectIdentityKey: "contract-project",
       kind: "artifact_of",
-      fromEventId: "contract-event-tool",
+      fromEventId: "contract-event-assistant",
       toId: "contract-artifact-1",
     },
   ],
@@ -250,7 +281,7 @@ const mappedSession = (overrides: {
       provider: "codex",
       agentName: "codex",
       projectIdentityKey: "contract-project",
-      model: "gpt-5.6-sol",
+      model: "gpt-5.6-terra",
       modelProvider: "openai",
       reasoningEffort: "high",
     },
@@ -260,7 +291,7 @@ const mappedSession = (overrides: {
       sequence: 1,
       scope: "turn",
       timestamp: "2026-06-18T10:00:30.000Z",
-      turnId: "turn-1",
+      turnId: "contract-event-assistant",
       machineId: "machine-contract",
       provider: "codex",
       agentName: "codex",
@@ -355,7 +386,7 @@ const searchQueryJson = (
 });
 
 describe("CLI HTTP client <-> server contract", () => {
-  test("mapSession keeps only conversation messages in search while preserving redacted source facts and tool linkage", () => {
+  test("mapSession projects visible conversational roles independent of event kind while preserving source identity, context, and tool linkage", () => {
     const normalized: NormalizedSession = {
       id: "codex:mapped-contract",
       nativeSessionId: "mapped-contract",
@@ -380,7 +411,7 @@ describe("CLI HTTP client <-> server contract", () => {
         {
           id: "event-user",
           sessionId: "codex:mapped-contract",
-          sequence: 2,
+          sequence: 0,
           machineId: "machine-contract",
           provider: "codex",
           agentName: "codex",
@@ -394,7 +425,7 @@ describe("CLI HTTP client <-> server contract", () => {
         {
           id: "event-preamble",
           sessionId: "codex:mapped-contract",
-          sequence: 3,
+          sequence: 1,
           machineId: "machine-contract",
           provider: "codex",
           agentName: "codex",
@@ -408,7 +439,7 @@ describe("CLI HTTP client <-> server contract", () => {
         {
           id: "event-reasoning",
           sessionId: "codex:mapped-contract",
-          sequence: 4,
+          sequence: 2,
           machineId: "machine-contract",
           provider: "codex",
           agentName: "codex",
@@ -422,7 +453,7 @@ describe("CLI HTTP client <-> server contract", () => {
         {
           id: "event-summary",
           sessionId: "codex:mapped-contract",
-          sequence: 5,
+          sequence: 3,
           machineId: "machine-contract",
           provider: "codex",
           agentName: "codex",
@@ -436,7 +467,7 @@ describe("CLI HTTP client <-> server contract", () => {
         {
           id: "event-tool",
           sessionId: "codex:mapped-contract",
-          sequence: 9,
+          sequence: 4,
           machineId: "machine-contract",
           provider: "codex",
           agentName: "codex",
@@ -471,8 +502,9 @@ describe("CLI HTTP client <-> server contract", () => {
       executionContexts: [{
         id: "context-new",
         sessionId: "codex:mapped-contract",
-        sequence: 20,
-        scope: "session",
+        sequence: 3,
+        scope: "turn",
+        turnId: "event-summary",
         machineId: "machine-contract",
         provider: "codex",
         agentName: "codex",
@@ -482,7 +514,7 @@ describe("CLI HTTP client <-> server contract", () => {
       }, {
         id: "context-old",
         sessionId: "codex:mapped-contract",
-        sequence: 1,
+        sequence: 0,
         scope: "session",
         machineId: "machine-contract",
         provider: "codex",
@@ -507,10 +539,27 @@ describe("CLI HTTP client <-> server contract", () => {
     const mapped = mapSession(normalized, "mapped-fingerprint");
     expect(mapped.messages.map((row) => ({ role: row.role, text: row.text }))).toEqual([
       { role: "user", text: "searchable user message" },
+      { role: "assistant", text: "Bearer [redacted]" },
       { role: "reasoning", text: "searchable reasoning" },
       { role: "assistant", text: "searchable compacted summary" },
     ]);
-    expect(mapped.toolCalls[0]).toMatchObject({ eventId: "event-tool", seq: 9 });
+    expect(mapped.messages.map((row) => ({
+      eventId: row.eventId,
+      seq: row.seq,
+      executionContextId: row.executionContextId,
+      model: row.model,
+    }))).toEqual([
+      { eventId: "event-user", seq: 0, executionContextId: "context-old", model: "gpt-5.6-sol" },
+      { eventId: "event-preamble", seq: 1, executionContextId: "context-old", model: "gpt-5.6-sol" },
+      { eventId: "event-reasoning", seq: 2, executionContextId: "context-old", model: "gpt-5.6-sol" },
+      { eventId: "event-summary", seq: 3, executionContextId: "context-new", model: "gpt-5.6-terra" },
+    ]);
+    expect(mapped.toolCalls[0]).toMatchObject({
+      eventId: "event-tool",
+      seq: 4,
+      executionContextId: "context-new",
+      model: "gpt-5.6-terra",
+    });
     expect(mapped.toolCalls[0]?.inputText).toContain("[redacted]");
     expect(JSON.parse(mapped.toolCalls[0]!.inputText)).toEqual({
       patch: "@@ -1 +1 @@\n-old\n+new",
@@ -555,6 +604,254 @@ describe("CLI HTTP client <-> server contract", () => {
     expect(usageFallback.session.model).toBe("gpt-5.6-luna");
   });
 
+  test("an OpenCode mixed turn survives adapter, mapping, HTTP ingest, reads, and lexical search", async () => {
+    const dir = tempDir();
+    const sourceRoot = join(dir, "opencode-source");
+    mkdirSync(sourceRoot);
+    const sourceDb = new Database(join(sourceRoot, "opencode.db"));
+    try {
+      sourceDb.exec(`
+        CREATE TABLE session (
+          id TEXT PRIMARY KEY,
+          title TEXT,
+          directory TEXT,
+          time_created INTEGER,
+          time_updated INTEGER
+        );
+        CREATE TABLE message (
+          id TEXT PRIMARY KEY,
+          session_id TEXT,
+          time_created INTEGER,
+          data TEXT
+        );
+        CREATE TABLE part (
+          id TEXT PRIMARY KEY,
+          message_id TEXT,
+          session_id TEXT,
+          time_created INTEGER,
+          data TEXT
+        );
+
+        INSERT INTO session VALUES (
+          'ses_event_faithful_fixture',
+          'event faithful fixture',
+          '/tmp/quasar-event-faithful-fixture',
+          1000,
+          4000
+        );
+        INSERT INTO message VALUES (
+          'msg_user',
+          'ses_event_faithful_fixture',
+          1000,
+          json_object('role', 'user', 'time', json_object('created', 1000))
+        );
+        INSERT INTO part VALUES (
+          'part_user',
+          'msg_user',
+          'ses_event_faithful_fixture',
+          1000,
+          json_object('type', 'text', 'text', 'start event faithful fixture')
+        );
+        INSERT INTO message VALUES (
+          'msg_mixed',
+          'ses_event_faithful_fixture',
+          2000,
+          json_object(
+            'role', 'assistant',
+            'time', json_object('created', 2000),
+            'modelID', 'model-alpha',
+            'providerID', 'provider-alpha'
+          )
+        );
+        INSERT INTO part VALUES (
+          'part_reasoning',
+          'msg_mixed',
+          'ses_event_faithful_fixture',
+          2001,
+          json_object('type', 'reasoning', 'text', 'reasoning-marker-before-tools')
+        );
+        INSERT INTO part VALUES (
+          'part_visible',
+          'msg_mixed',
+          'ses_event_faithful_fixture',
+          2002,
+          json_object('type', 'text', 'text', 'mixed-visible-marker')
+        );
+        INSERT INTO part VALUES (
+          'part_tool_one',
+          'msg_mixed',
+          'ses_event_faithful_fixture',
+          2003,
+          json_object(
+            'type', 'tool',
+            'tool', 'bash',
+            'callID', 'call-one',
+            'state', json_object(
+              'status', 'completed',
+              'input', json_object('command', 'pwd'),
+              'output', '/tmp/quasar-event-faithful-fixture'
+            )
+          )
+        );
+        INSERT INTO part VALUES (
+          'part_tool_two',
+          'msg_mixed',
+          'ses_event_faithful_fixture',
+          2004,
+          json_object(
+            'type', 'tool',
+            'tool', 'read',
+            'callID', 'call-two',
+            'state', json_object(
+              'status', 'completed',
+              'input', json_object('path', 'fixture.txt'),
+              'output', 'fixture contents'
+            )
+          )
+        );
+        INSERT INTO message VALUES (
+          'msg_later',
+          'ses_event_faithful_fixture',
+          3000,
+          json_object(
+            'role', 'assistant',
+            'time', json_object('created', 3000),
+            'modelID', 'model-beta',
+            'providerID', 'provider-beta'
+          )
+        );
+        INSERT INTO part VALUES (
+          'part_later',
+          'msg_later',
+          'ses_event_faithful_fixture',
+          3000,
+          json_object('type', 'text', 'text', 'later-visible-marker')
+        );
+      `);
+    } finally {
+      sourceDb.close();
+    }
+
+    const adapted = await opencodeAdapter.read({
+      machine: {
+        machineId: "machine:http-event-faithful",
+        hostname: "http-event-faithful",
+        platform: "darwin",
+      },
+      now: "2026-07-26T00:00:00.000Z",
+      roots: { opencode: sourceRoot },
+    });
+    expect(adapted.sessions).toHaveLength(1);
+    const normalized = adapted.sessions[0]!;
+    const mapped = mapSession(normalized, "event-faithful-source-fingerprint");
+    const mixedEvent = normalized.events.find((event) => event.nativeEventId === "msg_mixed")!;
+    const reasoningEvent = normalized.events.find(
+      (event) => event.nativeEventId === "msg_mixed:reasoning",
+    )!;
+    const laterEvent = normalized.events.find((event) => event.nativeEventId === "msg_later")!;
+
+    expect(normalized.events.map((event) => event.sequence)).toEqual([0, 1, 2, 3]);
+    expect(mapped.toolCalls).toHaveLength(2);
+    expect(mapped.toolCalls.every((call) => call.eventId === mixedEvent.id)).toBe(true);
+
+    const sqlite = join(dir, "quasar.sqlite");
+    const port = randomPort();
+    const token = "event-faithful-ingest-token";
+    const base = `http://127.0.0.1:${port}`;
+    const proc = spawnServer(sqlite, port, token);
+    try {
+      await waitFor(`${base}/health`);
+      const outcome = await postMappedSession(base, mapped, { ingestToken: token });
+      expect(outcome).toMatchObject({
+        status: "ok",
+        messagesWritten: 4,
+        toolCallsWritten: 2,
+      });
+
+      const messages = await resourceJson(base, "messages", {
+        sessionId: normalized.id,
+        limit: 20,
+        offset: 0,
+      });
+      expect(messages.body.data.rows.map((row: {
+        messageId: string;
+        sequence: number;
+        text: string;
+        model: string | null;
+        modelProvider: string | null;
+      }) => ({
+        messageId: row.messageId,
+        sequence: row.sequence,
+        text: row.text,
+        model: row.model,
+        modelProvider: row.modelProvider,
+      }))).toEqual([
+        {
+          messageId: normalized.events[0]!.id,
+          sequence: 0,
+          text: "start event faithful fixture",
+          model: null,
+          modelProvider: null,
+        },
+        {
+          messageId: mixedEvent.id,
+          sequence: 1,
+          text: "mixed-visible-marker",
+          model: "model-alpha",
+          modelProvider: "provider-alpha",
+        },
+        {
+          messageId: reasoningEvent.id,
+          sequence: 2,
+          text: "reasoning-marker-before-tools",
+          model: "model-alpha",
+          modelProvider: "provider-alpha",
+        },
+        {
+          messageId: laterEvent.id,
+          sequence: 3,
+          text: "later-visible-marker",
+          model: "model-beta",
+          modelProvider: "provider-beta",
+        },
+      ]);
+
+      const toolCalls = await resourceJson(base, "tool-calls", {
+        sessionId: normalized.id,
+        limit: 20,
+        offset: 0,
+      });
+      expect(toolCalls.body.data.rows).toHaveLength(2);
+      expect(toolCalls.body.data.rows.every((row: {
+        eventId: string;
+        sequence: number;
+        model: string;
+      }) => row.eventId === mixedEvent.id
+        && row.sequence === mixedEvent.sequence
+        && row.model === "model-alpha")).toBe(true);
+
+      for (const [text, eventId] of [
+        ["mixed-visible-marker", mixedEvent.id],
+        ["reasoning-marker-before-tools", reasoningEvent.id],
+        ["later-visible-marker", laterEvent.id],
+      ] as const) {
+        const search = await searchQueryJson(base, text, "lexical", {
+          filters: { sessionId: normalized.id },
+        });
+        expect(search.status).toBe(200);
+        expect(search.body.data.matches).toEqual([
+          expect.objectContaining({
+            key: eventId,
+            row: expect.objectContaining({ messageId: eventId, text }),
+          }),
+        ]);
+      }
+    } finally {
+      proc.kill();
+      await proc.exited;
+    }
+  }, 20_000);
+
   test("a normalized MappedSession POSTed via the CLI client persists and is served back over HTTP", async () => {
     const dir = tempDir();
     const sqlite = join(dir, "quasar.sqlite");
@@ -582,10 +879,25 @@ describe("CLI HTTP client <-> server contract", () => {
       expect(unchanged).toBe(true);
 
       // Read everything back over plain HTTP — the server's serving surface.
-      const [sessions, messages, toolCalls, toolCallDetail, detail, status] = await Promise.all([
+      const [
+        sessions,
+        messages,
+        solMessages,
+        terraMessages,
+        toolCalls,
+        toolCallDetail,
+        detail,
+        status,
+      ] = await Promise.all([
         resourceJson(base, "sessions", { limit: 20, offset: 0 }).then(({ body }) => body),
         resourceJson(base, "messages", {
           sessionId: "contract-session", limit: 20, offset: 0,
+        }).then(({ body }) => body),
+        resourceJson(base, "messages", {
+          sessionId: "contract-session", model: "gpt-5.6-sol", limit: 20, offset: 0,
+        }).then(({ body }) => body),
+        resourceJson(base, "messages", {
+          sessionId: "contract-session", model: "gpt-5.6-terra", limit: 20, offset: 0,
         }).then(({ body }) => body),
         resourceJson(base, "tool-calls", {
           provider: "codex", toolName: "shell_command", limit: 20, offset: 0,
@@ -599,13 +911,43 @@ describe("CLI HTTP client <-> server contract", () => {
       expect(sessions.data.rows[0].messageCount).toBe(2);
       expect(sessions.data.rows[0].toolCallCount).toBe(1);
       expect(sessions.data.rows[0]).toMatchObject({
-        model: "gpt-5.6-sol",
+        model: "gpt-5.6-terra",
         modelProvider: "openai",
         agentRole: "builder",
       });
-      expect(messages.data.rows.map((row: { text: string }) => row.text)).toEqual([
-        "contract handshake over http",
-        "assistant contract reply",
+      expect(messages.data.rows.map((row: {
+        messageId: string;
+        sequence: number;
+        text: string;
+        model: string;
+        executionContextId: string;
+      }) => ({
+        messageId: row.messageId,
+        sequence: row.sequence,
+        text: row.text,
+        model: row.model,
+        executionContextId: row.executionContextId,
+      }))).toEqual([
+        {
+          messageId: "contract-event-user",
+          sequence: 0,
+          text: "contract handshake over http",
+          model: "gpt-5.6-sol",
+          executionContextId: "contract-context-1",
+        },
+        {
+          messageId: "contract-event-assistant",
+          sequence: 1,
+          text: "assistant contract reply",
+          model: "gpt-5.6-terra",
+          executionContextId: "contract-context-2",
+        },
+      ]);
+      expect(solMessages.data.rows.map((row: { messageId: string }) => row.messageId)).toEqual([
+        "contract-event-user",
+      ]);
+      expect(terraMessages.data.rows.map((row: { messageId: string }) => row.messageId)).toEqual([
+        "contract-event-assistant",
       ]);
       expect(toolCalls.data.rows.map((row: { toolCallId: string }) => row.toolCallId)).toEqual(["contract-tool"]);
       expect(toolCallDetail.data.row).toMatchObject({
@@ -618,13 +960,13 @@ describe("CLI HTTP client <-> server contract", () => {
         data: {
           session: {
             sessionId: "contract-session",
-            model: "gpt-5.6-sol",
+            model: "gpt-5.6-terra",
             modelProvider: "openai",
             assignmentRole: "builder",
           },
           assignment: { nickname: "Laplace", role: "builder", depth: 1 },
           messages: { limit: 1, offset: 0, total: 2, hasMore: true },
-          events: { limit: 1, offset: 0, total: 2, hasMore: true },
+          events: { limit: 1, offset: 0, total: 3, hasMore: true },
           usageRecords: { limit: 1, offset: 0, total: 2, hasMore: true },
           sessionEdges: { limit: 1, offset: 0, total: 2, hasMore: true },
           artifacts: { limit: 1, offset: 0, total: 2, hasMore: true },
@@ -646,8 +988,8 @@ describe("CLI HTTP client <-> server contract", () => {
       const detailPageTwo = await fetch(
         `${base}/session-detail?sessionId=contract-session&messageLimit=1&messageOffset=1&eventLimit=1&eventOffset=1&usageLimit=1&usageOffset=1&edgeLimit=1&edgeOffset=1&artifactLimit=1&artifactOffset=1&contextLimit=1&contextOffset=1`,
       ).then((response) => response.json());
-      expect(detailPageTwo.data.messages.rows[0].seq).toBe(2);
-      expect(detailPageTwo.data.events.rows[0].id).toBe("contract-event-tool");
+      expect(detailPageTwo.data.messages.rows[0].seq).toBe(1);
+      expect(detailPageTwo.data.events.rows[0].id).toBe("contract-event-assistant");
       expect(detailPageTwo.data.usageRecords.rows[0].id).toBe("contract-usage-2");
       expect(detailPageTwo.data.sessionEdges.rows[0].id).toBe("contract-edge-2");
       expect(detailPageTwo.data.artifacts.rows[0].id).toBe("contract-artifact-2");
@@ -698,15 +1040,18 @@ describe("CLI HTTP client <-> server contract", () => {
           model: "gpt-5.6-terra",
           assignmentRole: "reviewer",
         },
-        events: [original.events[1]!],
+        events: original.events,
         usageRecords: [{ ...original.usageRecords[1]!, model: "gpt-5.6-terra" }],
         sessionEdges: [],
         artifacts: [original.artifacts[1]!],
-        executionContexts: [{
-          ...original.executionContexts[1]!,
-          model: "gpt-5.6-terra",
-          reasoningEffort: "xhigh",
-        }],
+        executionContexts: [
+          original.executionContexts[0]!,
+          {
+            ...original.executionContexts[1]!,
+            model: "gpt-5.6-terra",
+            reasoningEffort: "xhigh",
+          },
+        ],
         assignment: { ...original.assignment, role: "reviewer" },
       };
       const replay = await postMappedSession(base, upgraded, { ingestToken: token });
@@ -721,11 +1066,18 @@ describe("CLI HTTP client <-> server contract", () => {
         assignmentRole: "reviewer",
       });
       expect(detail.data.assignment).toMatchObject({ role: "reviewer" });
-      expect(detail.data.events.rows.map((row: { id: string }) => row.id)).toEqual(["contract-event-tool"]);
+      expect(detail.data.events.rows.map((row: { id: string }) => row.id)).toEqual([
+        "contract-event-user",
+        "contract-event-assistant",
+        "contract-event-tool",
+      ]);
       expect(detail.data.usageRecords.rows.map((row: { id: string }) => row.id)).toEqual(["contract-usage-2"]);
       expect(detail.data.sessionEdges.rows).toEqual([]);
       expect(detail.data.artifacts.rows.map((row: { id: string }) => row.id)).toEqual(["contract-artifact-2"]);
-      expect(detail.data.executionContexts.rows.map((row: { id: string }) => row.id)).toEqual(["contract-context-2"]);
+      expect(detail.data.executionContexts.rows.map((row: { id: string }) => row.id)).toEqual([
+        "contract-context-1",
+        "contract-context-2",
+      ]);
     } finally {
       proc.kill();
       await proc.exited;
@@ -902,17 +1254,32 @@ describe("CLI HTTP client <-> server contract", () => {
         filters: { projectKey: "contract-project" },
       });
       expect(lexical.status).toBe(200);
-      expect(lexical.body.data.matches.map((match: { row: { text: string } }) => match.row.text)).toEqual([
-        "contract handshake over http",
+      expect(lexical.body.data.matches).toEqual([
+        expect.objectContaining({
+          key: "contract-event-user",
+          row: expect.objectContaining({
+            messageId: "contract-event-user",
+            text: "contract handshake over http",
+            model: "gpt-5.6-sol",
+            executionContextId: "contract-context-1",
+          }),
+        }),
       ]);
 
       const roleSearch = await searchQueryJson(base, "assistant", "lexical", {
-        filters: { role: "assistant" },
+        filters: { role: "assistant", model: "gpt-5.6-terra" },
       });
       expect(roleSearch.status).toBe(200);
       expect(roleSearch.body.data.matches).toEqual([
         expect.objectContaining({
-          row: expect.objectContaining({ role: "assistant", text: "assistant contract reply" }),
+          key: "contract-event-assistant",
+          row: expect.objectContaining({
+            messageId: "contract-event-assistant",
+            role: "assistant",
+            text: "assistant contract reply",
+            model: "gpt-5.6-terra",
+            executionContextId: "contract-context-2",
+          }),
         }),
       ]);
 

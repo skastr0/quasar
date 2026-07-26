@@ -129,6 +129,7 @@ test("tool summary stays body-free while retaining byte sizes", () => {
   const item = {
     toolCallId: "call-1",
     sessionId: "codex:s1",
+    eventId: "event-call-1",
     projectKey: "quasar",
     provider: "codex",
     sequence: 3,
@@ -140,8 +141,10 @@ test("tool summary stays body-free while retaining byte sizes", () => {
     inputBytes: 128,
     outputBytes: 521_363,
     agentName: null,
+    executionContextId: null,
     model: "gpt-5.6-sol",
     modelProvider: "openai",
+    reasoningEffort: null,
   };
   const output = parseToolCalls({
     protocolVersion: "quasar.query/v1",
@@ -169,6 +172,7 @@ test("tool detail decodes full structured input and output on demand", () => {
     items: [{
       toolCallId: "call-1",
       sessionId: "codex:s1",
+      eventId: "event-call-1",
       projectKey: "quasar",
       provider: "codex",
       sequence: 3,
@@ -180,8 +184,10 @@ test("tool detail decodes full structured input and output on demand", () => {
       inputBytes: 10,
       outputBytes: 2,
       agentName: null,
+      executionContextId: null,
       model: "gpt-5.6-sol",
       modelProvider: "openai",
+      reasoningEffort: null,
       agentRole: "builder",
       input: { cmd: "pwd" },
       output: "ok",

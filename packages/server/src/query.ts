@@ -90,7 +90,7 @@ const hydrateSemanticHits = (hits: readonly VectorMatrixHit[], filters: Resource
     });
     const scoreByKey = new Map(hits.map((hit) => [`${hit.sessionId}\0${hit.seq}`, hit.score]));
     return rows.map((row) => ({
-      key: `${row.sessionId}:${row.sequence}`,
+      key: row.messageId,
       score: scoreByKey.get(`${row.sessionId}\0${row.sequence}`) ?? 0,
       row: { ...row },
     } satisfies SearchHit));

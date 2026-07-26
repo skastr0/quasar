@@ -309,7 +309,7 @@ describe("DurableQueue", () => {
     const SID = "codex:prune-session";
     const PK = "project-prune";
     const message = (seq: number, hash: string) => ({
-      sessionId: SID, seq, role: "assistant", text: `body ${seq}`, ts: null, projectKey: PK, contentHash: hash,
+      sessionId: SID, eventId: `event-${seq}`, seq, role: "assistant", text: `body ${seq}`, ts: null, projectKey: PK, contentHash: hash,
     });
     const mapped: MappedSession = {
       project: { projectKey: PK, displayName: "Prune", rawPath: "/tmp/prune" },

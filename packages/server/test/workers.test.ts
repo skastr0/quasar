@@ -49,7 +49,7 @@ const mappedSession = (): MappedSession => ({
     messageCount: 1,
     toolCallCount: 0,
   },
-  messages: [{ sessionId: "session-a", seq: 1, role: "user", text: "alpha terminal", projectKey: "project-a", contentHash: "hash-a" }],
+  messages: [{ sessionId: "session-a", eventId: "event-1", seq: 1, role: "user", text: "alpha terminal", projectKey: "project-a", contentHash: "hash-a" }],
   toolCalls: [],
   events: [],
   usageRecords: [],
