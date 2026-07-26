@@ -213,7 +213,9 @@ export const mapSession = (
       projectKey,
       provider: session.provider,
       agentName: session.agentName,
-      title: session.title,
+      title: session.title === undefined
+        ? undefined
+        : String(redactSensitive(session.title)),
       startedAt: session.startedAt,
       updatedAt: session.updatedAt,
       sourcePath: session.sourcePath,

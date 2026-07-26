@@ -349,6 +349,7 @@ describe("CLI HTTP client <-> server contract", () => {
       nativeSessionId: "mapped-contract",
       provider: "codex",
       agentName: "codex",
+      title: "Bearer sk-abcdefghijklmnopqrstuvwxyz123456",
       assignment: { nickname: "Laplace", role: "builder", path: "/root/mapped", depth: 1 },
       machineId: "machine-contract",
       host: "contract-host",
@@ -479,6 +480,7 @@ describe("CLI HTTP client <-> server contract", () => {
     expect(mapped.toolCalls[0]?.inputText).toContain("[redacted]");
     expect(mapped.events.find((event) => event.id === "event-preamble")?.contentText).toBe("Bearer [redacted]");
     expect(mapped.artifacts[0]?.metadata).toEqual({ apiKey: "[redacted]" });
+    expect(mapped.session.title).toBe("Bearer [redacted]");
     expect(mapped.session).toMatchObject({
       model: "gpt-5.6-terra",
       modelProvider: "openai",
