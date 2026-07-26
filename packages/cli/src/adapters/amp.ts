@@ -803,13 +803,18 @@ const buildAmpSession = (
         const eventId = eventIdFor(sessionId, seq, nativeEventId);
         const outputValue = toolResultOutput(block.run as Record<string, unknown> | undefined);
         const output = projectToolPayloadNativeValue(block.run);
+        const runRecord = block.run as Record<string, unknown> | undefined;
+        const rawRunStatus = runRecord?.status;
+        const runStatus = typeof rawRunStatus === "string" && rawRunStatus.trim().length > 0
+          ? rawRunStatus
+          : "completed";
         const existing = toolCallsById.get(block.toolUseID);
         const toolCallId = existing?.id ?? scopedId(sessionId, "tool", block.toolUseID);
         const merged: AmpToolCallDraft = {
           id: toolCallId,
           eventId: existing?.eventId ?? eventId,
           toolName: existing?.toolName ?? "amp_tool",
-          status: "completed",
+          status: runStatus,
           ...(existing?.input !== undefined ? { input: existing.input } : {}),
           ...(output !== undefined ? { output } : {}),
           ...(existing?.startedAt !== undefined ? { startedAt: existing.startedAt } : {}),

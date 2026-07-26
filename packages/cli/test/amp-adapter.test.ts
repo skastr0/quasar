@@ -546,7 +546,7 @@ describe("amp content mapping", () => {
     expect(result.diagnostics.find((d) => diagnosticName(d) === "amp.block.image.decode_failed")?.status).toBe("error");
   });
 
-  test("tool results retain full run payload while event text stays projected", async () => {
+  test("tool results retain full run payload and native status while event text stays projected", async () => {
     const run = { status: "failed", result: { exitCode: 17, output: "stderr text", content: [{ type: "json", value: { retained: true } }] } };
     const result = await read(MACHINE_A, {
       ampRunner: fixtureRunner({ [THREAD_A]: { ...recentExport, messages: [
@@ -557,6 +557,7 @@ describe("amp content mapping", () => {
     });
     const tool = result.sessions[0]!.toolCalls[0]!;
     expect(tool.output).toMatchObject({ status: "failed", result: { exitCode: 17, output: "stderr text", content: [{ type: "json", value: { retained: true } }] } });
+    expect(tool.status).toBe("failed");
     expect(result.sessions[0]!.events.find((event) => event.kind === "tool_result")?.contentText).toBe("stderr text");
   });
 
@@ -1065,6 +1066,7 @@ describe("amp highWatermark pagination", () => {
       messageCount: 1,
     }));
     const shortTail = [
+      scrambled[scrambled.length - 1]!,
       {
         id: "T-after-scram",
         title: "after",
@@ -1082,7 +1084,7 @@ describe("amp highWatermark pagination", () => {
         const offset = offsetIndex >= 0 ? Number(args[offsetIndex + 1]) : 0;
         offsets.push(offset);
         if (offset === 0) return { ok: true, stdout: JSON.stringify(scrambled) };
-        if (offset === AMP_LIST_PAGE_SIZE) {
+        if (offset === AMP_LIST_PAGE_STRIDE) {
           return { ok: true, stdout: JSON.stringify(shortTail) };
         }
         return { ok: true, stdout: JSON.stringify([]) };
@@ -1120,7 +1122,7 @@ describe("amp highWatermark pagination", () => {
     expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.early_stop")).toBe(
       false,
     );
-    expect(result.sessions).toHaveLength(0);
+    expect(result.sessions.map((session) => session.nativeSessionId)).toEqual(["T-after-scram"]);
   });
 
   test("page cap emits amp.list.page_cap_reached (truncated walk is observable)", async () => {
