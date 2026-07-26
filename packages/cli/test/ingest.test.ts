@@ -107,7 +107,7 @@ const adapterFor = (sessions: readonly NormalizedSession[], options: { readonly 
   },
 });
 
-const diagnosticAdapter = (): SessionAdapter => ({
+const diagnosticAdapter = (count = 1): SessionAdapter => ({
   id: "diagnostic-adapter",
   provider: "claude",
   displayName: "Diagnostic Adapter",
@@ -116,29 +116,31 @@ const diagnosticAdapter = (): SessionAdapter => ({
   read: async () => ({
     sourceRoots: [],
     sessions: [],
-    diagnostics: [{
+    diagnostics: Array.from({ length: count }, (_, index) => ({
       adapterId: "diagnostic-adapter",
-      provider: "claude",
-      status: "error",
-      parserConfidence: "documented",
+      provider: "claude" as const,
+      status: "error" as const,
+      parserConfidence: "documented" as const,
       rootPath: "/history",
-      message: "fixture adapter diagnostic",
-      details: { diagnostic: "fixture.adapter.boundary", sourcePath: "/history/bad.jsonl" },
-    }],
+      message: `fixture adapter diagnostic ${index + 1}`,
+      details: { diagnostic: `fixture.adapter.boundary_${index + 1}`, sourcePath: "/history/bad.jsonl" },
+    })),
   }),
   stream: async function* () {
-    yield {
-      type: "diagnostic" as const,
-      diagnostic: {
-        adapterId: "diagnostic-adapter",
-        provider: "claude" as const,
-        status: "error" as const,
-        parserConfidence: "documented" as const,
-        rootPath: "/history",
-        message: "fixture adapter diagnostic",
-        details: { diagnostic: "fixture.adapter.boundary", sourcePath: "/history/bad.jsonl" },
-      },
-    };
+    for (let index = 0; index < count; index += 1) {
+      yield {
+        type: "diagnostic" as const,
+        diagnostic: {
+          adapterId: "diagnostic-adapter",
+          provider: "claude" as const,
+          status: "error" as const,
+          parserConfidence: "documented" as const,
+          rootPath: "/history",
+          message: `fixture adapter diagnostic ${index + 1}`,
+          details: { diagnostic: `fixture.adapter.boundary_${index + 1}`, sourcePath: "/history/bad.jsonl" },
+        },
+      };
+    }
   },
 });
 
@@ -179,13 +181,42 @@ describe("ingestRemote", () => {
       expect(reports[0]?.sessionsFailed).toBe(1);
       expect(reports[0]?.failures).toEqual([{
         sessionId: "/history/bad.jsonl",
-        diagnostic: "fixture.adapter.boundary",
-        error: "fixture adapter diagnostic",
+        diagnostic: "fixture.adapter.boundary_1",
+        error: "fixture adapter diagnostic 1",
       }]);
       expect(runs).toHaveLength(2);
       expect(runs[0]).toMatchObject({ status: "running", sessionsSeen: 0 });
       expect(runs[1]).toMatchObject({ status: "failed", sessionsFailed: 1, completedAt: expect.any(String) });
       expect(runs[1]?.runId).toBe(runs[0]?.runId);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("multiple diagnostics for one source count as one failed session", async () => {
+    adaptersByProvider.set("claude", diagnosticAdapter(2));
+    const runs: Array<Record<string, unknown>> = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1", port: 0,
+      fetch: async (request) => {
+        if (new URL(request.url).pathname !== "/ingest/run") return new Response(null, { status: 404 });
+        runs.push((await request.json() as { run: Record<string, unknown> }).run);
+        return Response.json({ ok: true, data: {} });
+      },
+    });
+
+    try {
+      const reports = await ingestRemote(
+        { provider: "claude", ingestToken: "token-a" },
+        `http://127.0.0.1:${server.port}`,
+      );
+
+      expect(reports[0]?.sessionsFailed).toBe(1);
+      expect(reports[0]?.failures).toHaveLength(2);
+      expect(new Set(reports[0]?.failures.map((failure) => failure.sessionId))).toEqual(
+        new Set(["/history/bad.jsonl"]),
+      );
+      expect(runs[1]).toMatchObject({ status: "failed", sessionsFailed: 1 });
     } finally {
       server.stop(true);
     }
