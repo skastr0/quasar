@@ -961,7 +961,9 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
     ...(args.nativeProjectKey !== undefined
       ? { nativeProjectKey: args.nativeProjectKey }
       : {}),
-    ...(args.title !== undefined ? { title: args.title } : {}),
+    ...(args.title !== undefined
+      ? { title: String(redactSensitive(args.title)) }
+      : {}),
     ...(args.startedAt !== undefined ? { startedAt: args.startedAt } : {}),
     ...(args.updatedAt !== undefined ? { updatedAt: args.updatedAt } : {}),
     sourceRoot: args.sourceRoot,

@@ -149,7 +149,7 @@ describe("adapter common boundaries", () => {
     expect(diagnostics[0]!.name).toBe("test.json.string.invalid");
   });
 
-  test("buildSession redacts explicit content blocks without collapsing formatting", () => {
+  test("buildSession redacts the title and explicit content blocks without collapsing formatting", () => {
     const nativeSessionId = "common-content-block-redaction";
     const sessionId = sessionIdFor("claude", ClaudeSessionId(nativeSessionId));
     const secret = "should-not-leak";
@@ -177,6 +177,7 @@ Final thought`;
       sessionId,
       nativeSessionId,
       nativeProjectKey: "common:test",
+      title: `Review Bearer ${secret}`,
       sourceRoot: "/fixtures",
       sourcePath: "/fixtures/session.jsonl",
       events: [
@@ -233,6 +234,7 @@ Search line three`,
       ],
     });
 
+    expect(session.title).toBe("Review Bearer [redacted]");
     expect(session.events[0]!.contentText).toBe(
       "Search line one Bearer [redacted] Search line three",
     );
