@@ -102,7 +102,11 @@ export const AmpImageBlockSchema = Schema.Struct({
   type: Schema.Literal("image"),
   source: Schema.optional(Schema.Unknown),
   sourcePath: Schema.optional(Schema.String),
-});
+}).pipe(
+  Schema.filter((image) => image.source !== undefined || image.sourcePath !== undefined, {
+    message: () => "Expected image source or sourcePath",
+  }),
+);
 export type AmpImageBlock = typeof AmpImageBlockSchema.Type;
 
 /** Measured per-message model usage emitted by Amp assistant messages. */
