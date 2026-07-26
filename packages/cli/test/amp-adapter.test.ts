@@ -3,7 +3,6 @@ import { Schema } from "effect";
 
 import {
   AMP_LIST_PAGE_SIZE,
-  AMP_MAX_LIST_PAGES,
   ampAdapter,
   type AmpRunner,
   type AmpStreamOptions,
@@ -335,6 +334,49 @@ describe("amp fingerprint round-trip", () => {
     expect(result.sessions.length).toBe(2);
     expect(exportCalls).toEqual([THREAD_A, THREAD_B]);
   });
+
+  test("uses the archived-inclusive list contract on every page", async () => {
+    const listCalls: readonly string[][] = [];
+    const runner: AmpRunner = (args) => {
+      if (args[0] === "--version") return { ok: true, stdout: "ok\n" };
+      if (args[0] === "threads" && args[1] === "list") {
+        (listCalls as string[][]).push([...args]);
+        return { ok: true, stdout: JSON.stringify([]) };
+      }
+      return { ok: false, reason: "command_failed" };
+    };
+    await readAmp({ machine: MACHINE_A, now: NOW, ampRunner: runner, ampSleep: noSleep });
+    expect(listCalls).toHaveLength(1);
+    expect(listCalls[0]).toContain("--include-archived");
+  });
+
+  test("never reuses one export for a different thread with identical fingerprint metadata", async () => {
+    const first = { ...listPage[0], id: "T-identical-a", title: "same", messageCount: 1 };
+    const second = { ...listPage[0], id: "T-identical-b", title: "same", messageCount: 1 };
+    const calls: string[] = [];
+    const runner: AmpRunner = (args) => {
+      if (args[0] === "--version") return { ok: true, stdout: "ok\n" };
+      if (args[0] === "threads" && args[1] === "list") return { ok: true, stdout: JSON.stringify([first, second]) };
+      if (args[0] === "threads" && args[1] === "export") {
+        const id = args[2]!;
+        calls.push(id);
+        return {
+          ok: true,
+          stdout: JSON.stringify({
+            id,
+            messages: [{ role: "user", content: [{ type: "text", text: `payload:${id}` }] }],
+          }),
+        };
+      }
+      return { ok: false, reason: "command_failed" };
+    };
+    const result = await readAmp({ machine: MACHINE_A, now: NOW, ampRunner: runner, ampSleep: noSleep, exportSpacingMs: 0 });
+    expect(calls).toEqual([first.id, second.id]);
+    expect(result.sessions.map((session) => session.events[0]?.contentText)).toEqual([
+      `payload:${first.id}`,
+      `payload:${second.id}`,
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -408,6 +450,96 @@ describe("amp content mapping", () => {
     expect(mapped.session.sessionId).toBe(sessionItem.session.id);
     expect(mapped.session.sourceFingerprint).toBe(fingerprint);
     expect(mapped.messages.length).toBeGreaterThan(0);
+  });
+
+  test("maps measured usage, nested summary, and image attachment metadata", async () => {
+    const exportWithNonText = {
+      ...recentExport,
+      messages: [
+        {
+          role: "assistant",
+          usage: {
+            model: "openai/gpt-5",
+            timestamp: "2026-07-20T12:01:00.000Z",
+            inputTokens: 12,
+            outputTokens: 34,
+            cacheReadInputTokens: 5,
+            cacheCreationInputTokens: 6,
+            totalInputTokens: 23,
+            maxInputTokens: 100,
+          },
+          content: [
+            { type: "summary", summary: { type: "summary", summary: "Nested context summary." } },
+            { type: "image", source: { type: "url", url: "https://images.example.test/image.png" }, sourcePath: "image.png" },
+          ],
+        },
+      ],
+    };
+    const result = await read(MACHINE_A, {
+      ampRunner: fixtureRunner({ [THREAD_A]: exportWithNonText }),
+      limit: 1,
+    });
+    const session = result.sessions[0]!;
+    const summary = session.events.find((event) => event.kind === "summary");
+    expect(summary?.contentText).toBe("Nested context summary.");
+    expect(session.usageRecords).toHaveLength(1);
+    expect(session.usageRecords[0]).toMatchObject({
+      model: "openai/gpt-5",
+      inputTokens: 12,
+      outputTokens: 34,
+      cacheReadInputTokens: 5,
+      cacheCreationInputTokens: 6,
+    });
+    expect(session.artifacts).toHaveLength(2);
+    expect(session.artifacts[0]).toMatchObject({ kind: "image", sourceRef: { sourcePath: "image.png" } });
+    expect(session.artifacts[1]).toMatchObject({ kind: "usage_metadata", sourceRef: { maxInputTokens: 100, totalInputTokens: 23 } });
+  });
+
+  test("unknown content blocks fail closed for the affected session", async () => {
+    const result = await read(MACHINE_A, {
+      ampRunner: fixtureRunner({
+        [THREAD_A]: { ...recentExport, messages: [{ role: "assistant", content: [{ type: "future_block" }] }] },
+      }),
+      limit: 1,
+      shouldParseSession: (probe) => probe.sessionId === sessionIdFor("amp", AmpSessionId(THREAD_A)),
+    });
+    expect(result.sessions).toHaveLength(0);
+    expect(result.diagnostics.find((d) => diagnosticName(d) === "amp.block.unknown")?.status).toBe("error");
+  });
+
+  test("selected block-schema failures and invalid messages fail closed", async () => {
+    for (const messages of [
+      [{ role: "assistant", content: [{ type: "text" }] }],
+      [{ content: [] }],
+      [{ role: "future_role", content: [] }],
+    ]) {
+      const result = await read(MACHINE_A, {
+        ampRunner: fixtureRunner({ [THREAD_A]: { ...recentExport, messages } }),
+        limit: 1,
+        shouldParseSession: (probe) => probe.sessionId === sessionIdFor("amp", AmpSessionId(THREAD_A)),
+      });
+      expect(result.sessions).toHaveLength(0);
+      expect(result.diagnostics.some((d) => d.status === "error")).toBe(true);
+    }
+  });
+
+  test("zero list messageCount does not discard a nonempty export", async () => {
+    const exportWithMessage = {
+      ...recentExport,
+      messages: [{ role: "user", content: [{ type: "text", text: "Export is authoritative." }] }],
+    };
+    const runner: AmpRunner = (args) => {
+      if (args[0] === "--version") return { ok: true, stdout: "ok\n" };
+      if (args[0] === "threads" && args[1] === "list") {
+        return { ok: true, stdout: JSON.stringify([{ ...listPage[0], messageCount: 0 }]) };
+      }
+      if (args[0] === "threads" && args[1] === "export") {
+        return { ok: true, stdout: JSON.stringify(exportWithMessage) };
+      }
+      return { ok: false, reason: "command_failed" };
+    };
+    const result = await read(MACHINE_A, { ampRunner: runner, limit: 1 });
+    expect(result.sessions[0]?.events.some((event) => event.contentText === "Export is authoritative.")).toBe(true);
   });
 });
 
@@ -528,6 +660,9 @@ describe("amp fail-closed boundary", () => {
           && (d.details as { diagnostic?: string }).diagnostic === "amp.list.entry.decode_failed",
       ),
     ).toBe(true);
+    expect(
+      result.diagnostics.find((d) => diagnosticName(d) === "amp.list.entry.decode_failed")?.status,
+    ).toBe("error");
   });
 
   test("malformed export yields a named diagnostic and zero rows for that thread", async () => {
@@ -554,6 +689,67 @@ describe("amp fail-closed boundary", () => {
           && (d.details as { diagnostic?: string }).diagnostic === "amp.export.invalid_json",
       ),
     ).toBe(true);
+  });
+
+  test.each([
+    ["empty object", {}],
+    ["error envelope", { error: "upstream failed" }],
+    ["missing messages", { id: THREAD_A }],
+  ])("rejects %s export payload", async (_label, payload) => {
+    const result = await read(MACHINE_A, {
+      ampRunner: fixtureRunner({ [THREAD_A]: payload }),
+      limit: 1,
+      shouldParseSession: (probe) => probe.sessionId === sessionIdFor("amp", AmpSessionId(THREAD_A)),
+    });
+    expect(result.sessions).toHaveLength(0);
+    expect(result.diagnostics.find((d) => diagnosticName(d) === "amp.export.decode_failed")?.status).toBe("error");
+  });
+
+  test("rejects an export whose native id differs from the requested thread", async () => {
+    const result = await read(MACHINE_A, {
+      ampRunner: fixtureRunner({ [THREAD_A]: { ...recentExport, id: THREAD_B } }),
+      limit: 1,
+      shouldParseSession: (probe) => probe.sessionId === sessionIdFor("amp", AmpSessionId(THREAD_A)),
+    });
+    expect(result.sessions).toHaveLength(0);
+    expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.export.id_mismatch")).toBe(true);
+  });
+
+  test("retries a failed later list page and aborts before exporting partial enumeration", async () => {
+    let laterPageAttempts = 0;
+    const exports: string[] = [];
+    const runner: AmpRunner = (args) => {
+      if (args[0] === "--version") return { ok: true, stdout: "ok\n" };
+      if (args[0] === "threads" && args[1] === "list") {
+        const offset = Number(args[args.indexOf("--offset") + 1]);
+        if (offset === 0) return { ok: true, stdout: JSON.stringify(makeListPage(0, Date.parse("2026-07-20T12:00:00.000Z"), 60_000)) };
+        laterPageAttempts += 1;
+        return { ok: false, reason: "command_failed" };
+      }
+      if (args[0] === "threads" && args[1] === "export") {
+        exports.push(args[2] ?? "");
+        return { ok: true, stdout: JSON.stringify(recentExport) };
+      }
+      return { ok: false, reason: "command_failed" };
+    };
+    const result = await readAmp({ machine: MACHINE_A, now: NOW, ampRunner: runner, ampSleep: noSleep, exportSpacingMs: 0 });
+    expect(laterPageAttempts).toBe(3);
+    expect(exports).toEqual([]);
+    expect(result.sessions).toHaveLength(0);
+    expect(result.diagnostics.find((d) => diagnosticName(d) === "amp.list.failed")?.status).toBe("error");
+  });
+
+  test.each([{}, { error: "upstream failed" }, { threads: {} }])("rejects invalid list envelope %#", async (payload) => {
+    let exports = 0;
+    const runner: AmpRunner = (args) => {
+      if (args[0] === "--version") return { ok: true, stdout: "ok\n" };
+      if (args[0] === "threads" && args[1] === "list") return { ok: true, stdout: JSON.stringify(payload) };
+      if (args[0] === "threads" && args[1] === "export") { exports += 1; return { ok: true, stdout: JSON.stringify(recentExport) }; }
+      return { ok: false, reason: "command_failed" };
+    };
+    const result = await readAmp({ machine: MACHINE_A, now: NOW, ampRunner: runner, ampSleep: noSleep });
+    expect(exports).toBe(0);
+    expect(result.diagnostics.find((d) => diagnosticName(d) === "amp.list.invalid_envelope")?.status).toBe("error");
   });
 });
 
@@ -698,10 +894,9 @@ describe("amp highWatermark pagination", () => {
     });
 
     expect(offsets).toEqual([0, AMP_LIST_PAGE_SIZE, AMP_LIST_PAGE_SIZE * 2]);
-    expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.early_stop")).toBe(
-      true,
-    );
-    expect(result.sessions.map((s) => s.nativeSessionId)).toEqual([GUARD_IN_WINDOW_ID]);
+    expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.early_stop")).toBe(false);
+    expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.order_not_descending")).toBe(true);
+    expect(result.sessions).toHaveLength(0);
   });
 
   test("without highWatermark (force path) walks past where early-stop would cut", async () => {
@@ -844,14 +1039,13 @@ describe("amp highWatermark pagination", () => {
     expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.early_stop")).toBe(
       false,
     );
-    expect(result.sessions.map((s) => s.nativeSessionId)).toEqual(["T-after-scram"]);
+    expect(result.sessions).toHaveLength(0);
   });
 
   test("page cap emits amp.list.page_cap_reached (truncated walk is observable)", async () => {
     // Production default is AMP_MAX_LIST_PAGES; tests inject a tiny cap so a
     // truncated walk is cheap. Two full pages with maxListPages=2 exhausts the
     // cap without a short terminal page or early-stop.
-    expect(AMP_MAX_LIST_PAGES).toBeGreaterThan(1);
     const cap = 2;
     const offsets: number[] = [];
     const runner: AmpRunner = (args) => {
@@ -892,6 +1086,8 @@ describe("amp highWatermark pagination", () => {
     expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.early_stop")).toBe(
       false,
     );
+    expect(result.diagnostics.find((d) => diagnosticName(d) === "amp.list.page_cap_reached")?.status).toBe("error");
+    expect(result.sessions).toHaveLength(0);
   });
 
   test("short terminal page is a complete walk (no page_cap_reached)", async () => {
@@ -928,5 +1124,11 @@ describe("amp-schema decode", () => {
       updated: "2026-07-20T12:00:00.000Z",
     });
     expect(bad._tag).toBe("Left");
+  });
+
+  test("export requires a nonempty id and messages array", () => {
+    expect(Schema.decodeUnknownEither(AmpExportSchema)({})._tag).toBe("Left");
+    expect(Schema.decodeUnknownEither(AmpExportSchema)({ id: THREAD_A })._tag).toBe("Left");
+    expect(Schema.decodeUnknownEither(AmpExportSchema)({ id: "", messages: [] })._tag).toBe("Left");
   });
 });
