@@ -404,7 +404,7 @@ describe("amp content mapping", () => {
     expect(session.toolCalls).toHaveLength(1);
     const toolCall = session.toolCalls[0]!;
     expect(toolCall.toolName).toBe("read_file");
-    expect(toolCall.status).toBe("completed");
+    expect(toolCall.status).toBe("done");
     expect(JSON.stringify(toolCall.input)).toContain("src/widget.ts");
     expect(JSON.stringify(toolCall.output)).toContain("export const widget");
     expect(toolCall.eventId.length).toBeGreaterThan(0);
@@ -522,6 +522,49 @@ describe("amp content mapping", () => {
     expect(imageEvent?.contentBlocks[0]).toMatchObject({ kind: "image", path: "image.png", uri: "https://images.example.test/image.png" });
     expect(session.artifacts[0]).toMatchObject({ kind: "image", eventId: imageEvent?.id, sourceRef: { sourcePath: "image.png" } });
     expect(session.artifacts[1]).toMatchObject({ kind: "usage_metadata", sourceRef: { maxInputTokens: 100, totalInputTokens: 23 } });
+  });
+
+  test("preserves exact multiline text, thinking, and summary blocks through mapSession", async () => {
+    const text = "Answer line one\n\n```ts\nconst value = 1;\n```\n";
+    const thinking = "Reason line one\n  indented reason\n\nReason line three";
+    const summary = "Summary line one\n\n- first\n- second\n";
+    const exported = {
+      ...recentExport,
+      messages: [{
+        role: "assistant",
+        protocolMessageID: "protocol-formatting",
+        content: [
+          { type: "text", text },
+          { type: "thinking", thinking },
+          { type: "summary", summary: { type: "summary", summary } },
+        ],
+      }],
+    };
+    const result = await read(MACHINE_A, {
+      ampRunner: fixtureRunner({ [THREAD_A]: exported }),
+      limit: 1,
+    });
+    const session = result.sessions[0]!;
+    const [textEvent, thinkingEvent, summaryEvent] = session.events;
+    expect(textEvent?.contentText).toBe("Answer line one ```ts const value = 1; ```");
+    expect(textEvent?.contentBlocks).toEqual([
+      expect.objectContaining({ kind: "text", text }),
+    ]);
+    expect(thinkingEvent?.contentText).toBe("Reason line one indented reason Reason line three");
+    expect(thinkingEvent?.contentBlocks).toEqual([
+      expect.objectContaining({ kind: "thinking", thinking }),
+    ]);
+    expect(summaryEvent?.contentText).toBe("Summary line one - first - second");
+    expect(summaryEvent?.contentBlocks).toEqual([
+      expect.objectContaining({ kind: "text", text: summary }),
+    ]);
+
+    const mapped = mapSession(session, "formatting-fingerprint");
+    expect(mapped.events.map((event) => event.contentBlocks[0])).toEqual([
+      expect.objectContaining({ kind: "text", text }),
+      expect.objectContaining({ kind: "thinking", thinking }),
+      expect.objectContaining({ kind: "text", text: summary }),
+    ]);
   });
 
   test("unknown content blocks fail closed for the affected session", async () => {
@@ -808,7 +851,7 @@ describe("amp fail-closed boundary", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Watermark pagination
+// Complete remote pagination
 // ---------------------------------------------------------------------------
 
 /** Build a full list page of size LIST_PAGE_SIZE, updated-descending from startMs. */
@@ -842,7 +885,7 @@ const makeListPage = (
       };
     }
   }
-  // Re-sort desc by updated so the page remains order-sound for early-stop.
+  // Keep fixtures representative of Amp's usual newest-first list.
   entries.sort((left, right) => {
     const leftMs = Date.parse((left as { updated: string }).updated);
     const rightMs = Date.parse((right as { updated: string }).updated);
@@ -850,6 +893,11 @@ const makeListPage = (
   });
   return entries;
 };
+
+const overlapFullPage = (previous: readonly unknown[], next: readonly unknown[]): unknown[] => [
+  previous[previous.length - 1]!,
+  ...next.slice(0, AMP_LIST_PAGE_STRIDE),
+];
 
 const diagnosticName = (d: { details?: unknown }): string | undefined => {
   if (d.details === undefined || typeof d.details !== "object" || d.details === null) {
@@ -859,7 +907,7 @@ const diagnosticName = (d: { details?: unknown }): string | undefined => {
   return typeof name === "string" ? name : undefined;
 };
 
-describe("amp highWatermark pagination", () => {
+describe("amp complete pagination", () => {
   test("overlapping pages preserve every boundary row", async () => {
     const page0 = makeListPage(0, Date.parse("2026-07-20T12:00:00.000Z"), 60_000);
     const page1 = [page0[page0.length - 1]!, { id: "T-overlap-tail", title: "tail", updated: "2026-01-01T00:00:00.000Z", messageCount: 0 }];
@@ -893,13 +941,13 @@ describe("amp highWatermark pagination", () => {
     expect(exports).toBe(0);
     expect(result.diagnostics.find((d) => diagnosticName(d) === "amp.list.boundary_mismatch")?.status).toBe("error");
   });
-  test("multi-page: trigger page + exactly one guard page, then stop; in-window guard thread enumerated", async () => {
-    // Watermark W; cutoff = W - 60m. Page 0 stays above cutoff; page 1's oldest
-    // falls below cutoff (triggers stop); page 2 is the single guard page.
+  test("walks every full page to the terminal page before fingerprint filtering", async () => {
+    // The timestamps cross what used to be the early-stop cutoff. A complete
+    // walk must still request the terminal page so older normalization
+    // versions can reach shouldParseSession.
     const watermark = "2026-07-15T12:00:00.000Z";
     const cutoffMs = Date.parse(watermark) - 60 * 60 * 1_000;
-    const GUARD_IN_WINDOW_ID = "T-guard-in-window";
-    const GUARD_IN_WINDOW_UPDATED = new Date(cutoffMs + 30 * 60 * 1_000).toISOString();
+    const GUARD_THREAD_ID = "T-selected-guard";
 
     // Page 0: newest at Jul 20, step 5min → oldest still well above cutoff.
     const page0Start = Date.parse("2026-07-20T12:00:00.000Z");
@@ -913,24 +961,21 @@ describe("amp highWatermark pagination", () => {
     );
 
     const page0 = makeListPage(0, page0Start, 5 * 60 * 1_000);
-    const page1 = makeListPage(1, page1Start, page1Step);
-    // Guard page: short page including a thread still inside the window.
-    const page2 = [
-      {
-        id: GUARD_IN_WINDOW_ID,
-        title: "Guard in-window thread",
-        updated: GUARD_IN_WINDOW_UPDATED,
-        tree: "file:///Users/dev/projects/widget",
-        messageCount: 1,
-      },
-      {
-        id: "T-guard-old",
-        title: "Guard old thread",
-        updated: new Date(cutoffMs - 3 * 60 * 60 * 1_000).toISOString(),
-        tree: "file:///Users/dev/projects/old",
-        messageCount: 1,
-      },
-    ];
+    const page1 = overlapFullPage(
+      page0,
+      makeListPage(1, page1Start, page1Step),
+    );
+    const page1LastUpdated = Date.parse(
+      (page1[page1.length - 1] as { updated: string }).updated,
+    );
+    const page2Start = page1LastUpdated - 5 * 60 * 1_000;
+    const page2 = overlapFullPage(
+      page1,
+      makeListPage(2, page2Start, 5 * 60 * 1_000, [{
+        id: GUARD_THREAD_ID,
+        updated: new Date(page2Start - 60_000).toISOString(),
+      }]),
+    );
 
     // Sanity: page1 oldest is below cutoff so early-stop triggers.
     const page1Oldest = Date.parse((page1[page1.length - 1] as { updated: string }).updated);
@@ -948,26 +993,31 @@ describe("amp highWatermark pagination", () => {
         const offset = offsetIndex >= 0 ? Number(args[offsetIndex + 1]) : 0;
         offsets.push(offset);
         if (offset === 0) return { ok: true, stdout: JSON.stringify(page0) };
-        if (offset === AMP_LIST_PAGE_SIZE) {
+        if (offset === AMP_LIST_PAGE_STRIDE) {
           return { ok: true, stdout: JSON.stringify(page1) };
         }
-        if (offset === AMP_LIST_PAGE_SIZE * 2) {
+        if (offset === AMP_LIST_PAGE_STRIDE * 2) {
           return { ok: true, stdout: JSON.stringify(page2) };
         }
-        // Must not be requested after guard page.
-        return { ok: true, stdout: JSON.stringify([]) };
+        // Terminal overlap-only page.
+        return { ok: true, stdout: JSON.stringify([page2[page2.length - 1]]) };
       }
       if (args[0] === "threads" && args[1] === "export") {
         const id = args[2] ?? "";
         return {
           ok: true,
-          stdout: JSON.stringify({ v: 24, id, messages: [], created: 1_746_000_000_000 }),
+          stdout: JSON.stringify({
+            v: 24,
+            id,
+            messages: [{ role: "assistant", content: [{ type: "text", text: "later page retained" }] }],
+            created: 1_746_000_000_000,
+          }),
         };
       }
       return { ok: false, reason: "command_failed" };
     };
 
-    // Only export the in-window guard thread so we can assert it was enumerated
+    // Only export one later-page thread so we can assert it was enumerated
     // without exporting ~1000 other threads.
     const result = await readAmp({
       machine: MACHINE_A,
@@ -975,18 +1025,20 @@ describe("amp highWatermark pagination", () => {
       ampRunner: runner,
       ampSleep: noSleep,
       exportSpacingMs: 0,
-      highWatermark: watermark,
       shouldParseSession: (probe) =>
-        probe.sessionId === sessionIdFor("amp", AmpSessionId(GUARD_IN_WINDOW_ID)),
+        probe.sessionId === sessionIdFor("amp", AmpSessionId(GUARD_THREAD_ID)),
     });
 
-    expect(offsets).toEqual([0, AMP_LIST_PAGE_STRIDE]);
-    expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.early_stop")).toBe(false);
-    expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.order_not_descending")).toBe(false);
-    expect(result.sessions).toHaveLength(0);
+    expect(offsets).toEqual([
+      0,
+      AMP_LIST_PAGE_STRIDE,
+      AMP_LIST_PAGE_STRIDE * 2,
+      AMP_LIST_PAGE_STRIDE * 3,
+    ]);
+    expect(result.sessions.map((session) => session.nativeSessionId)).toEqual([GUARD_THREAD_ID]);
   });
 
-  test("without highWatermark (force path) walks past where early-stop would cut", async () => {
+  test("walks all overlapping pages to a short terminal page", async () => {
     const watermark = "2026-07-15T12:00:00.000Z";
     const cutoffMs = Date.parse(watermark) - 60 * 60 * 1_000;
     const page0Start = Date.parse("2026-07-20T12:00:00.000Z");
@@ -997,15 +1049,22 @@ describe("amp highWatermark pagination", () => {
       Math.ceil((page1Start - (cutoffMs - 2 * 60 * 60 * 1_000)) / (AMP_LIST_PAGE_SIZE - 1)),
     );
     const page0 = makeListPage(0, page0Start, 5 * 60 * 1_000);
-    const page1 = makeListPage(1, page1Start, page1Step);
+    const page1 = overlapFullPage(
+      page0,
+      makeListPage(1, page1Start, page1Step),
+    );
     // Page 2 continues with more threads — only fetched when watermark is absent.
-    const page2 = makeListPage(
-      2,
-      Date.parse((page1[page1.length - 1] as { updated: string }).updated) - 5 * 60 * 1_000,
-      5 * 60 * 1_000,
+    const page2 = overlapFullPage(
+      page1,
+      makeListPage(
+        2,
+        Date.parse((page1[page1.length - 1] as { updated: string }).updated) - 5 * 60 * 1_000,
+        5 * 60 * 1_000,
+      ),
     );
     // Short terminal page.
     const page3 = [
+      page2[page2.length - 1]!,
       {
         id: "T-force-tail",
         title: "Force tail",
@@ -1023,13 +1082,13 @@ describe("amp highWatermark pagination", () => {
         const offset = offsetIndex >= 0 ? Number(args[offsetIndex + 1]) : 0;
         offsets.push(offset);
         if (offset === 0) return { ok: true, stdout: JSON.stringify(page0) };
-        if (offset === AMP_LIST_PAGE_SIZE) {
+        if (offset === AMP_LIST_PAGE_STRIDE) {
           return { ok: true, stdout: JSON.stringify(page1) };
         }
-        if (offset === AMP_LIST_PAGE_SIZE * 2) {
+        if (offset === AMP_LIST_PAGE_STRIDE * 2) {
           return { ok: true, stdout: JSON.stringify(page2) };
         }
-        if (offset === AMP_LIST_PAGE_SIZE * 3) {
+        if (offset === AMP_LIST_PAGE_STRIDE * 3) {
           return { ok: true, stdout: JSON.stringify(page3) };
         }
         return { ok: true, stdout: JSON.stringify([]) };
@@ -1037,7 +1096,6 @@ describe("amp highWatermark pagination", () => {
       return { ok: false, reason: "command_failed" };
     };
 
-    // No highWatermark — same as ingest --force for Amp.
     const result = await readAmp({
       machine: MACHINE_A,
       now: NOW,
@@ -1047,15 +1105,16 @@ describe("amp highWatermark pagination", () => {
       shouldParseSession: () => false,
     });
 
-    expect(offsets).toEqual([0, AMP_LIST_PAGE_STRIDE]);
-    expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.early_stop")).toBe(
-      false,
-    );
+    expect(offsets).toEqual([
+      0,
+      AMP_LIST_PAGE_STRIDE,
+      AMP_LIST_PAGE_STRIDE * 2,
+      AMP_LIST_PAGE_STRIDE * 3,
+    ]);
     expect(result.sessions).toHaveLength(0);
   });
 
-  test("non-descending list page disables early-stop and emits order diagnostic", async () => {
-    const watermark = "2026-07-15T12:00:00.000Z";
+  test("list ordering does not affect complete enumeration", async () => {
     // Full page deliberately NOT updated-descending.
     const scrambled = Array.from({ length: AMP_LIST_PAGE_SIZE }, (_, i) => ({
       id: `T-scram-${i}`,
@@ -1109,44 +1168,41 @@ describe("amp highWatermark pagination", () => {
       ampRunner: runner,
       ampSleep: noSleep,
       exportSpacingMs: 0,
-      highWatermark: watermark,
       shouldParseSession: (probe) =>
         probe.sessionId === sessionIdFor("amp", AmpSessionId("T-after-scram")),
     });
 
-    // Early-stop disabled → walks to short page (offset 500), not stop after page 0.
     expect(offsets).toEqual([0, AMP_LIST_PAGE_STRIDE]);
-    expect(
-      result.diagnostics.some((d) => diagnosticName(d) === "amp.list.order_not_descending"),
-    ).toBe(true);
-    expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.early_stop")).toBe(
-      false,
-    );
     expect(result.sessions.map((session) => session.nativeSessionId)).toEqual(["T-after-scram"]);
   });
 
   test("page cap emits amp.list.page_cap_reached (truncated walk is observable)", async () => {
-    // Production default is AMP_MAX_LIST_PAGES; tests inject a tiny cap so a
-    // truncated walk is cheap. Two full pages with maxListPages=2 exhausts the
-    // cap without a short terminal page or early-stop.
+    // Tests inject a tiny cap so a truncated walk is cheap. Production has no
+    // page cap and walks until a terminal page.
     const cap = 2;
     const offsets: number[] = [];
+    let exports = 0;
+    const page0 = makeListPage(0, Date.parse("2026-07-20T12:00:00.000Z"), 60_000);
+    const page1 = overlapFullPage(
+      page0,
+      makeListPage(
+        1,
+        Date.parse((page0[page0.length - 1] as { updated: string }).updated) - 60_000,
+        60_000,
+      ),
+    );
     const runner: AmpRunner = (args) => {
       if (args[0] === "--version") return { ok: true, stdout: "ok\n" };
       if (args[0] === "threads" && args[1] === "list") {
         const offsetIndex = args.indexOf("--offset");
         const offset = offsetIndex >= 0 ? Number(args[offsetIndex + 1]) : 0;
         offsets.push(offset);
-        const pageIndex = offset / AMP_LIST_PAGE_SIZE;
-        // Always return a full page so the short-page exit never fires.
-        return {
-          ok: true,
-          stdout: JSON.stringify(
-            makeListPage(pageIndex, Date.parse("2026-07-20T12:00:00.000Z") - pageIndex * 1e9, 60_000),
-          ),
-        };
+        return { ok: true, stdout: JSON.stringify(offset === 0 ? page0 : page1) };
       }
-      // Fingerprint gate will skip exports; no export path needed.
+      if (args[0] === "threads" && args[1] === "export") {
+        exports += 1;
+        return { ok: true, stdout: JSON.stringify(recentExport) };
+      }
       return { ok: false, reason: "command_failed" };
     };
 
@@ -1157,16 +1213,12 @@ describe("amp highWatermark pagination", () => {
       ampSleep: noSleep,
       exportSpacingMs: 0,
       maxListPages: cap,
-      // No highWatermark → no early-stop; walk until cap.
-      shouldParseSession: () => false,
+      limit: 1,
     });
 
     expect(offsets).toEqual([0, AMP_LIST_PAGE_STRIDE]);
-    expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.page_cap_reached")).toBe(false);
-    // Short/complete walk diagnostics must not fire for a pure cap truncation.
-    expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.early_stop")).toBe(
-      false,
-    );
+    expect(result.diagnostics.find((d) => diagnosticName(d) === "amp.list.page_cap_reached")?.status).toBe("error");
+    expect(exports).toBe(0);
     expect(result.sessions).toHaveLength(0);
   });
 

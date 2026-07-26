@@ -152,6 +152,28 @@ describe("adapter common boundaries", () => {
 
   test("tool payload projection preserves complete structure and whitespace while redacting", () => {
     const secret = "should-not-leak";
+    const deeplyNested = {
+      level1: {
+        level2: {
+          level3: {
+            level4: {
+              level5: {
+                level6: {
+                  level7: {
+                    level8: {
+                      level9: {
+                        output: "deep payload retained",
+                        authorization: `Bearer ${secret}`,
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
     expect(projectToolPayloadNativeValue({
       patch: "@@ -1 +1 @@\n-old\n+new",
       state: {
@@ -159,6 +181,7 @@ describe("adapter common boundaries", () => {
         emptyObject: {},
         emptyArray: [],
       },
+      deeplyNested,
       authorization: `Bearer ${secret}`,
       note: `credential Bearer ${secret}`,
     })).toEqual({
@@ -167,6 +190,28 @@ describe("adapter common boundaries", () => {
         output: "line one\n  line two",
         emptyObject: {},
         emptyArray: [],
+      },
+      deeplyNested: {
+        level1: {
+          level2: {
+            level3: {
+              level4: {
+                level5: {
+                  level6: {
+                    level7: {
+                      level8: {
+                        level9: {
+                          output: "deep payload retained",
+                          authorization: "[redacted]",
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
       },
       authorization: "[redacted]",
       note: "credential Bearer [redacted]",

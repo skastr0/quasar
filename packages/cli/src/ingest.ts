@@ -282,45 +282,6 @@ export const postFingerprintProbe = async (
   return body.data.unchanged;
 };
 
-/**
- * Best-effort high watermark for remote list pagination (Amp). Reads the most
- * recently updated session for a provider via GET /sessions?provider=&limit=1
- * and returns its `endedAt` (updated_at). Failures return undefined so ingest
- * falls back to a full list walk. Ingest must omit this under `--force` so
- * early-stop cannot hide older threads; threads never enumerated never reach
- * shouldParseSession.
- */
-export const getProviderHighWatermark = async (
-  base: string,
-  provider: Provider,
-  options: { readonly ingestToken?: string; readonly timeoutMs?: number } = {},
-): Promise<string | undefined> => {
-  try {
-    const url = new URL("/sessions", base.endsWith("/") ? base : `${base}/`);
-    url.searchParams.set("provider", provider);
-    url.searchParams.set("limit", "1");
-    const headers: Record<string, string> = {};
-    if (options.ingestToken !== undefined && options.ingestToken.trim() !== "") {
-      headers["x-quasar-ingest-token"] = options.ingestToken;
-    }
-    const response = await fetch(url, {
-      method: "GET",
-      headers,
-      signal: AbortSignal.timeout(options.timeoutMs ?? defaultHttpTimeoutMs),
-    });
-    if (!response.ok) return undefined;
-    const body = await response.json() as {
-      ok?: boolean;
-      data?: { rows?: readonly { endedAt?: unknown }[] };
-    } | null;
-    if (body === null || typeof body !== "object" || body.ok === false) return undefined;
-    const endedAt = body.data?.rows?.[0]?.endedAt;
-    return typeof endedAt === "string" && endedAt.length > 0 ? endedAt : undefined;
-  } catch {
-    return undefined;
-  }
-};
-
 interface IngestRunWrite {
   readonly runId: string;
   readonly provider: Provider | "all";
@@ -467,18 +428,11 @@ const ingestProviderRemote = async (
         return shouldRead;
       };
 
-  // --force must walk the full remote list; watermark early-stop would hide
-  // older threads that never reach shouldParseSession.
-  const highWatermark = provider === "amp" && options.force !== true
-    ? await getProviderHighWatermark(serverUrl, provider, options)
-    : undefined;
-
   const stream = adapter.stream({
     machine: loadMachineIdentity(),
     now: new Date().toISOString(),
     roots: configuredRoots(),
     limit: options.limit,
-    ...(highWatermark !== undefined ? { highWatermark } : {}),
     shouldParseSession,
     shouldReadFile,
   });
