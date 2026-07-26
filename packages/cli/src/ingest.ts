@@ -372,7 +372,7 @@ const ingestProviderRemote = async (
   let sessionsSeen = 0;
   let sessionsWritten = 0;
   let sessionsSkipped = 0;
-  let sessionsFailed = 0;
+  const failedSessionTargets = new Set<string>();
   let messagesWritten = 0;
   let toolCallsWritten = 0;
   let jobsEnqueued = 0;
@@ -440,9 +440,10 @@ const ingestProviderRemote = async (
   for await (const item of stream) {
     if (item.type === "diagnostic") {
       if (item.diagnostic.status === "error") {
-        sessionsFailed += 1;
+        const target = diagnosticTarget(item.diagnostic, provider);
+        failedSessionTargets.add(target);
         failures.push({
-          sessionId: diagnosticTarget(item.diagnostic, provider),
+          sessionId: target,
           diagnostic: diagnosticCode(item.diagnostic),
           error: item.diagnostic.message,
         });
@@ -456,7 +457,7 @@ const ingestProviderRemote = async (
       sourceFingerprint = fingerprintForItem(item);
     } catch (error) {
       const detail = errorMessage(error);
-      sessionsFailed += 1;
+      failedSessionTargets.add(item.session.id);
       failures.push({ sessionId: item.session.id, diagnostic: "source_fingerprint_failed", error: detail });
       outcomes.push({ sessionId: item.session.id, status: "failed", diagnostic: "source_fingerprint_failed", detail, messagesWritten: 0, toolCallsWritten: 0, jobsEnqueued: 0 });
       continue;
@@ -466,7 +467,7 @@ const ingestProviderRemote = async (
       mapped = mapSession(item.session, sourceFingerprint);
     } catch (error) {
       const detail = errorMessage(error);
-      sessionsFailed += 1;
+      failedSessionTargets.add(item.session.id);
       failures.push({ sessionId: item.session.id, diagnostic: "map_session_failed", error: detail });
       outcomes.push({ sessionId: item.session.id, status: "failed", diagnostic: "map_session_failed", detail, messagesWritten: 0, toolCallsWritten: 0, jobsEnqueued: 0 });
       continue;
@@ -501,11 +502,11 @@ const ingestProviderRemote = async (
       } else if (outcome.status === "skipped") {
         sessionsSkipped += 1;
       } else {
-        sessionsFailed += 1;
+        failedSessionTargets.add(outcome.sessionId);
       }
     } catch (error) {
       const detail = errorMessage(error);
-      sessionsFailed += 1;
+      failedSessionTargets.add(mapped.session.sessionId);
       failures.push({ sessionId: mapped.session.sessionId, diagnostic: "remote_write_failed", error: detail });
       outcomes.push({ sessionId: mapped.session.sessionId, status: "failed", diagnostic: "remote_write_failed", detail, messagesWritten: 0, toolCallsWritten: 0, jobsEnqueued: 0 });
     }
@@ -517,7 +518,7 @@ const ingestProviderRemote = async (
   // intentionally differ from the DB file stat. Limited walks cannot prove that
   // unseen sessions are current, and failed walks must retry every sibling
   // session, so neither persists file-level manifest state.
-  if (options.limit === undefined && sessionsFailed === 0) {
+  if (options.limit === undefined && failedSessionTargets.size === 0) {
     for (const [path, entry] of manifestCandidates) {
       manifestUpdates[path] = entry;
     }
@@ -529,7 +530,7 @@ const ingestProviderRemote = async (
       sessionsSeen,
       sessionsWritten,
       sessionsSkipped,
-      sessionsFailed,
+      sessionsFailed: failedSessionTargets.size,
       messagesWritten,
       toolCallsWritten,
       jobsEnqueued,
