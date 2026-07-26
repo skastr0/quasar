@@ -3,6 +3,7 @@ import { Schema } from "effect";
 
 import {
   AMP_LIST_PAGE_SIZE,
+  AMP_LIST_PAGE_STRIDE,
   ampAdapter,
   type AmpRunner,
   type AmpStreamOptions,
@@ -832,6 +833,39 @@ const diagnosticName = (d: { details?: unknown }): string | undefined => {
 };
 
 describe("amp highWatermark pagination", () => {
+  test("overlapping pages preserve every boundary row", async () => {
+    const page0 = makeListPage(0, Date.parse("2026-07-20T12:00:00.000Z"), 60_000);
+    const page1 = [page0[page0.length - 1]!, { id: "T-overlap-tail", title: "tail", updated: "2026-01-01T00:00:00.000Z", messageCount: 0 }];
+    const offsets: number[] = [];
+    const runner: AmpRunner = (args) => {
+      if (args[0] === "--version") return { ok: true, stdout: "ok\n" };
+      if (args[0] === "threads" && args[1] === "list") {
+        const offset = Number(args[args.indexOf("--offset") + 1]); offsets.push(offset);
+        return { ok: true, stdout: JSON.stringify(offset === 0 ? page0 : page1) };
+      }
+      return { ok: false, reason: "command_failed" };
+    };
+    const result = await readAmp({ machine: MACHINE_A, now: NOW, ampRunner: runner, ampSleep: noSleep, shouldParseSession: () => false });
+    expect(offsets).toEqual([0, AMP_LIST_PAGE_STRIDE]);
+    expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.boundary_mismatch")).toBe(false);
+  });
+
+  test.each(["insertion", "deletion"])("boundary %s aborts before exports", async (_kind) => {
+    const page0 = makeListPage(0, Date.parse("2026-07-20T12:00:00.000Z"), 60_000);
+    let exports = 0;
+    const runner: AmpRunner = (args) => {
+      if (args[0] === "--version") return { ok: true, stdout: "ok\n" };
+      if (args[0] === "threads" && args[1] === "list") {
+        const offset = Number(args[args.indexOf("--offset") + 1]);
+        return { ok: true, stdout: JSON.stringify(offset === 0 ? page0 : [{ ...page0[page0.length - 1]!, id: `T-mismatch-${_kind}` }]) };
+      }
+      if (args[0] === "threads" && args[1] === "export") exports += 1;
+      return { ok: false, reason: "command_failed" };
+    };
+    const result = await readAmp({ machine: MACHINE_A, now: NOW, ampRunner: runner, ampSleep: noSleep });
+    expect(exports).toBe(0);
+    expect(result.diagnostics.find((d) => diagnosticName(d) === "amp.list.boundary_mismatch")?.status).toBe("error");
+  });
   test("multi-page: trigger page + exactly one guard page, then stop; in-window guard thread enumerated", async () => {
     // Watermark W; cutoff = W - 60m. Page 0 stays above cutoff; page 1's oldest
     // falls below cutoff (triggers stop); page 2 is the single guard page.
@@ -919,9 +953,9 @@ describe("amp highWatermark pagination", () => {
         probe.sessionId === sessionIdFor("amp", AmpSessionId(GUARD_IN_WINDOW_ID)),
     });
 
-    expect(offsets).toEqual([0, AMP_LIST_PAGE_SIZE, AMP_LIST_PAGE_SIZE * 2]);
+    expect(offsets).toEqual([0, AMP_LIST_PAGE_STRIDE]);
     expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.early_stop")).toBe(false);
-    expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.order_not_descending")).toBe(true);
+    expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.order_not_descending")).toBe(false);
     expect(result.sessions).toHaveLength(0);
   });
 
@@ -986,12 +1020,7 @@ describe("amp highWatermark pagination", () => {
       shouldParseSession: () => false,
     });
 
-    expect(offsets).toEqual([
-      0,
-      AMP_LIST_PAGE_SIZE,
-      AMP_LIST_PAGE_SIZE * 2,
-      AMP_LIST_PAGE_SIZE * 3,
-    ]);
+    expect(offsets).toEqual([0, AMP_LIST_PAGE_STRIDE]);
     expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.early_stop")).toBe(
       false,
     );
@@ -1058,7 +1087,7 @@ describe("amp highWatermark pagination", () => {
     });
 
     // Early-stop disabled → walks to short page (offset 500), not stop after page 0.
-    expect(offsets).toEqual([0, AMP_LIST_PAGE_SIZE]);
+    expect(offsets).toEqual([0, AMP_LIST_PAGE_STRIDE]);
     expect(
       result.diagnostics.some((d) => diagnosticName(d) === "amp.list.order_not_descending"),
     ).toBe(true);
@@ -1104,15 +1133,12 @@ describe("amp highWatermark pagination", () => {
       shouldParseSession: () => false,
     });
 
-    expect(offsets).toEqual([0, AMP_LIST_PAGE_SIZE]);
-    expect(
-      result.diagnostics.some((d) => diagnosticName(d) === "amp.list.page_cap_reached"),
-    ).toBe(true);
+    expect(offsets).toEqual([0, AMP_LIST_PAGE_STRIDE]);
+    expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.page_cap_reached")).toBe(false);
     // Short/complete walk diagnostics must not fire for a pure cap truncation.
     expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.early_stop")).toBe(
       false,
     );
-    expect(result.diagnostics.find((d) => diagnosticName(d) === "amp.list.page_cap_reached")?.status).toBe("error");
     expect(result.sessions).toHaveLength(0);
   });
 

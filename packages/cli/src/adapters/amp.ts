@@ -53,6 +53,7 @@ import {
 const SOURCE_ROOT = "https://ampcode.com/threads";
 /** Page size for `amp threads list --limit`. Exported for multi-page tests. */
 export const AMP_LIST_PAGE_SIZE = 500;
+export const AMP_LIST_PAGE_STRIDE = AMP_LIST_PAGE_SIZE - 1;
 const LIST_PAGE_SIZE = AMP_LIST_PAGE_SIZE;
 /**
  * Hard cap on list pagination. Hitting it is a truncated walk — not a complete
@@ -298,10 +299,11 @@ const enumerateThreads = async (
   /** True when the loop exited because a short (terminal) page was returned. */
   let sawShortPage = false;
   let previousPageOldestMs: number | undefined;
+  let previousPageLastIdentity: string | undefined;
 
   const fullPageSignatures = new Set<string>();
   for (let page = 0; maxListPages === undefined || page < maxListPages; page += 1) {
-    const offset = page * LIST_PAGE_SIZE;
+    const offset = page * AMP_LIST_PAGE_STRIDE;
     let parsed: unknown;
     let listSucceeded = false;
     for (let attempt = 0; attempt < MAX_LIST_ATTEMPTS; attempt += 1) {
@@ -369,6 +371,31 @@ const enumerateThreads = async (
       });
       if (isSignal(decision)) pageEntries.push(decision.value);
     }
+    if (previousPageLastIdentity !== undefined) {
+      const first = pageEntries[0];
+      const firstIdentity = first === undefined ? undefined : stableJsonHash({
+        id: first.id,
+        updated: first.updated,
+        title: first.title ?? null,
+        tree: first.tree ?? null,
+        messageCount: first.messageCount ?? null,
+      });
+      if (firstIdentity !== previousPageLastIdentity) {
+        diagnostics.push({
+          name: "amp.list.boundary_mismatch",
+          message: `Amp list page at offset ${offset} does not overlap the prior page boundary.`,
+        });
+        return { threads: collected, listFailed: true, earlyStop, orderAssumptionViolated, pageCapReached: false, pagesFetched };
+      }
+    }
+    const last = pageEntries[pageEntries.length - 1];
+    previousPageLastIdentity = last === undefined ? undefined : stableJsonHash({
+      id: last.id,
+      updated: last.updated,
+      title: last.title ?? null,
+      tree: last.tree ?? null,
+      messageCount: last.messageCount ?? null,
+    });
     collected.push(...pageEntries);
     pagesFetched += 1;
 
