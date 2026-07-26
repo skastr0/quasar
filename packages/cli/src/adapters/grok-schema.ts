@@ -20,22 +20,25 @@ import type { SessionEventKind } from "../core/schemas";
  * `SessionEventKind`) or drop (with a NAMED reason). ZERO records fall through to
  * "unknown" pass-through.
  *
- * Full measured inventory (46 record types across 6 surfaces):
+ * Full measured inventory (53 record types across 6 surfaces):
  *   chat_history.jsonl : 6  (user, assistant, reasoning, tool_result, system,
  *                            backend_tool_call)
- *   events.jsonl       : 19 (phase_changed, tool_started, tool_completed,
+ *   events.jsonl       : 23 (phase_changed, tool_started, tool_completed,
  *                            permission_requested, permission_resolved,
  *                            loop_started, first_token, turn_started, turn_ended,
  *                            yolo_toggled, mcp_server_starting/_failed/_connected,
  *                            mcp_managed_config_result, mcp_config_resolved,
  *                            mcp_init_completed, mcp_tool_call_started/_completed,
- *                            mcp_oauth_discovery_timeout)
- *   updates.jsonl      : 16 sessionUpdate subtypes (tool_call, tool_call_update,
+ *                            mcp_oauth_discovery_timeout, mcp_health_check,
+ *                            goal_classifier_fail_open, mcp_transport_decode_error,
+ *                            interjected)
+ *   updates.jsonl      : 19 sessionUpdate subtypes (tool_call, tool_call_update,
  *                            available_commands_update, agent_thought_chunk,
  *                            agent_message_chunk, user_message_chunk, retry_state,
  *                            task_backgrounded, task_completed, subagent_spawned,
  *                            subagent_finished, auto_compact_started/_completed,
- *                            compaction_checkpoint, plan, current_mode_update)
+ *                            compaction_checkpoint, plan, current_mode_update,
+ *                            turn_completed, session_recap, hook_execution)
  *   hunk_records.jsonl : 3  (added, updated, removed)
  *   summary.json       : 1
  *   subagents/.../meta.json : 1 (lineage manifest)
@@ -374,7 +377,10 @@ const grokUpdateSubtype = (record: unknown): string | undefined => {
 
 const GrokUpdateMethod = Schema.Literal("session/update", "_x.ai/session/update");
 
-const updateEnvelope = <S extends string>(sessionUpdate: S, extra: Schema.Struct.Fields) =>
+const updateEnvelope = <S extends string, Fields extends Schema.Struct.Fields>(
+  sessionUpdate: S,
+  extra: Fields,
+) =>
   Schema.Struct({
     method: GrokUpdateMethod,
     timestamp: Schema.optional(Schema.Number),
@@ -479,12 +485,13 @@ const GrokTurnUsage = Schema.Struct({
   numTurns: Schema.Number,
   usageIsIncomplete: Schema.optional(Schema.Boolean),
 });
-/** `{sessionUpdate:"turn_completed"}` — terminal usage metadata, never conversation text. */
+/** `{sessionUpdate:"turn_completed"}` — a lifecycle boundary carrying usage facts. */
 export const GrokUpdTurnCompleted = updateEnvelope("turn_completed", {
   prompt_id: Schema.String,
   stop_reason: Schema.String,
   usage: Schema.optional(GrokTurnUsage),
 });
+export type GrokUpdTurnCompletedRecord = typeof GrokUpdTurnCompleted.Type;
 /** `{sessionUpdate:"session_recap"}` — unique recap prose, worth indexing as a summary event. */
 export const GrokUpdSessionRecap = updateEnvelope("session_recap", {
   summary: Schema.String.pipe(
@@ -682,7 +689,7 @@ const EVENT_TABLE: Record<string, ChatEntry> = {
   mcp_health_check: { schema: GrokEvtMcpHealthCheck, dropReason: "mcp_health_telemetry" },
   goal_classifier_fail_open: { schema: GrokEvtGoalClassifierFailOpen, dropReason: "goal_classifier_telemetry" },
   mcp_transport_decode_error: { schema: GrokEvtMcpTransportDecodeError, dropReason: "mcp_transport_error_telemetry" },
-  interjected: { schema: GrokEvtInterjected, dropReason: "queue_interjection_telemetry" },
+  interjected: { schema: GrokEvtInterjected, kind: "lifecycle" },
 };
 
 /** updates.jsonl declarative dispatch keyed by `update.sessionUpdate`. */
@@ -695,7 +702,7 @@ const UPDATE_TABLE: Record<string, ChatEntry> = {
   retry_state: { schema: GrokUpdRetryState, kind: "lifecycle" },
   task_backgrounded: { schema: GrokUpdTaskBackgrounded, kind: "lifecycle" },
   task_completed: { schema: GrokUpdTaskCompleted, kind: "lifecycle" },
-  turn_completed: { schema: GrokUpdTurnCompleted, dropReason: "turn_usage_telemetry" },
+  turn_completed: { schema: GrokUpdTurnCompleted, kind: "lifecycle" },
   session_recap: { schema: GrokUpdSessionRecap, kind: "summary" },
   hook_execution: { schema: GrokUpdHookExecution, dropReason: "hook_execution_telemetry" },
   subagent_spawned: { schema: GrokUpdSubagentSpawned, kind: "lifecycle" },
