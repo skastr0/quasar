@@ -10,6 +10,7 @@ import type {
   SessionEdge,
   SessionEvent,
   ToolCall,
+  UsageRecord,
 } from "../core/schemas";
 import {
   artifactIdFor,
@@ -19,6 +20,7 @@ import {
   edgeIdFor,
   eventIdFor,
   homePath,
+  jsonBlock,
   parseJsonString,
   projectSessionNativeValue,
   projectToolPayloadNativeValue,
@@ -31,6 +33,7 @@ import {
   sourceRoot,
   stringValue,
   type NativeValue,
+  usageIdFor,
 } from "./common";
 import type { SessionEventKind, SessionRole } from "../core/schemas";
 import {
@@ -42,6 +45,7 @@ import {
   decodeGrokSummary,
   GROK_DECODE_FAILED,
   GROK_UNKNOWN_TYPE,
+  type GrokUpdTurnCompletedRecord,
 } from "./grok-schema";
 import { isSignal, type DecodeDiagnostic, type SignalDecision } from "./harness-schema";
 
@@ -92,6 +96,10 @@ type GrokEdgeDraft = Omit<
 >;
 type GrokExecutionContextDraft = Omit<
   ExecutionContextRecord,
+  "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
+>;
+type GrokUsageDraft = Omit<
+  UsageRecord,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
 >;
 
@@ -264,15 +272,67 @@ const grokToolCall = (
  * through to an `unknown` pass-through event.
  */
 type ClassifyResult =
-  | { readonly emit: true; readonly kind: SessionEventKind }
+  | { readonly emit: true; readonly kind: SessionEventKind; readonly value: unknown }
   | { readonly emit: false; readonly reason: string };
 
 const toClassifyResult = (
   decision: SignalDecision<unknown, SessionEventKind>,
 ): ClassifyResult =>
   isSignal(decision)
-    ? { emit: true, kind: decision.kind }
+    ? { emit: true, kind: decision.kind, value: decision.value }
     : { emit: false, reason: decision.reason };
+
+type GrokTurnUsage = NonNullable<
+  GrokUpdTurnCompletedRecord["params"]["update"]["usage"]
+>;
+type GrokUsageCounters = Pick<
+  GrokTurnUsage,
+  "inputTokens" | "outputTokens" | "totalTokens" | "reasoningTokens" | "cachedReadTokens"
+>;
+
+const grokUsageDraft = (
+  sessionId: SessionId,
+  eventId: string,
+  sequence: number,
+  timestamp: string | undefined,
+  counters: GrokUsageCounters,
+  model?: string,
+): GrokUsageDraft => ({
+  id: usageIdFor(sessionId, eventId, sequence),
+  eventId,
+  ...(timestamp !== undefined ? { timestamp } : {}),
+  ...(model !== undefined ? { model } : {}),
+  inputTokens: counters.inputTokens,
+  outputTokens: counters.outputTokens,
+  reasoningTokens: counters.reasoningTokens,
+  cacheReadInputTokens: counters.cachedReadTokens,
+  totalTokens: counters.totalTokens,
+});
+
+const grokUsageDrafts = (
+  sessionId: SessionId,
+  eventId: string,
+  sequenceOffset: number,
+  timestamp: string | undefined,
+  update: GrokUpdTurnCompletedRecord["params"]["update"],
+): GrokUsageDraft[] => {
+  const usage = update.usage;
+  if (usage === undefined) return [];
+  const perModel = Object.entries(usage.modelUsage);
+  if (perModel.length > 0) {
+    return perModel.map(([model, counters], index) =>
+      grokUsageDraft(
+        sessionId,
+        eventId,
+        sequenceOffset + index,
+        timestamp,
+        counters,
+        model.trim().length > 0 ? model : undefined,
+      ),
+    );
+  }
+  return [grokUsageDraft(sessionId, eventId, sequenceOffset, timestamp, usage)];
+};
 
 const grokContentProjection = (record: Record<string, unknown>): NativeValue | undefined => {
   const content = grokNestedContent(record);
@@ -589,6 +649,7 @@ const buildGrokSessionFromChatPath = (
   const updateLines = readOptionalLines(join(sessionDir, "updates.jsonl"));
   const hunkPath = join(sessionDir, "hunk_records.jsonl");
   const toolCallsById = new Map<string, GrokToolCallDraft>();
+  const usageRecords: GrokUsageDraft[] = [];
 
   // Derive session metadata from summary.json.
   const generatedTitle = stringValue(summary.generated_title);
@@ -796,17 +857,22 @@ const buildGrokSessionFromChatPath = (
       });
     }
     const toolCallId = collectTool(eventId, record);
-    const content = grokContentProjection(record);
+    const content = type === "interjected"
+      ? projectSessionNativeValue(classified.value)
+      : grokContentProjection(record);
     return [
       {
         id: eventId,
         nativeEventId,
         sequence: chatLines.length + index,
         timestamp: grokTime(record),
-        role: "unknown" as const,
+        role: type === "interjected" ? ("system" as const) : ("unknown" as const),
         kind: classified.kind,
-        contentText: compactText(content),
+        contentText: type === "interjected" ? undefined : compactText(content),
         contentSource: content,
+        ...(type === "interjected" && content !== undefined
+          ? { contentBlocks: [jsonBlock(sessionId, eventId, 0, content)] }
+          : {}),
         ...(toolCallId !== undefined ? { toolCallId } : {}),
         rawReference: { sourcePath: eventPath, line: lineNumber, nativeType: type ?? "event" },
       } satisfies GrokEventDraft,
@@ -824,23 +890,46 @@ const buildGrokSessionFromChatPath = (
     const subtype = stringValue(innerUpdate.sessionUpdate);
     const eventId = eventIdFor(sessionId, index, `updates:${lineNumber}`);
     const toolCallId = collectTool(eventId, innerUpdate);
-    const content = grokContentProjection(innerUpdate);
+    const turnCompleted = subtype === "turn_completed"
+      ? classified.value as GrokUpdTurnCompletedRecord
+      : undefined;
+    if (turnCompleted !== undefined) {
+      usageRecords.push(...grokUsageDrafts(
+        sessionId,
+        eventId,
+        usageRecords.length,
+        grokTime(record),
+        turnCompleted.params.update,
+      ));
+    }
+    const content = turnCompleted !== undefined
+      ? projectSessionNativeValue(turnCompleted.params.update)
+      : subtype === "session_recap"
+        ? projectSessionNativeValue({ auto: innerUpdate.auto })
+        : grokContentProjection(innerUpdate);
+    const opaqueContent =
+      subtype === "turn_completed" || subtype === "session_recap";
     // extractGrokProse on innerUpdate finds content directly (innerUpdate IS params.update).
     // For the `content` field on innerUpdate (e.g. agent_message_chunk.content), it peels the
     // leaf string from the content block array.
     const proseText =
       subtype === "session_recap" && typeof innerUpdate.summary === "string"
         ? innerUpdate.summary
-        : extractGrokProse(innerUpdate) ?? compactText(content);
+        : subtype === "turn_completed"
+          ? undefined
+          : extractGrokProse(innerUpdate) ?? compactText(content);
     return [
       {
         id: eventId,
         sequence: chatLines.length + eventLines.length + index,
         timestamp: grokTime(record),
-        role: "system" as const,
+        role: subtype === "session_recap" ? ("assistant" as const) : ("system" as const),
         kind: classified.kind,
         contentText: proseText,
         contentSource: content,
+        ...(opaqueContent && content !== undefined
+          ? { contentBlocks: [jsonBlock(sessionId, eventId, 0, content)] }
+          : {}),
         ...(toolCallId !== undefined ? { toolCallId } : {}),
         rawReference: { sourcePath: updatePath, line: lineNumber, nativeType: subtype ?? "update" },
       } satisfies GrokEventDraft,
@@ -865,6 +954,7 @@ const buildGrokSessionFromChatPath = (
     toolCalls: [...toolCallsById.values()],
     sessionEdges,
     executionContexts,
+    usageRecords,
     artifacts: existsSync(hunkPath)
       ? grokArtifacts(sessionId, sessionDir, hunkPath, decodeDiagnostics)
       : [],
