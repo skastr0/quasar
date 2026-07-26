@@ -408,6 +408,20 @@ describe("CLI HTTP client <-> server contract", () => {
           rawReference: { sourcePath: "/history/mapped-contract.jsonl", line: 3 },
         },
         {
+          id: "event-summary",
+          sessionId: "codex:mapped-contract",
+          sequence: 5,
+          machineId: "machine-contract",
+          provider: "codex",
+          agentName: "codex",
+          projectIdentityKey: "contract-project",
+          role: "assistant",
+          kind: "summary",
+          contentText: "searchable compacted summary",
+          contentBlocks: [],
+          rawReference: { sourcePath: "/history/mapped-contract.jsonl", line: 4 },
+        },
+        {
           id: "event-tool",
           sessionId: "codex:mapped-contract",
           sequence: 9,
@@ -475,6 +489,7 @@ describe("CLI HTTP client <-> server contract", () => {
     expect(mapped.messages.map((row) => ({ role: row.role, text: row.text }))).toEqual([
       { role: "user", text: "searchable user message" },
       { role: "reasoning", text: "searchable reasoning" },
+      { role: "assistant", text: "searchable compacted summary" },
     ]);
     expect(mapped.toolCalls[0]).toMatchObject({ eventId: "event-tool", seq: 9 });
     expect(mapped.toolCalls[0]?.inputText).toContain("[redacted]");
