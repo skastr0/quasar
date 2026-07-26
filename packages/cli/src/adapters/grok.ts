@@ -282,13 +282,13 @@ const toClassifyResult = (
     ? { emit: true, kind: decision.kind, value: decision.value }
     : { emit: false, reason: decision.reason };
 
-type GrokTurnUsage = NonNullable<
-  GrokUpdTurnCompletedRecord["params"]["update"]["usage"]
->;
-type GrokUsageCounters = Pick<
-  GrokTurnUsage,
-  "inputTokens" | "outputTokens" | "totalTokens" | "reasoningTokens" | "cachedReadTokens"
->;
+type GrokUsageCounters = {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly totalTokens: number;
+  readonly reasoningTokens: number;
+  readonly cachedReadTokens: number;
+};
 
 const grokUsageDraft = (
   sessionId: SessionId,
