@@ -8,6 +8,7 @@ import {
   buildSession,
   numberValue,
   parseJsonString,
+  projectToolPayloadNativeValue,
   readJsonFile,
   readJsonLines,
   recordFrom,
@@ -147,6 +148,29 @@ describe("adapter common boundaries", () => {
     })).toBeUndefined();
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]!.name).toBe("test.json.string.invalid");
+  });
+
+  test("tool payload projection preserves complete structure and whitespace while redacting", () => {
+    const secret = "should-not-leak";
+    expect(projectToolPayloadNativeValue({
+      patch: "@@ -1 +1 @@\n-old\n+new",
+      state: {
+        output: "line one\n  line two",
+        emptyObject: {},
+        emptyArray: [],
+      },
+      authorization: `Bearer ${secret}`,
+      note: `credential Bearer ${secret}`,
+    })).toEqual({
+      patch: "@@ -1 +1 @@\n-old\n+new",
+      state: {
+        output: "line one\n  line two",
+        emptyObject: {},
+        emptyArray: [],
+      },
+      authorization: "[redacted]",
+      note: "credential Bearer [redacted]",
+    });
   });
 
   test("buildSession redacts the title and explicit content blocks without collapsing formatting", () => {

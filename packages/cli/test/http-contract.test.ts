@@ -49,6 +49,12 @@ const randomPort = () => 20_000 + Math.floor(Math.random() * 20_000);
 
 const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
 
+const exactToolInputText = JSON.stringify({
+  patch: "@@ -1 +1 @@\n-old\n+new",
+  state: { empty: "", nested: {} },
+});
+const exactToolOutputText = "line one\n  line two\n";
+
 const mappedSession = (overrides: {
   readonly fingerprint?: string;
   readonly firstText?: string;
@@ -102,8 +108,8 @@ const mappedSession = (overrides: {
       seq: 3,
       toolName: "shell_command",
       status: "ok",
-      inputText: "echo contract",
-      outputText: "contract",
+      inputText: exactToolInputText,
+      outputText: exactToolOutputText,
       startedAt: "2026-06-18T10:00:40.000Z",
       completedAt: "2026-06-18T10:00:41.000Z",
       projectKey: "contract-project",
@@ -445,8 +451,15 @@ describe("CLI HTTP client <-> server contract", () => {
         agentName: "codex",
         projectIdentityKey: "contract-project",
         toolName: "shell_command",
-        input: { authorization: "Bearer sk-abcdefghijklmnopqrstuvwxyz123456" },
-        output: "ok",
+        input: {
+          patch: "@@ -1 +1 @@\n-old\n+new",
+          state: { empty: "", nested: {} },
+          authorization: "Bearer sk-abcdefghijklmnopqrstuvwxyz123456",
+        },
+        output: {
+          status: "completed",
+          result: { output: "line one\n  line two\n" },
+        },
       }],
       sessionEdges: [],
       executionContexts: [{
@@ -493,6 +506,15 @@ describe("CLI HTTP client <-> server contract", () => {
     ]);
     expect(mapped.toolCalls[0]).toMatchObject({ eventId: "event-tool", seq: 9 });
     expect(mapped.toolCalls[0]?.inputText).toContain("[redacted]");
+    expect(JSON.parse(mapped.toolCalls[0]!.inputText)).toEqual({
+      patch: "@@ -1 +1 @@\n-old\n+new",
+      state: { empty: "", nested: {} },
+      authorization: "Bearer [redacted]",
+    });
+    expect(JSON.parse(mapped.toolCalls[0]!.outputText)).toEqual({
+      status: "completed",
+      result: { output: "line one\n  line two\n" },
+    });
     expect(mapped.events.find((event) => event.id === "event-preamble")?.contentText).toBe("Bearer [redacted]");
     expect(mapped.artifacts[0]?.metadata).toEqual({ apiKey: "[redacted]" });
     expect(mapped.session.title).toBe("Bearer [redacted]");
@@ -554,7 +576,7 @@ describe("CLI HTTP client <-> server contract", () => {
       expect(unchanged).toBe(true);
 
       // Read everything back over plain HTTP — the server's serving surface.
-      const [sessions, messages, toolCalls, detail, status] = await Promise.all([
+      const [sessions, messages, toolCalls, toolCallDetail, detail, status] = await Promise.all([
         resourceJson(base, "sessions", { limit: 20, offset: 0 }).then(({ body }) => body),
         resourceJson(base, "messages", {
           sessionId: "contract-session", limit: 20, offset: 0,
@@ -562,6 +584,7 @@ describe("CLI HTTP client <-> server contract", () => {
         resourceJson(base, "tool-calls", {
           provider: "codex", toolName: "shell_command", limit: 20, offset: 0,
         }).then(({ body }) => body),
+        fetch(`${base}/tool-call?id=contract-tool`).then((r) => r.json()),
         fetch(`${base}/session-detail?sessionId=contract-session&messageLimit=1&eventLimit=1&usageLimit=1&edgeLimit=1&artifactLimit=1&contextLimit=1`).then((r) => r.json()),
         fetch(`${base}/status`).then((r) => r.json()),
       ]);
@@ -579,6 +602,10 @@ describe("CLI HTTP client <-> server contract", () => {
         "assistant contract reply",
       ]);
       expect(toolCalls.data.rows.map((row: { toolCallId: string }) => row.toolCallId)).toEqual(["contract-tool"]);
+      expect(toolCallDetail.data.row).toMatchObject({
+        inputText: exactToolInputText,
+        outputText: exactToolOutputText,
+      });
       expect(detail).toMatchObject({
         ok: true,
         command: "session-detail",
