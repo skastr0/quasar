@@ -54,6 +54,7 @@ const exactToolInputText = JSON.stringify({
   state: { empty: "", nested: {} },
 });
 const exactToolOutputText = "line one\n  line two\n";
+const exactEventText = "contract handshake\n\n```ts\nconst value = 1;\n```\n";
 
 const mappedSession = (overrides: {
   readonly fingerprint?: string;
@@ -130,7 +131,12 @@ const mappedSession = (overrides: {
       role: "user",
       kind: "message",
       contentText: "contract handshake over http",
-      contentBlocks: [],
+      contentBlocks: [{
+        id: "contract-content-user",
+        sequence: 0,
+        kind: "text",
+        text: exactEventText,
+      }],
       rawReference: { sourcePath: "/history/contract-session.jsonl", line: 1 },
     },
     {
@@ -626,6 +632,12 @@ describe("CLI HTTP client <-> server contract", () => {
         },
       });
       expect(detail.data.events.rows[0].id).toBe("contract-event-user");
+      expect(detail.data.events.rows[0].contentBlocks).toEqual([{
+        id: "contract-content-user",
+        sequence: 0,
+        kind: "text",
+        text: exactEventText,
+      }]);
       expect(detail.data.usageRecords.rows[0].id).toBe("contract-usage-1");
       expect(detail.data.sessionEdges.rows[0].id).toBe("contract-edge-1");
       expect(detail.data.artifacts.rows[0].id).toBe("contract-artifact-1");

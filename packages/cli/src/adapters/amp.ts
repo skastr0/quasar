@@ -60,7 +60,6 @@ const LIST_PAGE_SIZE = AMP_LIST_PAGE_SIZE;
  * corpus — and must emit `amp.list.page_cap_reached` (no silent truncation).
  * Exported so tests can assert the production default without re-deriving it.
  */
-const WATERMARK_GUARD_MS = 60 * 60 * 1_000;
 const DEFAULT_EXPORT_SPACING_MS = 3_000;
 const MAX_EXPORT_ATTEMPTS = 5;
 const MAX_LIST_ATTEMPTS = 3;
@@ -215,53 +214,12 @@ const parseUpdatedMs = (updated: string): number | undefined => {
   return Number.isFinite(time) ? time : undefined;
 };
 
-const oldestUpdatedMs = (entries: readonly AmpThreadListEntry[]): number | undefined => {
-  let oldest: number | undefined;
-  for (const entry of entries) {
-    const ms = parseUpdatedMs(entry.updated);
-    if (ms === undefined) continue;
-    oldest = oldest === undefined ? ms : Math.min(oldest, ms);
-  }
-  return oldest;
-};
-
-const newestUpdatedMs = (entries: readonly AmpThreadListEntry[]): number | undefined => {
-  let newest: number | undefined;
-  for (const entry of entries) {
-    const ms = parseUpdatedMs(entry.updated);
-    if (ms === undefined) continue;
-    newest = newest === undefined ? ms : Math.max(newest, ms);
-  }
-  return newest;
-};
-
-/**
- * Grounded contract (measured against live `amp threads list --json` 2026-07-24):
- * pages are returned `updated`-descending. Early-stop on watermark is only sound
- * under that order — if a page is not descending we disable early-stop for the
- * rest of the walk so recent threads on later pages are not silently dropped.
- */
-const isUpdatedDescending = (entries: readonly AmpThreadListEntry[]): boolean => {
-  let previousMs: number | undefined;
-  for (const entry of entries) {
-    const ms = parseUpdatedMs(entry.updated);
-    if (ms === undefined) return false;
-    if (previousMs !== undefined && ms > previousMs) return false;
-    previousMs = ms;
-  }
-  return true;
-};
-
 type EnumerateThreadsResult = {
   readonly threads: readonly AmpThreadListEntry[];
   readonly listFailed: boolean;
-  /** True when watermark early-stop truncated enumeration (after one guard page). */
-  readonly earlyStop: boolean;
-  /** True when a list page was not updated-descending; early-stop was disabled. */
-  readonly orderAssumptionViolated: boolean;
   /**
    * True when enumeration stopped because `maxListPages` was exhausted without a
-   * short terminal page or armed early-stop — a truncated walk, not a complete one.
+   * short terminal page — a truncated walk, not a complete one.
    */
   readonly pageCapReached: boolean;
   /** Pages successfully fetched before exit (for the page-cap diagnostic message). */
@@ -271,34 +229,21 @@ type EnumerateThreadsResult = {
 /**
  * Paginate `amp threads list --json --limit 500`.
  *
- * With a high watermark, and only while pages remain updated-descending:
- * stop when a page's oldest `updated` is below watermark − 60 minutes, then
- * fetch one guard page and halt. Early-stop skips threads that never reach
- * shouldParseSession — omit highWatermark (ingest `--force`) for a full walk.
+ * Every run walks to a short terminal page. This is required so unchanged
+ * older sessions still reach `shouldParseSession` after normalization changes.
  *
- * Exhausting `maxListPages` without a short page or early-stop sets
+ * Exhausting `maxListPages` without a short page sets
  * `pageCapReached` so callers can emit a named truncation diagnostic.
  */
 const enumerateThreads = async (
   runner: AmpRunner,
-  highWatermark: string | undefined,
   diagnostics: DecodeDiagnostic[],
   maxListPages: number | undefined,
 ): Promise<EnumerateThreadsResult> => {
   const collected: AmpThreadListEntry[] = [];
-  const watermarkMs =
-    highWatermark !== undefined ? parseUpdatedMs(highWatermark) : undefined;
-  const cutoffMs =
-    watermarkMs !== undefined ? watermarkMs - WATERMARK_GUARD_MS : undefined;
-  /** After a page trips the cutoff, fetch exactly one more page then halt. */
-  let expectingGuardPage = false;
-  let earlyStop = false;
-  let orderAssumptionViolated = false;
-  let listOrderTrusted = true;
   let pagesFetched = 0;
   /** True when the loop exited because a short (terminal) page was returned. */
   let sawShortPage = false;
-  let previousPageOldestMs: number | undefined;
   let previousPageLastIdentity: string | undefined;
 
   const fullPageSignatures = new Set<string>();
@@ -333,8 +278,6 @@ const enumerateThreads = async (
       return {
         threads: collected,
         listFailed: true,
-        earlyStop,
-        orderAssumptionViolated,
         pageCapReached: false,
         pagesFetched,
       };
@@ -348,8 +291,6 @@ const enumerateThreads = async (
       return {
         threads: collected,
         listFailed: true,
-        earlyStop,
-        orderAssumptionViolated,
         pageCapReached: false,
         pagesFetched,
       };
@@ -358,7 +299,7 @@ const enumerateThreads = async (
       const signature = stableJsonHash(rawEntries);
       if (fullPageSignatures.has(signature)) {
         diagnostics.push({ name: "amp.list.repeated_page", message: "Amp returned a repeated full list page; pagination offset is not advancing." });
-        return { threads: collected, listFailed: true, earlyStop, orderAssumptionViolated, pageCapReached: false, pagesFetched };
+        return { threads: collected, listFailed: true, pageCapReached: false, pagesFetched };
       }
       fullPageSignatures.add(signature);
     }
@@ -385,7 +326,7 @@ const enumerateThreads = async (
           name: "amp.list.boundary_mismatch",
           message: `Amp list page at offset ${offset} does not overlap the prior page boundary.`,
         });
-        return { threads: collected, listFailed: true, earlyStop, orderAssumptionViolated, pageCapReached: false, pagesFetched };
+        return { threads: collected, listFailed: true, pageCapReached: false, pagesFetched };
       }
     }
     const last = pageEntries[pageEntries.length - 1];
@@ -399,47 +340,16 @@ const enumerateThreads = async (
     collected.push(...pageEntries);
     pagesFetched += 1;
 
-    const pageOldestMs = oldestUpdatedMs(pageEntries);
-    const pageNewestMs = newestUpdatedMs(pageEntries);
-    const pageOrderSound =
-      isUpdatedDescending(pageEntries)
-      && pageOldestMs !== undefined
-      && pageNewestMs !== undefined
-      && (previousPageOldestMs === undefined || pageNewestMs <= previousPageOldestMs);
-    if (!pageOrderSound) {
-      listOrderTrusted = false;
-      orderAssumptionViolated = true;
-    }
-    if (pageOldestMs !== undefined) previousPageOldestMs = pageOldestMs;
-
-    // A guard page can itself reveal cross-page ordering drift. Only stop when
-    // the entire prefix, including the guard page, remains order-sound.
-    if (expectingGuardPage && listOrderTrusted) {
-      earlyStop = true;
-      break;
-    }
-    expectingGuardPage = false;
-
     if (rawEntries.length < LIST_PAGE_SIZE) {
       sawShortPage = true;
       break;
     }
-
-    if (cutoffMs === undefined) continue;
-
-    // Early-stop requires updated-descending pages; otherwise keep walking.
-    if (!listOrderTrusted) continue;
-
-    if (pageOldestMs !== undefined && pageOldestMs < cutoffMs) {
-      // One extra page after the stop condition, then halt.
-      expectingGuardPage = true;
-    }
   }
 
-  // Cap hit = walked maxListPages full pages without a short terminal page or
-  // early-stop. Distinguishable from a complete walk so callers can surface
+  // Cap hit = walked maxListPages full pages without a short terminal page.
+  // Distinguishable from a complete walk so callers can surface
   // truncation (no silent partial corpus).
-  const pageCapReached = maxListPages !== undefined && !earlyStop && !sawShortPage && pagesFetched >= maxListPages;
+  const pageCapReached = maxListPages !== undefined && !sawShortPage && pagesFetched >= maxListPages;
 
   const byId = new Map<string, AmpThreadListEntry>();
   for (const thread of collected) byId.set(thread.id, thread);
@@ -451,8 +361,6 @@ const enumerateThreads = async (
   return {
     threads,
     listFailed: false,
-    earlyStop,
-    orderAssumptionViolated,
     pageCapReached,
     pagesFetched,
   };
@@ -631,6 +539,14 @@ const nativeMessageIdentity = (message: AmpExport["messages"][number], messageIn
   return `message:${messageIndex}`;
 };
 
+const toolCallStatusFromRun = (run: Record<string, unknown> | undefined): string | undefined => {
+  if (run === undefined) return undefined;
+  const status = run.status;
+  if (typeof status !== "string") return undefined;
+  const trimmed = status.trim();
+  return trimmed.length === 0 ? undefined : trimmed;
+};
+
 const buildAmpSession = (
   thread: AmpThreadListEntry,
   exported: AmpExport,
@@ -702,7 +618,12 @@ const buildAmpSession = (
           role,
           kind: "message",
           ...(contentText !== undefined ? { contentText } : {}),
-          contentSource: block.text,
+          contentBlocks: [{
+            id: scopedId(sessionId, "content", nativeEventId),
+            sequence: 0,
+            kind: "text",
+            text: block.text,
+          }],
           rawReference: { sourcePath: url, line, nativeType: "text" },
         });
         seq += 1;
@@ -735,7 +656,12 @@ const buildAmpSession = (
           role: "thinking",
           kind: "reasoning",
           ...(contentText !== undefined ? { contentText } : {}),
-          contentSource: block.thinking,
+          contentBlocks: [{
+            id: scopedId(sessionId, "content", nativeEventId),
+            sequence: 0,
+            kind: "thinking",
+            thinking: block.thinking,
+          }],
           rawReference: { sourcePath: url, line, nativeType: "thinking" },
         });
         seq += 1;
@@ -803,18 +729,14 @@ const buildAmpSession = (
         const eventId = eventIdFor(sessionId, seq, nativeEventId);
         const outputValue = toolResultOutput(block.run as Record<string, unknown> | undefined);
         const output = projectToolPayloadNativeValue(block.run);
-        const runRecord = block.run as Record<string, unknown> | undefined;
-        const rawRunStatus = runRecord?.status;
-        const runStatus = typeof rawRunStatus === "string" && rawRunStatus.trim().length > 0
-          ? rawRunStatus
-          : "completed";
+        const runStatus = toolCallStatusFromRun(block.run as Record<string, unknown> | undefined);
         const existing = toolCallsById.get(block.toolUseID);
         const toolCallId = existing?.id ?? scopedId(sessionId, "tool", block.toolUseID);
         const merged: AmpToolCallDraft = {
           id: toolCallId,
           eventId: existing?.eventId ?? eventId,
           toolName: existing?.toolName ?? "amp_tool",
-          status: runStatus,
+          status: runStatus ?? "completed",
           ...(existing?.input !== undefined ? { input: existing.input } : {}),
           ...(output !== undefined ? { output } : {}),
           ...(existing?.startedAt !== undefined ? { startedAt: existing.startedAt } : {}),
@@ -862,7 +784,12 @@ const buildAmpSession = (
           ...(compactText(text) !== undefined
             ? { contentText: compactText(text) }
             : {}),
-          contentSource: text,
+          contentBlocks: [{
+            id: scopedId(sessionId, "content", nativeEventId),
+            sequence: 0,
+            kind: "text",
+            text,
+          }],
           rawReference: { sourcePath: url, line, nativeType: "summary" },
         });
         seq += 1;
@@ -1031,36 +958,11 @@ async function* streamAmp(options: AmpStreamOptions): AsyncGenerator<AdapterStre
   const {
     threads,
     listFailed,
-    earlyStop,
-    orderAssumptionViolated,
     pageCapReached,
     pagesFetched,
-  } = await enumerateThreads(runner, options.highWatermark, listDiagnostics, maxListPages);
+  } = await enumerateThreads(runner, listDiagnostics, maxListPages);
   for (const diagnostic of listDiagnostics) {
     yield { type: "diagnostic", diagnostic: schemaDiagnostic(SOURCE_ROOT, diagnostic) };
-  }
-  if (orderAssumptionViolated) {
-    yield {
-      type: "diagnostic",
-      diagnostic: adapterDiagnostic(
-        SOURCE_ROOT,
-        "amp.list.order_not_descending",
-        "Amp thread list page was not updated-descending; watermark early-stop disabled for this walk so later pages are still enumerated.",
-        "error",
-      ),
-    };
-    return;
-  }
-  if (earlyStop) {
-    yield {
-      type: "diagnostic",
-      diagnostic: adapterDiagnostic(
-        SOURCE_ROOT,
-        "amp.list.early_stop",
-        "Amp thread list enumeration stopped after watermark cutoff (+1 guard page). Threads older than the window were not enumerated and never reach shouldParseSession. Use --force for a full walk.",
-        "unsupported",
-      ),
-    };
   }
   if (pageCapReached) {
     yield {

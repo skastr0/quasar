@@ -24,18 +24,17 @@ const redactString = (value: string) =>
     .replace(CREDENTIAL_URL, `$1${REDACTED}$2`)
     .replace(SECRET_ENV_ASSIGNMENT, `$1${REDACTED}`);
 
-export const redactSensitive = (value: unknown, depth = 0): unknown => {
-  if (depth > 8) return "[redacted:depth]";
+export const redactSensitive = (value: unknown): unknown => {
   if (typeof value === "string") return redactString(value);
   if (value === null || value === undefined) return value;
   if (typeof value !== "object") return value;
   if (Array.isArray(value)) {
-    return value.map((item) => redactSensitive(item, depth + 1));
+    return value.map((item) => redactSensitive(item));
   }
   return Object.fromEntries(
     Object.entries(value as Record<string, unknown>).map(([key, item]) => [
       key,
-      SENSITIVE_KEY.test(key) ? REDACTED : redactSensitive(item, depth + 1),
+      SENSITIVE_KEY.test(key) ? REDACTED : redactSensitive(item),
     ]),
   );
 };
