@@ -674,6 +674,92 @@ describe("amp content mapping", () => {
     expect(mapped.executionContexts[0]?.reasoningEffort).toBe("high");
   });
 
+  test("maps observed server-tool search and manual bash blocks", async () => {
+    const exported = {
+      ...recentExport,
+      messages: [
+        {
+          role: "assistant",
+          protocolMessageID: "protocol-server-tool",
+          state: { type: "complete", stopReason: "tool_use" },
+          content: [
+            {
+              type: "server_tool_use",
+              id: "server-tool-1",
+              name: "tool_search_tool_regex",
+              input: { limit: 5, pattern: "shell" },
+            },
+            {
+              type: "tool_search_tool_result",
+              toolUseID: "server-tool-1",
+              content: {
+                type: "tool_search_tool_search_result",
+                toolReferences: [{ name: "shell" }, { name: "read_file" }],
+              },
+            },
+          ],
+        },
+        {
+          role: "info",
+          protocolMessageID: "protocol-manual-bash",
+          content: [{
+            type: "manual_bash_invocation",
+            args: { cmd: "printf hello" },
+            hidden: false,
+            toolRun: {
+              status: "done",
+              result: { output: "hello", exitCode: 0 },
+            },
+          }],
+        },
+      ],
+    };
+
+    const result = await read(MACHINE_A, {
+      ampRunner: fixtureRunner({ [THREAD_A]: exported }),
+      limit: 1,
+    });
+    expect(result.diagnostics.filter((diagnostic) => diagnostic.status === "error")).toHaveLength(0);
+    const session = result.sessions[0]!;
+    expect(session.toolCalls).toHaveLength(2);
+
+    const serverTool = session.toolCalls.find((toolCall) => toolCall.toolName === "tool_search_tool_regex");
+    expect(serverTool).toMatchObject({
+      status: "completed",
+      input: { limit: 5, pattern: "shell" },
+      output: {
+        type: "tool_search_tool_search_result",
+        toolReferences: [{ name: "shell" }, { name: "read_file" }],
+      },
+    });
+    expect(
+      session.events.find((event) =>
+        event.rawReference.nativeType === "tool_search_tool_result")?.toolCallId,
+    ).toBe(serverTool?.id);
+
+    const manualBash = session.toolCalls.find((toolCall) => toolCall.toolName === "manual_bash_invocation");
+    expect(manualBash).toMatchObject({
+      status: "done",
+      input: { cmd: "printf hello" },
+      output: {
+        status: "done",
+        result: { output: "hello", exitCode: 0 },
+      },
+    });
+    const manualEvent = session.events.find((event) =>
+      event.rawReference.nativeType === "manual_bash_invocation");
+    expect(manualEvent).toMatchObject({
+      kind: "tool_call",
+      role: "assistant",
+      toolCallId: manualBash?.id,
+    });
+    expect(manualEvent?.contentBlocks[0]?.metadata).toEqual({ hidden: false });
+
+    const mapped = mapSession(session, "observed-amp-tool-blocks");
+    expect(mapped.messages).toHaveLength(0);
+    expect(mapped.toolCalls).toHaveLength(2);
+  });
+
   test("unknown content blocks fail closed for the affected session", async () => {
     const result = await read(MACHINE_A, {
       ampRunner: fixtureRunner({
@@ -906,7 +992,35 @@ describe("amp fail-closed boundary", () => {
       shouldParseSession: (probe) => probe.sessionId === sessionIdFor("amp", AmpSessionId(THREAD_A)),
     });
     expect(result.sessions).toHaveLength(0);
-    expect(result.diagnostics.find((d) => diagnosticName(d) === "amp.export.decode_failed")?.status).toBe("error");
+    const diagnostic = result.diagnostics.find((d) => diagnosticName(d) === "amp.export.decode_failed");
+    expect(diagnostic?.status).toBe("error");
+    expect((diagnostic?.details as { sourcePath?: string } | undefined)?.sourcePath).toBe(
+      `https://ampcode.com/threads/${THREAD_A}`,
+    );
+  });
+
+  test("attributes separate malformed exports to their own thread URLs", async () => {
+    const runner: AmpRunner = (args) => {
+      if (args[0] === "--version") return { ok: true, stdout: "0.0.1\n" };
+      if (args[0] === "threads" && args[1] === "list") {
+        const offset = Number(args[args.indexOf("--offset") + 1]);
+        return { ok: true, stdout: JSON.stringify(offset === 0 ? listPage.slice(0, 2) : []) };
+      }
+      if (args[0] === "threads" && args[1] === "export") {
+        return { ok: true, stdout: "{}" };
+      }
+      return { ok: false, reason: "command_failed" };
+    };
+    const result = await read(MACHINE_A, {
+      ampRunner: runner,
+    });
+    const sourcePaths = result.diagnostics
+      .filter((diagnostic) => diagnosticName(diagnostic) === "amp.export.decode_failed")
+      .map((diagnostic) => (diagnostic.details as { sourcePath?: string }).sourcePath);
+    expect(sourcePaths).toEqual([
+      `https://ampcode.com/threads/${THREAD_A}`,
+      `https://ampcode.com/threads/${THREAD_B}`,
+    ]);
   });
 
   test("rejects an export whose native id differs from the requested thread", async () => {

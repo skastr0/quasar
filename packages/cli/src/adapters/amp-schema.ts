@@ -65,6 +65,15 @@ export const AmpToolUseBlockSchema = Schema.Struct({
 });
 export type AmpToolUseBlock = typeof AmpToolUseBlockSchema.Type;
 
+/** Measured server-side tool invocation emitted by Amp tool search. */
+export const AmpServerToolUseBlockSchema = Schema.Struct({
+  type: Schema.Literal("server_tool_use"),
+  id: NonEmptyString,
+  name: NonEmptyString,
+  input: UnknownRecord,
+});
+export type AmpServerToolUseBlock = typeof AmpServerToolUseBlockSchema.Type;
+
 /**
  * Tool result content block. `run.result` is heterogeneous across tools
  * (content[], output string, search-result arrays) — kept as Unknown and
@@ -79,6 +88,23 @@ export const AmpToolResultBlockSchema = Schema.Struct({
   blockState: Schema.optional(Schema.String),
 });
 export type AmpToolResultBlock = typeof AmpToolResultBlockSchema.Type;
+
+/** Measured result paired with `server_tool_use` by `toolUseID`. */
+export const AmpToolSearchResultBlockSchema = Schema.Struct({
+  type: Schema.Literal("tool_search_tool_result"),
+  toolUseID: NonEmptyString,
+  content: UnknownRecord,
+});
+export type AmpToolSearchResultBlock = typeof AmpToolSearchResultBlockSchema.Type;
+
+/** Measured completed shell invocation stored by Amp as one combined block. */
+export const AmpManualBashInvocationBlockSchema = Schema.Struct({
+  type: Schema.Literal("manual_bash_invocation"),
+  args: UnknownRecord,
+  hidden: Schema.Boolean,
+  toolRun: UnknownRecord,
+});
+export type AmpManualBashInvocationBlock = typeof AmpManualBashInvocationBlockSchema.Type;
 
 /** Measured context-compaction summary block. */
 export const AmpSummaryBlockSchema = Schema.Struct({

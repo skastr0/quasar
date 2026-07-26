@@ -28,11 +28,14 @@ import {
 import {
   AmpExportSchema,
   AmpImageBlockSchema,
+  AmpManualBashInvocationBlockSchema,
+  AmpServerToolUseBlockSchema,
   AmpSummaryBlockSchema,
   AmpTextBlockSchema,
   AmpThinkingBlockSchema,
   AmpThreadListEntrySchema,
   AmpToolResultBlockSchema,
+  AmpToolSearchResultBlockSchema,
   AmpToolUseBlockSchema,
   type AmpExport,
   type AmpUsage,
@@ -160,6 +163,7 @@ const adapterDiagnostic = (
   name: string,
   message: string,
   status: AdapterDiagnostic["status"] = "unsupported",
+  sourcePath?: string,
 ): AdapterDiagnostic => ({
   adapterId: ampAdapter.id,
   provider: "amp",
@@ -167,26 +171,34 @@ const adapterDiagnostic = (
   parserConfidence: "observed",
   rootPath,
   message,
-  details: { diagnostic: name },
+  details: {
+    diagnostic: name,
+    ...(sourcePath === undefined ? {} : { sourcePath }),
+  },
 });
 
 const schemaDiagnostic = (
   rootPath: string,
   diagnostic: DecodeDiagnostic,
   sessionId?: string,
-): AdapterDiagnostic => ({
-  ...adapterDiagnostic(
-    rootPath,
-    diagnostic.name,
-    `Amp record rejected (${diagnostic.name}).`,
-    "error",
-  ),
-  details: {
-    diagnostic: diagnostic.name,
-    error: diagnostic.message,
-    ...(sessionId === undefined ? {} : { nativeSessionId: sessionId }),
-  },
-});
+): AdapterDiagnostic => {
+  const sourcePath = sessionId === undefined ? undefined : threadUrl(sessionId);
+  return {
+    ...adapterDiagnostic(
+      rootPath,
+      diagnostic.name,
+      `Amp record rejected (${diagnostic.name}).`,
+      "error",
+      sourcePath,
+    ),
+    details: {
+      diagnostic: diagnostic.name,
+      error: diagnostic.message,
+      ...(sourcePath === undefined ? {} : { sourcePath }),
+      ...(sessionId === undefined ? {} : { nativeSessionId: sessionId }),
+    },
+  };
+};
 
 // ---------------------------------------------------------------------------
 // List enumeration
@@ -632,7 +644,10 @@ const buildAmpSession = (
         blockType !== "text"
         && blockType !== "thinking"
         && blockType !== "tool_use"
+        && blockType !== "server_tool_use"
         && blockType !== "tool_result"
+        && blockType !== "tool_search_tool_result"
+        && blockType !== "manual_bash_invocation"
         && blockType !== "summary"
         && blockType !== "image"
       ) {
@@ -786,6 +801,46 @@ const buildAmpSession = (
         continue;
       }
 
+      const serverToolUseDecision = blockType === "server_tool_use"
+        ? decodeOrDrop(AmpServerToolUseBlockSchema, rawBlock, {
+            kind: "server_tool_use",
+            diagnosticName: "amp.block.server_tool_use.decode_failed",
+            diagnostics,
+          })
+        : undefined;
+      if (serverToolUseDecision !== undefined && isSignal(serverToolUseDecision)) {
+        const block = serverToolUseDecision.value;
+        const nativeEventId = `${messageIdentity}:${blockIndex}`;
+        const eventId = eventIdFor(sessionId, seq, nativeEventId);
+        const toolCallId = scopedId(sessionId, "tool", block.id);
+        const input = projectToolPayloadNativeValue(block.input);
+        const metadata = sourceMetadataFor(message);
+        const contentBlocks = metadataContentBlock(sessionId, nativeEventId, metadata);
+        toolCallsById.set(block.id, {
+          id: toolCallId,
+          eventId,
+          toolName: block.name,
+          status: "started",
+          ...(input !== undefined ? { input } : {}),
+        });
+        events.push({
+          id: eventId,
+          nativeEventId,
+          sequence: seq,
+          role: "assistant",
+          kind: "tool_call",
+          toolCallId,
+          ...(contentBlocks !== undefined ? { contentBlocks } : {}),
+          rawReference: { sourcePath: url, line, nativeType: "server_tool_use" },
+        });
+        seq += 1;
+        continue;
+      }
+      if (blockType === "server_tool_use") {
+        hasFatalBlockError = true;
+        continue;
+      }
+
       const toolResultDecision = blockType === "tool_result"
         ? decodeOrDrop(AmpToolResultBlockSchema, rawBlock, {
             kind: "tool_result",
@@ -840,6 +895,91 @@ const buildAmpSession = (
         continue;
       }
       if (blockType === "tool_result") {
+        hasFatalBlockError = true;
+        continue;
+      }
+
+      const toolSearchResultDecision = blockType === "tool_search_tool_result"
+        ? decodeOrDrop(AmpToolSearchResultBlockSchema, rawBlock, {
+            kind: "tool_search_tool_result",
+            diagnosticName: "amp.block.tool_search_tool_result.decode_failed",
+            diagnostics,
+          })
+        : undefined;
+      if (toolSearchResultDecision !== undefined && isSignal(toolSearchResultDecision)) {
+        const block = toolSearchResultDecision.value;
+        const nativeEventId = `${messageIdentity}:${blockIndex}`;
+        const eventId = eventIdFor(sessionId, seq, nativeEventId);
+        const output = projectToolPayloadNativeValue(block.content);
+        const metadata = sourceMetadataFor(message);
+        const contentBlocks = metadataContentBlock(sessionId, nativeEventId, metadata);
+        const existing = toolCallsById.get(block.toolUseID);
+        const toolCallId = existing?.id ?? scopedId(sessionId, "tool", block.toolUseID);
+        toolCallsById.set(block.toolUseID, {
+          id: toolCallId,
+          eventId: existing?.eventId ?? eventId,
+          toolName: existing?.toolName ?? "amp_server_tool",
+          status: "completed",
+          ...(existing?.input !== undefined ? { input: existing.input } : {}),
+          ...(output !== undefined ? { output } : {}),
+          ...(existing?.startedAt !== undefined ? { startedAt: existing.startedAt } : {}),
+        });
+        events.push({
+          id: eventId,
+          nativeEventId,
+          sequence: seq,
+          role: "tool",
+          kind: "tool_result",
+          toolCallId,
+          ...(contentBlocks !== undefined ? { contentBlocks } : {}),
+          rawReference: { sourcePath: url, line, nativeType: "tool_search_tool_result" },
+        });
+        seq += 1;
+        continue;
+      }
+      if (blockType === "tool_search_tool_result") {
+        hasFatalBlockError = true;
+        continue;
+      }
+
+      const manualBashDecision = blockType === "manual_bash_invocation"
+        ? decodeOrDrop(AmpManualBashInvocationBlockSchema, rawBlock, {
+            kind: "manual_bash_invocation",
+            diagnosticName: "amp.block.manual_bash_invocation.decode_failed",
+            diagnostics,
+          })
+        : undefined;
+      if (manualBashDecision !== undefined && isSignal(manualBashDecision)) {
+        const block = manualBashDecision.value;
+        const nativeEventId = `${messageIdentity}:${blockIndex}`;
+        const eventId = eventIdFor(sessionId, seq, nativeEventId);
+        const toolCallId = scopedId(sessionId, "tool", nativeEventId);
+        const input = projectToolPayloadNativeValue(block.args);
+        const output = projectToolPayloadNativeValue(block.toolRun);
+        const metadata = sourceMetadataFor(message, { hidden: block.hidden });
+        const contentBlocks = metadataContentBlock(sessionId, nativeEventId, metadata);
+        toolCallsById.set(nativeEventId, {
+          id: toolCallId,
+          eventId,
+          toolName: "manual_bash_invocation",
+          status: toolCallStatusFromRun(block.toolRun) ?? "completed",
+          ...(input !== undefined ? { input } : {}),
+          ...(output !== undefined ? { output } : {}),
+        });
+        events.push({
+          id: eventId,
+          nativeEventId,
+          sequence: seq,
+          role: "assistant",
+          kind: "tool_call",
+          toolCallId,
+          ...(contentBlocks !== undefined ? { contentBlocks } : {}),
+          rawReference: { sourcePath: url, line, nativeType: "manual_bash_invocation" },
+        });
+        seq += 1;
+        continue;
+      }
+      if (blockType === "manual_bash_invocation") {
         hasFatalBlockError = true;
         continue;
       }
@@ -1142,6 +1282,7 @@ async function* streamAmp(options: AmpStreamOptions): AsyncGenerator<AdapterStre
               : "amp.export.failed",
             `Amp thread export failed for thread ${thread.id}; continuing.`,
             "error",
+            threadUrl(thread.id),
           ),
         };
         continue;
@@ -1155,6 +1296,7 @@ async function* streamAmp(options: AmpStreamOptions): AsyncGenerator<AdapterStre
             "amp.export.invalid_json",
             `Amp thread export returned unparseable JSON for thread ${thread.id}; continuing.`,
             "error",
+            threadUrl(thread.id),
           ),
         };
         continue;
@@ -1183,6 +1325,7 @@ async function* streamAmp(options: AmpStreamOptions): AsyncGenerator<AdapterStre
             "amp.export.id_mismatch",
             `Amp thread export id did not match requested thread ${thread.id}.`,
             "error",
+            threadUrl(thread.id),
           ),
         };
         continue;
