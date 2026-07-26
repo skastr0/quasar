@@ -30,7 +30,7 @@ export const queryFields = {
     detail: [
       "sessionId", "projectKey", "provider", "title", "role", "text", "score",
       "messageId", "sequence", "timestamp", "agentName", "agentRole", "model", "modelProvider",
-      "contentHash", "textBytes", "textTruncated",
+      "executionContextId", "reasoningEffort", "contentHash", "textBytes", "textTruncated",
     ],
   },
   sessions: {
@@ -46,19 +46,19 @@ export const queryFields = {
     summary: ["messageId", "sessionId", "sequence", "role", "text", "timestamp"],
     detail: [
       "messageId", "sessionId", "sequence", "role", "text", "timestamp", "projectKey", "provider",
-      "agentName", "agentRole", "model", "modelProvider",
+      "agentName", "agentRole", "model", "modelProvider", "executionContextId", "reasoningEffort",
     ],
   },
   toolCalls: {
     summary: [
-      "toolCallId", "sessionId", "projectKey", "provider", "sequence", "toolName", "timestamp",
+      "toolCallId", "eventId", "sessionId", "projectKey", "provider", "sequence", "toolName", "timestamp",
       "status", "startedAt", "completedAt", "inputBytes", "outputBytes", "agentName", "model",
-      "modelProvider",
+      "modelProvider", "executionContextId", "reasoningEffort",
     ],
     detail: [
-      "toolCallId", "sessionId", "projectKey", "provider", "sequence", "toolName", "timestamp",
+      "toolCallId", "eventId", "sessionId", "projectKey", "provider", "sequence", "toolName", "timestamp",
       "status", "startedAt", "completedAt", "inputBytes", "outputBytes", "agentName", "model",
-      "modelProvider", "agentRole", "input", "output", "error",
+      "modelProvider", "executionContextId", "reasoningEffort", "agentRole", "input", "output", "error",
     ],
   },
 } as const;

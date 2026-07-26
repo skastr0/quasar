@@ -127,6 +127,59 @@ const roleForEvent = (event: SessionEvent): MessageRole | undefined => {
   return undefined;
 };
 
+type EventContext = {
+  readonly executionContextId?: string;
+  readonly model?: string;
+  readonly modelProvider?: string;
+  readonly reasoningEffort?: string;
+};
+
+const contextForEvent = (
+  session: NormalizedSession,
+  event: SessionEvent,
+): EventContext => {
+  const turnIds = new Set(
+    [event.id, event.nativeEventId].filter((value): value is string => value !== undefined),
+  );
+  const ordered = [...session.executionContexts]
+    .sort((left, right) => left.sequence - right.sequence || left.id.localeCompare(right.id));
+  const exact = ordered.filter(
+    (context) =>
+      context.scope === "turn"
+      && context.turnId !== undefined
+      && turnIds.has(context.turnId),
+  );
+  const exactIds = new Set(exact.map((context) => context.id));
+  const timeline = ordered.filter(
+    (context) => context.sequence <= event.sequence && !exactIds.has(context.id),
+  );
+  let executionContextId: string | undefined;
+  let model: string | undefined;
+  let modelProvider: string | undefined;
+  let reasoningEffort: string | undefined;
+  for (const context of [...timeline, ...exact]) {
+    executionContextId = context.id;
+    if (context.model !== undefined) model = context.model;
+    if (context.modelProvider !== undefined) modelProvider = context.modelProvider;
+    if (context.reasoningEffort !== undefined) reasoningEffort = context.reasoningEffort;
+  }
+  for (const usage of session.usageRecords) {
+    if (usage.eventId !== event.id) continue;
+    if (usage.model !== undefined) model = usage.model;
+    if (usage.modelProvider !== undefined) modelProvider = usage.modelProvider;
+  }
+  return {
+    ...(executionContextId !== undefined ? { executionContextId } : {}),
+    ...(model !== undefined ? { model: String(redactSensitive(model)) } : {}),
+    ...(modelProvider !== undefined
+      ? { modelProvider: String(redactSensitive(modelProvider)) }
+      : {}),
+    ...(reasoningEffort !== undefined
+      ? { reasoningEffort: String(redactSensitive(reasoningEffort)) }
+      : {}),
+  };
+};
+
 const blockText = (block: ContentBlock): string | undefined => {
   if (block.kind === "text") return block.text;
   if (block.kind === "markdown") return block.markdown;
@@ -134,29 +187,42 @@ const blockText = (block: ContentBlock): string | undefined => {
   return undefined;
 };
 
+const isToolPayloadBlock = (block: ContentBlock): boolean => {
+  if (block.metadata === null || typeof block.metadata !== "object") return false;
+  const nativeType = (block.metadata as Record<string, unknown>).nativeType;
+  if (typeof nativeType !== "string") return false;
+  const normalized = nativeType.toLowerCase();
+  return (
+    normalized.includes("tool")
+    || normalized.endsWith("_call")
+    || normalized.endsWith("_output")
+    || normalized.endsWith("_result")
+  );
+};
+
 const eventText = (event: SessionEvent): string => {
   if (event.contentText !== undefined && event.contentText.trim().length > 0) {
     return event.contentText;
   }
-  return event.contentBlocks.flatMap((block) => blockText(block) ?? []).join("\n\n");
+  return event.contentBlocks
+    .flatMap((block) =>
+      isToolPayloadBlock(block) ? [] : (blockText(block) ?? []),
+    )
+    .join("\n\n");
 };
 
 const messageEvents = (session: NormalizedSession) =>
   session.events.flatMap((event) => {
     const role = roleForEvent(event);
     if (role === undefined) return [];
-    const searchableMessage = event.kind === "message"
-      && (role === "user" || role === "assistant");
-    const searchableReasoning = event.kind === "reasoning" && role === "reasoning";
-    const searchableSummary = event.kind === "summary" && role === "assistant";
-    if (!searchableMessage && !searchableReasoning && !searchableSummary) return [];
     const text = String(redactSensitive(eventText(event))).trim();
     if (text.length === 0) return [];
-    return [{ event, role, text }];
+    return [{ event, role, text, context: contextForEvent(session, event) }];
   });
 
 const toolCallsForSession = (session: NormalizedSession, projectKey: string) => {
   const eventSequenceById = new Map(session.events.map((event) => [event.id, event.sequence]));
+  const eventById = new Map(session.events.map((event) => [event.id, event]));
   return session.toolCalls.map((toolCall: ToolCall, index) => ({
     id: toolCall.id,
     sessionId: toolCall.sessionId,
@@ -170,6 +236,9 @@ const toolCallsForSession = (session: NormalizedSession, projectKey: string) => 
     completedAt: toolCall.completedAt,
     projectKey,
     provider: toolCall.provider,
+    ...(eventById.get(toolCall.eventId) === undefined
+      ? {}
+      : contextForEvent(session, eventById.get(toolCall.eventId)!)),
   }));
 };
 
@@ -178,14 +247,16 @@ export const mapSession = (
   sourceFingerprint: string,
 ): MappedSession => {
   const projectKey = session.projectIdentity.projectIdentityKey;
-  const messages = messageEvents(session).map(({ event, role, text }, index) => ({
+  const messages = messageEvents(session).map(({ event, role, text, context }) => ({
     sessionId: session.id,
-    seq: index,
+    eventId: event.id,
+    seq: event.sequence,
     role,
     text,
     ts: event.timestamp,
     projectKey,
-    contentHash: stableWideHash(`${session.id}:${index}:${role}:${text}`),
+    contentHash: stableWideHash(`${session.id}:${event.id}:${event.sequence}:${role}:${text}`),
+    ...context,
   }));
 
   const toolCalls = toolCallsForSession(session, projectKey);

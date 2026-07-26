@@ -79,10 +79,22 @@ only agent-facing read surface. The server deliberately has no generic
 interface MappedSession {
   project: { projectKey: string; displayName: string; rawPath?: string };
   session: SessionRow;       // includes messageCount, toolCallCount
-  messages: MessageRow[];    // role ∈ { user, assistant, reasoning }
+  messages: MessageRow[];    // event-faithful search/read projection
   toolCalls: ToolCallRow[];
+  events: SessionEventRow[];
+  usageRecords: UsageRecordRow[];
+  sessionEdges: SessionEdgeRow[];
+  artifacts: ArtifactRow[];
+  executionContexts: ExecutionContextRow[];
+  assignment?: AgentAssignment;
 }
 ```
+
+Every `MessageRow` carries the canonical normalized `eventId`, the source
+event's `sequence`, and its resolved execution-context/model provenance. Every
+`ToolCallRow` carries the event that owns it plus the same context fields.
+`session.model` and `session.modelProvider` remain latest-value summaries for
+cheap session listing; they are not used as per-message attribution.
 
 ### Locked boundary invariants
 
@@ -96,6 +108,14 @@ The server rejects anything outside these at the ingest boundary:
   `toolCalls.length === session.toolCallCount`, and every message/tool-call row
   carries the session's `sessionId`/`projectKey` (tool calls also the
   `provider`). Mismatches are rejected with `400` and write zero rows.
+- **Event identity and order:** event IDs are unique; event sequence is dense,
+  unique, and equal to stored order; every message and tool call points at an
+  existing event with the same sequence.
+- **Event-faithful message projection:** at most one message row may point at an
+  event; its role must be the event's normalized conversational role. Message
+  identity is the source `eventId`, never a synthesized projection index.
+- **Context references:** projected execution-context IDs must resolve to an
+  execution-context record in the same payload.
 
 The `SessionRow` interface is held byte-for-byte identical across the two
 packages by `packages/cli/test/wire-contract.test.ts`. The provider enum and
@@ -157,6 +177,13 @@ include project, provider, session, agent name/role, model, and model provider;
 tool queries additionally accept tool name. A targeted tool-call id dispatches
 to `/tool-call`.
 
+Message and search model filters operate on the model resolved for each source
+event. Message and detailed search rows return the source event as
+`messageId`, plus `executionContextId` and `reasoningEffort`; tool-call rows
+return `eventId` and the same event-level provenance. Search fusion therefore
+deduplicates lexical and semantic hits by source event rather than by a
+projection-local sequence key.
+
 Tool-call summary projection deliberately exposes metadata and byte counts but
 not `input` or `output`. Those payloads require a detail projection, making
 enumeration cheap while retaining lossless targeted retrieval.
@@ -214,4 +241,8 @@ and reads normalized rows back through the first-class GET resources. Server
 tests assert `POST /query` is not registered. Protocol schema tests lock strict
 local query decode, projections, pagination, and enrichment composition. A
 malformed ingest payload is asserted to yield a `4xx` through the CLI client
-with zero rows persisted.
+with zero rows persisted. The same suite drives a real fabricated OpenCode
+SQLite fixture through adapter parsing, mapping, HTTP ingest, bounded
+message/tool reads, and lexical search; the mixed assistant text, reasoning,
+two tool calls, later turn, model change, and exact source-event IDs are all
+asserted after persistence.

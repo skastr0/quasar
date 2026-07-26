@@ -102,7 +102,6 @@
               "text": "{\"type\":\"function_call\",\"call_id\":\"fixture-call\",\"name\":\"bash\",\"arguments\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}"
             }
           ],
-          "contentText": "{\"type\":\"function_call\",\"call_id\":\"fixture-call\",\"name\":\"bash\",\"arguments\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}",
           "id": "codex:067912ce9780ebb9a39923340bdc170f:event:895362bcb640979f5874293e658c7271",
           "kind": "tool_call",
           "machineId": "machine:test",
@@ -134,7 +133,6 @@
               "text": "{\"type\":\"function_call_output\",\"call_id\":\"fixture-call\",\"output\":\"/fixture/quasar\"}"
             }
           ],
-          "contentText": "{\"type\":\"function_call_output\",\"call_id\":\"fixture-call\",\"output\":\"/fixture/quasar\"}",
           "id": "codex:067912ce9780ebb9a39923340bdc170f:event:7cd13c77ce0e4e2405381a59f60b3556",
           "kind": "tool_result",
           "machineId": "machine:test",

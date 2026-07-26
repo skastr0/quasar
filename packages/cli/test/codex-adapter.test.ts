@@ -762,7 +762,19 @@ describe("codex adapter", () => {
         .map((event) => event.kind);
       expect(activityKinds).toEqual(["system", "lifecycle", "lifecycle"]);
       expect(JSON.stringify(session.events)).not.toContain("must-not-cross");
-      expect(mapSession(session, "fp-current").messages).toHaveLength(1);
+      expect(
+        mapSession(session, "fp-current").messages.map(({ seq, role, text }) => ({
+          seq,
+          role,
+          text,
+        })),
+      ).toEqual([
+        {
+          seq: 9,
+          role: "assistant",
+          text: "qsr fabricated final answer",
+        },
+      ]);
     } finally {
       rmSync(currentRoot, { recursive: true, force: true });
     }

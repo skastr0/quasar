@@ -218,8 +218,8 @@ const isInjectedWrapperMessage = (payload: CodexRecord): boolean => {
  *                             to summary text; NEVER read encrypted_content
  *
  * Returns undefined when no leaf text can be found (empty stub, image-only
- * payload, etc.). The caller falls back to the generic `compactText(content)`
- * path for all other payload types (tool calls, usage, lifecycle, …).
+ * payload, tool envelope, etc.). Structural payloads remain available through
+ * contentSource/contentBlocks, but they are not promoted to visible prose.
  *
  * NON-NEGOTIABLE: the returned value is the verbatim leaf — no reformatting,
  * no JSON re-encoding, no isMostlyProse gate. Agent-generated JSON that the
@@ -291,8 +291,7 @@ export const codexMessageText = (
     return undefined;
   }
 
-  // All other payload types: no envelope peeling needed here — the caller uses
-  // the generic compactText(content) path which is correct for them.
+  // All other payload types have no visible message leaf.
   return undefined;
 };
 
@@ -1258,11 +1257,16 @@ async function* streamCodexSessionFromFile(
     // no fallback JSON dump on the search surface.
     const hasTurnContent = kind !== "message" || codexMessageHasTurnContent(payloadRecord);
     // Peel the harness envelope to the verbatim leaf text for message/reasoning
-    // records. codexMessageText returns undefined for all other payload types so
-    // those fall through to the generic compactText(content) path unchanged.
+    // records. Tool envelopes stay structural: their payload remains in
+    // contentSource/contentBlocks and must never become searchable prose.
     // NON-NEGOTIABLE: no prose-vs-json gate, no reformatting — leaf is kept verbatim.
     const leafText = codexMessageText(payloadType, payloadRecord);
-    const resolvedContentText = leafText !== undefined ? leafText : compactText(content);
+    const resolvedContentText =
+      leafText !== undefined
+        ? leafText
+        : kind === "tool_call" || kind === "tool_result"
+          ? undefined
+          : compactText(content);
     // Pre-envelope top-level response items share the payload `type` with the
     // record `type`; tag them `legacy_response_item.<type>` so provenance does
     // not collapse to the ambiguous `message.message` form.

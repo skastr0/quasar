@@ -49,6 +49,7 @@ const reasoningSession = (text: string): MappedSession => ({
   messages: [
     {
       sessionId: "session-r",
+      eventId: "event-reasoning",
       seq: 0,
       role: "reasoning",
       text,

@@ -297,6 +297,29 @@ const claudeContentProjection = (
   return projectSessionNativeValue(record.content);
 };
 
+/**
+ * Conversation text is a leaf projection, never a serialization of the
+ * provider envelope. Tool payloads stay in contentSource/contentBlocks.
+ * Thinking-only records remain independently searchable as reasoning; mixed
+ * text/tool records expose only their visible text.
+ */
+const claudeConversationText = (
+  message: Record<string, unknown>,
+  kind: ClaudeKind,
+): string | undefined => {
+  if (typeof message.content === "string") {
+    return message.content.length > 0 ? message.content : undefined;
+  }
+  const wantedType = kind === "reasoning" ? "thinking" : "text";
+  const parts = contentArray(message).flatMap((blockValue) => {
+    const block = recordFrom(blockValue);
+    if (block?.type !== wantedType) return [];
+    const text = wantedType === "thinking" ? block.thinking : block.text;
+    return typeof text === "string" && text.length > 0 ? [text] : [];
+  });
+  return parts.length > 0 ? parts.join("\n\n") : undefined;
+};
+
 const toolCallIdFor = (sessionId: SessionId, nativeToolId: string) =>
   scopedId(sessionId, "tool", nativeToolId);
 
@@ -640,7 +663,10 @@ const buildClaudeSessionFromFile = (
       timestamp,
       role: claudeRoleFor(kind, messageRole),
       kind,
-      contentText: compactText(content),
+      contentText:
+        message === undefined
+          ? compactText(content)
+          : claudeConversationText(message, kind),
       contentSource: content,
       ...(toolCallId !== undefined ? { toolCallId } : {}),
       rawReference: { sourcePath, line: lineNumber, nativeType: type },

@@ -52,28 +52,29 @@ insert into session values ('${SESSION_ID}', 'profiling session', '/tmp/proj', 1
 insert into message values ('msg_user', '${SESSION_ID}', 1, json_object('role', 'user', 'time', json_object('created', 1)));
 insert into part values ('prt_user_text', 'msg_user', '${SESSION_ID}', 1, json_object('type', 'text', 'text', 'please profile the ingest'));
 
-insert into message values ('msg_assistant', '${SESSION_ID}', 2, json_object('role', 'assistant', 'time', json_object('created', 2)));
+insert into message values ('msg_assistant', '${SESSION_ID}', 2, json_object('role', 'assistant', 'time', json_object('created', 2), 'modelID', 'gpt-5.6-sol', 'providerID', 'openai'));
 insert into part values ('prt_step_start', 'msg_assistant', '${SESSION_ID}', 2, json_object('type', 'step-start'));
 insert into part values ('prt_reasoning', 'msg_assistant', '${SESSION_ID}', 3, json_object('type', 'reasoning', 'text', 'I should measure first'));
 insert into part values ('prt_text', 'msg_assistant', '${SESSION_ID}', 4, json_object('type', 'text', 'text', 'Measured; here is the plan.'));
 insert into part values ('prt_tool', 'msg_assistant', '${SESSION_ID}', 5, json_object('type', 'tool', 'tool', 'bash', 'callID', 'call1', 'state', json_object('status', 'completed', 'input', json_object('command', 'ls'), 'output', 'file.txt')));
-insert into part values ('prt_step_finish', 'msg_assistant', '${SESSION_ID}', 6, json_object('type', 'step-finish'));
+insert into part values ('prt_tool_second', 'msg_assistant', '${SESSION_ID}', 6, json_object('type', 'tool', 'tool', 'read', 'callID', 'call2', 'state', json_object('status', 'completed', 'input', json_object('path', 'file.txt'), 'output', 'contents')));
+insert into part values ('prt_step_finish', 'msg_assistant', '${SESSION_ID}', 7, json_object('type', 'step-finish'));
 
 -- Machinery-only turn: a compaction marker is not a session turn.
 insert into message values ('msg_machinery', '${SESSION_ID}', 3, json_object('role', 'assistant', 'time', json_object('created', 3)));
-insert into part values ('prt_compaction', 'msg_machinery', '${SESSION_ID}', 7, json_object('type', 'compaction', 'auto', json('true')));
+insert into part values ('prt_compaction', 'msg_machinery', '${SESSION_ID}', 8, json_object('type', 'compaction', 'auto', json('true')));
 
 -- Garbage source row: >1 MiB of summary.diffs (hex(zeroblob(600000)) is 1.2M chars),
 -- pruned away in SQL — only raw_bytes can witness the breach downstream.
 insert into message values ('msg_garbage', '${SESSION_ID}', 4, json_object('role', 'user', 'time', json_object('created', 4), 'summary', json_object('diffs', json_array(hex(zeroblob(600000))))));
-insert into part values ('prt_garbage_text', 'msg_garbage', '${SESSION_ID}', 8, json_object('type', 'text', 'text', 'Continue'));
+insert into part values ('prt_garbage_text', 'msg_garbage', '${SESSION_ID}', 9, json_object('type', 'text', 'text', 'Continue'));
 
 -- Empty stubs (measured 2026-06-11): an encrypted-reasoning part whose
 -- plaintext is empty, and an empty text part. Machinery, not turns — neither
 -- may surface as a JSON envelope dump.
 insert into message values ('msg_empty', '${SESSION_ID}', 5, json_object('role', 'assistant', 'time', json_object('created', 5)));
-insert into part values ('prt_empty_reasoning', 'msg_empty', '${SESSION_ID}', 9, json_object('type', 'reasoning', 'text', '', 'metadata', json_object('openai', json_object('reasoningEncryptedContent', 'gAAAAAB-cipher'))));
-insert into part values ('prt_empty_text', 'msg_empty', '${SESSION_ID}', 10, json_object('type', 'text', 'text', ''));
+insert into part values ('prt_empty_reasoning', 'msg_empty', '${SESSION_ID}', 10, json_object('type', 'reasoning', 'text', '', 'metadata', json_object('openai', json_object('reasoningEncryptedContent', 'gAAAAAB-cipher'))));
+insert into part values ('prt_empty_text', 'msg_empty', '${SESSION_ID}', 11, json_object('type', 'text', 'text', ''));
 `;
 
 const root = mkdtempSync(join(tmpdir(), "quasar-opencode-test-"));
@@ -263,7 +264,7 @@ describe("opencode adapter", () => {
       const assistantEvent = session.events[1]!;
       expect(assistantEvent.kind).toBe("tool_call");
       const kinds = assistantEvent.contentBlocks.map((block) => block.kind);
-      expect(kinds).toEqual(["thinking", "text", "text"]);
+      expect(kinds).toEqual(["thinking", "text", "text", "text"]);
       expect(assistantEvent.contentBlocks[0]?.thinking).toBe("I should measure first");
       expect(assistantEvent.contentBlocks[1]?.text).toBe("Measured; here is the plan.");
       const toolBlockMetadata = assistantEvent.contentBlocks[2]?.metadata as
@@ -274,13 +275,20 @@ describe("opencode adapter", () => {
       expect(JSON.stringify(assistantEvent.contentBlocks)).not.toContain("step-finish");
 
       // Tool part maps to a ToolCall with state.input/state.output payloads.
-      expect(session.toolCalls).toHaveLength(1);
-      expect(session.toolCalls[0]).toMatchObject({
-        toolName: "bash",
-        status: "completed",
-        input: { command: "ls" },
-        output: "file.txt",
-      });
+      expect(session.toolCalls).toEqual([
+        expect.objectContaining({
+          toolName: "bash",
+          status: "completed",
+          input: { command: "ls" },
+          output: "file.txt",
+        }),
+        expect.objectContaining({
+          toolName: "read",
+          status: "completed",
+          input: { path: "file.txt" },
+          output: "contents",
+        }),
+      ]);
 
       // QSR-224: the assistant's reasoning part surfaces as a SEPARATE
       // kind="reasoning"/role="thinking" event so reasoning is role-filterable in search.
@@ -310,6 +318,76 @@ describe("opencode adapter", () => {
       expect(emptyEvent.contentText).toBeUndefined();
       expect(emptyEvent.contentBlocks).toHaveLength(0);
       expect(JSON.stringify(emptyEvent)).not.toContain("gAAAAAB");
+    },
+    15_000,
+  );
+
+  test(
+    "projects mixed assistant facts in one chronological event coordinate system",
+    async () => {
+      const result = await opencodeAdapter.read({
+        machine: MACHINE,
+        now: NOW,
+        roots: { opencode: root },
+      });
+
+      const session = result.sessions[0]!;
+      const mapped = mapSession(session, "event-faithful-fixture");
+      const assistantEvent = session.events.find(
+        (event) => event.nativeEventId === "msg_assistant",
+      )!;
+      const reasoningEvent = session.events.find(
+        (event) => event.nativeEventId === "msg_assistant:reasoning",
+      )!;
+
+      expect(session.events.map((event) => event.sequence)).toEqual([0, 1, 2, 3, 4, 5]);
+      expect(new Set(session.events.map((event) => event.sequence)).size).toBe(
+        session.events.length,
+      );
+      expect(mapped.messages.map(({ eventId, seq, role, text }) => ({
+        eventId,
+        seq,
+        role,
+        text,
+      }))).toEqual([
+        {
+          eventId: session.events[0]!.id,
+          seq: 0,
+          role: "user",
+          text: "please profile the ingest",
+        },
+        {
+          eventId: assistantEvent.id,
+          seq: 1,
+          role: "assistant",
+          text: "Measured; here is the plan.",
+        },
+        {
+          eventId: reasoningEvent.id,
+          seq: 2,
+          role: "reasoning",
+          text: "I should measure first",
+        },
+        {
+          eventId: session.events[4]!.id,
+          seq: 4,
+          role: "user",
+          text: "Continue",
+        },
+      ]);
+      expect(mapped.toolCalls).toHaveLength(2);
+      expect(mapped.toolCalls.every((call) => call.eventId === assistantEvent.id)).toBe(true);
+      expect(mapped.toolCalls.every((call) => call.seq === assistantEvent.sequence)).toBe(true);
+      expect(mapped.messages.find((message) => message.eventId === assistantEvent.id)).toMatchObject({
+        model: "gpt-5.6-sol",
+        modelProvider: "openai",
+      });
+      expect(mapped.messages.find((message) => message.eventId === reasoningEvent.id)).toMatchObject({
+        model: "gpt-5.6-sol",
+        modelProvider: "openai",
+      });
+      expect(mapped.toolCalls.every((call) => call.model === "gpt-5.6-sol")).toBe(true);
+      expect(mapped.toolCalls.every((call) => call.modelProvider === "openai")).toBe(true);
     },
     15_000,
   );

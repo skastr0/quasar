@@ -6,6 +6,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { Schema } from "effect";
 
 import { claudeAdapter } from "../src/adapters/claude";
+import { mapSession } from "../src/map";
 import {
   ClaudeAgentNameSchema,
   ClaudeAgentSettingSchema,
@@ -115,6 +116,78 @@ describe("T1: discovers sessions under projects/", () => {
     expect(result.sessions).toHaveLength(2);
     expect(result.diagnostics.every((d) => d.status === "available")).toBe(true);
     expect(result.diagnostics.some((d) => d.message.includes("Discovered 2 Claude session(s)"))).toBe(true);
+  });
+});
+
+describe("event-faithful conversation projection", () => {
+  test("keeps mixed visible text while excluding tool-only envelopes from messages", async () => {
+    const root = join(testRoot, "event-faithful");
+    const projectDir = join(root, "projects", "-Users-me-quasar");
+    const sessionId = "eeee5555-0005-0005-0005-000000000005";
+    mkdirSync(projectDir, { recursive: true });
+    writeFileSync(
+      join(projectDir, `${sessionId}.jsonl`),
+      [
+        line({
+          sessionId,
+          type: "user",
+          message: { role: "user", content: [{ type: "text", text: "run both tools" }] },
+        }),
+        line({
+          sessionId,
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "tool-only",
+                name: "Read",
+                input: { path: "/tmp/tool-only" },
+              },
+            ],
+          },
+        }),
+        line({
+          sessionId,
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "text", text: "Visible answer before the call." },
+              {
+                type: "tool_use",
+                id: "mixed-tool",
+                name: "Read",
+                input: { path: "/tmp/mixed" },
+              },
+            ],
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const result = await claudeAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { claude: root },
+    });
+    const session = result.sessions[0]!;
+    const toolOnly = session.events[1]!;
+    const mixed = session.events[2]!;
+
+    expect(toolOnly.kind).toBe("tool_call");
+    expect(toolOnly.contentText).toBeUndefined();
+    expect(mixed.kind).toBe("tool_call");
+    expect(mixed.contentText).toBe("Visible answer before the call.");
+    expect(
+      mapSession(session, "claude-event-faithful").messages.map(
+        ({ seq, role, text }) => ({ seq, role, text }),
+      ),
+    ).toEqual([
+      { seq: 0, role: "user", text: "run both tools" },
+      { seq: 2, role: "assistant", text: "Visible answer before the call." },
+    ]);
   });
 });
 

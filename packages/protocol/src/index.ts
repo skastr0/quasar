@@ -40,6 +40,10 @@ const MessageId = boundedString("QuasarMessageId").pipe(
   Schema.brand("QuasarMessageId"),
 );
 
+const EventId = boundedString("QuasarEventId").pipe(
+  Schema.brand("QuasarEventId"),
+);
+
 const ToolCallId = boundedString("QuasarToolCallId").pipe(
   Schema.brand("QuasarToolCallId"),
 );
@@ -157,6 +161,8 @@ const SearchDetailField = Schema.Literal(
   "agentRole",
   "model",
   "modelProvider",
+  "executionContextId",
+  "reasoningEffort",
   "contentHash",
   "textBytes",
   "textTruncated",
@@ -206,10 +212,13 @@ const MessageDetailField = Schema.Literal(
   "agentRole",
   "model",
   "modelProvider",
+  "executionContextId",
+  "reasoningEffort",
 ).annotations({ identifier: "QuasarMessageDetailField" });
 
 const ToolCallSummaryField = Schema.Literal(
   "toolCallId",
+  "eventId",
   "sessionId",
   "projectKey",
   "provider",
@@ -224,6 +233,8 @@ const ToolCallSummaryField = Schema.Literal(
   "agentName",
   "model",
   "modelProvider",
+  "executionContextId",
+  "reasoningEffort",
 ).annotations({ identifier: "QuasarToolCallSummaryField" });
 
 const ToolCallDetailField = Schema.Literal(
@@ -374,6 +385,8 @@ const SearchItem = Schema.Struct({
   agentRole: Schema.optional(Schema.NullOr(AgentRole)),
   model: Schema.optional(Schema.NullOr(Model)),
   modelProvider: Schema.optional(Schema.NullOr(ModelProvider)),
+  executionContextId: Schema.optional(Schema.NullOr(boundedString("QuasarExecutionContextId"))),
+  reasoningEffort: Schema.optional(Schema.NullOr(boundedString("QuasarReasoningEffort", 128))),
   contentHash: Schema.optional(Schema.NullOr(Schema.String)),
   textBytes: Schema.optional(Schema.NullOr(NonNegativeInteger)),
   textTruncated: Schema.optional(Schema.NullOr(Schema.Boolean)),
@@ -415,10 +428,13 @@ const MessageItem = Schema.Struct({
   agentRole: Schema.optional(Schema.NullOr(AgentRole)),
   model: Schema.optional(Schema.NullOr(Model)),
   modelProvider: Schema.optional(Schema.NullOr(ModelProvider)),
+  executionContextId: Schema.optional(Schema.NullOr(boundedString("QuasarExecutionContextId"))),
+  reasoningEffort: Schema.optional(Schema.NullOr(boundedString("QuasarReasoningEffort", 128))),
 });
 
 const ToolCallItem = Schema.Struct({
   toolCallId: Schema.optional(ToolCallId),
+  eventId: Schema.optional(EventId),
   sessionId: Schema.optional(SessionId),
   projectKey: Schema.optional(ProjectKey),
   provider: Schema.optional(Provider),
@@ -434,6 +450,8 @@ const ToolCallItem = Schema.Struct({
   agentRole: Schema.optional(Schema.NullOr(AgentRole)),
   model: Schema.optional(Schema.NullOr(Model)),
   modelProvider: Schema.optional(Schema.NullOr(ModelProvider)),
+  executionContextId: Schema.optional(Schema.NullOr(boundedString("QuasarExecutionContextId"))),
+  reasoningEffort: Schema.optional(Schema.NullOr(boundedString("QuasarReasoningEffort", 128))),
   input: Schema.optional(JsonValue),
   output: Schema.optional(JsonValue),
   error: Schema.optional(JsonValue),

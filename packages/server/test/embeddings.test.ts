@@ -49,6 +49,7 @@ const mappedSession = (text = "alpha terminal"): MappedSession => ({
   messages: [
     {
       sessionId: "session-a",
+      eventId: "event-1",
       seq: 1,
       role: "user",
       text,
@@ -209,8 +210,8 @@ describe("Embeddings", () => {
         yield* store.upsertSession({
           ...mappedSession(),
           messages: [
-            { sessionId: "session-a", seq: 1, role: "user", text: "alpha terminal", projectKey: "project-a", contentHash: "hash-a" },
-            { sessionId: "session-a", seq: 2, role: "assistant", text: "beta terminal", projectKey: "project-a", contentHash: "hash-b" },
+            { sessionId: "session-a", eventId: "event-1", seq: 1, role: "user", text: "alpha terminal", projectKey: "project-a", contentHash: "hash-a" },
+            { sessionId: "session-a", eventId: "event-2", seq: 2, role: "assistant", text: "beta terminal", projectKey: "project-a", contentHash: "hash-b" },
           ],
         });
         yield* embeddings.putCached({ contentHash: "hash-a", text: "alpha terminal", vector: vector(0), now: "2026-06-18T09:00:00.000Z" });
@@ -246,8 +247,8 @@ describe("Embeddings", () => {
         yield* store.upsertSession({
           ...mappedSession(),
           messages: [
-            { sessionId: "session-a", seq: 1, role: "user", text: "alpha terminal", projectKey: "project-a", contentHash: "hash-a" },
-            { sessionId: "session-a", seq: 2, role: "assistant", text: "beta terminal", projectKey: "project-a", contentHash: "hash-b" },
+            { sessionId: "session-a", eventId: "event-1", seq: 1, role: "user", text: "alpha terminal", projectKey: "project-a", contentHash: "hash-a" },
+            { sessionId: "session-a", eventId: "event-2", seq: 2, role: "assistant", text: "beta terminal", projectKey: "project-a", contentHash: "hash-b" },
           ],
         });
         yield* embeddings.putCached({ contentHash: "hash-a", text: "alpha terminal", vector: vector(0), now: "2026-06-18T09:00:00.000Z" });
@@ -295,6 +296,7 @@ describe("Embeddings", () => {
           ...mappedSession("replacement terminal"),
           messages: [{
             sessionId: "session-a",
+            eventId: "event-1",
             seq: 1,
             role: "user",
             text: "replacement terminal",
@@ -321,6 +323,7 @@ describe("Embeddings", () => {
           ...mappedSession("replacement terminal"),
           messages: [{
             sessionId: "session-a",
+            eventId: "event-1",
             seq: 1,
             role: "user",
             text: "replacement terminal",
@@ -561,6 +564,7 @@ describe("Embeddings", () => {
           ...mappedSession("new text"),
           messages: [{
             sessionId: "session-a",
+            eventId: "event-1",
             seq: 1,
             role: "user",
             text: "new text",
@@ -649,8 +653,8 @@ describe("Embeddings", () => {
         yield* store.upsertSession({
           ...mappedSession(),
           messages: [
-            { sessionId: "session-a", seq: 1, role: "user", text: "alpha terminal", projectKey: "project-a", contentHash: "hash-a" },
-            { sessionId: "session-a", seq: 2, role: "assistant", text: "beta terminal", projectKey: "project-a", contentHash: "hash-b" },
+            { sessionId: "session-a", eventId: "event-1", seq: 1, role: "user", text: "alpha terminal", projectKey: "project-a", contentHash: "hash-a" },
+            { sessionId: "session-a", eventId: "event-2", seq: 2, role: "assistant", text: "beta terminal", projectKey: "project-a", contentHash: "hash-b" },
           ],
         });
         yield* queue.enqueue({

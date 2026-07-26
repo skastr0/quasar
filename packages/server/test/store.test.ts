@@ -63,6 +63,7 @@ const mappedSession = (overrides: Partial<MappedSession["session"]> = {}): Mappe
   messages: [
     {
       sessionId: overrides.sessionId ?? "session-a",
+      eventId: `${overrides.sessionId ?? "session-a"}:event:2`,
       seq: 2,
       role: "assistant",
       text: "Second message",
@@ -72,6 +73,7 @@ const mappedSession = (overrides: Partial<MappedSession["session"]> = {}): Mappe
     },
     {
       sessionId: overrides.sessionId ?? "session-a",
+      eventId: `${overrides.sessionId ?? "session-a"}:event:1`,
       seq: 1,
       role: "user",
       text: "First message",
@@ -84,6 +86,7 @@ const mappedSession = (overrides: Partial<MappedSession["session"]> = {}): Mappe
     {
       id: `${overrides.sessionId ?? "session-a"}:tool-2`,
       sessionId: overrides.sessionId ?? "session-a",
+      eventId: `${overrides.sessionId ?? "session-a"}:event:4`,
       seq: 4,
       toolName: "shell_command",
       status: "ok",
@@ -97,6 +100,7 @@ const mappedSession = (overrides: Partial<MappedSession["session"]> = {}): Mappe
     {
       id: `${overrides.sessionId ?? "session-a"}:tool-1`,
       sessionId: overrides.sessionId ?? "session-a",
+      eventId: `${overrides.sessionId ?? "session-a"}:event:3`,
       seq: 3,
       toolName: "read_file",
       status: "ok",

@@ -39,6 +39,7 @@ const PROJECT_KEY = "project-diff";
 
 const message = (seq: number, text: string, overrides: Partial<MessageRow> = {}): MessageRow => ({
   sessionId: SESSION_ID,
+  eventId: overrides.eventId ?? `event-${seq}`,
   seq,
   role: overrides.role ?? (seq % 2 === 0 ? "assistant" : "user"),
   text,
@@ -50,6 +51,7 @@ const message = (seq: number, text: string, overrides: Partial<MessageRow> = {})
 const toolCall = (id: string, seq: number, overrides: Partial<ToolCallRow> = {}): ToolCallRow => ({
   id,
   sessionId: SESSION_ID,
+  eventId: overrides.eventId ?? `event-${seq}`,
   seq,
   toolName: overrides.toolName ?? "bash",
   status: overrides.status ?? "completed",

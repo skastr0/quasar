@@ -157,19 +157,24 @@ const isSessionRow = (value: unknown): boolean =>
 const isMessageRow = (sessionId: string, projectKey: string, value: unknown): boolean =>
   isRecord(value)
   && value.sessionId === sessionId
+  && isString(value.eventId)
   && value.projectKey === projectKey
   && isSeq(value.seq)
   && isString(value.role)
   && roles.has(value.role)
   && isString(value.text)
   && isOptionalString(value.ts)
-  && isString(value.contentHash);
+  && isString(value.contentHash)
+  && isOptionalString(value.executionContextId)
+  && isOptionalString(value.model)
+  && isOptionalString(value.modelProvider)
+  && isOptionalString(value.reasoningEffort);
 
 const isToolCallRow = (sessionId: string, projectKey: string, provider: string, value: unknown): boolean =>
   isRecord(value)
   && isString(value.id)
   && value.sessionId === sessionId
-  && isOptionalString(value.eventId)
+  && isString(value.eventId)
   && value.projectKey === projectKey
   && value.provider === provider
   && isSeq(value.seq)
@@ -178,7 +183,11 @@ const isToolCallRow = (sessionId: string, projectKey: string, provider: string, 
   && isString(value.inputText)
   && isString(value.outputText)
   && isOptionalString(value.startedAt)
-  && isOptionalString(value.completedAt);
+  && isOptionalString(value.completedAt)
+  && isOptionalString(value.executionContextId)
+  && isOptionalString(value.model)
+  && isOptionalString(value.modelProvider)
+  && isOptionalString(value.reasoningEffort);
 
 const isOptionalNonNegativeInt = (value: unknown): boolean =>
   value === undefined || isNonNegativeInt(value);
@@ -332,13 +341,50 @@ const isMappedSession = (value: unknown): value is MappedSession => {
   if (value.assignment !== undefined && !isAgentAssignment(value.assignment)) return false;
   const assignmentRole = isRecord(value.assignment) ? value.assignment.role : undefined;
   if (session.assignmentRole !== assignmentRole) return false;
-  return value.messages.every((row) => isMessageRow(sessionId, projectKey, row))
+  const rowsAreValid = value.messages.every((row) => isMessageRow(sessionId, projectKey, row))
     && value.toolCalls.every((row) => isToolCallRow(sessionId, projectKey, provider, row))
     && value.events.every((row) => isSessionEventRow(sessionId, projectKey, provider, row))
     && value.usageRecords.every((row) => isUsageRecordRow(sessionId, projectKey, provider, row))
     && value.sessionEdges.every((row) => isSessionEdgeRow(sessionId, projectKey, provider, row))
     && value.artifacts.every((row) => isArtifactRow(sessionId, projectKey, provider, row))
     && value.executionContexts.every((row) => isExecutionContextRow(sessionId, projectKey, provider, row));
+  if (!rowsAreValid) return false;
+
+  const events = value.events as Array<Record<string, unknown>>;
+  const eventById = new Map<string, Record<string, unknown>>();
+  for (const [index, event] of events.entries()) {
+    const eventId = event.id as string;
+    if (event.sequence !== index || eventById.has(eventId)) return false;
+    eventById.set(eventId, event);
+  }
+  const contextIds = new Set(
+    (value.executionContexts as Array<Record<string, unknown>>)
+      .map((context) => context.id as string),
+  );
+  const messageEventIds = new Set<string>();
+  for (const message of value.messages as Array<Record<string, unknown>>) {
+    const eventId = message.eventId as string;
+    const event = eventById.get(eventId);
+    if (event === undefined || event.sequence !== message.seq || messageEventIds.has(eventId)) {
+      return false;
+    }
+    const expectedRole = event.role === "thinking" ? "reasoning" : event.role;
+    if (message.role !== expectedRole) return false;
+    if (
+      message.executionContextId !== undefined
+      && !contextIds.has(message.executionContextId as string)
+    ) return false;
+    messageEventIds.add(eventId);
+  }
+  for (const toolCall of value.toolCalls as Array<Record<string, unknown>>) {
+    const event = eventById.get(toolCall.eventId as string);
+    if (event === undefined || event.sequence !== toolCall.seq) return false;
+    if (
+      toolCall.executionContextId !== undefined
+      && !contextIds.has(toolCall.executionContextId as string)
+    ) return false;
+  }
+  return true;
 };
 
 const configuredIngestToken = (): string | undefined => {

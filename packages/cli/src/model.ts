@@ -47,18 +47,24 @@ export interface SessionRow {
 
 export interface MessageRow {
   readonly sessionId: string;
+  /** Canonical normalized event that produced this projection row. */
+  readonly eventId: string;
   readonly seq: number;
   readonly role: MessageRole;
   readonly text: string;
   readonly ts?: string;
   readonly projectKey: string;
   readonly contentHash: string;
+  readonly executionContextId?: string;
+  readonly model?: string;
+  readonly modelProvider?: string;
+  readonly reasoningEffort?: string;
 }
 
 export interface ToolCallRow {
   readonly id: string;
   readonly sessionId: string;
-  readonly eventId?: string;
+  readonly eventId: string;
   readonly seq: number;
   readonly toolName: string;
   readonly status?: string;
@@ -68,6 +74,10 @@ export interface ToolCallRow {
   readonly completedAt?: string;
   readonly projectKey: string;
   readonly provider: Provider;
+  readonly executionContextId?: string;
+  readonly model?: string;
+  readonly modelProvider?: string;
+  readonly reasoningEffort?: string;
 }
 
 export interface MappedSession {
