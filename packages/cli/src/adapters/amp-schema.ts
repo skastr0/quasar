@@ -80,15 +80,53 @@ export const AmpToolResultBlockSchema = Schema.Struct({
 });
 export type AmpToolResultBlock = typeof AmpToolResultBlockSchema.Type;
 
+/** Measured context-compaction summary block. */
+export const AmpSummaryBlockSchema = Schema.Struct({
+  type: Schema.Literal("summary"),
+  summary: Schema.Union(
+    Schema.String,
+    Schema.Struct({
+      type: Schema.optional(Schema.String),
+      summary: Schema.String,
+    }),
+  ),
+});
+export type AmpSummaryBlock = typeof AmpSummaryBlockSchema.Type;
+
+/**
+ * Measured image block. Amp exports only source metadata, not usable text, so
+ * the adapter deliberately records a named non-text drop rather than treating
+ * it as an unclassified block.
+ */
+export const AmpImageBlockSchema = Schema.Struct({
+  type: Schema.Literal("image"),
+  source: Schema.optional(Schema.Unknown),
+  sourcePath: Schema.optional(Schema.String),
+});
+export type AmpImageBlock = typeof AmpImageBlockSchema.Type;
+
+/** Measured per-message model usage emitted by Amp assistant messages. */
+export const AmpUsageSchema = Schema.Struct({
+  model: Schema.optional(Schema.String),
+  timestamp: Schema.optional(Schema.String),
+  inputTokens: Schema.optional(Schema.Number),
+  outputTokens: Schema.optional(Schema.Number),
+  maxInputTokens: Schema.optional(Schema.Number),
+  totalInputTokens: Schema.optional(Schema.Number),
+  cacheReadInputTokens: Schema.optional(Schema.Number),
+  cacheCreationInputTokens: Schema.optional(Schema.Number),
+});
+export type AmpUsage = typeof AmpUsageSchema.Type;
+
 export const AmpMessageSchema = Schema.Struct({
-  role: Schema.optional(Schema.String),
-  content: Schema.optional(Schema.Array(Schema.Unknown)),
+  role: Schema.Literal("user", "assistant", "info"),
+  content: Schema.Array(Schema.Unknown),
   meta: Schema.optional(UnknownRecord),
   messageId: Schema.optional(Schema.Unknown),
   protocolMessageID: Schema.optional(Schema.String),
   readAt: Schema.optional(Schema.NullOr(Schema.String)),
   state: Schema.optional(UnknownRecord),
-  usage: Schema.optional(UnknownRecord),
+  usage: Schema.optional(AmpUsageSchema),
   userState: Schema.optional(UnknownRecord),
 });
 export type AmpMessage = typeof AmpMessageSchema.Type;
@@ -120,13 +158,13 @@ export type AmpExportEnv = typeof AmpExportEnvSchema.Type;
 /** Full `amp threads export <id>` payload (v-flexible). */
 export const AmpExportSchema = Schema.Struct({
   v: Schema.optional(Schema.Number),
-  id: Schema.optional(Schema.String),
+  id: NonEmptyString,
   title: NullableText,
   created: Schema.optional(Schema.Number),
   updatedAt: Schema.optional(Schema.String),
   env: Schema.optional(AmpExportEnvSchema),
   meta: Schema.optional(UnknownRecord),
-  messages: Schema.optional(Schema.Array(AmpMessageSchema)),
+  messages: Schema.Array(AmpMessageSchema),
   activatedSkills: Schema.optional(Schema.Unknown),
   creatorUserID: Schema.optional(Schema.Unknown),
   pinned: Schema.optional(Schema.Unknown),

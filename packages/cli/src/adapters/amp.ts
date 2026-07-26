@@ -17,6 +17,7 @@ import {
   eventIdFor,
   homePath,
   projectToolPayloadNativeValue,
+  projectSessionNativeValue,
   scopedId,
   sessionIdFor,
   sourceRoot,
@@ -24,12 +25,15 @@ import {
 } from "./common";
 import {
   AmpExportSchema,
+  AmpImageBlockSchema,
+  AmpSummaryBlockSchema,
   AmpTextBlockSchema,
   AmpThinkingBlockSchema,
   AmpThreadListEntrySchema,
   AmpToolResultBlockSchema,
   AmpToolUseBlockSchema,
   type AmpExport,
+  type AmpUsage,
   type AmpThreadListEntry,
 } from "./amp-schema";
 import { type DecodeDiagnostic, decodeOrDrop, isSignal } from "./harness-schema";
@@ -54,10 +58,10 @@ const LIST_PAGE_SIZE = AMP_LIST_PAGE_SIZE;
  * corpus — and must emit `amp.list.page_cap_reached` (no silent truncation).
  * Exported so tests can assert the production default without re-deriving it.
  */
-export const AMP_MAX_LIST_PAGES = 100;
 const WATERMARK_GUARD_MS = 60 * 60 * 1_000;
 const DEFAULT_EXPORT_SPACING_MS = 3_000;
 const MAX_EXPORT_ATTEMPTS = 5;
+const MAX_LIST_ATTEMPTS = 3;
 const BASE_BACKOFF_MS = 1_000;
 
 const threadUrl = (threadId: string) => `${SOURCE_ROOT}/${threadId}`;
@@ -173,6 +177,7 @@ const schemaDiagnostic = (
     rootPath,
     diagnostic.name,
     `Amp record rejected (${diagnostic.name}).`,
+    "error",
   ),
   details: {
     diagnostic: diagnostic.name,
@@ -194,13 +199,13 @@ const parseJson = (text: string): unknown => {
 };
 
 /** The thread list array can be the top-level value or under a `threads` key. */
-const listArrayFrom = (value: unknown): readonly unknown[] => {
+const listArrayFrom = (value: unknown): readonly unknown[] | undefined => {
   if (Array.isArray(value)) return value;
   if (value !== null && typeof value === "object" && !Array.isArray(value)) {
     const threads = (value as { readonly threads?: unknown }).threads;
     if (Array.isArray(threads)) return threads;
   }
-  return [];
+  return undefined;
 };
 
 const parseUpdatedMs = (updated: string): number | undefined => {
@@ -218,6 +223,16 @@ const oldestUpdatedMs = (entries: readonly AmpThreadListEntry[]): number | undef
   return oldest;
 };
 
+const newestUpdatedMs = (entries: readonly AmpThreadListEntry[]): number | undefined => {
+  let newest: number | undefined;
+  for (const entry of entries) {
+    const ms = parseUpdatedMs(entry.updated);
+    if (ms === undefined) continue;
+    newest = newest === undefined ? ms : Math.max(newest, ms);
+  }
+  return newest;
+};
+
 /**
  * Grounded contract (measured against live `amp threads list --json` 2026-07-24):
  * pages are returned `updated`-descending. Early-stop on watermark is only sound
@@ -228,7 +243,7 @@ const isUpdatedDescending = (entries: readonly AmpThreadListEntry[]): boolean =>
   let previousMs: number | undefined;
   for (const entry of entries) {
     const ms = parseUpdatedMs(entry.updated);
-    if (ms === undefined) continue;
+    if (ms === undefined) return false;
     if (previousMs !== undefined && ms > previousMs) return false;
     previousMs = ms;
   }
@@ -266,7 +281,7 @@ const enumerateThreads = async (
   runner: AmpRunner,
   highWatermark: string | undefined,
   diagnostics: DecodeDiagnostic[],
-  maxListPages: number,
+  maxListPages: number | undefined,
 ): Promise<EnumerateThreadsResult> => {
   const collected: AmpThreadListEntry[] = [];
   const watermarkMs =
@@ -281,33 +296,36 @@ const enumerateThreads = async (
   let pagesFetched = 0;
   /** True when the loop exited because a short (terminal) page was returned. */
   let sawShortPage = false;
+  let previousPageOldestMs: number | undefined;
 
-  for (let page = 0; page < maxListPages; page += 1) {
+  const fullPageSignatures = new Set<string>();
+  for (let page = 0; maxListPages === undefined || page < maxListPages; page += 1) {
     const offset = page * LIST_PAGE_SIZE;
-    const result = await runner([
-      "threads",
-      "list",
-      "--json",
-      "--limit",
-      String(LIST_PAGE_SIZE),
-      "--offset",
-      String(offset),
-    ]);
-    if (!result.ok) {
-      return {
-        threads: collected,
-        listFailed: true,
-        earlyStop,
-        orderAssumptionViolated,
-        pageCapReached: false,
-        pagesFetched,
-      };
+    let parsed: unknown;
+    let listSucceeded = false;
+    for (let attempt = 0; attempt < MAX_LIST_ATTEMPTS; attempt += 1) {
+      const result = await runner([
+        "threads",
+        "list",
+        "--json",
+        "--include-archived",
+        "--limit",
+        String(LIST_PAGE_SIZE),
+        "--offset",
+        String(offset),
+      ]);
+      if (result.ok) {
+        parsed = parseJson(result.stdout);
+        if (parsed !== undefined) {
+          listSucceeded = true;
+          break;
+        }
+      }
     }
-    const parsed = parseJson(result.stdout);
-    if (parsed === undefined) {
+    if (!listSucceeded) {
       diagnostics.push({
-        name: "amp.list.invalid_json",
-        message: "amp threads list returned unparseable JSON.",
+        name: "amp.list.failed",
+        message: `Amp thread list page at offset ${offset} failed after ${MAX_LIST_ATTEMPTS} attempts.`,
       });
       return {
         threads: collected,
@@ -319,6 +337,28 @@ const enumerateThreads = async (
       };
     }
     const rawEntries = listArrayFrom(parsed);
+    if (rawEntries === undefined) {
+      diagnostics.push({
+        name: "amp.list.invalid_envelope",
+        message: "Amp thread list must be an array or an object containing a threads array.",
+      });
+      return {
+        threads: collected,
+        listFailed: true,
+        earlyStop,
+        orderAssumptionViolated,
+        pageCapReached: false,
+        pagesFetched,
+      };
+    }
+    if (rawEntries.length === LIST_PAGE_SIZE) {
+      const signature = stableJsonHash(rawEntries);
+      if (fullPageSignatures.has(signature)) {
+        diagnostics.push({ name: "amp.list.repeated_page", message: "Amp returned a repeated full list page; pagination offset is not advancing." });
+        return { threads: collected, listFailed: true, earlyStop, orderAssumptionViolated, pageCapReached: false, pagesFetched };
+      }
+      fullPageSignatures.add(signature);
+    }
     const pageEntries: AmpThreadListEntry[] = [];
     for (const raw of rawEntries) {
       const decision = decodeOrDrop(AmpThreadListEntrySchema, raw, {
@@ -331,11 +371,26 @@ const enumerateThreads = async (
     collected.push(...pageEntries);
     pagesFetched += 1;
 
-    // Guard page (full or short) always ends enumeration after the cutoff trip.
-    if (expectingGuardPage) {
+    const pageOldestMs = oldestUpdatedMs(pageEntries);
+    const pageNewestMs = newestUpdatedMs(pageEntries);
+    const pageOrderSound =
+      isUpdatedDescending(pageEntries)
+      && pageOldestMs !== undefined
+      && pageNewestMs !== undefined
+      && (previousPageOldestMs === undefined || pageNewestMs <= previousPageOldestMs);
+    if (!pageOrderSound) {
+      listOrderTrusted = false;
+      orderAssumptionViolated = true;
+    }
+    if (pageOldestMs !== undefined) previousPageOldestMs = pageOldestMs;
+
+    // A guard page can itself reveal cross-page ordering drift. Only stop when
+    // the entire prefix, including the guard page, remains order-sound.
+    if (expectingGuardPage && listOrderTrusted) {
       earlyStop = true;
       break;
     }
+    expectingGuardPage = false;
 
     if (rawEntries.length < LIST_PAGE_SIZE) {
       sawShortPage = true;
@@ -345,15 +400,9 @@ const enumerateThreads = async (
     if (cutoffMs === undefined) continue;
 
     // Early-stop requires updated-descending pages; otherwise keep walking.
-    if (!isUpdatedDescending(pageEntries)) {
-      listOrderTrusted = false;
-      orderAssumptionViolated = true;
-      continue;
-    }
     if (!listOrderTrusted) continue;
 
-    const oldest = oldestUpdatedMs(pageEntries);
-    if (oldest !== undefined && oldest < cutoffMs) {
+    if (pageOldestMs !== undefined && pageOldestMs < cutoffMs) {
       // One extra page after the stop condition, then halt.
       expectingGuardPage = true;
     }
@@ -362,7 +411,7 @@ const enumerateThreads = async (
   // Cap hit = walked maxListPages full pages without a short terminal page or
   // early-stop. Distinguishable from a complete walk so callers can surface
   // truncation (no silent partial corpus).
-  const pageCapReached = !earlyStop && !sawShortPage && pagesFetched >= maxListPages;
+  const pageCapReached = maxListPages !== undefined && !earlyStop && !sawShortPage && pagesFetched >= maxListPages;
 
   const byId = new Map<string, AmpThreadListEntry>();
   for (const thread of collected) byId.set(thread.id, thread);
@@ -493,12 +542,57 @@ type AmpEventDraft = {
   };
 };
 
-const messageRole = (role: string | undefined): SessionRole => {
+type AmpUsageDraft = Omit<
+  import("../core/schemas").UsageRecord,
+  "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
+>;
+
+type AmpArtifactDraft = Omit<
+  import("../core/schemas").Artifact,
+  "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
+>;
+
+const nonNegativeInteger = (value: number | undefined): number | undefined =>
+  value !== undefined && Number.isInteger(value) && value >= 0 ? value : undefined;
+
+const usageDraftFrom = (
+  usage: AmpUsage,
+  sessionId: SessionId,
+  messageIndex: number,
+  eventId: string | undefined,
+): AmpUsageDraft | undefined => {
+  const inputTokens = nonNegativeInteger(usage.inputTokens);
+  const outputTokens = nonNegativeInteger(usage.outputTokens);
+  const cacheReadInputTokens = nonNegativeInteger(usage.cacheReadInputTokens);
+  const cacheCreationInputTokens = nonNegativeInteger(usage.cacheCreationInputTokens);
+  const timestamp = isoFromBlockTime(usage.timestamp);
+  if (
+    usage.model === undefined
+    && inputTokens === undefined
+    && outputTokens === undefined
+    && cacheReadInputTokens === undefined
+    && cacheCreationInputTokens === undefined
+    && timestamp === undefined
+  ) return undefined;
+  return {
+    id: scopedId(sessionId, "usage", String(messageIndex)),
+    ...(eventId !== undefined ? { eventId } : {}),
+    ...(timestamp !== undefined ? { timestamp } : {}),
+    ...(usage.model !== undefined ? { model: usage.model } : {}),
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(cacheReadInputTokens !== undefined ? { cacheReadInputTokens } : {}),
+    ...(cacheCreationInputTokens !== undefined ? { cacheCreationInputTokens } : {}),
+  };
+};
+
+const summaryText = (summary: string | { readonly summary: string }): string =>
+  typeof summary === "string" ? summary : summary.summary;
+
+const messageRole = (role: string): SessionRole => {
   if (role === "user") return "user";
   if (role === "assistant") return "assistant";
-  if (role === "system") return "system";
-  if (role === "tool") return "tool";
-  return "unknown";
+  return "system";
 };
 
 const buildAmpSession = (
@@ -506,28 +600,55 @@ const buildAmpSession = (
   exported: AmpExport,
   machine: AdapterDiscoverOptions["machine"],
   sessionId: SessionId,
+  diagnostics: DecodeDiagnostic[],
 ) => {
   const url = threadUrl(thread.id);
-  const messages = exported.messages ?? [];
+  const messages = exported.messages;
   const events: AmpEventDraft[] = [];
   const toolCallsById = new Map<string, AmpToolCallDraft>();
+  const usageRecords: AmpUsageDraft[] = [];
+  const artifacts: AmpArtifactDraft[] = [];
+  let hasFatalBlockError = false;
   let seq = 0;
 
   for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
     const message = messages[messageIndex]!;
     const role = messageRole(message.role);
-    const blocks = message.content ?? [];
+    const blocks = message.content;
     const userTimestamp = isoFromEpochMs(message.meta?.sentAt);
     // RawReference.line is PositiveInteger (1-based).
     const line = messageIndex + 1;
+    const firstEventAtMessage = events.length;
 
     for (let blockIndex = 0; blockIndex < blocks.length; blockIndex += 1) {
       const rawBlock = blocks[blockIndex];
-      const textDecision = decodeOrDrop(AmpTextBlockSchema, rawBlock, {
-        kind: "text",
-        diagnosticName: "amp.block.text.decode_failed",
-      });
-      if (isSignal(textDecision)) {
+      const blockType =
+        rawBlock !== null && typeof rawBlock === "object" && !Array.isArray(rawBlock)
+          ? (rawBlock as { readonly type?: unknown }).type
+          : undefined;
+      if (
+        blockType !== "text"
+        && blockType !== "thinking"
+        && blockType !== "tool_use"
+        && blockType !== "tool_result"
+        && blockType !== "summary"
+        && blockType !== "image"
+      ) {
+        diagnostics.push({
+          name: "amp.block.unknown",
+          message: `Amp content block at message ${line} has an unsupported type.`,
+        });
+        hasFatalBlockError = true;
+        continue;
+      }
+      const textDecision = blockType === "text"
+        ? decodeOrDrop(AmpTextBlockSchema, rawBlock, {
+            kind: "text",
+            diagnosticName: "amp.block.text.decode_failed",
+            diagnostics,
+          })
+        : undefined;
+      if (textDecision !== undefined && isSignal(textDecision)) {
         const block = textDecision.value;
         const blockTime =
           role === "user"
@@ -548,12 +669,19 @@ const buildAmpSession = (
         seq += 1;
         continue;
       }
+      if (blockType === "text") {
+        hasFatalBlockError = true;
+        continue;
+      }
 
-      const thinkingDecision = decodeOrDrop(AmpThinkingBlockSchema, rawBlock, {
-        kind: "thinking",
-        diagnosticName: "amp.block.thinking.decode_failed",
-      });
-      if (isSignal(thinkingDecision)) {
+      const thinkingDecision = blockType === "thinking"
+        ? decodeOrDrop(AmpThinkingBlockSchema, rawBlock, {
+            kind: "thinking",
+            diagnosticName: "amp.block.thinking.decode_failed",
+            diagnostics,
+          })
+        : undefined;
+      if (thinkingDecision !== undefined && isSignal(thinkingDecision)) {
         const block = thinkingDecision.value;
         const blockTime =
           isoFromBlockTime(block.finalTime) ?? isoFromBlockTime(block.startTime);
@@ -572,12 +700,19 @@ const buildAmpSession = (
         seq += 1;
         continue;
       }
+      if (blockType === "thinking") {
+        hasFatalBlockError = true;
+        continue;
+      }
 
-      const toolUseDecision = decodeOrDrop(AmpToolUseBlockSchema, rawBlock, {
-        kind: "tool_use",
-        diagnosticName: "amp.block.tool_use.decode_failed",
-      });
-      if (isSignal(toolUseDecision)) {
+      const toolUseDecision = blockType === "tool_use"
+        ? decodeOrDrop(AmpToolUseBlockSchema, rawBlock, {
+            kind: "tool_use",
+            diagnosticName: "amp.block.tool_use.decode_failed",
+            diagnostics,
+          })
+        : undefined;
+      if (toolUseDecision !== undefined && isSignal(toolUseDecision)) {
         const block = toolUseDecision.value;
         const blockTime =
           isoFromBlockTime(block.finalTime) ?? isoFromBlockTime(block.startTime);
@@ -605,12 +740,19 @@ const buildAmpSession = (
         seq += 1;
         continue;
       }
+      if (blockType === "tool_use") {
+        hasFatalBlockError = true;
+        continue;
+      }
 
-      const toolResultDecision = decodeOrDrop(AmpToolResultBlockSchema, rawBlock, {
-        kind: "tool_result",
-        diagnosticName: "amp.block.tool_result.decode_failed",
-      });
-      if (isSignal(toolResultDecision)) {
+      const toolResultDecision = blockType === "tool_result"
+        ? decodeOrDrop(AmpToolResultBlockSchema, rawBlock, {
+            kind: "tool_result",
+            diagnosticName: "amp.block.tool_result.decode_failed",
+            diagnostics,
+          })
+        : undefined;
+      if (toolResultDecision !== undefined && isSignal(toolResultDecision)) {
         const block = toolResultDecision.value;
         const blockTime =
           isoFromBlockTime(block.finalTime) ?? isoFromBlockTime(block.startTime);
@@ -645,8 +787,81 @@ const buildAmpSession = (
         seq += 1;
         continue;
       }
+      if (blockType === "tool_result") {
+        hasFatalBlockError = true;
+        continue;
+      }
 
-      // Unknown / summary / image blocks: skip without aborting the thread.
+      const summaryDecision = blockType === "summary"
+        ? decodeOrDrop(AmpSummaryBlockSchema, rawBlock, {
+            kind: "summary",
+            diagnosticName: "amp.block.summary.decode_failed",
+            diagnostics,
+          })
+        : undefined;
+      if (summaryDecision !== undefined && isSignal(summaryDecision)) {
+        const eventId = eventIdFor(sessionId, seq, `${messageIndex}:${blockIndex}:summary`);
+        const text = summaryText(summaryDecision.value.summary);
+        events.push({
+          id: eventId,
+          sequence: seq,
+          role: "assistant",
+          kind: "summary",
+          ...(compactText(text) !== undefined
+            ? { contentText: compactText(text) }
+            : {}),
+          contentSource: text,
+          rawReference: { sourcePath: url, line, nativeType: "summary" },
+        });
+        seq += 1;
+        continue;
+      }
+      if (blockType === "summary") {
+        hasFatalBlockError = true;
+        continue;
+      }
+
+      const imageDecision = blockType === "image"
+        ? decodeOrDrop(AmpImageBlockSchema, rawBlock, {
+            kind: "image",
+            diagnosticName: "amp.block.image.decode_failed",
+            diagnostics,
+          })
+        : undefined;
+      if (imageDecision !== undefined && isSignal(imageDecision)) {
+        const sourceRef = projectSessionNativeValue({
+          source: imageDecision.value.source,
+          sourcePath: imageDecision.value.sourcePath,
+        });
+        if (sourceRef !== undefined) {
+          artifacts.push({
+            id: scopedId(sessionId, "artifact", `${messageIndex}:${blockIndex}`),
+            kind: "image",
+            sourcePath: url,
+            sourceRef,
+          });
+        }
+        continue;
+      }
+      hasFatalBlockError = true;
+    }
+    const usage = message.usage;
+    if (usage !== undefined) {
+      const usageDraft = usageDraftFrom(usage, sessionId, messageIndex, events[firstEventAtMessage]?.id);
+      if (usageDraft !== undefined) usageRecords.push(usageDraft);
+      const maxInputTokens = nonNegativeInteger(usage.maxInputTokens);
+      const totalInputTokens = nonNegativeInteger(usage.totalInputTokens);
+      if (maxInputTokens !== undefined || totalInputTokens !== undefined) {
+        artifacts.push({
+          id: scopedId(sessionId, "usage-metadata", String(messageIndex)),
+          kind: "usage_metadata",
+          ...(events[firstEventAtMessage] !== undefined ? { eventId: events[firstEventAtMessage]!.id } : {}),
+          sourceRef: {
+            ...(maxInputTokens !== undefined ? { maxInputTokens } : {}),
+            ...(totalInputTokens !== undefined ? { totalInputTokens } : {}),
+          },
+        });
+      }
     }
   }
 
@@ -661,7 +876,7 @@ const buildAmpSession = (
       ? exported.title
       : undefined);
 
-  return buildSession({
+  const session = buildSession({
     provider: "amp",
     agentName: "amp",
     machine,
@@ -676,7 +891,10 @@ const buildAmpSession = (
     sourcePath: url,
     events,
     toolCalls: [...toolCallsById.values()],
+    usageRecords,
+    artifacts,
   });
+  return hasFatalBlockError ? undefined : session;
 };
 
 // ---------------------------------------------------------------------------
@@ -729,7 +947,7 @@ async function* streamAmp(options: AmpStreamOptions): AsyncGenerator<AdapterStre
   };
 
   const listDiagnostics: DecodeDiagnostic[] = [];
-  const maxListPages = options.maxListPages ?? AMP_MAX_LIST_PAGES;
+  const maxListPages = options.maxListPages;
   const {
     threads,
     listFailed,
@@ -748,9 +966,10 @@ async function* streamAmp(options: AmpStreamOptions): AsyncGenerator<AdapterStre
         SOURCE_ROOT,
         "amp.list.order_not_descending",
         "Amp thread list page was not updated-descending; watermark early-stop disabled for this walk so later pages are still enumerated.",
-        "unsupported",
+        "error",
       ),
     };
+    return;
   }
   if (earlyStop) {
     yield {
@@ -770,11 +989,12 @@ async function* streamAmp(options: AmpStreamOptions): AsyncGenerator<AdapterStre
         SOURCE_ROOT,
         "amp.list.page_cap_reached",
         `Amp thread list enumeration hit the page cap (${pagesFetched} full pages × ${LIST_PAGE_SIZE}); walk is truncated, not complete. Raise maxListPages or use --force with a higher cap once the corpus is dogfooded.`,
-        "unsupported",
+        "error",
       ),
     };
+    return;
   }
-  if (listFailed && threads.length === 0) {
+  if (listFailed) {
     yield {
       type: "diagnostic",
       diagnostic: adapterDiagnostic(
@@ -787,7 +1007,6 @@ async function* streamAmp(options: AmpStreamOptions): AsyncGenerator<AdapterStre
     return;
   }
 
-  const exportMemo = new Map<string, AmpExport | "failed">();
   let emitted = 0;
   let exportCount = 0;
   const limit = options.limit ?? Number.POSITIVE_INFINITY;
@@ -809,13 +1028,12 @@ async function* streamAmp(options: AmpStreamOptions): AsyncGenerator<AdapterStre
       continue;
     }
 
-    let exported: AmpExport | "failed" | undefined = exportMemo.get(fingerprintKey);
+    let exported: AmpExport | "failed" | undefined;
     if (exported === undefined) {
       if (exportCount > 0) await sleep(exportSpacingMs);
       exportCount += 1;
       const exportResult = await exportThread(runner, thread.id, sleep);
       if (!exportResult.ok) {
-        exportMemo.set(fingerprintKey, "failed");
         yield {
           type: "diagnostic",
           diagnostic: adapterDiagnostic(
@@ -831,7 +1049,6 @@ async function* streamAmp(options: AmpStreamOptions): AsyncGenerator<AdapterStre
       }
       const parsed = parseJson(exportResult.stdout);
       if (parsed === undefined) {
-        exportMemo.set(fingerprintKey, "failed");
         yield {
           type: "diagnostic",
           diagnostic: adapterDiagnostic(
@@ -850,7 +1067,6 @@ async function* streamAmp(options: AmpStreamOptions): AsyncGenerator<AdapterStre
         diagnostics: exportDiagnostics,
       });
       if (!isSignal(decision)) {
-        exportMemo.set(fingerprintKey, "failed");
         for (const diagnostic of exportDiagnostics) {
           yield {
             type: "diagnostic",
@@ -860,11 +1076,27 @@ async function* streamAmp(options: AmpStreamOptions): AsyncGenerator<AdapterStre
         continue;
       }
       exported = decision.value;
-      exportMemo.set(fingerprintKey, exported);
+      if (exported.id !== thread.id) {
+        yield {
+          type: "diagnostic",
+          diagnostic: adapterDiagnostic(
+            SOURCE_ROOT,
+            "amp.export.id_mismatch",
+            `Amp thread export id did not match requested thread ${thread.id}.`,
+            "error",
+          ),
+        };
+        continue;
+      }
     }
     if (exported === "failed") continue;
 
-    const session = buildAmpSession(thread, exported, options.machine, sessionId);
+    const mappingDiagnostics: DecodeDiagnostic[] = [];
+    const session = buildAmpSession(thread, exported, options.machine, sessionId, mappingDiagnostics);
+    for (const diagnostic of mappingDiagnostics) {
+      yield { type: "diagnostic", diagnostic: schemaDiagnostic(SOURCE_ROOT, diagnostic, thread.id) };
+    }
+    if (session === undefined) continue;
     yield {
       type: "session",
       session,
