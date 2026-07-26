@@ -828,7 +828,10 @@ const buildGrokSessionFromChatPath = (
     // extractGrokProse on innerUpdate finds content directly (innerUpdate IS params.update).
     // For the `content` field on innerUpdate (e.g. agent_message_chunk.content), it peels the
     // leaf string from the content block array.
-    const proseText = extractGrokProse(innerUpdate) ?? compactText(content);
+    const proseText =
+      subtype === "session_recap" && typeof innerUpdate.summary === "string"
+        ? innerUpdate.summary
+        : extractGrokProse(innerUpdate) ?? compactText(content);
     return [
       {
         id: eventId,

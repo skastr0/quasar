@@ -456,6 +456,55 @@ export const GrokUpdCompactionCheckpoint = updateEnvelope("compaction_checkpoint
 export const GrokUpdTaskCompleted = updateEnvelope("task_completed", {
   task_snapshot: Schema.optional(Schema.Unknown),
 });
+const GrokModelUsage = Schema.Struct({
+  inputTokens: Schema.Number,
+  outputTokens: Schema.Number,
+  totalTokens: Schema.Number,
+  cachedReadTokens: Schema.Number,
+  reasoningTokens: Schema.Number,
+  modelCalls: Schema.Number,
+  apiDurationMs: Schema.Number,
+  costUsdTicks: Schema.optional(Schema.Number),
+});
+const GrokTurnUsage = Schema.Struct({
+  inputTokens: Schema.Number,
+  outputTokens: Schema.Number,
+  totalTokens: Schema.Number,
+  cachedReadTokens: Schema.Number,
+  reasoningTokens: Schema.Number,
+  modelCalls: Schema.Number,
+  apiDurationMs: Schema.Number,
+  costUsdTicks: Schema.optional(Schema.Number),
+  modelUsage: Schema.Record({ key: Schema.String, value: GrokModelUsage }),
+  numTurns: Schema.Number,
+  usageIsIncomplete: Schema.optional(Schema.Boolean),
+});
+/** `{sessionUpdate:"turn_completed"}` — terminal usage metadata, never conversation text. */
+export const GrokUpdTurnCompleted = updateEnvelope("turn_completed", {
+  prompt_id: Schema.String,
+  stop_reason: Schema.String,
+  usage: Schema.optional(GrokTurnUsage),
+});
+/** `{sessionUpdate:"session_recap"}` — unique recap prose, worth indexing as a summary event. */
+export const GrokUpdSessionRecap = updateEnvelope("session_recap", {
+  summary: Schema.String.pipe(
+    Schema.filter((value) => value.trim().length > 0 || "summary must not be blank"),
+  ),
+  auto: Schema.Boolean,
+});
+/** `{sessionUpdate:"hook_execution"}` — hook telemetry, never conversation text. */
+export const GrokUpdHookExecution = updateEnvelope("hook_execution", {
+  event_name: Schema.String,
+  runs: Schema.Array(
+    Schema.Struct({
+      name: Schema.String,
+      status: Schema.Struct({
+        status: Schema.String,
+        elapsed_ms: Schema.Number,
+      }),
+    }),
+  ),
+});
 export const GrokUpdSubagentSpawned = updateEnvelope("subagent_spawned", {
   subagent_id: Schema.optional(Schema.String),
   subagent_type: Schema.optional(Schema.String),
@@ -475,6 +524,39 @@ export const GrokUpdSubagentFinished = updateEnvelope("subagent_finished", {
   tokens_used: Schema.optional(Schema.Number),
   tool_calls: Schema.optional(Schema.Unknown),
   turns: Schema.optional(Schema.Number),
+});
+
+// ===========================================================================
+// 4b. events.jsonl schema drift — observed telemetry sidecars
+// ===========================================================================
+
+export const GrokEvtMcpHealthCheck = Schema.Struct({
+  type: Schema.Literal("mcp_health_check"),
+  ts: Schema.String,
+  server_name: Schema.String,
+  client_state: Schema.String,
+  healthy: Schema.Boolean,
+});
+export const GrokEvtGoalClassifierFailOpen = Schema.Struct({
+  type: Schema.Literal("goal_classifier_fail_open"),
+  ts: Schema.String,
+  attempt: Schema.Number,
+  latency_ms: Schema.Number,
+  reason: Schema.String,
+});
+export const GrokEvtMcpTransportDecodeError = Schema.Struct({
+  type: Schema.Literal("mcp_transport_decode_error"),
+  ts: Schema.String,
+  server_name: Schema.String,
+  error: Schema.String,
+  sample: Schema.String,
+});
+export const GrokEvtInterjected = Schema.Struct({
+  type: Schema.Literal("interjected"),
+  ts: Schema.String,
+  image_count: Schema.Number,
+  redirect_kind: Schema.String,
+  source: Schema.String,
 });
 
 // ===========================================================================
@@ -597,6 +679,10 @@ const EVENT_TABLE: Record<string, ChatEntry> = {
   mcp_config_resolved: { schema: GrokEvtMcpConfigResolved, dropReason: "mcp_config_telemetry" },
   mcp_init_completed: { schema: GrokEvtMcpInitCompleted, dropReason: "mcp_config_telemetry" },
   mcp_oauth_discovery_timeout: { schema: GrokEvtMcpOauthDiscoveryTimeout, dropReason: "mcp_oauth_telemetry" },
+  mcp_health_check: { schema: GrokEvtMcpHealthCheck, dropReason: "mcp_health_telemetry" },
+  goal_classifier_fail_open: { schema: GrokEvtGoalClassifierFailOpen, dropReason: "goal_classifier_telemetry" },
+  mcp_transport_decode_error: { schema: GrokEvtMcpTransportDecodeError, dropReason: "mcp_transport_error_telemetry" },
+  interjected: { schema: GrokEvtInterjected, dropReason: "queue_interjection_telemetry" },
 };
 
 /** updates.jsonl declarative dispatch keyed by `update.sessionUpdate`. */
@@ -609,6 +695,9 @@ const UPDATE_TABLE: Record<string, ChatEntry> = {
   retry_state: { schema: GrokUpdRetryState, kind: "lifecycle" },
   task_backgrounded: { schema: GrokUpdTaskBackgrounded, kind: "lifecycle" },
   task_completed: { schema: GrokUpdTaskCompleted, kind: "lifecycle" },
+  turn_completed: { schema: GrokUpdTurnCompleted, dropReason: "turn_usage_telemetry" },
+  session_recap: { schema: GrokUpdSessionRecap, kind: "summary" },
+  hook_execution: { schema: GrokUpdHookExecution, dropReason: "hook_execution_telemetry" },
   subagent_spawned: { schema: GrokUpdSubagentSpawned, kind: "lifecycle" },
   subagent_finished: { schema: GrokUpdSubagentFinished, kind: "lifecycle" },
   auto_compact_started: { schema: GrokUpdAutoCompactStarted, kind: "lifecycle" },
