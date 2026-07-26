@@ -148,7 +148,8 @@ const messageEvents = (session: NormalizedSession) =>
     const searchableMessage = event.kind === "message"
       && (role === "user" || role === "assistant");
     const searchableReasoning = event.kind === "reasoning" && role === "reasoning";
-    if (!searchableMessage && !searchableReasoning) return [];
+    const searchableSummary = event.kind === "summary" && role === "assistant";
+    if (!searchableMessage && !searchableReasoning && !searchableSummary) return [];
     const text = String(redactSensitive(eventText(event))).trim();
     if (text.length === 0) return [];
     return [{ event, role, text }];
