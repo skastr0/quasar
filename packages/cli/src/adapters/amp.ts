@@ -556,6 +556,7 @@ type AmpToolCallDraft = Omit<
 
 type AmpEventDraft = {
   readonly id: string;
+  readonly nativeEventId?: string;
   readonly sequence: number;
   readonly timestamp?: string;
   readonly role: SessionRole;
@@ -624,6 +625,12 @@ const messageRole = (role: string): SessionRole => {
   return "system";
 };
 
+const nativeMessageIdentity = (message: AmpExport["messages"][number], messageIndex: number): string => {
+  if (typeof message.protocolMessageID === "string" && message.protocolMessageID.length > 0) return message.protocolMessageID;
+  if (typeof message.messageId === "number" && Number.isFinite(message.messageId)) return String(message.messageId);
+  return `message:${messageIndex}`;
+};
+
 const buildAmpSession = (
   thread: AmpThreadListEntry,
   exported: AmpExport,
@@ -648,6 +655,7 @@ const buildAmpSession = (
     // RawReference.line is PositiveInteger (1-based).
     const line = messageIndex + 1;
     const firstEventAtMessage = events.length;
+    const messageIdentity = nativeMessageIdentity(message, messageIndex);
 
     for (let blockIndex = 0; blockIndex < blocks.length; blockIndex += 1) {
       const rawBlock = blocks[blockIndex];
@@ -684,9 +692,11 @@ const buildAmpSession = (
             ? userTimestamp
             : isoFromBlockTime(block.finalTime) ?? isoFromBlockTime(block.startTime);
         const contentText = compactText(block.text);
-        const eventId = eventIdFor(sessionId, seq, `${messageIndex}:${blockIndex}:text`);
+        const nativeEventId = `${messageIdentity}:${blockIndex}`;
+        const eventId = eventIdFor(sessionId, seq, nativeEventId);
         events.push({
           id: eventId,
+          nativeEventId,
           sequence: seq,
           ...(blockTime !== undefined ? { timestamp: blockTime } : {}),
           role,
@@ -715,9 +725,11 @@ const buildAmpSession = (
         const blockTime =
           isoFromBlockTime(block.finalTime) ?? isoFromBlockTime(block.startTime);
         const contentText = compactText(block.thinking);
-        const eventId = eventIdFor(sessionId, seq, `${messageIndex}:${blockIndex}:thinking`);
+        const nativeEventId = `${messageIdentity}:${blockIndex}`;
+        const eventId = eventIdFor(sessionId, seq, nativeEventId);
         events.push({
           id: eventId,
+          nativeEventId,
           sequence: seq,
           ...(blockTime !== undefined ? { timestamp: blockTime } : {}),
           role: "thinking",
@@ -745,7 +757,8 @@ const buildAmpSession = (
         const block = toolUseDecision.value;
         const blockTime =
           isoFromBlockTime(block.finalTime) ?? isoFromBlockTime(block.startTime);
-        const eventId = eventIdFor(sessionId, seq, `${messageIndex}:${blockIndex}:tool_use`);
+        const nativeEventId = `${messageIdentity}:${blockIndex}`;
+        const eventId = eventIdFor(sessionId, seq, nativeEventId);
         const toolCallId = scopedId(sessionId, "tool", block.id);
         const input = projectToolPayloadNativeValue(block.input);
         const draft: AmpToolCallDraft = {
@@ -759,6 +772,7 @@ const buildAmpSession = (
         toolCallsById.set(block.id, draft);
         events.push({
           id: eventId,
+          nativeEventId,
           sequence: seq,
           ...(blockTime !== undefined ? { timestamp: blockTime } : {}),
           role: "assistant",
@@ -785,7 +799,8 @@ const buildAmpSession = (
         const block = toolResultDecision.value;
         const blockTime =
           isoFromBlockTime(block.finalTime) ?? isoFromBlockTime(block.startTime);
-        const eventId = eventIdFor(sessionId, seq, `${messageIndex}:${blockIndex}:tool_result`);
+        const nativeEventId = `${messageIdentity}:${blockIndex}`;
+        const eventId = eventIdFor(sessionId, seq, nativeEventId);
         const outputValue = toolResultOutput(block.run as Record<string, unknown> | undefined);
         const output = projectToolPayloadNativeValue(block.run);
         const existing = toolCallsById.get(block.toolUseID);
@@ -803,6 +818,7 @@ const buildAmpSession = (
         toolCallsById.set(block.toolUseID, merged);
         events.push({
           id: eventId,
+          nativeEventId,
           sequence: seq,
           ...(blockTime !== undefined ? { timestamp: blockTime } : {}),
           role: "tool",
@@ -829,10 +845,12 @@ const buildAmpSession = (
           })
         : undefined;
       if (summaryDecision !== undefined && isSignal(summaryDecision)) {
-        const eventId = eventIdFor(sessionId, seq, `${messageIndex}:${blockIndex}:summary`);
+        const nativeEventId = `${messageIdentity}:${blockIndex}`;
+        const eventId = eventIdFor(sessionId, seq, nativeEventId);
         const text = summaryText(summaryDecision.value.summary);
         events.push({
           id: eventId,
+          nativeEventId,
           sequence: seq,
           role: "assistant",
           kind: "summary",
@@ -863,7 +881,8 @@ const buildAmpSession = (
           sourcePath: imageDecision.value.sourcePath,
         });
         if (sourceRef !== undefined) {
-          const eventId = eventIdFor(sessionId, seq, `${messageIndex}:${blockIndex}:image`);
+          const nativeEventId = `${messageIdentity}:${blockIndex}`;
+          const eventId = eventIdFor(sessionId, seq, nativeEventId);
           const source = imageDecision.value.source;
           const uri =
             source !== null && typeof source === "object" && !Array.isArray(source)
@@ -872,6 +891,7 @@ const buildAmpSession = (
               : undefined;
           events.push({
             id: eventId,
+            nativeEventId,
             sequence: seq,
             role,
             kind: "message",
