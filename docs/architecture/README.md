@@ -11,6 +11,10 @@ There is exactly **one current direction**:
 - **[Quasar — Data-Reality Plan](quasar-data-reality-plan-2026-06-11.md)** — still live
   as measured corpus evidence and normalized entity-model source: provider reality,
   turn-mapping rules, redaction requirements, and the store-at-read-grain lesson.
+- **[Quasar Session Contract and Projection Plan](quasar-session-contract-and-projections-2026-07-26.md)** —
+  the implementation sequence for making normalized source facts a versioned,
+  executable contract, repairing event-faithful reads, and deriving
+  agent-readable and benchmark interchange projections.
 
 Superseded (kept for provenance, no longer the direction):
 
@@ -24,5 +28,5 @@ Operational deployment lives outside this architecture folder:
   Mac mini Docker compose, Tailscale-IP access, persistent volumes, secrets, backup,
   restore, and launchd cutover.
 
-Abandoned architecture documents are not part of the active tree. Use the two
+Abandoned architecture documents are not part of the active tree. Use the three
 documents above plus the operations runbook as the current contract.
