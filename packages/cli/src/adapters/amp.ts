@@ -8,6 +8,7 @@ import { AmpSessionId, type SessionId } from "../core/identity";
 import type {
   AdapterDiagnostic,
   ContentBlock,
+  ExecutionContextRecord,
   SessionEventKind,
   SessionRole,
   ToolCall,
@@ -490,6 +491,11 @@ type AmpArtifactDraft = Omit<
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
 >;
 
+type AmpExecutionContextDraft = Omit<
+  ExecutionContextRecord,
+  "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
+>;
+
 const nonNegativeInteger = (value: number | undefined): number | undefined =>
   value !== undefined && Number.isInteger(value) && value >= 0 ? value : undefined;
 
@@ -539,6 +545,48 @@ const nativeMessageIdentity = (message: AmpExport["messages"][number], messageIn
   return `message:${messageIndex}`;
 };
 
+const nonEmptyString = (value: unknown): string | undefined =>
+  typeof value === "string" && value.length > 0 ? value : undefined;
+
+const sourceMetadataFor = (
+  message: AmpExport["messages"][number],
+  blockFacts: Readonly<Record<string, unknown>> = {},
+): NativeValue | undefined => {
+  const openAIResponsePhase = nonEmptyString(message.meta?.openAIResponsePhase);
+  const stateType = nonEmptyString(message.state?.type);
+  const stopReason = nonEmptyString(message.state?.stopReason);
+  const hasBlockFacts = Object.values(blockFacts).some((value) => value !== undefined);
+  if (!hasBlockFacts && openAIResponsePhase === undefined && stateType === undefined && stopReason === undefined) {
+    return undefined;
+  }
+  return projectToolPayloadNativeValue({
+    ...blockFacts,
+    ...(openAIResponsePhase !== undefined ? { openAIResponsePhase } : {}),
+    ...(stateType !== undefined || stopReason !== undefined
+      ? {
+          state: {
+            ...(stateType !== undefined ? { type: stateType } : {}),
+            ...(stopReason !== undefined ? { stopReason } : {}),
+          },
+        }
+      : {}),
+  });
+};
+
+const metadataContentBlock = (
+  sessionId: SessionId,
+  nativeEventId: string,
+  metadata: NativeValue | undefined,
+): readonly ContentBlock[] | undefined =>
+  metadata === undefined
+    ? undefined
+    : [{
+        id: scopedId(sessionId, "content", nativeEventId),
+        sequence: 0,
+        kind: "json",
+        metadata,
+      }];
+
 const toolCallStatusFromRun = (run: Record<string, unknown> | undefined): string | undefined => {
   if (run === undefined) return undefined;
   const status = run.status;
@@ -560,6 +608,7 @@ const buildAmpSession = (
   const toolCallsById = new Map<string, AmpToolCallDraft>();
   const usageRecords: AmpUsageDraft[] = [];
   const artifacts: AmpArtifactDraft[] = [];
+  const executionContexts: AmpExecutionContextDraft[] = [];
   let hasFatalBlockError = false;
   let seq = 0;
 
@@ -610,6 +659,11 @@ const buildAmpSession = (
         const contentText = compactText(block.text);
         const nativeEventId = `${messageIdentity}:${blockIndex}`;
         const eventId = eventIdFor(sessionId, seq, nativeEventId);
+        const metadata = sourceMetadataFor(message, {
+          startTime: block.startTime,
+          finalTime: block.finalTime,
+          blockState: block.blockState,
+        });
         events.push({
           id: eventId,
           nativeEventId,
@@ -623,6 +677,7 @@ const buildAmpSession = (
             sequence: 0,
             kind: "text",
             text: block.text,
+            ...(metadata !== undefined ? { metadata } : {}),
           }],
           rawReference: { sourcePath: url, line, nativeType: "text" },
         });
@@ -648,6 +703,12 @@ const buildAmpSession = (
         const contentText = compactText(block.thinking);
         const nativeEventId = `${messageIdentity}:${blockIndex}`;
         const eventId = eventIdFor(sessionId, seq, nativeEventId);
+        const metadata = sourceMetadataFor(message, {
+          startTime: block.startTime,
+          finalTime: block.finalTime,
+          provider: block.provider,
+          blockState: block.blockState,
+        });
         events.push({
           id: eventId,
           nativeEventId,
@@ -661,6 +722,7 @@ const buildAmpSession = (
             sequence: 0,
             kind: "thinking",
             thinking: block.thinking,
+            ...(metadata !== undefined ? { metadata } : {}),
           }],
           rawReference: { sourcePath: url, line, nativeType: "thinking" },
         });
@@ -687,13 +749,22 @@ const buildAmpSession = (
         const eventId = eventIdFor(sessionId, seq, nativeEventId);
         const toolCallId = scopedId(sessionId, "tool", block.id);
         const input = projectToolPayloadNativeValue(block.input);
+        const startTime = isoFromBlockTime(block.startTime);
+        const metadata = sourceMetadataFor(message, {
+          startTime: block.startTime,
+          finalTime: block.finalTime,
+          complete: block.complete,
+          blockState: block.blockState,
+          providerToolUseId: block.providerToolUseId,
+        });
+        const contentBlocks = metadataContentBlock(sessionId, nativeEventId, metadata);
         const draft: AmpToolCallDraft = {
           id: toolCallId,
           eventId,
           toolName: block.name,
           status: "started",
           ...(input !== undefined ? { input } : {}),
-          ...(blockTime !== undefined ? { startedAt: blockTime } : {}),
+          ...((startTime ?? blockTime) !== undefined ? { startedAt: startTime ?? blockTime } : {}),
         };
         toolCallsById.set(block.id, draft);
         events.push({
@@ -704,6 +775,7 @@ const buildAmpSession = (
           role: "assistant",
           kind: "tool_call",
           toolCallId,
+          ...(contentBlocks !== undefined ? { contentBlocks } : {}),
           rawReference: { sourcePath: url, line, nativeType: "tool_use" },
         });
         seq += 1;
@@ -730,6 +802,13 @@ const buildAmpSession = (
         const outputValue = toolResultOutput(block.run as Record<string, unknown> | undefined);
         const output = projectToolPayloadNativeValue(block.run);
         const runStatus = toolCallStatusFromRun(block.run as Record<string, unknown> | undefined);
+        const finalTime = isoFromBlockTime(block.finalTime);
+        const metadata = sourceMetadataFor(message, {
+          startTime: block.startTime,
+          finalTime: block.finalTime,
+          blockState: block.blockState,
+        });
+        const contentBlocks = metadataContentBlock(sessionId, nativeEventId, metadata);
         const existing = toolCallsById.get(block.toolUseID);
         const toolCallId = existing?.id ?? scopedId(sessionId, "tool", block.toolUseID);
         const merged: AmpToolCallDraft = {
@@ -740,7 +819,7 @@ const buildAmpSession = (
           ...(existing?.input !== undefined ? { input: existing.input } : {}),
           ...(output !== undefined ? { output } : {}),
           ...(existing?.startedAt !== undefined ? { startedAt: existing.startedAt } : {}),
-          ...(blockTime !== undefined ? { completedAt: blockTime } : {}),
+          ...((finalTime ?? blockTime) !== undefined ? { completedAt: finalTime ?? blockTime } : {}),
         };
         toolCallsById.set(block.toolUseID, merged);
         events.push({
@@ -754,6 +833,7 @@ const buildAmpSession = (
           ...(typeof outputValue === "string"
             ? { contentText: compactText(outputValue) }
             : {}),
+          ...(contentBlocks !== undefined ? { contentBlocks } : {}),
           rawReference: { sourcePath: url, line, nativeType: "tool_result" },
         });
         seq += 1;
@@ -775,6 +855,7 @@ const buildAmpSession = (
         const nativeEventId = `${messageIdentity}:${blockIndex}`;
         const eventId = eventIdFor(sessionId, seq, nativeEventId);
         const text = summaryText(summaryDecision.value.summary);
+        const metadata = sourceMetadataFor(message);
         events.push({
           id: eventId,
           nativeEventId,
@@ -789,6 +870,7 @@ const buildAmpSession = (
             sequence: 0,
             kind: "text",
             text,
+            ...(metadata !== undefined ? { metadata } : {}),
           }],
           rawReference: { sourcePath: url, line, nativeType: "summary" },
         });
@@ -815,6 +897,7 @@ const buildAmpSession = (
         if (sourceRef !== undefined) {
           const nativeEventId = `${messageIdentity}:${blockIndex}`;
           const eventId = eventIdFor(sessionId, seq, nativeEventId);
+          const imageTimestamp = role === "user" ? userTimestamp : undefined;
           const source = imageDecision.value.source;
           const uri =
             source !== null && typeof source === "object" && !Array.isArray(source)
@@ -825,6 +908,7 @@ const buildAmpSession = (
             id: eventId,
             nativeEventId,
             sequence: seq,
+            ...(imageTimestamp !== undefined ? { timestamp: imageTimestamp } : {}),
             role,
             kind: "message",
             contentBlocks: [{
@@ -882,6 +966,38 @@ const buildAmpSession = (
     ?? (typeof exported.title === "string" && exported.title.length > 0
       ? exported.title
       : undefined);
+  const reasoningEffort = nonEmptyString(exported.reasoningEffort);
+  if (reasoningEffort !== undefined) {
+    executionContexts.push({
+      id: scopedId(sessionId, "context", "session"),
+      sequence: 0,
+      scope: "session",
+      ...(startedAt !== undefined ? { timestamp: startedAt } : {}),
+      reasoningEffort,
+    });
+  }
+  const metaAgentMode = nonEmptyString(exported.meta?.agentMode);
+  const hasConfiguration =
+    exported.agentMode !== undefined
+    || metaAgentMode !== undefined
+    || exported.activatedSkills !== undefined
+    || exported.archived !== undefined;
+  const configuration = hasConfiguration
+    ? projectToolPayloadNativeValue({
+        agentMode: exported.agentMode,
+        metaAgentMode,
+        activatedSkills: exported.activatedSkills,
+        archived: exported.archived,
+      })
+    : undefined;
+  if (configuration !== undefined) {
+    artifacts.push({
+      id: scopedId(sessionId, "artifact", "amp-session-configuration"),
+      kind: "amp_session_configuration",
+      sourcePath: url,
+      sourceRef: configuration,
+    });
+  }
 
   const session = buildSession({
     provider: "amp",
@@ -900,6 +1016,7 @@ const buildAmpSession = (
     toolCalls: [...toolCallsById.values()],
     usageRecords,
     artifacts,
+    executionContexts,
   });
   return hasFatalBlockError ? undefined : session;
 };
