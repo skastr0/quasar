@@ -8,6 +8,27 @@ formats may still change.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-26
+
+### Added
+
+- Promoted Amp to a stable ingest provider with complete archived-thread
+  enumeration, server-coordinated fingerprint skips, and normalized messages,
+  reasoning, summaries, tools, usage, artifacts, and execution context.
+
+### Fixed
+
+- Preserved Amp source content and structural payloads, including native event
+  identities, tool status, image blocks, tool-search results, server tool use,
+  and manual shell invocations.
+- Made Amp normalization upgrades replay every unchanged thread exactly once,
+  then return to an idempotent no-op; a full 339-thread qualification completed
+  with zero failures and the immediate rerun skipped all 339.
+- Counted failed sessions independently from the number of diagnostics emitted
+  for one source.
+- Preserved Grok lifecycle, usage, summary, and interjection records introduced
+  by recent on-disk schema changes.
+
 ## [0.5.0] - 2026-07-23
 
 ### Added
