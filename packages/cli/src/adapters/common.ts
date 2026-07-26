@@ -332,15 +332,42 @@ export const projectSessionPatchNativeValue = (value: unknown): NativeValue | un
 
 /**
  * Tool payloads are stored in full. The ingest layer rejects provider garbage
- * with a named diagnostic. The adapter only redacts and prunes provider
- * machinery keys; it never truncates.
+ * with a named diagnostic. This boundary redacts secrets but preserves keys,
+ * structure, empty containers, string whitespace, and ordering-relevant array
+ * entries. Tool payloads are never search-indexed, so session-text pruning does
+ * not apply here.
  */
 export const projectToolPayloadNativeValue = (value: unknown): NativeValue | undefined => {
   const decoded = Option.getOrElse(
     Schema.decodeUnknownOption(NativeProjectionInputSchema)(value),
     () => value,
   );
-  return projectNativeValue(decoded);
+  return preserveRedactedNativeValue(redactSensitive(decoded));
+};
+
+const preserveRedactedNativeValue = (value: unknown): NativeValue | undefined => {
+  if (value === undefined) return undefined;
+  if (
+    value === null
+    || typeof value === "string"
+    || typeof value === "number"
+    || typeof value === "boolean"
+  ) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => {
+      const projected = preserveRedactedNativeValue(item);
+      return projected === undefined ? [] : [projected];
+    });
+  }
+  if (typeof value !== "object") return undefined;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).flatMap(([key, item]) => {
+      const projected = preserveRedactedNativeValue(item);
+      return projected === undefined ? [] : [[key, projected] as const];
+    }),
+  );
 };
 
 const shouldDropNativeKey = (key: string) =>
