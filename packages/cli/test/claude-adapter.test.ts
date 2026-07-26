@@ -11,6 +11,7 @@ import {
   ClaudeAgentSettingSchema,
   ClaudeAiTitleSchema,
   ClaudeAssistantRecordSchema,
+  ClaudeFileHistoryDeltaSchema,
   ClaudeFileHistorySnapshotSchema,
   ClaudeLastPromptSchema,
   ClaudeModeSchema,
@@ -574,6 +575,23 @@ describe("work-item attachment subtype dispatch", () => {
     expect(diags.some((x) => x.name === "claude.attachment.unknown_subtype")).toBe(false);
   });
 
+  test("attachment read_truncation_notice -> drop(bookkeeping), no unknown diagnostic", () => {
+    const diags: DecodeDiagnostic[] = [];
+    const rec = {
+      type: "attachment",
+      attachment: {
+        type: "read_truncation_notice",
+        banner: "Synthetic notice: Read output was truncated.",
+        toolUseID: "toolu_synthetic",
+      },
+      ...envelope,
+    };
+    const d = classifyClaudeRecord(rec, diags);
+    expect(d._tag).toBe("drop");
+    if (d._tag === "drop") expect(d.reason).toContain("truncation");
+    expect(diags.some((x) => x.name === "claude.attachment.unknown_subtype")).toBe(false);
+  });
+
   test("custom-title -> signal(summary)", () => {
     const rec = { type: "custom-title", sessionId: "s", customTitle: "prism session check" };
     const d = classifyClaudeRecord(rec, []);
@@ -601,6 +619,36 @@ describe("work-item attachment subtype dispatch", () => {
 // work-item / remaining top-level types.
 // ---------------------------------------------------------------------------
 describe("work-item top-level type dispatch", () => {
+  test("file-history-delta -> drop(bookkeeping), no unknown diagnostic", () => {
+    for (const backup of [
+      {
+        backupFileName: "synthetic.txt",
+        backupTime: FAB.ts,
+        realParentDir: "/Users/fixtureuser/fixtureapp",
+        version: 1,
+      },
+      {
+        backupFileName: null,
+        backupTime: FAB.ts,
+        version: 2,
+      },
+    ]) {
+      const diags: DecodeDiagnostic[] = [];
+      const rec = fromSchema(ClaudeFileHistoryDeltaSchema, {
+        type: "file-history-delta",
+        messageId: FAB.uuid,
+        snapshotMessageId: FAB.parentUuid,
+        timestamp: FAB.ts,
+        trackingPath: "/Users/fixtureuser/.claude/file-history/synthetic",
+        backup,
+      });
+      const d = classifyClaudeRecord(rec, diags);
+      expect(d._tag).toBe("drop");
+      if (d._tag === "drop") expect(d.reason).toContain("backup");
+      expect(diags.some((x) => x.name === "claude.unknown_type")).toBe(false);
+    }
+  });
+
   test("file-history-snapshot -> signal(snapshot)", () => {
     const rec = fromSchema(ClaudeFileHistorySnapshotSchema, {
       type: "file-history-snapshot",
@@ -843,6 +891,27 @@ describe("work-item end-to-end through the adapter", () => {
     { type: "assistant", sessionId: SID, uuid: "a2", parentUuid: "u1", message: { role: "assistant", model: "claude-synthetic-model", content: [{ type: "text", text: "syn 2" }] } },
     // drop: session ui bookkeeping (NOT an event)
     { type: "mode", sessionId: SID, mode: "default" },
+    // drop: provider file-history backup metadata (NOT an event)
+    {
+      type: "file-history-delta",
+      messageId: "u1",
+      snapshotMessageId: "snap1",
+      timestamp: NOW,
+      trackingPath: "/Users/fixtureuser/.claude/file-history/synthetic",
+      backup: { backupFileName: "synthetic.txt", backupTime: NOW, version: 1 },
+    },
+    // drop: provider Read-tool truncation bookkeeping (NOT an event)
+    {
+      type: "attachment",
+      sessionId: SID,
+      uuid: "a3",
+      parentUuid: "a2",
+      attachment: {
+        type: "read_truncation_notice",
+        banner: "Synthetic notice: Read output was truncated.",
+        toolUseID: "toolu_synthetic",
+      },
+    },
   ];
   writeFileSync(join(projectDir, `${SID}.jsonl`), records.map((r) => JSON.stringify(r)).join("\n"));
 
@@ -850,10 +919,11 @@ describe("work-item end-to-end through the adapter", () => {
     const result = await claudeAdapter.read({ machine: MACHINE, now: NOW, roots: { claude: root } });
     expect(result.sessions).toHaveLength(1);
     const session = result.sessions[0]!;
-    // 7 on-disk records -> 2 kept events (user + assistant).
+    // 9 on-disk records -> 2 kept events (user + assistant).
     expect(session.events).toHaveLength(2);
     expect(session.events.map((e) => e.kind)).toEqual(["message", "message"]);
     expect(session.events.map((e) => e.role)).toEqual(["user", "assistant"]);
+    expect(result.diagnostics.some((diagnostic) => diagnostic.status === "error")).toBe(false);
   });
 
   test("preserves measured assignment records and message model as typed session facts", async () => {

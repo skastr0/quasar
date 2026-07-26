@@ -23,8 +23,9 @@ import {
  *
  * Inventory grounded against the real root (`~/.claude/projects/**.jsonl`):
  *   top-level types : user, assistant, system, attachment, file-history-snapshot,
- *                     last-prompt, mode, permission-mode, ai-title, custom-title,
- *                     frame-link, queue-operation, agent-setting, agent-name
+ *                     file-history-delta, last-prompt, mode, permission-mode,
+ *                     ai-title, custom-title, frame-link, queue-operation,
+ *                     agent-setting, agent-name
  *   system subtypes : turn_duration, away_summary, stop_hook_summary,
  *                     local_command, compact_boundary, api_error,
  *                     scheduled_task_fire, informational, model_refusal_fallback
@@ -35,7 +36,7 @@ import {
  *                     plan_mode_exit, plan_mode_reentry, workflow_keyword_request,
  *                     budget_usd, invoked_skills, plan_file_reference,
  *                     compact_file_reference, directory, nested_memory,
- *                     structured_output, context_tip
+ *                     structured_output, context_tip, read_truncation_notice
  *   (`journal.jsonl` run-manifest files are excluded upstream — never reach here.)
  *
  * The kinds emitted here are the canonical `SessionEventKind` literals (see
@@ -364,7 +365,8 @@ export type ClaudeAttachmentSubtype =
   | "directory"
   | "nested_memory"
   | "structured_output"
-  | "context_tip";
+  | "context_tip"
+  | "read_truncation_notice";
 
 /**
  * Per-attachment-subtype verdict: subtypes carrying real user/assistant content
@@ -414,10 +416,11 @@ const ATTACHMENT_VERDICT: Record<
   budget_usd: { reason: "harness bookkeeping: spend budget snapshot" },
   // A UI hint the harness injects (a `tip` string), not user/model turn content.
   context_tip: { reason: "harness bookkeeping: contextual usage tip injection" },
+  read_truncation_notice: { reason: "harness bookkeeping: tool-read truncation notice" },
 };
 
 // ---------------------------------------------------------------------------
-// file-history-snapshot
+// file-history snapshot/delta
 // ---------------------------------------------------------------------------
 
 export const ClaudeFileHistorySnapshotSchema = Schema.Struct({
@@ -427,6 +430,21 @@ export const ClaudeFileHistorySnapshotSchema = Schema.Struct({
   snapshot: Schema.Unknown,
 });
 export type ClaudeFileHistorySnapshot = typeof ClaudeFileHistorySnapshotSchema.Type;
+
+export const ClaudeFileHistoryDeltaSchema = Schema.Struct({
+  type: Schema.Literal("file-history-delta"),
+  messageId: Schema.String,
+  snapshotMessageId: Schema.String,
+  timestamp: Schema.String,
+  trackingPath: Schema.String,
+  backup: Schema.Struct({
+    backupFileName: Schema.NullOr(Schema.String),
+    backupTime: Schema.String,
+    realParentDir: Schema.optional(Schema.String),
+    version: Schema.Number,
+  }),
+});
+export type ClaudeFileHistoryDelta = typeof ClaudeFileHistoryDeltaSchema.Type;
 
 // ---------------------------------------------------------------------------
 // session-scoped bookkeeping records (all carry a sessionId, no conversation)
@@ -783,6 +801,13 @@ export const classifyClaudeRecord = (
         diagnosticName: CLAUDE_SNAPSHOT_DECODE_FAILED,
         diagnostics,
       });
+    case "file-history-delta":
+      return bookkeepingDrop(
+        ClaudeFileHistoryDeltaSchema,
+        record,
+        "harness bookkeeping: file-history backup delta",
+        diagnostics,
+      );
     case "ai-title":
       return decodeOrDrop(ClaudeAiTitleSchema, record, {
         kind: "summary" as const,
