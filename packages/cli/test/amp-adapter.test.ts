@@ -453,6 +453,32 @@ describe("amp content mapping", () => {
     expect(mapped.messages.length).toBeGreaterThan(0);
   });
 
+  test("preserves protocol message identity for every block event through mapSession", async () => {
+    const exported = {
+      ...recentExport,
+      messages: [{
+        role: "assistant",
+        protocolMessageID: "protocol-unique",
+        messageId: 42,
+        content: [
+          { type: "text", text: "one" },
+          { type: "thinking", thinking: "two" },
+          { type: "summary", summary: { type: "summary", summary: "three" } },
+          { type: "image", sourcePath: "four.png" },
+        ],
+      }],
+    };
+    const items = [];
+    for await (const item of ampAdapter.stream!({ machine: MACHINE_A, now: NOW, ampRunner: fixtureRunner({ [THREAD_A]: exported }), ampSleep: noSleep, exportSpacingMs: 0, limit: 1 } as AmpStreamOptions)) items.push(item);
+    const sessionItem = items.find((item) => item.type === "session");
+    if (sessionItem?.type !== "session") throw new Error("expected session");
+    expect(sessionItem.session.events.map((event) => event.nativeEventId)).toEqual([
+      "protocol-unique:0", "protocol-unique:1", "protocol-unique:2", "protocol-unique:3",
+    ]);
+    const mapped = mapSession(sessionItem.session, JSON.stringify(sessionItem.fingerprint));
+    expect(mapped.messages).toHaveLength(3);
+  });
+
   test("maps measured usage, nested summary, and image attachment metadata", async () => {
     const exportWithNonText = {
       ...recentExport,
