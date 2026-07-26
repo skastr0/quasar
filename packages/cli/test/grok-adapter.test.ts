@@ -35,6 +35,10 @@ import {
   GrokEvtMcpToolCallStarted,
   GrokEvtMcpToolCallCompleted,
   GrokEvtMcpOauthDiscoveryTimeout,
+  GrokEvtMcpHealthCheck,
+  GrokEvtGoalClassifierFailOpen,
+  GrokEvtMcpTransportDecodeError,
+  GrokEvtInterjected,
   GrokUpdToolCall,
   GrokUpdToolCallUpdate,
   GrokUpdAvailableCommands,
@@ -44,6 +48,9 @@ import {
   GrokUpdRetryState,
   GrokUpdTaskBackgrounded,
   GrokUpdTaskCompleted,
+  GrokUpdTurnCompleted,
+  GrokUpdSessionRecap,
+  GrokUpdHookExecution,
   GrokUpdSubagentSpawned,
   GrokUpdSubagentFinished,
   GrokUpdAutoCompactStarted,
@@ -484,6 +491,10 @@ describe("QSR-220 grok full data fidelity: declarative signal/drop dispatch", ()
     ["mcp_config_resolved", fromSchema(GrokEvtMcpConfigResolved, { type: "mcp_config_resolved" }), "grok.drop.mcp_config_telemetry"],
     ["mcp_init_completed", fromSchema(GrokEvtMcpInitCompleted, { type: "mcp_init_completed", total_servers: 0 }), "grok.drop.mcp_config_telemetry"],
     ["mcp_oauth_discovery_timeout", fromSchema(GrokEvtMcpOauthDiscoveryTimeout, { type: "mcp_oauth_discovery_timeout", server_name: "fab-server-zzz" }), "grok.drop.mcp_oauth_telemetry"],
+    ["mcp_health_check", fromSchema(GrokEvtMcpHealthCheck, { type: "mcp_health_check", ts: NOW, server_name: "fab-server-zzz", client_state: "connected", healthy: true } as const), "grok.drop.mcp_health_telemetry"],
+    ["goal_classifier_fail_open", fromSchema(GrokEvtGoalClassifierFailOpen, { type: "goal_classifier_fail_open", ts: NOW, attempt: 1, latency_ms: 12, reason: "synthetic" } as const), "grok.drop.goal_classifier_telemetry"],
+    ["mcp_transport_decode_error", fromSchema(GrokEvtMcpTransportDecodeError, { type: "mcp_transport_decode_error", ts: NOW, server_name: "fab-server-zzz", error: "synthetic", sample: "provider transport evidence" } as const), "grok.drop.mcp_transport_error_telemetry"],
+    ["interjected", fromSchema(GrokEvtInterjected, { type: "interjected", ts: NOW, image_count: 1, redirect_kind: "synthetic", source: "synthetic" } as const), "grok.drop.queue_interjection_telemetry"],
   ];
   for (const [name, record, reason] of dropEventCases) {
     test(`event ${name} -> drop(${reason})`, () => {
@@ -498,6 +509,9 @@ describe("QSR-220 grok full data fidelity: declarative signal/drop dispatch", ()
     "retry_state",
     "task_backgrounded",
     "task_completed",
+    "turn_completed",
+    "session_recap",
+    "hook_execution",
     "subagent_spawned",
     "subagent_finished",
     "auto_compact_started",
@@ -518,6 +532,7 @@ describe("QSR-220 grok full data fidelity: declarative signal/drop dispatch", ()
     ["retry_state", upd(GrokUpdRetryState, "retry_state", { attempt: 1, max_retries: 3 }), "lifecycle"],
     ["task_backgrounded", upd(GrokUpdTaskBackgrounded, "task_backgrounded", { task_id: "fab-task-zzz" }), "lifecycle"],
     ["task_completed", upd(GrokUpdTaskCompleted, "task_completed", { task_snapshot: { id: "fab-task-zzz" } }), "lifecycle"],
+    ["session_recap", upd(GrokUpdSessionRecap, "session_recap", { summary: "synthetic recap prose", auto: true }), "summary"],
     ["subagent_spawned", upd(GrokUpdSubagentSpawned, "subagent_spawned", { subagent_id: "fab-subagent-zzz", subagent_type: "fab-explore-role", child_session_id: "fab-child-zzz" }), "lifecycle"],
     ["subagent_finished", upd(GrokUpdSubagentFinished, "subagent_finished", { subagent_id: "fab-subagent-zzz", status: "completed" }), "lifecycle"],
     ["auto_compact_started", upd(GrokUpdAutoCompactStarted, "auto_compact_started", { reason: "synthetic", tokens_used: 1 }), "lifecycle"],
@@ -535,6 +550,8 @@ describe("QSR-220 grok full data fidelity: declarative signal/drop dispatch", ()
   const dropUpdateCases: ReadonlyArray<readonly [string, unknown, string]> = [
     ["available_commands_update", upd(GrokUpdAvailableCommands, "available_commands_update", { availableCommands: [] }), "grok.drop.command_palette_ui"],
     ["current_mode_update", upd(GrokUpdCurrentMode, "current_mode_update", { currentModeId: "plan" }), "grok.drop.ui_mode_toggle"],
+    ["turn_completed", upd(GrokUpdTurnCompleted, "turn_completed", { prompt_id: "fab-prompt-zzz", stop_reason: "completed" }), "grok.drop.turn_usage_telemetry"],
+    ["hook_execution", upd(GrokUpdHookExecution, "hook_execution", { event_name: "synthetic", runs: [] }), "grok.drop.hook_execution_telemetry"],
   ];
   for (const [name, record, reason] of dropUpdateCases) {
     test(`update ${name} -> drop(${reason})`, () => {
@@ -678,6 +695,45 @@ describe("QSR-220 grok adapter end-to-end: signal kept, telemetry dropped, garba
       // ingest still produced the session (available diagnostic present too).
       expect(result.diagnostics.some((d) => d.status === "error")).toBe(true);
       expect(result.diagnostics.some((d) => d.status === "available")).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("grok schema drift: recap signal and telemetry drops", () => {
+  const SESSION_UUID = "01900000-0000-7000-8000-0000fab1d12f";
+  const PROJECT_KEY = encodeURIComponent("/repo/fab-grok-schema-drift");
+
+  test("keeps session recap prose and fail-closed drops all six telemetry records without diagnostics", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-grok-schema-drift-"));
+    try {
+      const sessionDir = join(root, "sessions", PROJECT_KEY, SESSION_UUID);
+      mkdirSync(sessionDir, { recursive: true });
+      writeJsonLines(join(sessionDir, "chat_history.jsonl"), [
+        { type: "user", content: "synthetic user prompt" },
+      ]);
+      writeJsonLines(join(sessionDir, "events.jsonl"), [
+        { type: "mcp_health_check", ts: NOW, server_name: "fab-server-zzz", client_state: "connected", healthy: true },
+        { type: "goal_classifier_fail_open", ts: NOW, attempt: 1, latency_ms: 12, reason: "synthetic" },
+        { type: "mcp_transport_decode_error", ts: NOW, server_name: "fab-server-zzz", error: "synthetic", sample: "provider transport evidence" },
+        { type: "interjected", ts: NOW, image_count: 1, redirect_kind: "synthetic", source: "synthetic" },
+      ]);
+      writeJsonLines(join(sessionDir, "updates.jsonl"), [
+        { method: "_x.ai/session/update", timestamp: 1, params: { sessionId: SESSION_UUID, update: { sessionUpdate: "turn_completed", prompt_id: "fab-prompt-zzz", stop_reason: "completed", usage: { inputTokens: 0, outputTokens: 1, totalTokens: 1, cachedReadTokens: 0, reasoningTokens: 0, modelCalls: 1, apiDurationMs: 1, modelUsage: {}, numTurns: 1 } } } },
+        { method: "_x.ai/session/update", timestamp: 2, params: { sessionId: SESSION_UUID, update: { sessionUpdate: "session_recap", summary: "synthetic recap prose", auto: true } } },
+        { method: "_x.ai/session/update", timestamp: 3, params: { sessionId: SESSION_UUID, update: { sessionUpdate: "hook_execution", event_name: "synthetic", runs: [] } } },
+      ]);
+
+      const result = await grokAdapter.read({ machine: MACHINE, now: NOW, roots: { grok: root } });
+      expect(result.sessions).toHaveLength(1);
+      const session = result.sessions[0]!;
+      expect(session.events.map((event) => event.kind).sort()).toEqual(["message", "summary"]);
+      expect(session.events).toContainEqual(
+        expect.objectContaining({ kind: "summary", contentText: "synthetic recap prose" }),
+      );
+      expect(session.events.some((event) => event.kind === "unknown")).toBe(false);
+      expect(result.diagnostics.some((diagnostic) => diagnostic.status === "error")).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
