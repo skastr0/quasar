@@ -9,6 +9,7 @@ import type { QuerySpec } from "@skastr0/quasar-protocol";
 import { parseCliArguments } from "./argv";
 import { configuredIngestToken, configuredServerUrl, defaultClientConfigPath } from "./client-config";
 import { Provider } from "./core/schemas";
+import { daemonIngestProcess } from "./daemon-process";
 import { ingestFailureError, ingestReportPayload } from "./ingest-report";
 import { ingestRemote } from "./ingest";
 import { fail, ok, writeJson } from "./json";
@@ -310,9 +311,10 @@ const runDaemonTick = () => {
     cleanup();
     throw new Error("daemon run requires QUASAR_SERVER_URL and QUASAR_INGEST_TOKEN");
   }
-  const result = spawnSync(binary, ["ingest", "--provider", "all", "--summary", "--server", serverUrl, "--ingest-token", ingestToken], {
+  const child = daemonIngestProcess(serverUrl, ingestToken);
+  const result = spawnSync(binary, child.args, {
     stdio: "inherit",
-    env: process.env,
+    env: child.env,
   });
   cleanup();
   process.exit(result.status ?? (result.signal === null ? 1 : 128));
