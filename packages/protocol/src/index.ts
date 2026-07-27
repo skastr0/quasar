@@ -25,10 +25,15 @@ import {
   lettaTrajectoryExamples,
   trajectoryExamples,
 } from "./trajectory";
+import {
+  RESEARCH_EXPORT_PROTOCOL_VERSION,
+  ResearchExportFrame,
+} from "./research-export";
 
 export * from "./normalized-session";
 export * from "./trajectory";
 export * from "./atif";
+export * from "./research-export";
 
 export const QUERY_PROTOCOL_VERSION = "quasar.query/v1" as const;
 export const SESSION_ENRICHMENT_VERSION = "quasar.session-enrichment/v1" as const;
@@ -862,6 +867,28 @@ export const protocolContracts = {
       "Strict ATIF-v1.7 output plus fact-level compatibility and validation reporting.",
     schema: AtifTrajectoryExport,
     examples: atifTrajectoryExamples,
+  }),
+  researchExport: defineContract({
+    schemaId: RESEARCH_EXPORT_PROTOCOL_VERSION,
+    title: "Quasar reproducible research export frame v1",
+    description:
+      "Strict NDJSON frames for bounded message-and-trajectory shards tied to a persistent corpus snapshot.",
+    schema: ResearchExportFrame,
+    examples: [{
+      name: "research export manifest frame",
+      input: {
+        protocolVersion: RESEARCH_EXPORT_PROTOCOL_VERSION,
+        kind: "manifest",
+        snapshot: "corpus-example:7",
+        filters: { projectKey: "quasar", providers: ["codex"] },
+        page: { limit: 100, after: null },
+        trajectoryScope: "first-matching-message-in-scan",
+        trajectoryProjection: {
+          includeReasoning: true,
+          includeToolResults: true,
+        },
+      },
+    }],
   }),
   query: defineContract({
     schemaId: QUERY_PROTOCOL_VERSION,

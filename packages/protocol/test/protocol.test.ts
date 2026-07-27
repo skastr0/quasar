@@ -5,6 +5,7 @@ import {
   HARBOR_ATIF_UPSTREAM_COMMIT,
   HARBOR_ATIF_VERSION,
   NORMALIZED_SESSION_PROTOCOL_VERSION,
+  RESEARCH_EXPORT_PROTOCOL_VERSION,
   QUASAR_TRAJECTORY_VERSION,
   QUERY_PROTOCOL_VERSION,
   QuerySpec,
@@ -1098,11 +1099,12 @@ describe("SessionEnrichment v1", () => {
       "quasar.trajectory.letta-export/v1",
       HARBOR_ATIF_SCHEMA_ID,
       "quasar.trajectory.atif-export/v1",
+      RESEARCH_EXPORT_PROTOCOL_VERSION,
       QUERY_PROTOCOL_VERSION,
       "quasar.query-response/v1",
       SESSION_ENRICHMENT_VERSION,
     ]);
-    expect(protocolExamples.length).toBe(13);
+    expect(protocolExamples.length).toBe(14);
     expect(protocolExamples.every((example) => example.schemaId.length > 0)).toBe(true);
   });
 });
