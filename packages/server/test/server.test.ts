@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import {
   NORMALIZED_SESSION_PROTOCOL_VERSION,
+  SESSION_ENRICHMENT_VERSION,
   decodeResearchExportFrameSync,
 } from "@skastr0/quasar-protocol";
 import { Effect } from "effect";
@@ -222,6 +223,154 @@ describe("HTTP server resources", () => {
       expect(forced.data.outcome.status).toBe("ok");
       expect(messages.data.rows.map((row: { text: string }) => row.text)).toEqual(["forced http rewrite", "assistant-only http memory"]);
     } finally { proc.kill(); await proc.exited; }
+  });
+
+  test("session enrichment writes replace deterministically and survive source re-ingest", async () => {
+    const dir = tempDir();
+    const sqlite = join(dir, "quasar.sqlite");
+    const root = mappedSession();
+    const child = descendantSession(
+      "codex:session-http:child",
+      root.session.sessionId,
+    );
+    await seed(sqlite, [root, child]);
+    const { proc, base } = startServer(sqlite, "test-ingest-token");
+    const enrichment = (
+      sessionId: string,
+      namespace: string,
+      overrides: Record<string, unknown> = {},
+    ) => ({
+      protocolVersion: SESSION_ENRICHMENT_VERSION,
+      sessionId,
+      namespace,
+      schemaVersion: 1,
+      producer: "research-analyzer@1",
+      inputHash: `sha256:${sessionId}:v1`,
+      payload: { verdict: "initial" },
+      updatedAt: "2026-07-27T12:00:00.000Z",
+      ...overrides,
+    });
+    const write = async (body: unknown, token = "test-ingest-token") => {
+      const response = await fetch(`${base}/session-enrichments`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-quasar-ingest-token": token,
+        },
+        body: JSON.stringify(body),
+      });
+      return { response, body: await response.json() };
+    };
+
+    try {
+      await waitFor(`${base}/health`);
+      const unauthorized = await write(
+        enrichment(root.session.sessionId, "quasar.analysis.alpha"),
+        "wrong-token",
+      );
+      expect(unauthorized.response.status).toBe(401);
+
+      const invalid = await write({
+        ...enrichment(root.session.sessionId, "quasar.analysis.alpha"),
+        sourceFacts: { provider: "must remain separate" },
+      });
+      expect(invalid.response.status).toBe(400);
+
+      const initial = enrichment(
+        root.session.sessionId,
+        "quasar.analysis.alpha",
+      );
+      const replacement = enrichment(
+        root.session.sessionId,
+        "quasar.analysis.alpha",
+        {
+          schemaVersion: 2,
+          producer: "research-analyzer@2",
+          inputHash: "sha256:root:v2",
+          payload: { verdict: "replacement" },
+          updatedAt: "2026-07-27T12:01:00.000Z",
+        },
+      );
+      const zeta = enrichment(
+        root.session.sessionId,
+        "quasar.analysis.zeta",
+      );
+      const childAlpha = enrichment(
+        child.session.sessionId,
+        "quasar.analysis.alpha",
+      );
+
+      expect((await write(initial)).response.status).toBe(200);
+      const replaced = await write(replacement);
+      const replayed = await write(replacement);
+      expect(replaced.response.status).toBe(200);
+      expect(replayed.body).toEqual(replaced.body);
+      expect((await write(zeta)).response.status).toBe(200);
+      expect((await write(childAlpha)).response.status).toBe(200);
+
+      const firstResponse = await fetch(
+        `${base}/session-enrichments?projectKey=project-http&limit=1`,
+      );
+      expect(firstResponse.status).toBe(200);
+      const first = await firstResponse.json();
+      expect(first.data.rows).toEqual([replacement]);
+      expect(first.data.page).toEqual({
+        returned: 1,
+        nextCursor: expect.any(String),
+      });
+
+      const continuation = new URLSearchParams({
+        projectKey: "project-http",
+        limit: "2",
+        cursor: first.data.page.nextCursor,
+      });
+      const secondResponse = await fetch(
+        `${base}/session-enrichments?${continuation}`,
+      );
+      expect(secondResponse.status).toBe(200);
+      const second = await secondResponse.json();
+      expect(second.data.rows).toEqual([zeta, childAlpha]);
+      expect(second.data.page).toEqual({ returned: 2 });
+
+      const mismatched = new URLSearchParams({
+        projectKey: "project-http",
+        namespace: "quasar.analysis.alpha",
+        limit: "1",
+        cursor: first.data.page.nextCursor,
+      });
+      const mismatchResponse = await fetch(
+        `${base}/session-enrichments?${mismatched}`,
+      );
+      expect(mismatchResponse.status).toBe(400);
+      expect(await mismatchResponse.json()).toMatchObject({
+        error: {
+          message: expect.stringContaining("does not match"),
+        },
+      });
+
+      const reingest = await fetch(`${base}/ingest/session?force=true`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-quasar-ingest-token": "test-ingest-token",
+        },
+        body: JSON.stringify({
+          session: mappedSession({
+            fingerprint: "fingerprint-http-reingested",
+            firstText: "re-ingested source text",
+          }),
+        }),
+      });
+      expect(reingest.status).toBe(200);
+
+      const preserved = await fetch(
+        `${base}/session-enrichments?sessionId=${encodeURIComponent(root.session.sessionId)}&namespace=quasar.analysis.alpha&producer=research-analyzer%402&inputHash=sha256%3Aroot%3Av2&limit=10`,
+      ).then((response) => response.json());
+      expect(preserved.data.rows).toEqual([replacement]);
+    } finally {
+      proc.kill();
+      await proc.exited;
+    }
   });
 
   test("GET messages scans globally and continues from a stable keyset page", async () => {

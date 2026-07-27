@@ -2,7 +2,10 @@ import { HttpMiddleware, HttpRouter, HttpServer, HttpServerRequest, HttpServerRe
 import { BunHttpServer, BunRuntime } from "@effect/platform-bun";
 import {
   NORMALIZED_SESSION_PROTOCOL_VERSION,
+  SESSION_ENRICHMENT_VERSION,
   decodeMappedSessionSync,
+  decodeSessionEnrichment,
+  decodeSessionEnrichmentFilters,
   projectQuasarTrajectory,
   toAtifTrajectory,
   toLettaTrajectory,
@@ -28,6 +31,10 @@ import {
 } from "./query";
 import { makeResearchExportStream } from "./researchExport";
 import { AppLayer } from "./runtime";
+import {
+  SessionEnrichmentCursorError,
+  executeSessionEnrichmentQuery,
+} from "./sessionEnrichment";
 import { DurableQueue, Embeddings, IngestCoordinator, WorkerSupervisor } from "./services";
 import { LocalStore, StoredSessionContractError } from "./store";
 import { VectorMatrix } from "./vectorMatrix";
@@ -884,6 +891,126 @@ const toolCall = Effect.gen(function* () {
   return result.row === undefined ? notFound("tool-call", `tool call not found: ${id}`) : json(ok("tool-call", { row: result.row }));
 });
 
+const sessionEnrichments = Effect.gen(function* () {
+  const params = yield* query;
+  const invalid = queryParamError(
+    "session-enrichments",
+    params,
+    new Set([
+      "projectKey",
+      "sessionId",
+      "namespace",
+      "producer",
+      "inputHash",
+      "limit",
+      "cursor",
+    ]),
+  );
+  if (invalid !== undefined) return invalid;
+
+  const limitRaw = params.get("limit");
+  const limit = limitRaw === null ? 100 : Number(limitRaw);
+  if (
+    !Number.isSafeInteger(limit)
+    || limit < 1
+    || limit > RESOURCE_PAGE_MAXIMUM
+  ) {
+    return badRequest(
+      "session-enrichments",
+      `limit must be an integer from 1 to ${RESOURCE_PAGE_MAXIMUM}`,
+    );
+  }
+  const cursor = params.get("cursor") ?? undefined;
+  if (cursor !== undefined && cursor.trim() === "") {
+    return badRequest(
+      "session-enrichments",
+      "cursor must not be empty",
+    );
+  }
+  const filtersResult = yield* decodeSessionEnrichmentFilters({
+    projectKey: params.get("projectKey") ?? undefined,
+    sessionId: params.get("sessionId") ?? undefined,
+    namespace: params.get("namespace") ?? undefined,
+    producer: params.get("producer") ?? undefined,
+    inputHash: params.get("inputHash") ?? undefined,
+  }).pipe(Effect.either);
+  if (filtersResult._tag === "Left") {
+    return badRequest(
+      "session-enrichments",
+      "session enrichment filters failed strict decode",
+    );
+  }
+  const page = yield* executeSessionEnrichmentQuery({
+    filters: filtersResult.right,
+    limit,
+    ...(cursor === undefined ? {} : { cursor }),
+  }).pipe(Effect.either);
+  if (page._tag === "Left") {
+    return page.left instanceof SessionEnrichmentCursorError
+      ? badRequest("session-enrichments", page.left.message)
+      : internalError(
+          "session-enrichments",
+          "session enrichment query failed",
+        );
+  }
+  return json(ok("session-enrichments", page.right));
+});
+
+const sessionEnrichmentWrite = Effect.gen(function* () {
+  const request = yield* HttpServerRequest.HttpServerRequest;
+  const requiredToken = configuredIngestToken();
+  if (requiredToken === undefined) {
+    return serviceUnavailable(
+      "session-enrichments",
+      "QUASAR_INGEST_TOKEN must be configured before enrichment writes are enabled",
+    );
+  }
+  if (requestIngestToken(request) !== requiredToken) {
+    return unauthorized(
+      "session-enrichments",
+      "valid x-quasar-ingest-token header is required",
+    );
+  }
+  const bodyResult = yield* Effect.either(
+    HttpServerRequest.schemaBodyJson(Schema.Unknown),
+  );
+  if (bodyResult._tag === "Left") {
+    return badRequest(
+      "session-enrichments",
+      "request body must be valid JSON",
+    );
+  }
+  if (
+    isRecord(bodyResult.right)
+    && bodyResult.right.protocolVersion !== undefined
+    && bodyResult.right.protocolVersion !== SESSION_ENRICHMENT_VERSION
+  ) {
+    return badRequest(
+      "session-enrichments",
+      `expected ${SESSION_ENRICHMENT_VERSION}`,
+    );
+  }
+  const enrichmentResult = yield* decodeSessionEnrichment(
+    bodyResult.right,
+  ).pipe(Effect.either);
+  if (enrichmentResult._tag === "Left") {
+    return badRequest(
+      "session-enrichments",
+      `request body failed ${SESSION_ENRICHMENT_VERSION} strict decode`,
+    );
+  }
+  const store = yield* LocalStore;
+  const row = yield* store.upsertSessionEnrichment(
+    enrichmentResult.right,
+  );
+  return row === undefined
+    ? notFound(
+        "session-enrichments",
+        `session not found: ${enrichmentResult.right.sessionId}`,
+      )
+    : json(ok("session-enrichment-write", { row }));
+});
+
 const SEARCH_TEXT_MAXIMUM_BYTES = 2_000;
 
 const utf8PrefixAtMost = (text: string, maximumBytes: number) => {
@@ -1184,7 +1311,7 @@ const DASHBOARD_HTML = `<!doctype html>
 
 const dashboard = HttpServerResponse.html(DASHBOARD_HTML);
 
-const routes = HttpRouter.empty.pipe(
+const resourceRoutes = HttpRouter.empty.pipe(
   HttpRouter.get("/health", health),
   HttpRouter.get("/ready", ready),
   HttpRouter.get("/status", status),
@@ -1196,11 +1323,16 @@ const routes = HttpRouter.empty.pipe(
   HttpRouter.get("/messages", messages),
   HttpRouter.get("/tool-calls", toolCalls),
   HttpRouter.get("/tool-call", toolCall),
+  HttpRouter.get("/session-enrichments", sessionEnrichments),
+  HttpRouter.post("/session-enrichments", sessionEnrichmentWrite),
   HttpRouter.get("/search/lexical", lexicalSearch),
   HttpRouter.get("/search/semantic", semanticSearch),
   HttpRouter.get("/search/fusion", fusionSearch),
   HttpRouter.get("/ingest-runs", ingestRuns),
   HttpRouter.get("/ingest-run", ingestRun),
+);
+
+const routes = resourceRoutes.pipe(
   HttpRouter.post("/ingest/fingerprint", ingestFingerprint),
   HttpRouter.post("/ingest/run", ingestRunWrite),
   HttpRouter.post("/ingest/session", ingestSession),

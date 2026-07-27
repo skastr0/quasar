@@ -615,6 +615,59 @@ export type SessionEnrichmentEncoded = typeof SessionEnrichment.Encoded;
 export const decodeSessionEnrichment = Schema.decodeUnknown(SessionEnrichment, strictParseOptions);
 export const decodeSessionEnrichmentSync = Schema.decodeUnknownSync(SessionEnrichment, strictParseOptions);
 
+export const SessionEnrichmentFilters = Schema.Struct({
+  projectKey: Schema.optional(ProjectKey),
+  sessionId: Schema.optional(SessionId),
+  namespace: Schema.optional(EnrichmentNamespace),
+  producer: Schema.optional(Producer),
+  inputHash: Schema.optional(InputHash),
+}).annotations({
+  identifier: "QuasarSessionEnrichmentFiltersV1",
+  title: "Quasar SessionEnrichment filters v1",
+  description:
+    "Exact filters for bounded enumeration of current session enrichment records.",
+  parseOptions: strictParseOptions,
+});
+export type SessionEnrichmentFilters =
+  typeof SessionEnrichmentFilters.Type;
+
+export const decodeSessionEnrichmentFilters = Schema.decodeUnknown(
+  SessionEnrichmentFilters,
+  strictParseOptions,
+);
+export const decodeSessionEnrichmentFiltersSync = Schema.decodeUnknownSync(
+  SessionEnrichmentFilters,
+  strictParseOptions,
+);
+
+export const SessionEnrichmentPage = Schema.Struct({
+  rows: Schema.Array(SessionEnrichment),
+  page: ResponsePage,
+}).pipe(
+  Schema.filter(
+    ({ rows, page }) =>
+      rows.length === page.returned
+        || "page.returned must equal rows.length",
+  ),
+  Schema.annotations({
+    identifier: "QuasarSessionEnrichmentPageV1",
+    title: "Quasar SessionEnrichment page v1",
+    description:
+      "A bounded deterministic page of current session enrichment records.",
+    parseOptions: strictParseOptions,
+  }),
+);
+export type SessionEnrichmentPage = typeof SessionEnrichmentPage.Type;
+
+export const decodeSessionEnrichmentPage = Schema.decodeUnknown(
+  SessionEnrichmentPage,
+  strictParseOptions,
+);
+export const decodeSessionEnrichmentPageSync = Schema.decodeUnknownSync(
+  SessionEnrichmentPage,
+  strictParseOptions,
+);
+
 const queryExamples = [
   {
     name: "fusion search summary",
