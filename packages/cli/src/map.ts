@@ -13,7 +13,10 @@ import type {
 } from "./core/schemas";
 
 import type { MappedSession, MessageRole } from "./model";
-import { NORMALIZED_SESSION_PROTOCOL_VERSION } from "@skastr0/quasar-protocol";
+import {
+  decodeNormalizedSessionSync,
+  NORMALIZED_SESSION_PROTOCOL_VERSION,
+} from "@skastr0/quasar-protocol";
 
 const stringifyPayload = (value: unknown): string => {
   if (value === undefined || value === null) return "";
@@ -243,9 +246,10 @@ const toolCallsForSession = (session: NormalizedSession, projectKey: string) => 
 };
 
 export const mapSession = (
-  session: NormalizedSession,
+  sourceSession: NormalizedSession,
   sourceFingerprint: string,
 ): MappedSession => {
+  const session = decodeNormalizedSessionSync(sourceSession);
   const projectKey = session.projectIdentity.projectIdentityKey;
   const messages = messageEvents(session).map(({ event, role, text, context }) => ({
     sessionId: session.id,
