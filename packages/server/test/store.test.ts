@@ -215,22 +215,6 @@ describe("LocalStore", () => {
     });
     expect(explicit.read).toEqual(source);
 
-    const originalArgv1 = process.argv[1] ?? "";
-    process.argv[1] = join(tmpdir(), "normalizedSessionCorpusAuditCli.ts");
-    try {
-      const shimmed = await withStore(path, (store) =>
-        Effect.gen(function* () {
-          const snapshot = yield* store.querySnapshot;
-          const read = yield* store.readMappedSession(source.session.sessionId);
-          return { snapshot, read };
-        }));
-
-      expect(shimmed.snapshot.writing).toBe(false);
-      expect(shimmed.read).toEqual(source);
-    } finally {
-      process.argv[1] = originalArgv1;
-    }
-
     const after = sqliteFileState(path);
     expect(after).toEqual(before);
   });

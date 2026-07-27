@@ -1081,13 +1081,6 @@ export class LocalStore extends Context.Tag("@quasar/LocalStore")<
   LocalStoreService
 >() {}
 
-interface LocalStoreLayerOptions {
-  readonly readOnly?: boolean;
-}
-
-const auditCorpusEntrypoint = (): boolean =>
-  process.argv.some((arg) => arg.includes("normalizedSessionCorpusAuditCli"));
-
 const makeLocalStoreLayerScoped = (
   path: string,
   readOnly: boolean,
@@ -3053,9 +3046,8 @@ const makeLocalStoreLayerScoped = (
 
 export const makeLocalStoreLayer = (
   path = sqlitePath(),
-  options: LocalStoreLayerOptions = {},
 ): Layer.Layer<LocalStore> =>
-  makeLocalStoreLayerScoped(path, options.readOnly ?? auditCorpusEntrypoint());
+  makeLocalStoreLayerScoped(path, false);
 
 export const makeReadonlyLocalStoreLayer = (
   path = sqlitePath(),
