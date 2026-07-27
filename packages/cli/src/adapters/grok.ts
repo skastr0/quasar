@@ -793,8 +793,12 @@ const buildGrokSessionFromChatPath = (
         timestamp: grokTime(record),
         role: grokRole(type),
         kind: classified.kind,
-        contentText: extractGrokProse(record) ?? compactText(content),
-        contentSource: content,
+        ...(toolCallId === undefined
+          ? {
+              contentText: extractGrokProse(record) ?? compactText(content),
+              contentSource: content,
+            }
+          : {}),
         ...(toolCallId !== undefined ? { toolCallId } : {}),
         rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: type },
       });
@@ -826,8 +830,12 @@ const buildGrokSessionFromChatPath = (
         timestamp: grokTime(record),
         role: grokRole(type),
         kind: classified.kind,
-        contentText: extractGrokProse(record) ?? compactText(content),
-        contentSource: content,
+        ...(toolCallId === undefined
+          ? {
+              contentText: extractGrokProse(record) ?? compactText(content),
+              contentSource: content,
+            }
+          : {}),
         ...(toolCallId !== undefined ? { toolCallId } : {}),
         rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: type },
       });
@@ -864,6 +872,9 @@ const buildGrokSessionFromChatPath = (
     const content = type === "interjected"
       ? projectSessionNativeValue(classified.value)
       : grokContentProjection(record);
+    const linkedToolEvent =
+      toolCallId !== undefined
+      && (classified.kind === "tool_call" || classified.kind === "tool_result");
     return [
       {
         id: eventId,
@@ -872,10 +883,14 @@ const buildGrokSessionFromChatPath = (
         timestamp: grokTime(record),
         role: type === "interjected" ? ("system" as const) : ("unknown" as const),
         kind: classified.kind,
-        contentText: type === "interjected" ? undefined : compactText(content),
-        contentSource: content,
-        ...(type === "interjected" && content !== undefined
-          ? { contentBlocks: [jsonBlock(sessionId, eventId, 0, content)] }
+        ...(!linkedToolEvent
+          ? {
+              contentText: type === "interjected" ? undefined : compactText(content),
+              contentSource: content,
+              ...(type === "interjected" && content !== undefined
+                ? { contentBlocks: [jsonBlock(sessionId, eventId, 0, content)] }
+                : {}),
+            }
           : {}),
         ...(toolCallId !== undefined ? { toolCallId } : {}),
         rawReference: { sourcePath: eventPath, line: lineNumber, nativeType: type ?? "event" },
@@ -922,6 +937,9 @@ const buildGrokSessionFromChatPath = (
         : subtype === "turn_completed"
           ? undefined
           : extractGrokProse(innerUpdate) ?? compactText(content);
+    const linkedToolEvent =
+      toolCallId !== undefined
+      && (classified.kind === "tool_call" || classified.kind === "tool_result");
     return [
       {
         id: eventId,
@@ -929,10 +947,14 @@ const buildGrokSessionFromChatPath = (
         timestamp: grokTime(record),
         role: subtype === "session_recap" ? ("assistant" as const) : ("system" as const),
         kind: classified.kind,
-        contentText: proseText,
-        contentSource: content,
-        ...(opaqueContent && content !== undefined
-          ? { contentBlocks: [jsonBlock(sessionId, eventId, 0, content)] }
+        ...(!linkedToolEvent
+          ? {
+              contentText: proseText,
+              contentSource: content,
+              ...(opaqueContent && content !== undefined
+                ? { contentBlocks: [jsonBlock(sessionId, eventId, 0, content)] }
+                : {}),
+            }
           : {}),
         ...(toolCallId !== undefined ? { toolCallId } : {}),
         rawReference: { sourcePath: updatePath, line: lineNumber, nativeType: subtype ?? "update" },

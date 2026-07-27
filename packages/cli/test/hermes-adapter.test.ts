@@ -765,3 +765,41 @@ describe("QSR-220 fidelity E2E: session_meta row dropped, conversational turns k
     expect(roles).toEqual(["assistant", "user"]);
   });
 });
+
+describe("linked Hermes tool results keep payloads only on ToolCall", () => {
+  const root = join(testRoot, "linked-tool-result");
+  mkdirSync(root, { recursive: true });
+
+  const SID = "20990101_120001_feedface";
+  execFileSync("sqlite3", [join(root, "state.db"),
+    SESSION_SCHEMA
+    + insertSession(SID, "Linked tool result fixture")
+    + `insert into messages (session_id, role, content, tool_call_id, tool_name, timestamp) values ('${SID}', 'tool', 'synthetic linked tool output', 'fab-call-result', 'fab-tool', 1001);`,
+  ]);
+
+  test("preserves full output structurally without duplicating it on the event", async () => {
+    const result = await hermesAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { hermes: root },
+    });
+    const session = result.sessions.find(
+      (candidate) =>
+        candidate.id === sessionIdFor("hermes", HermesSessionId(SID)),
+    );
+    expect(session).toBeDefined();
+    const event = session!.events.find(
+      (candidate) => candidate.kind === "tool_result",
+    );
+    expect(event?.toolCallId).toBeDefined();
+    expect(event?.contentText).toBeUndefined();
+    expect(event?.contentBlocks).toEqual([]);
+    expect(
+      JSON.stringify(
+        session!.toolCalls.find(
+          (toolCall) => toolCall.id === event?.toolCallId,
+        )?.output,
+      ),
+    ).toContain("synthetic linked tool output");
+  });
+});
