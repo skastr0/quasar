@@ -153,6 +153,79 @@ describe("normalized session corpus audit", () => {
     expect(fileState(path)).toEqual(before);
   });
 
+  test("validates a complete recursive ATIF descendant tree", async () => {
+    const path = tempDatabase();
+    const parent = await seedDatabase(path);
+    const childValue: any = structuredClone(mappedSessionExamples[0]!.input);
+    const childSessionId = `${parent.session.provider}:audit-child`;
+    const childEventId = `${childSessionId}:event:0`;
+    childValue.session.sessionId = childSessionId;
+    childValue.session.parentSessionId = parent.session.sessionId;
+    childValue.session.sourcePath = "/history/audit-child.jsonl";
+    childValue.session.sourceFingerprint = "audit-child-fingerprint";
+    childValue.events[0].id = childEventId;
+    childValue.events[0].sessionId = childSessionId;
+    childValue.events[0].nativeEventId = "audit-child-native-event";
+    childValue.events[0].rawReference.sourcePath =
+      childValue.session.sourcePath;
+    childValue.messages[0].sessionId = childSessionId;
+    childValue.messages[0].eventId = childEventId;
+    childValue.sessionEdges = [{
+      id: `${childSessionId}:edge:parent`,
+      sessionId: childSessionId,
+      machineId: childValue.events[0].machineId,
+      provider: childValue.session.provider,
+      agentName: childValue.session.agentName,
+      projectIdentityKey: childValue.session.projectKey,
+      kind: "subagent_of",
+      fromId: parent.session.sessionId,
+      toId: childSessionId,
+    }];
+    const child = decodeMappedSessionSync(childValue);
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* LocalStore;
+        yield* store.upsertSession(child);
+        yield* store.finalizeSessionIngest(
+          child.session.sessionId,
+          child.session.sourceFingerprint,
+          child.session.normalizationVersion,
+        );
+      }).pipe(Effect.provide(makeLocalStoreLayer(path))),
+    );
+    checkpointDatabase(path);
+    const before = fileState(path);
+
+    const result = await runAudit(path);
+
+    expect(result.exitCode).toBe(0);
+    const report = JSON.parse(result.stdout);
+    expect(report).toMatchObject({
+      ok: true,
+      sessionsDiscovered: 2,
+      mappedSessions: 2,
+      projections: {
+        quasar: 2,
+        letta: 2,
+        atif: 2,
+        recursiveAtifRoots: 1,
+      },
+      lineage: {
+        childSessions: 1,
+        danglingParentSessions: 0,
+        completeRoots: 1,
+      },
+    });
+    expect(report.compatibility.atif.recursive).toMatchObject({
+      sourceSessions: 2,
+      embeddedSubagents: 1,
+    });
+    expect(result.stdout).not.toContain(parent.session.sessionId);
+    expect(result.stdout).not.toContain(child.session.sessionId);
+    expect(fileState(path)).toEqual(before);
+  });
+
   test("groups failures into content-free diagnostics", async () => {
     const path = tempDatabase();
     const source = await seedDatabase(path);
