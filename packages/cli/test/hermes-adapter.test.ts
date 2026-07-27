@@ -23,7 +23,13 @@ import {
 } from "../src/adapters/hermes-schema";
 import { decodeOrDrop, isSignal } from "../src/adapters/harness-schema";
 import { HermesSessionId } from "../src/core/identity";
+import type {
+  NormalizedSession,
+  SessionEdge,
+  SessionEvent,
+} from "../src/core/schemas";
 import { mapSession } from "../src/map";
+import { NORMALIZATION_VERSION } from "../src/normalization-version";
 
 // ---------------------------------------------------------------------------
 // QSR-220 FULL DATA FIDELITY — fixtures are built FROM the Effect schemas via
@@ -56,6 +62,52 @@ const MACHINE = {
 };
 
 const NOW = "2026-06-11T00:00:00.000Z";
+
+const normalizedSessionForEdges = (
+  sessionId: string,
+  title: string,
+  sessionEdges: readonly SessionEdge[],
+  events: readonly SessionEvent[] = [],
+): NormalizedSession => ({
+  id: sessionId,
+  nativeSessionId: sessionId,
+  provider: "hermes",
+  agentName: "hermes",
+  machineId: MACHINE.machineId,
+  host: MACHINE.hostname,
+  identitySchemeVersion: 1,
+  projectIdentity: {
+    projectIdentityKey: "project:profile:hermes",
+    displayName: "hermes",
+    confidence: "explicit",
+    signals: [{
+      kind: "explicit",
+      value: "hermes-test-profile",
+      confidence: "explicit",
+    }],
+  },
+  title,
+  startedAt: NOW,
+  updatedAt: NOW,
+  sourceRoot: "/tmp",
+  sourcePath: "/tmp/state.db",
+  events,
+  toolCalls: [],
+  usageRecords: [],
+  executionContexts: [],
+  artifacts: [],
+  sessionEdges,
+  normalizationVersion: NORMALIZATION_VERSION,
+  eventCount: events.length,
+  toolCallCount: 0,
+  contentBlockCount: events.reduce(
+    (count, event) => count + event.contentBlocks.length,
+    0,
+  ),
+  sessionEdgeCount: sessionEdges.length,
+  usageRecordCount: 0,
+  artifactCount: 0,
+});
 
 // Real on-disk shape, grounded against ~/.hermes/state.db `.schema`:
 //   - sessions.id is TEXT PK (real shape e.g. 20200101_000000_aaaaaaaa)
@@ -428,85 +480,65 @@ describe("QSR-220 regression: event-level kind=parent edge must not corrupt pare
     const sessionId = sessionIdFor("hermes", HermesSessionId("20200101_000000_99999999"));
     // The claude/opencode forward-reference shape: kind="parent", fromId is a
     // raw message uuid (NOT a canonical SessionId), toEventId set.
-    const session = {
-      id: sessionId,
-      provider: "hermes" as const,
+    const event: SessionEvent = {
+      id: "event:0",
+      sessionId,
+      sequence: 0,
+      machineId: MACHINE.machineId,
+      provider: "hermes",
       agentName: "hermes",
-      title: "Event-threaded session",
-      startedAt: NOW,
-      updatedAt: NOW,
-      sourcePath: "/tmp/state.db",
-      host: { machineId: MACHINE.machineId, hostname: MACHINE.hostname, platform: MACHINE.platform },
-      identitySchemeVersion: 1,
-      projectIdentity: {
-        projectIdentityKey: "project:profile:hermes",
-        displayName: "hermes",
-        rawPath: undefined,
-      },
-      events: [],
-      toolCalls: [],
-      usageRecords: [],
-      executionContexts: [],
-      artifacts: [],
-      sessionEdges: [
+      projectIdentityKey: "project:profile:hermes",
+      role: "assistant",
+      kind: "message",
+      contentBlocks: [],
+      rawReference: { sourcePath: "/tmp/state.db", rowId: "event:0" },
+    };
+    const session = normalizedSessionForEdges(
+      sessionId,
+      "Event-threaded session",
+      [
         {
           id: "edge:parent:forward",
           sessionId,
           machineId: MACHINE.machineId,
-          provider: "hermes" as const,
+          provider: "hermes",
           agentName: "hermes",
           projectIdentityKey: "project:profile:hermes",
-          kind: "parent" as const,
+          kind: "parent",
           fromId: "a1b2c3d4-0000-0000-0000-000000000000", // raw MESSAGE uuid
           toEventId: "event:0",
         },
       ],
-    };
+      [event],
+    );
 
     // The event-threading edge must be ignored — parentSessionId stays unset.
-    const mapped = mapSession(session as unknown as Parameters<typeof mapSession>[0], "fp");
+    const mapped = mapSession(session, "fp");
     expect(mapped.session.parentSessionId).toBeUndefined();
   });
 
   test("a session with a subagent_of edge maps to the canonical parent SessionId", () => {
     const sessionId = sessionIdFor("hermes", HermesSessionId("20200101_000000_88888888"));
     const parentSessionId = sessionIdFor("hermes", HermesSessionId("20200101_000000_77777777"));
-    const session = {
-      id: sessionId,
-      provider: "hermes" as const,
-      agentName: "hermes",
-      title: "Subagent session",
-      startedAt: NOW,
-      updatedAt: NOW,
-      sourcePath: "/tmp/state.db",
-      host: { machineId: MACHINE.machineId, hostname: MACHINE.hostname, platform: MACHINE.platform },
-      identitySchemeVersion: 1,
-      projectIdentity: {
-        projectIdentityKey: "project:profile:hermes",
-        displayName: "hermes",
-        rawPath: undefined,
-      },
-      events: [],
-      toolCalls: [],
-      usageRecords: [],
-      executionContexts: [],
-      artifacts: [],
-      sessionEdges: [
+    const session = normalizedSessionForEdges(
+      sessionId,
+      "Subagent session",
+      [
         {
           id: "edge:subagent_of:lineage",
           sessionId,
           machineId: MACHINE.machineId,
-          provider: "hermes" as const,
+          provider: "hermes",
           agentName: "hermes",
           projectIdentityKey: "project:profile:hermes",
-          kind: "subagent_of" as const,
+          kind: "subagent_of",
           fromId: parentSessionId,
           toId: sessionId,
         },
       ],
-    };
+    );
 
-    const mapped = mapSession(session as unknown as Parameters<typeof mapSession>[0], "fp");
+    const mapped = mapSession(session, "fp");
     expect(mapped.session.parentSessionId).toBe(parentSessionId);
   });
 });

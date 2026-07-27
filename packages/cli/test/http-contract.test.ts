@@ -613,8 +613,15 @@ describe("CLI HTTP client <-> server contract", () => {
         model: "gpt-5.6-luna",
         modelProvider: "openai",
       }],
+      usageRecordCount: 2,
     }, "usage-fallback-fingerprint");
     expect(usageFallback.session.model).toBe("gpt-5.6-luna");
+    expect(() =>
+      mapSession(
+        { ...normalized, eventCount: normalized.eventCount - 1 },
+        "invalid-source-contract",
+      )
+    ).toThrow("eventCount must equal 5");
   });
 
   test("an OpenCode mixed turn survives adapter, mapping, HTTP ingest, reads, and lexical search", async () => {
