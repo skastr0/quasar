@@ -696,11 +696,22 @@ const migrateEmptySessionShells = (
       INSERT INTO quasar_legacy_empty_sessions(session_id)
       SELECT session.session_id
       FROM sessions AS session
-      WHERE NOT EXISTS (
-        SELECT 1
-        FROM session_events AS event
-        WHERE event.session_id = session.session_id
-      );
+      WHERE session.normalization_version > 0
+        AND NOT EXISTS (
+          SELECT 1
+          FROM session_events AS event
+          WHERE event.session_id = session.session_id
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM messages AS message
+          WHERE message.session_id = session.session_id
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM tool_calls AS tool_call
+          WHERE tool_call.session_id = session.session_id
+        );
     `);
 
     const counts = db.query(
@@ -767,6 +778,8 @@ const migrateEmptySessionShells = (
       DELETE FROM session_artifacts
       WHERE session_id IN (SELECT session_id FROM quasar_legacy_empty_sessions);
       DELETE FROM execution_contexts
+      WHERE session_id IN (SELECT session_id FROM quasar_legacy_empty_sessions);
+      DELETE FROM message_vectors
       WHERE session_id IN (SELECT session_id FROM quasar_legacy_empty_sessions);
       DELETE FROM messages
       WHERE session_id IN (SELECT session_id FROM quasar_legacy_empty_sessions);
