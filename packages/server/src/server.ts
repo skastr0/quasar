@@ -19,7 +19,10 @@ import {
   executeResourceQuery,
   QueryEmbeddingUnavailableError,
   QuerySemanticDisabledError,
+  QuerySnapshotBusyError,
+  QuerySnapshotExpiredError,
   RESOURCE_PAGE_MAXIMUM,
+  type MessagePageRequest,
   type SearchMode,
 } from "./query";
 import { AppLayer } from "./runtime";
@@ -70,6 +73,25 @@ const embeddingUnavailable = (route: string, message: string) =>
   json(
     { ok: false, route, error: { type: "EmbeddingUnavailable", message } },
     { status: 503 },
+  );
+
+const snapshotConflict = (
+  route: string,
+  error: QuerySnapshotBusyError | QuerySnapshotExpiredError,
+) =>
+  json(
+    {
+      ok: false,
+      route,
+      error: {
+        type: error._tag,
+        message: error.message,
+        action: error instanceof QuerySnapshotExpiredError
+          ? "Restart the message scan without a cursor."
+          : "Retry the same message page.",
+      },
+    },
+    { status: 409 },
   );
 
 const unauthorized = (route: string, message: string) =>
@@ -179,6 +201,105 @@ const nonNegativeInt = (params: URLSearchParams, name: string, fallback: number)
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
 };
 
+const queryParamError = (
+  route: string,
+  params: URLSearchParams,
+  allowed: ReadonlySet<string>,
+): HttpServerResponse.HttpServerResponse | undefined => {
+  const unknown = [...new Set(params.keys())]
+    .filter((name) => !allowed.has(name))
+    .sort();
+  return unknown.length === 0
+    ? undefined
+    : badRequest(route, `unknown query parameter${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}`);
+};
+
+const RESOURCE_FILTER_PARAMS = [
+  "projectKey",
+  "provider",
+  "sessionId",
+  "role",
+  "agentName",
+  "agentRole",
+  "model",
+  "modelProvider",
+] as const;
+
+const strictTimestamp = (
+  params: URLSearchParams,
+  name: string,
+): { readonly valid: true; readonly value?: string } | {
+  readonly valid: false;
+  readonly message: string;
+} => {
+  const raw = params.get(name);
+  if (raw === null) return { valid: true };
+  return raw.trim() !== "" && Number.isFinite(Date.parse(raw))
+    ? { valid: true, value: raw }
+    : { valid: false, message: `${name} must be a valid timestamp` };
+};
+
+const messagePage = (
+  params: URLSearchParams,
+): { readonly valid: true; readonly value: MessagePageRequest } | {
+  readonly valid: false;
+  readonly message: string;
+} => {
+  const limitRaw = params.get("limit");
+  const limit = limitRaw === null ? 100 : Number(limitRaw);
+  if (
+    !Number.isSafeInteger(limit)
+    || limit <= 0
+    || limit > RESOURCE_PAGE_MAXIMUM
+  ) {
+    return {
+      valid: false,
+      message: `limit must be an integer from 1 to ${RESOURCE_PAGE_MAXIMUM}`,
+    };
+  }
+  const afterSessionId = params.get("afterSessionId");
+  const afterSequenceRaw = params.get("afterSequence");
+  if ((afterSessionId === null) !== (afterSequenceRaw === null)) {
+    return {
+      valid: false,
+      message: "afterSessionId and afterSequence must be provided together",
+    };
+  }
+  let after: MessagePageRequest["after"];
+  if (afterSessionId !== null && afterSequenceRaw !== null) {
+    const afterSequence = Number(afterSequenceRaw);
+    if (
+      afterSessionId.trim() === ""
+      || !Number.isSafeInteger(afterSequence)
+      || afterSequence < 0
+    ) {
+      return {
+        valid: false,
+        message: "message cursor key must contain a session id and non-negative integer sequence",
+      };
+    }
+    after = { sessionId: afterSessionId, sequence: afterSequence };
+  }
+  const snapshot = params.get("snapshot") ?? undefined;
+  if (snapshot !== undefined && snapshot.trim() === "") {
+    return { valid: false, message: "snapshot must not be empty" };
+  }
+  if ((after === undefined) !== (snapshot === undefined)) {
+    return {
+      valid: false,
+      message: "message cursor key and snapshot must be provided together",
+    };
+  }
+  return {
+    valid: true,
+    value: {
+      limit,
+      ...(after === undefined ? {} : { after }),
+      ...(snapshot === undefined ? {} : { snapshot }),
+    },
+  };
+};
+
 const SESSION_DETAIL_PAGE_DEFAULT = 100;
 const SESSION_DETAIL_PAGE_MAXIMUM = 1_000;
 
@@ -266,6 +387,17 @@ const projects = Effect.gen(function* () {
 // directly usable by CLIs, agents, curl, and browser diagnostics.
 const sessions = Effect.gen(function* () {
   const params = yield* query;
+  const invalid = queryParamError(
+    "sessions",
+    params,
+    new Set([
+      ...RESOURCE_FILTER_PARAMS.filter((name) => name !== "role"),
+      "assignmentRole",
+      "limit",
+      "offset",
+    ]),
+  );
+  if (invalid !== undefined) return invalid;
   const result = yield* executeResourceQuery({
     kind: "sessions",
     filters: {
@@ -448,17 +580,119 @@ const trajectory = Effect.gen(function* () {
 
 const messages = Effect.gen(function* () {
   const params = yield* query;
-  const sessionId = params.get("sessionId");
-  if (sessionId === null || sessionId.trim() === "") return badRequest("messages", "sessionId is required");
+  const invalid = queryParamError(
+    "messages",
+    params,
+    new Set([
+      ...RESOURCE_FILTER_PARAMS,
+      "messageAfter",
+      "messageBefore",
+      "sessionStartedAfter",
+      "sessionStartedBefore",
+      "rootsOnly",
+      "lineageRootSessionId",
+      "limit",
+      "afterSessionId",
+      "afterSequence",
+      "snapshot",
+    ]),
+  );
+  if (invalid !== undefined) return invalid;
+  const page = messagePage(params);
+  if (!page.valid) return badRequest("messages", page.message);
+  const timestamps = [
+    strictTimestamp(params, "messageAfter"),
+    strictTimestamp(params, "messageBefore"),
+    strictTimestamp(params, "sessionStartedAfter"),
+    strictTimestamp(params, "sessionStartedBefore"),
+  ] as const;
+  const timestampError = timestamps.find((candidate) => !candidate.valid);
+  if (timestampError !== undefined && !timestampError.valid) {
+    return badRequest("messages", timestampError.message);
+  }
+  const [
+    messageAfter,
+    messageBefore,
+    sessionStartedAfter,
+    sessionStartedBefore,
+  ] = timestamps.map((candidate) => candidate.valid
+    ? candidate.value
+    : undefined);
+  if (
+    messageAfter !== undefined
+    && messageBefore !== undefined
+    && Date.parse(messageAfter) > Date.parse(messageBefore)
+  ) {
+    return badRequest("messages", "messageAfter must not be after messageBefore");
+  }
+  if (
+    sessionStartedAfter !== undefined
+    && sessionStartedBefore !== undefined
+    && Date.parse(sessionStartedAfter) > Date.parse(sessionStartedBefore)
+  ) {
+    return badRequest(
+      "messages",
+      "sessionStartedAfter must not be after sessionStartedBefore",
+    );
+  }
+  const rootsOnly = strictBooleanParam(params, "rootsOnly", false);
+  if (!rootsOnly.valid) {
+    return badRequest("messages", "rootsOnly must be true, false, 1, or 0");
+  }
+  const sessionId = params.get("sessionId") ?? undefined;
+  const lineageRootSessionId = params.get("lineageRootSessionId") ?? undefined;
+  if (sessionId !== undefined && sessionId.trim() === "") {
+    return badRequest("messages", "sessionId must not be empty");
+  }
+  if (
+    lineageRootSessionId !== undefined
+    && lineageRootSessionId.trim() === ""
+  ) {
+    return badRequest("messages", "lineageRootSessionId must not be empty");
+  }
   const result = yield* executeResourceQuery({
-    kind: "messages", filters: { ...searchFilters(params), sessionId }, page: resourcePage(params),
-  });
-  if (result.kind !== "messages") return yield* Effect.die("messages query returned wrong result kind");
-  return json(ok("messages", { sessionId, rows: result.rows, page: result.page }));
+    kind: "messages",
+    filters: {
+      ...searchFilters(params),
+      ...(messageAfter === undefined ? {} : { messageAfter }),
+      ...(messageBefore === undefined ? {} : { messageBefore }),
+      ...(sessionStartedAfter === undefined ? {} : { sessionStartedAfter }),
+      ...(sessionStartedBefore === undefined ? {} : { sessionStartedBefore }),
+      ...(rootsOnly.value ? { rootsOnly: true } : {}),
+      ...(lineageRootSessionId === undefined ? {} : { lineageRootSessionId }),
+    },
+    page: page.value,
+  }).pipe(Effect.either);
+  if (result._tag === "Left") {
+    if (
+      result.left instanceof QuerySnapshotBusyError
+      || result.left instanceof QuerySnapshotExpiredError
+    ) {
+      return snapshotConflict("messages", result.left);
+    }
+    return internalError("messages", "message query failed");
+  }
+  if (result.right.kind !== "messages") return yield* Effect.die("messages query returned wrong result kind");
+  return json(ok("messages", {
+    ...(sessionId === undefined ? {} : { sessionId }),
+    rows: result.right.rows,
+    page: result.right.page,
+  }));
 });
 
 const toolCalls = Effect.gen(function* () {
   const params = yield* query;
+  const invalid = queryParamError(
+    "tool-calls",
+    params,
+    new Set([
+      ...RESOURCE_FILTER_PARAMS.filter((name) => name !== "role"),
+      "toolName",
+      "limit",
+      "offset",
+    ]),
+  );
+  if (invalid !== undefined) return invalid;
   const result = yield* executeResourceQuery({
     kind: "toolCalls", filters: { ...searchFilters(params), toolName: params.get("toolName") ?? undefined }, page: resourcePage(params),
   });
@@ -468,6 +702,8 @@ const toolCalls = Effect.gen(function* () {
 
 const toolCall = Effect.gen(function* () {
   const params = yield* query;
+  const invalid = queryParamError("tool-call", params, new Set(["id"]));
+  if (invalid !== undefined) return invalid;
   const id = params.get("id");
   if (id === null || id.trim() === "") return badRequest("tool-call", "id is required");
   const result = yield* executeResourceQuery({ kind: "toolCall", id });
@@ -512,6 +748,12 @@ const search = (mode: SearchMode) => Effect.gen(function* () {
   const params = yield* query;
   const text = params.get("q") ?? params.get("query");
   const route = `search/${mode}`;
+  const invalid = queryParamError(
+    route,
+    params,
+    new Set([...RESOURCE_FILTER_PARAMS, "q", "query", "limit", "offset"]),
+  );
+  if (invalid !== undefined) return invalid;
   if (text === null || text.trim() === "") return badRequest(route, "q is required");
   const result = yield* executeResourceQuery({ kind: "search", mode, text, filters: searchFilters(params), page: resourcePage(params) }).pipe(Effect.either);
   if (result._tag === "Left") {

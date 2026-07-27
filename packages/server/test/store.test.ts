@@ -242,6 +242,217 @@ describe("LocalStore", () => {
     expect(stats).toEqual({ projects: 1, sessions: 1, messages: 2, toolCalls: 2, ingestRuns: 0 });
   });
 
+  test("scans every message across sessions with research filters and stable keys", async () => {
+    const path = sqlitePath();
+    const researchSession = (input: {
+      readonly sessionId: string;
+      readonly projectKey: string;
+      readonly provider: MappedSession["session"]["provider"];
+      readonly agentName: string;
+      readonly agentRole: string;
+      readonly model: string;
+      readonly modelProvider: string;
+      readonly startedAt: string;
+      readonly messageTimes: readonly [string, string];
+      readonly parentSessionId?: string;
+    }): MappedSession => {
+      const base = mappedSession({
+        sessionId: input.sessionId,
+        projectKey: input.projectKey,
+        provider: input.provider,
+        agentName: input.agentName,
+        startedAt: input.startedAt,
+        updatedAt: input.messageTimes[1],
+        sourcePath: `/history/${input.sessionId}.jsonl`,
+        sourceFingerprint: `fingerprint-${input.sessionId}`,
+        ...(input.parentSessionId === undefined
+          ? {}
+          : { parentSessionId: input.parentSessionId }),
+      });
+      return {
+        ...base,
+        session: {
+          ...base.session,
+          assignmentRole: input.agentRole,
+          model: input.model,
+          modelProvider: input.modelProvider,
+        },
+        messages: base.messages.map((message) => ({
+          ...message,
+          ts: input.messageTimes[message.seq - 1],
+          model: input.model,
+          modelProvider: input.modelProvider,
+        })),
+      };
+    };
+
+    const root = researchSession({
+      sessionId: "codex:00-root",
+      projectKey: "project-a",
+      provider: "codex",
+      agentName: "root-agent",
+      agentRole: "builder",
+      model: "gpt-root",
+      modelProvider: "openai",
+      startedAt: "2026-07-01T10:00:00.000Z",
+      messageTimes: [
+        "2026-07-01T10:01:00.000Z",
+        "2026-07-01T10:02:00.000Z",
+      ],
+    });
+    const child = researchSession({
+      sessionId: "claude:01-child",
+      projectKey: "project-a",
+      provider: "claude",
+      agentName: "child-agent",
+      agentRole: "researcher",
+      model: "claude-child",
+      modelProvider: "anthropic",
+      startedAt: "2026-07-02T10:00:00.000Z",
+      messageTimes: [
+        "2026-07-02T10:01:00.000Z",
+        "2026-07-02T10:02:00.000Z",
+      ],
+      parentSessionId: root.session.sessionId,
+    });
+    const grandchild = researchSession({
+      sessionId: "codex:02-grandchild",
+      projectKey: "project-a",
+      provider: "codex",
+      agentName: "grandchild-agent",
+      agentRole: "researcher",
+      model: "gpt-grandchild",
+      modelProvider: "openai",
+      startedAt: "2026-07-03T10:00:00.000Z",
+      messageTimes: [
+        "2026-07-03T10:01:00.000Z",
+        "2026-07-03T10:02:00.000Z",
+      ],
+      parentSessionId: child.session.sessionId,
+    });
+    const other = researchSession({
+      sessionId: "grok:03-other",
+      projectKey: "project-b",
+      provider: "grok",
+      agentName: "other-agent",
+      agentRole: "reviewer",
+      model: "grok-other",
+      modelProvider: "xai",
+      startedAt: "2026-07-04T10:00:00.000Z",
+      messageTimes: [
+        "2026-07-04T10:01:00.000Z",
+        "2026-07-04T10:02:00.000Z",
+      ],
+    });
+
+    const result = await withStore(path, (store) =>
+      Effect.gen(function* () {
+        const snapshotBefore = yield* store.querySnapshot;
+        for (const session of [root, child, grandchild, other]) {
+          yield* store.upsertSession(session);
+        }
+        const snapshotAfter = yield* store.querySnapshot;
+        const all = yield* store.queryMessages({ limit: 100 });
+        const firstPage = yield* store.queryMessages({ limit: 3 });
+        const secondPage = yield* store.queryMessages({
+          after: {
+            sessionId: firstPage.at(-1)!.sessionId,
+            sequence: firstPage.at(-1)!.sequence,
+          },
+          limit: 3,
+        });
+        const thirdPage = yield* store.queryMessages({
+          after: {
+            sessionId: secondPage.at(-1)!.sessionId,
+            sequence: secondPage.at(-1)!.sequence,
+          },
+          limit: 3,
+        });
+        return {
+          snapshotBefore,
+          snapshotAfter,
+          all,
+          paged: [...firstPage, ...secondPage, ...thirdPage],
+          allUsers: yield* store.queryMessages({ role: "user", limit: 100 }),
+          projectClaudeUsers: yield* store.queryMessages({
+            projectKey: "project-a",
+            providers: ["claude"],
+            role: "user",
+            limit: 100,
+          }),
+          childAgent: yield* store.queryMessages({
+            agentName: "child-agent",
+            limit: 100,
+          }),
+          researchers: yield* store.queryMessages({
+            agentRole: "researcher",
+            limit: 100,
+          }),
+          anthropic: yield* store.queryMessages({
+            model: "claude-child",
+            modelProvider: "anthropic",
+            limit: 100,
+          }),
+          messageWindow: yield* store.queryMessages({
+            messageAfter: "2026-07-02T10:01:00.000Z",
+            messageBefore: "2026-07-03T10:01:00.000Z",
+            limit: 100,
+          }),
+          sessionWindow: yield* store.queryMessages({
+            sessionStartedAfter: "2026-07-02T10:00:00.000Z",
+            sessionStartedBefore: "2026-07-04T10:00:00.000Z",
+            limit: 100,
+          }),
+          roots: yield* store.queryMessages({
+            rootsOnly: true,
+            limit: 100,
+          }),
+          lineage: yield* store.queryMessages({
+            lineageRootSessionId: root.session.sessionId,
+            limit: 100,
+          }),
+          exactSession: yield* store.queryMessages({
+            sessionId: child.session.sessionId,
+            limit: 100,
+          }),
+        };
+      }));
+
+    expect(result.snapshotBefore.writing).toBe(false);
+    expect(result.snapshotAfter.writing).toBe(false);
+    expect(result.snapshotAfter.id).not.toBe(result.snapshotBefore.id);
+    expect(result.all).toHaveLength(8);
+    expect(result.paged).toEqual(result.all);
+    expect(result.allUsers.map((row) => row.sessionId)).toEqual([
+      "claude:01-child",
+      "codex:00-root",
+      "codex:02-grandchild",
+      "grok:03-other",
+    ]);
+    expect(result.projectClaudeUsers.map((row) => row.sessionId)).toEqual([
+      "claude:01-child",
+    ]);
+    expect(result.childAgent).toHaveLength(2);
+    expect(result.researchers).toHaveLength(4);
+    expect(result.anthropic).toHaveLength(2);
+    expect(result.messageWindow.map((row) => row.timestamp)).toEqual([
+      "2026-07-02T10:01:00.000Z",
+      "2026-07-02T10:02:00.000Z",
+    ]);
+    expect(result.sessionWindow).toHaveLength(4);
+    expect(new Set(result.roots.map((row) => row.sessionId))).toEqual(
+      new Set(["codex:00-root", "grok:03-other"]),
+    );
+    expect(new Set(result.lineage.map((row) => row.sessionId))).toEqual(
+      new Set([
+        "codex:00-root",
+        "claude:01-child",
+        "codex:02-grandchild",
+      ]),
+    );
+    expect(result.exactSession).toHaveLength(2);
+  });
+
   test("keeps message vectors scoped by embedding profile", async () => {
     const path = sqlitePath();
 
