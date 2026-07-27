@@ -384,6 +384,69 @@ describe("amp fingerprint round-trip", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Input-unit windowing
+// ---------------------------------------------------------------------------
+
+describe("amp input-unit windowing", () => {
+  test("skip partitions enumerated threads before fingerprint probes and exports", async () => {
+    const probes: string[] = [];
+    const exportCalls: string[] = [];
+    const runner: AmpRunner = (args) => {
+      if (args[0] === "threads" && args[1] === "export") {
+        exportCalls.push(args[2] ?? "");
+      }
+      return fixtureRunner()(args);
+    };
+
+    const result = await readAmp({
+      machine: MACHINE_A,
+      now: NOW,
+      ampRunner: runner,
+      ampSleep: noSleep,
+      exportSpacingMs: 0,
+      skip: 1,
+      limit: 1,
+      shouldParseSession: (probe) => {
+        probes.push(probe.sessionId);
+        return true;
+      },
+    });
+
+    expect(probes).toEqual([sessionIdFor("amp", AmpSessionId(THREAD_B))]);
+    expect(exportCalls).toEqual([THREAD_B]);
+    expect(result.sessions.map((session) => session.nativeSessionId)).toEqual([THREAD_B]);
+  });
+
+  test("limit bounds enumerated threads even when the selected unit is skipped", async () => {
+    const probes: string[] = [];
+    const exportCalls: string[] = [];
+    const runner: AmpRunner = (args) => {
+      if (args[0] === "threads" && args[1] === "export") {
+        exportCalls.push(args[2] ?? "");
+      }
+      return fixtureRunner()(args);
+    };
+
+    const result = await readAmp({
+      machine: MACHINE_A,
+      now: NOW,
+      ampRunner: runner,
+      ampSleep: noSleep,
+      exportSpacingMs: 0,
+      limit: 1,
+      shouldParseSession: (probe) => {
+        probes.push(probe.sessionId);
+        return false;
+      },
+    });
+
+    expect(probes).toEqual([sessionIdFor("amp", AmpSessionId(THREAD_A))]);
+    expect(exportCalls).toEqual([]);
+    expect(result.sessions).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Mapping
 // ---------------------------------------------------------------------------
 

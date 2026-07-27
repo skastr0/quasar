@@ -1246,13 +1246,23 @@ async function* streamAmp(options: AmpStreamOptions): AsyncGenerator<AdapterStre
     return;
   }
 
+  const skip =
+    options.skip !== undefined && Number.isFinite(options.skip) && options.skip > 0
+      ? Math.floor(options.skip)
+      : 0;
+  const limit =
+    options.limit !== undefined && Number.isFinite(options.limit)
+      ? Math.max(0, Math.floor(options.limit))
+      : Number.POSITIVE_INFINITY;
+  const selectedThreads =
+    limit === Number.POSITIVE_INFINITY
+      ? threads.slice(skip)
+      : threads.slice(skip, skip + limit);
+
   let emitted = 0;
   let exportCount = 0;
-  const limit = options.limit ?? Number.POSITIVE_INFINITY;
 
-  for (const thread of threads) {
-    if (emitted >= limit) break;
-
+  for (const thread of selectedThreads) {
     const fingerprint = fingerprintForThread(thread);
     const fingerprintKey = JSON.stringify(fingerprint);
     const sessionId = sessionIdFor("amp", AmpSessionId(thread.id));
