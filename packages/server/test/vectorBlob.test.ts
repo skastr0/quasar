@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  decodeFloat32Vector,
   decodeFloat16Vector,
+  encodeFloat32Vector,
   encodeFloat16Vector,
   float16BitsToFloat32,
   float32ToFloat16Bits,
@@ -33,6 +35,23 @@ describe("vectorBlob", () => {
   test("rejects non-finite values and dimension mismatches", () => {
     expect(() => encodeFloat16Vector([Number.NaN])).toThrow("cannot encode non-finite vector value at index 0");
     expect(() => decodeFloat16Vector(new Uint8Array([0, 60]), 2)).toThrow("f16 vector blob has dimension 1; expected 2");
+  });
+
+  test("round-trips explicit little-endian fp32 cache blobs", () => {
+    const encoded = encodeFloat32Vector([1, -2, 0.33325]);
+
+    expect([...encoded.slice(0, 8)]).toEqual([0, 0, 128, 63, 0, 0, 0, 192]);
+    expect(decodeFloat32Vector(encoded, 3)).toEqual([
+      1,
+      -2,
+      Math.fround(0.33325),
+    ]);
+    expect(() => decodeFloat32Vector(encoded, 2)).toThrow(
+      "f32 vector blob has dimension 3; expected 2",
+    );
+    expect(() => encodeFloat32Vector([Number.POSITIVE_INFINITY])).toThrow(
+      "cannot encode non-finite vector value at index 0",
+    );
   });
 
   test("converts scalar f16 boundary values", () => {

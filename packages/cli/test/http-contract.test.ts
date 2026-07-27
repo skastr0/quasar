@@ -30,6 +30,10 @@ import type { MappedSession } from "../src/model";
 import type { NormalizedSession } from "../src/core/schemas";
 import { NORMALIZATION_VERSION } from "../src/normalization-version";
 import { NORMALIZED_SESSION_PROTOCOL_VERSION } from "@skastr0/quasar-protocol";
+import {
+  EMBEDDING_CACHE_VECTOR_ENCODING,
+  encodeFloat32Vector,
+} from "../../server/src/vectorBlob";
 
 const serverRoot = join(import.meta.dir, "..", "..", "server");
 
@@ -1348,14 +1352,15 @@ describe("CLI HTTP client <-> server contract", () => {
       const db = new Database(sqlite);
       try {
         db.prepare(
-          `INSERT INTO embedding_cache(model, content_hash, dimensions, text_bytes, vector_json, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO embedding_cache(model, content_hash, dimensions, text_bytes, encoding, vector_blob, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
           cacheNamespace,
           sha256(documentText),
           768,
           new TextEncoder().encode(documentText).byteLength,
-          JSON.stringify(Array.from({ length: 768 }, (_, index) => index === 0 ? 1 : 0)),
+          EMBEDDING_CACHE_VECTOR_ENCODING,
+          encodeFloat32Vector(Array.from({ length: 768 }, (_, index) => index === 0 ? 1 : 0)),
           "2026-06-18T10:00:00.000Z",
           "2026-06-18T10:00:00.000Z",
         );
@@ -1378,14 +1383,15 @@ describe("CLI HTTP client <-> server contract", () => {
       const dbAfterReplay = new Database(sqlite);
       try {
         dbAfterReplay.prepare(
-          `INSERT INTO embedding_cache(model, content_hash, dimensions, text_bytes, vector_json, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO embedding_cache(model, content_hash, dimensions, text_bytes, encoding, vector_blob, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
           cacheNamespace,
           sha256(secondDocumentText),
           768,
           new TextEncoder().encode(secondDocumentText).byteLength,
-          JSON.stringify(Array.from({ length: 768 }, (_, index) => index === 1 ? 1 : 0)),
+          EMBEDDING_CACHE_VECTOR_ENCODING,
+          encodeFloat32Vector(Array.from({ length: 768 }, (_, index) => index === 1 ? 1 : 0)),
           "2026-06-18T10:00:00.000Z",
           "2026-06-18T10:00:00.000Z",
         );
@@ -1502,8 +1508,8 @@ describe("CLI HTTP client <-> server contract", () => {
       const queryDb = new Database(sqlite);
       try {
         queryDb.prepare(
-          `INSERT INTO embedding_cache(model, content_hash, dimensions, text_bytes, vector_json, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO embedding_cache(model, content_hash, dimensions, text_bytes, encoding, vector_blob, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
           cacheNamespace,
           sha256(queryDocumentText),
@@ -1511,7 +1517,8 @@ describe("CLI HTTP client <-> server contract", () => {
           new TextEncoder().encode(queryDocumentText).byteLength,
           // Same direction as the first document vector: cosine 1.0 against
           // "contract handshake over http", 0.0 against the assistant reply.
-          JSON.stringify(Array.from({ length: 768 }, (_, index) => index === 0 ? 1 : 0)),
+          EMBEDDING_CACHE_VECTOR_ENCODING,
+          encodeFloat32Vector(Array.from({ length: 768 }, (_, index) => index === 0 ? 1 : 0)),
           "2026-06-18T10:00:00.000Z",
           "2026-06-18T10:00:00.000Z",
         );

@@ -857,7 +857,8 @@ const migrate = (db: Database): readonly StoreMigrationLog[] => {
       content_hash TEXT NOT NULL,
       dimensions INTEGER NOT NULL,
       text_bytes INTEGER NOT NULL,
-      vector_json TEXT NOT NULL,
+      encoding TEXT NOT NULL,
+      vector_blob BLOB NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       PRIMARY KEY (model, content_hash)

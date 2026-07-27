@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { Effect, Layer } from "effect";
 import { createHash } from "node:crypto";
@@ -13,6 +14,7 @@ import { Embeddings, DurableQueue, makeDurableQueueLayer } from "../src/services
 import type { DurableQueueService } from "../src/services";
 import { LocalStore, makeLocalStoreLayer } from "../src/store";
 import { makeSyntheticEmbedder, SyntheticEmbeddingError } from "../src/syntheticEmbeddings";
+import { EMBEDDING_CACHE_VECTOR_ENCODING } from "../src/vectorBlob";
 
 const tempDirs: string[] = [];
 
@@ -122,6 +124,100 @@ describe("Embeddings", () => {
     expect(calls).toBe(1);
     expect(first).toEqual(second);
     expect(status.cached).toBe(1);
+  });
+
+  test("migrates legacy JSON cache vectors to exact fp32 blobs", async () => {
+    const sqlite = join(tempDir(), "legacy-cache.sqlite");
+    const legacyProfile = makeEmbeddingProfile({
+      model: "legacy-test-embedding",
+      dimensions: 3,
+      task: "search_document",
+      cacheNamespace: "legacy-test-cache",
+    });
+    const legacy = new Database(sqlite);
+    try {
+      legacy.exec(`
+        CREATE TABLE embedding_cache (
+          model TEXT NOT NULL,
+          content_hash TEXT NOT NULL,
+          dimensions INTEGER NOT NULL,
+          text_bytes INTEGER NOT NULL,
+          vector_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (model, content_hash)
+        )
+      `);
+      legacy.prepare(`
+        INSERT INTO embedding_cache(
+          model, content_hash, dimensions, text_bytes, vector_json,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        legacyProfile.cacheNamespace,
+        "legacy-hash",
+        3,
+        12,
+        JSON.stringify([1, 0.33325, -2]),
+        "2026-07-01T00:00:00.000Z",
+        "2026-07-02T00:00:00.000Z",
+      );
+    } finally {
+      legacy.close();
+    }
+
+    const cached = await withEmbeddingsAt(
+      sqlite,
+      { embedMany: async () => [[0, 0, 0]] },
+      legacyProfile,
+      Effect.gen(function* () {
+        const embeddings = yield* Embeddings;
+        return yield* embeddings.getCached("legacy-hash");
+      }),
+    );
+    const cachedAfterSecondBoot = await withEmbeddingsAt(
+      sqlite,
+      { embedMany: async () => [[0, 0, 0]] },
+      legacyProfile,
+      Effect.gen(function* () {
+        const embeddings = yield* Embeddings;
+        return yield* embeddings.getCached("legacy-hash");
+      }),
+    );
+
+    expect(cached).toMatchObject({
+      model: legacyProfile.cacheNamespace,
+      contentHash: "legacy-hash",
+      dimensions: 3,
+      textBytes: 12,
+      vector: [1, Math.fround(0.33325), -2],
+      createdAt: "2026-07-01T00:00:00.000Z",
+      updatedAt: "2026-07-02T00:00:00.000Z",
+    });
+    expect(cachedAfterSecondBoot).toEqual(cached);
+
+    const migrated = new Database(sqlite, { readonly: true });
+    try {
+      const columns = migrated
+        .query("PRAGMA table_info(embedding_cache)")
+        .all() as Array<{ readonly name: string }>;
+      const columnNames = columns.map((column) => column.name);
+      expect(columnNames).toContain("encoding");
+      expect(columnNames).toContain("vector_blob");
+      expect(columnNames).not.toContain("vector_json");
+      expect(
+        migrated
+          .query(
+            "SELECT encoding, length(vector_blob) AS bytes FROM embedding_cache WHERE model = ? AND content_hash = ?",
+          )
+          .get(legacyProfile.cacheNamespace, "legacy-hash"),
+      ).toEqual({
+        encoding: EMBEDDING_CACHE_VECTOR_ENCODING,
+        bytes: 12,
+      });
+    } finally {
+      migrated.close();
+    }
   });
 
   test("cache miss embeds, caches, writes SQLite message_vectors, and acks the job", async () => {

@@ -10,6 +10,11 @@ import { DurableQueue, Embeddings, type EmbeddingCacheRow, type EmbeddingReadine
 import { LocalStore } from "./store";
 import { makeLocalOnnxEmbedder } from "./localOnnxEmbeddings";
 import { makeSyntheticEmbedder, SyntheticEmbeddingError } from "./syntheticEmbeddings";
+import {
+  decodeFloat32Vector,
+  EMBEDDING_CACHE_VECTOR_ENCODING,
+  encodeFloat32Vector,
+} from "./vectorBlob";
 
 // Provider prefix of a sessionId (matches fts5.providerFromSessionId); kept
 // local to avoid importing the search layer into the embed worker.
@@ -63,22 +68,124 @@ const nowIso = () => new Date().toISOString();
 const contentHashForText = (text: string) =>
   createHash("sha256").update(text).digest("hex");
 
-const embeddingMigrate = (db: Database): void => {
+const createEmbeddingCacheTable = (db: Database): void => {
   db.exec(`
-    PRAGMA journal_mode = WAL;
-    PRAGMA synchronous = NORMAL;
-    CREATE TABLE IF NOT EXISTS embedding_cache (
+    CREATE TABLE embedding_cache (
       model TEXT NOT NULL,
       content_hash TEXT NOT NULL,
       dimensions INTEGER NOT NULL,
       text_bytes INTEGER NOT NULL,
-      vector_json TEXT NOT NULL,
+      encoding TEXT NOT NULL,
+      vector_blob BLOB NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       PRIMARY KEY (model, content_hash)
-    );
-    CREATE INDEX IF NOT EXISTS embedding_cache_updated ON embedding_cache(model, updated_at);
+    )
   `);
+};
+
+const embeddingMigrate = (db: Database): void => {
+  db.exec(`
+    PRAGMA journal_mode = WAL;
+    PRAGMA synchronous = NORMAL;
+  `);
+  const existing = db
+    .query(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'embedding_cache'",
+    )
+    .get() as { readonly name: string } | null;
+  if (existing === null) {
+    createEmbeddingCacheTable(db);
+  } else {
+    const columns = new Set(
+      (
+        db.query("PRAGMA table_info(embedding_cache)").all() as Array<{
+          readonly name: string;
+        }>
+      ).map((column) => column.name),
+    );
+    const current =
+      columns.has("encoding")
+      && columns.has("vector_blob")
+      && !columns.has("vector_json");
+    if (!current) {
+      if (!columns.has("vector_json")) {
+        throw new Error(
+          "embedding_cache has neither the current vector_blob nor legacy vector_json representation",
+        );
+      }
+      const migrateLegacy = db.transaction(() => {
+        db.exec(
+          "ALTER TABLE embedding_cache RENAME TO embedding_cache_json_legacy",
+        );
+        createEmbeddingCacheTable(db);
+        const insert = db.prepare(`
+          INSERT INTO embedding_cache(
+            model, content_hash, dimensions, text_bytes, encoding, vector_blob,
+            created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        const rows = db.query(`
+          SELECT model, content_hash AS contentHash, dimensions,
+            text_bytes AS textBytes, vector_json AS vectorJson,
+            created_at AS createdAt, updated_at AS updatedAt
+          FROM embedding_cache_json_legacy
+        `);
+        const expectedRows = (
+          db
+            .query(
+              "SELECT COUNT(*) AS count FROM embedding_cache_json_legacy",
+            )
+            .get() as { readonly count: number }
+        ).count;
+        let migratedRows = 0;
+        for (const row of rows.iterate() as Iterable<{
+          readonly model: string;
+          readonly contentHash: string;
+          readonly dimensions: number;
+          readonly textBytes: number;
+          readonly vectorJson: string;
+          readonly createdAt: string;
+          readonly updatedAt: string;
+        }>) {
+          const vector = JSON.parse(row.vectorJson) as unknown;
+          if (
+            !Array.isArray(vector)
+            || vector.length !== row.dimensions
+            || !vector.every(
+              (value): value is number =>
+                typeof value === "number" && Number.isFinite(value),
+            )
+          ) {
+            throw new Error(
+              `legacy embedding cache vector ${row.model}/${row.contentHash} does not match dimension ${row.dimensions}`,
+            );
+          }
+          insert.run(
+            row.model,
+            row.contentHash,
+            row.dimensions,
+            row.textBytes,
+            EMBEDDING_CACHE_VECTOR_ENCODING,
+            encodeFloat32Vector(vector),
+            row.createdAt,
+            row.updatedAt,
+          );
+          migratedRows += 1;
+        }
+        if (migratedRows !== expectedRows) {
+          throw new Error(
+            `embedding cache migration wrote ${migratedRows} of ${expectedRows} rows`,
+          );
+        }
+        db.exec("DROP TABLE embedding_cache_json_legacy");
+      });
+      migrateLegacy();
+    }
+  }
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS embedding_cache_updated ON embedding_cache(model, updated_at)",
+  );
 };
 
 const tryEmbedding = <A>(operation: string, run: () => A): Effect.Effect<A, EmbeddingError> =>
@@ -92,15 +199,25 @@ const tryEmbedding = <A>(operation: string, run: () => A): Effect.Effect<A, Embe
       }),
   });
 
-const toCacheRow = (row: Record<string, unknown>): EmbeddingCacheRow => ({
-  model: row.model as string,
-  contentHash: row.contentHash as string,
-  dimensions: row.dimensions as number,
-  textBytes: row.textBytes as number,
-  vector: JSON.parse(row.vectorJson as string) as readonly number[],
-  createdAt: row.createdAt as string,
-  updatedAt: row.updatedAt as string,
-});
+const toCacheRow = (row: Record<string, unknown>): EmbeddingCacheRow => {
+  if (row.encoding !== EMBEDDING_CACHE_VECTOR_ENCODING) {
+    throw new Error(
+      `unsupported embedding cache encoding ${String(row.encoding)}`,
+    );
+  }
+  return {
+    model: row.model as string,
+    contentHash: row.contentHash as string,
+    dimensions: row.dimensions as number,
+    textBytes: row.textBytes as number,
+    vector: decodeFloat32Vector(
+      row.vectorBlob as Uint8Array,
+      row.dimensions as number,
+    ),
+    createdAt: row.createdAt as string,
+    updatedAt: row.updatedAt as string,
+  };
+};
 
 const liveEmbedderForProfile = (profile: EmbeddingProfile): Embedder =>
   embeddingProviderFromEnv() === "synthetic"
@@ -348,12 +465,12 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
             Effect.forkScoped,
           );
           const selectCached = db.prepare(
-            "SELECT model, content_hash AS contentHash, dimensions, text_bytes AS textBytes, vector_json AS vectorJson, created_at AS createdAt, updated_at AS updatedAt FROM embedding_cache WHERE model = ? AND content_hash = ?",
+            "SELECT model, content_hash AS contentHash, dimensions, text_bytes AS textBytes, encoding, vector_blob AS vectorBlob, created_at AS createdAt, updated_at AS updatedAt FROM embedding_cache WHERE model = ? AND content_hash = ?",
           );
           const upsertCached = db.prepare(
-            `INSERT INTO embedding_cache(model, content_hash, dimensions, text_bytes, vector_json, created_at, updated_at)
-             VALUES ($model, $contentHash, $dimensions, $textBytes, $vectorJson, $createdAt, $updatedAt)
-             ON CONFLICT(model, content_hash) DO UPDATE SET dimensions = excluded.dimensions, text_bytes = excluded.text_bytes, vector_json = excluded.vector_json, updated_at = excluded.updated_at`,
+            `INSERT INTO embedding_cache(model, content_hash, dimensions, text_bytes, encoding, vector_blob, created_at, updated_at)
+             VALUES ($model, $contentHash, $dimensions, $textBytes, $encoding, $vectorBlob, $createdAt, $updatedAt)
+             ON CONFLICT(model, content_hash) DO UPDATE SET dimensions = excluded.dimensions, text_bytes = excluded.text_bytes, encoding = excluded.encoding, vector_blob = excluded.vector_blob, updated_at = excluded.updated_at`,
           );
 
           const getCached = (contentHash: string) =>
@@ -375,7 +492,8 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                 $contentHash: row.contentHash,
                 $dimensions: row.vector.length,
                 $textBytes: textEncoder.encode(row.text).byteLength,
-                $vectorJson: JSON.stringify(row.vector),
+                $encoding: EMBEDDING_CACHE_VECTOR_ENCODING,
+                $vectorBlob: encodeFloat32Vector(row.vector),
                 $createdAt: existing === null ? at : existing.createdAt as string,
                 $updatedAt: at,
               });
