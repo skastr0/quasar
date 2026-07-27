@@ -194,6 +194,9 @@ describe("LocalStore", () => {
         );
       }));
 
+    const checkpoint = new Database(path);
+    checkpoint.query("PRAGMA wal_checkpoint(TRUNCATE)").get();
+    checkpoint.close();
     const before = sqliteFileState(path);
 
     const explicit = await withReadonlyStore(path, (store) =>
