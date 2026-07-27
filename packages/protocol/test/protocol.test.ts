@@ -17,6 +17,8 @@ import {
   decodeQuasarTrajectorySync,
   decodeQueryResponseSync,
   decodeQuerySpecSync,
+  decodeSessionEnrichmentFiltersSync,
+  decodeSessionEnrichmentPageSync,
   decodeSessionEnrichmentSync,
   projectQuasarTrajectory,
   protocolContracts,
@@ -1106,5 +1108,34 @@ describe("SessionEnrichment v1", () => {
     ]);
     expect(protocolExamples.length).toBe(14);
     expect(protocolExamples.every((example) => example.schemaId.length > 0)).toBe(true);
+  });
+
+  test("strictly types exact enumeration filters and bounded pages", () => {
+    const enrichment = protocolContracts.sessionEnrichment.examples[0].input;
+    const filters = decodeSessionEnrichmentFiltersSync({
+      projectKey: "quasar",
+      sessionId: enrichment.sessionId,
+      namespace: enrichment.namespace,
+      producer: enrichment.producer,
+      inputHash: enrichment.inputHash,
+    });
+    expect(String(filters.projectKey)).toBe("quasar");
+    expect(String(filters.sessionId)).toBe(enrichment.sessionId);
+    expect(filters.namespace).toBe(enrichment.namespace);
+    expect(filters.producer).toBe(enrichment.producer);
+    expect(filters.inputHash).toBe(enrichment.inputHash);
+    expect(() => decodeSessionEnrichmentFiltersSync({
+      namespace: enrichment.namespace,
+      payload: "not a filter",
+    })).toThrow();
+
+    expect(() => decodeSessionEnrichmentPageSync({
+      rows: [enrichment],
+      page: { returned: 1, nextCursor: "opaque-cursor" },
+    })).not.toThrow();
+    expect(() => decodeSessionEnrichmentPageSync({
+      rows: [enrichment],
+      page: { returned: 0 },
+    })).toThrow();
   });
 });

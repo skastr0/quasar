@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  SESSION_ENRICHMENT_VERSION,
   decodeMappedSessionSync,
+  decodeSessionEnrichmentSync,
   mappedSessionExamples,
 } from "@skastr0/quasar-protocol";
 import { Effect } from "effect";
@@ -240,6 +242,137 @@ describe("LocalStore", () => {
     );
 
     expect(stats).toEqual({ projects: 1, sessions: 1, messages: 2, toolCalls: 2, ingestRuns: 0 });
+  });
+
+  test("replaces one enrichment per session namespace without source re-ingest loss", async () => {
+    const path = sqlitePath();
+    const source = mappedSession();
+    const secondSource = mappedSession({
+      sessionId: "session-b",
+      projectKey: "project-b",
+      sourcePath: "/hist/session-b.jsonl",
+      sourceFingerprint: "fingerprint-b",
+    });
+    const makeEnrichment = (overrides: {
+      readonly sessionId?: string;
+      readonly namespace?: string;
+      readonly schemaVersion?: number;
+      readonly producer?: string;
+      readonly inputHash?: string;
+      readonly payload?: unknown;
+      readonly updatedAt?: string;
+    } = {}) => decodeSessionEnrichmentSync({
+      protocolVersion: SESSION_ENRICHMENT_VERSION,
+      sessionId: overrides.sessionId ?? "session-a",
+      namespace: overrides.namespace ?? "quasar.analysis.alpha",
+      schemaVersion: overrides.schemaVersion ?? 1,
+      producer: overrides.producer ?? "analyzer@1",
+      inputHash: overrides.inputHash ?? "sha256:source-a",
+      payload: overrides.payload ?? { verdict: "initial" },
+      updatedAt: overrides.updatedAt ?? "2026-07-27T12:00:00.000Z",
+    });
+    const initial = makeEnrichment();
+    const replacement = makeEnrichment({
+      schemaVersion: 2,
+      producer: "analyzer@2",
+      inputHash: "sha256:source-a-v2",
+      payload: { verdict: "replacement" },
+      updatedAt: "2026-07-27T12:01:00.000Z",
+    });
+    const sameSessionSecondNamespace = makeEnrichment({
+      namespace: "quasar.analysis.zeta",
+      payload: { verdict: "zeta" },
+    });
+    const secondSession = makeEnrichment({
+      sessionId: "session-b",
+      inputHash: "sha256:source-b",
+      payload: { verdict: "second-session" },
+    });
+    const unknownSession = makeEnrichment({ sessionId: "session-missing" });
+
+    const result = await withStore(
+      path,
+      (store) =>
+        Effect.gen(function* () {
+          yield* store.upsertSession(source);
+          yield* store.upsertSession(secondSource);
+
+          const missing = yield* store.upsertSessionEnrichment(unknownSession);
+          const inserted = yield* store.upsertSessionEnrichment(initial);
+          const replayed = yield* store.upsertSessionEnrichment(initial);
+          const replaced = yield* store.upsertSessionEnrichment(replacement);
+          yield* store.upsertSessionEnrichment(sameSessionSecondNamespace);
+          yield* store.upsertSessionEnrichment(secondSession);
+
+          yield* store.upsertSession({
+            ...source,
+            session: {
+              ...source.session,
+              title: "Re-ingested source",
+              sourceFingerprint: "fingerprint-a-reingested",
+            },
+          });
+
+          const all = yield* store.querySessionEnrichments({ limit: 10 });
+          const afterFirst = yield* store.querySessionEnrichments({
+            after: {
+              sessionId: "session-a",
+              namespace: "quasar.analysis.alpha",
+            },
+            limit: 10,
+          });
+          const projectScoped = yield* store.querySessionEnrichments({
+            projectKey: "project-a",
+            limit: 10,
+          });
+          const exactReplacement = yield* store.querySessionEnrichments({
+            sessionId: "session-a",
+            namespace: "quasar.analysis.alpha",
+            producer: "analyzer@2",
+            inputHash: "sha256:source-a-v2",
+            limit: 10,
+          });
+          return {
+            missing,
+            inserted,
+            replayed,
+            replaced,
+            all,
+            afterFirst,
+            projectScoped,
+            exactReplacement,
+          };
+        }),
+    );
+
+    expect(result.missing).toBeUndefined();
+    expect(result.inserted).toEqual(initial);
+    expect(result.replayed).toEqual(initial);
+    expect(result.replaced).toEqual(replacement);
+    expect(result.all).toEqual([
+      replacement,
+      sameSessionSecondNamespace,
+      secondSession,
+    ]);
+    expect(result.afterFirst).toEqual([
+      sameSessionSecondNamespace,
+      secondSession,
+    ]);
+    expect(result.projectScoped).toEqual([
+      replacement,
+      sameSessionSecondNamespace,
+    ]);
+    expect(result.exactReplacement).toEqual([replacement]);
+
+    const db = new Database(path, { readonly: true });
+    try {
+      const count = db.query(
+        "SELECT COUNT(*) AS count FROM session_enrichments",
+      ).get() as { readonly count: number };
+      expect(count.count).toBe(3);
+    } finally {
+      db.close();
+    }
   });
 
   test("scans every message across sessions with research filters and stable keys", async () => {

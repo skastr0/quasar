@@ -3,7 +3,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import {
   NORMALIZED_SESSION_PROTOCOL_VERSION,
+  decodeSessionEnrichmentSync,
   decodeMappedSessionSync,
+  type SessionEnrichment,
 } from "@skastr0/quasar-protocol";
 import { Cause, Context, Effect, Layer, Schema } from "effect";
 
@@ -130,6 +132,11 @@ export interface MessageScanKey {
   readonly sequence: number;
 }
 
+export interface SessionEnrichmentScanKey {
+  readonly sessionId: string;
+  readonly namespace: string;
+}
+
 export interface QuerySnapshot {
   readonly id: string;
   readonly writing: boolean;
@@ -242,6 +249,18 @@ export interface LocalStoreService {
     readonly limit: number;
   }) => Effect.Effect<readonly QueryMessageRow[], SqliteStoreError>;
   readonly querySnapshot: Effect.Effect<QuerySnapshot>;
+  readonly upsertSessionEnrichment: (
+    enrichment: SessionEnrichment,
+  ) => Effect.Effect<SessionEnrichment | undefined, SqliteStoreError>;
+  readonly querySessionEnrichments: (options: {
+    readonly projectKey?: string;
+    readonly sessionId?: string;
+    readonly namespace?: string;
+    readonly producer?: string;
+    readonly inputHash?: string;
+    readonly after?: SessionEnrichmentScanKey;
+    readonly limit: number;
+  }) => Effect.Effect<readonly SessionEnrichment[], SqliteStoreError>;
   readonly queryToolCalls: (options: {
     readonly projectKey?: string;
     readonly providers?: readonly string[];
@@ -779,6 +798,23 @@ const migrate = (db: Database): readonly StoreMigrationLog[] => {
     CREATE INDEX IF NOT EXISTS sessions_by_parent ON sessions(parent_session_id, session_id);
     CREATE INDEX IF NOT EXISTS sessions_by_recency_order
       ON sessions(COALESCE(updated_at, started_at, '') DESC, session_id ASC);
+    CREATE TABLE IF NOT EXISTS session_enrichments (
+      session_id TEXT NOT NULL,
+      namespace TEXT NOT NULL,
+      protocol_version TEXT NOT NULL,
+      schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+      producer TEXT NOT NULL,
+      input_hash TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (session_id, namespace)
+    );
+    CREATE INDEX IF NOT EXISTS session_enrichments_by_namespace
+      ON session_enrichments(namespace, session_id);
+    CREATE INDEX IF NOT EXISTS session_enrichments_by_producer
+      ON session_enrichments(producer, session_id, namespace);
+    CREATE INDEX IF NOT EXISTS session_enrichments_by_input_hash
+      ON session_enrichments(input_hash, session_id, namespace);
     CREATE TABLE IF NOT EXISTS messages (
       session_id TEXT NOT NULL,
       event_id TEXT NOT NULL,
@@ -1094,6 +1130,38 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
           `INSERT INTO sessions(session_id, project_key, provider, agent_name, title, started_at, updated_at, source_path, source_fingerprint, host, identity_scheme_version, normalization_version, model, model_provider, assignment_nickname, assignment_role, assignment_path, assignment_depth, parent_session_id, message_count, tool_call_count)
            VALUES ($sessionId, $projectKey, $provider, $agentName, $title, $startedAt, $updatedAt, $sourcePath, $sourceFingerprint, $host, $identitySchemeVersion, $normalizationVersion, $model, $modelProvider, $assignmentNickname, $assignmentRole, $assignmentPath, $assignmentDepth, $parentSessionId, $messageCount, $toolCallCount)
            ON CONFLICT(session_id) DO UPDATE SET project_key = excluded.project_key, provider = excluded.provider, agent_name = excluded.agent_name, title = excluded.title, started_at = excluded.started_at, updated_at = excluded.updated_at, source_path = excluded.source_path, source_fingerprint = excluded.source_fingerprint, host = excluded.host, identity_scheme_version = excluded.identity_scheme_version, normalization_version = excluded.normalization_version, model = excluded.model, model_provider = excluded.model_provider, assignment_nickname = excluded.assignment_nickname, assignment_role = excluded.assignment_role, assignment_path = excluded.assignment_path, assignment_depth = excluded.assignment_depth, parent_session_id = excluded.parent_session_id, message_count = excluded.message_count, tool_call_count = excluded.tool_call_count`,
+        );
+        const selectSessionExists = db.prepare(
+          "SELECT 1 AS present FROM sessions WHERE session_id = ?",
+        );
+        const upsertSessionEnrichment = db.prepare(
+          `INSERT INTO session_enrichments(session_id, namespace, protocol_version, schema_version, producer, input_hash, payload_json, updated_at)
+           VALUES ($sessionId, $namespace, $protocolVersion, $schemaVersion, $producer, $inputHash, $payloadJson, $updatedAt)
+           ON CONFLICT(session_id, namespace) DO UPDATE SET
+             protocol_version = excluded.protocol_version,
+             schema_version = excluded.schema_version,
+             producer = excluded.producer,
+             input_hash = excluded.input_hash,
+             payload_json = excluded.payload_json,
+             updated_at = excluded.updated_at
+           WHERE session_enrichments.protocol_version IS NOT excluded.protocol_version
+              OR session_enrichments.schema_version IS NOT excluded.schema_version
+              OR session_enrichments.producer IS NOT excluded.producer
+              OR session_enrichments.input_hash IS NOT excluded.input_hash
+              OR session_enrichments.payload_json IS NOT excluded.payload_json
+              OR session_enrichments.updated_at IS NOT excluded.updated_at`,
+        );
+        const selectSessionEnrichment = db.prepare(
+          `SELECT protocol_version AS protocolVersion,
+                  session_id AS sessionId,
+                  namespace,
+                  schema_version AS schemaVersion,
+                  producer,
+                  input_hash AS inputHash,
+                  payload_json AS payloadJson,
+                  updated_at AS updatedAt
+           FROM session_enrichments
+           WHERE session_id = ? AND namespace = ?`,
         );
         const insertMessage = db.prepare(
           `INSERT INTO messages(session_id, event_id, seq, role, text, ts, project_key, content_hash, project_scope_token, execution_context_id, model, model_provider, reasoning_effort)
@@ -1956,6 +2024,122 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                 .all(limit, offset) as ProjectRow[];
             }),
           upsertSession: upsertSessionDiff,
+          upsertSessionEnrichment: (enrichment) =>
+            trySqlite("upsertSessionEnrichment", () => {
+              if (selectSessionExists.get(enrichment.sessionId) === null) {
+                return undefined;
+              }
+              upsertSessionEnrichment.run({
+                $sessionId: enrichment.sessionId,
+                $namespace: enrichment.namespace,
+                $protocolVersion: enrichment.protocolVersion,
+                $schemaVersion: enrichment.schemaVersion,
+                $producer: enrichment.producer,
+                $inputHash: enrichment.inputHash,
+                $payloadJson: JSON.stringify(enrichment.payload),
+                $updatedAt: enrichment.updatedAt,
+              });
+              const row = selectSessionEnrichment.get(
+                enrichment.sessionId,
+                enrichment.namespace,
+              ) as {
+                readonly protocolVersion: string;
+                readonly sessionId: string;
+                readonly namespace: string;
+                readonly schemaVersion: number;
+                readonly producer: string;
+                readonly inputHash: string;
+                readonly payloadJson: string;
+                readonly updatedAt: string;
+              } | null;
+              if (row === null) {
+                throw new Error("upserted session enrichment disappeared");
+              }
+              return decodeSessionEnrichmentSync({
+                protocolVersion: row.protocolVersion,
+                sessionId: row.sessionId,
+                namespace: row.namespace,
+                schemaVersion: row.schemaVersion,
+                producer: row.producer,
+                inputHash: row.inputHash,
+                payload: JSON.parse(row.payloadJson) as unknown,
+                updatedAt: row.updatedAt,
+              });
+            }),
+          querySessionEnrichments: (options) =>
+            trySqlite("querySessionEnrichments", () => {
+              const filters: string[] = [];
+              const args: Array<string | number> = [];
+              if (options.projectKey !== undefined) {
+                filters.push("s.project_key = ?");
+                args.push(options.projectKey);
+              }
+              if (options.sessionId !== undefined) {
+                filters.push("e.session_id = ?");
+                args.push(options.sessionId);
+              }
+              if (options.namespace !== undefined) {
+                filters.push("e.namespace = ?");
+                args.push(options.namespace);
+              }
+              if (options.producer !== undefined) {
+                filters.push("e.producer = ?");
+                args.push(options.producer);
+              }
+              if (options.inputHash !== undefined) {
+                filters.push("e.input_hash = ?");
+                args.push(options.inputHash);
+              }
+              if (options.after !== undefined) {
+                filters.push(
+                  "(e.session_id > ? OR (e.session_id = ? AND e.namespace > ?))",
+                );
+                args.push(
+                  options.after.sessionId,
+                  options.after.sessionId,
+                  options.after.namespace,
+                );
+              }
+              const where = filters.length === 0
+                ? ""
+                : `WHERE ${filters.join(" AND ")}`;
+              const rows = db.query(`
+                SELECT e.protocol_version AS protocolVersion,
+                       e.session_id AS sessionId,
+                       e.namespace,
+                       e.schema_version AS schemaVersion,
+                       e.producer,
+                       e.input_hash AS inputHash,
+                       e.payload_json AS payloadJson,
+                       e.updated_at AS updatedAt
+                FROM session_enrichments AS e
+                JOIN sessions AS s ON s.session_id = e.session_id
+                ${where}
+                ORDER BY e.session_id ASC, e.namespace ASC
+                LIMIT ?
+              `).all(...args, options.limit) as Array<{
+                readonly protocolVersion: string;
+                readonly sessionId: string;
+                readonly namespace: string;
+                readonly schemaVersion: number;
+                readonly producer: string;
+                readonly inputHash: string;
+                readonly payloadJson: string;
+                readonly updatedAt: string;
+              }>;
+              return rows.map((row) =>
+                decodeSessionEnrichmentSync({
+                  protocolVersion: row.protocolVersion,
+                  sessionId: row.sessionId,
+                  namespace: row.namespace,
+                  schemaVersion: row.schemaVersion,
+                  producer: row.producer,
+                  inputHash: row.inputHash,
+                  payload: JSON.parse(row.payloadJson) as unknown,
+                  updatedAt: row.updatedAt,
+                })
+              );
+            }),
           finalizeSessionIngest: (sessionId, sourceFingerprint, normalizationVersion) =>
             trySqlite("finalizeSessionIngest", () => {
               const applyingFingerprint = `applying:${sourceFingerprint}`;

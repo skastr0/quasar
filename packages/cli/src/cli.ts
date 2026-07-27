@@ -22,6 +22,11 @@ import {
 } from "./query-client";
 import { runResearchExport } from "./research-export";
 import {
+  listSessionEnrichments,
+  readSessionEnrichmentArgument,
+  writeSessionEnrichment,
+} from "./session-enrichment";
+import {
   messagesQuery,
   searchQuery,
   sessionsQuery,
@@ -54,6 +59,7 @@ const valueOptionNames = new Set([
   "--fields",
   "--format",
   "--id",
+  "--input-hash",
   "--ingest-token",
   "--interval-seconds",
   "--limit",
@@ -66,10 +72,12 @@ const valueOptionNames = new Set([
   "--model",
   "--model-provider",
   "--name",
+  "--namespace",
   "--offset",
   "--out",
   "--project",
   "--project-key",
+  "--producer",
   "--provider",
   "--providers",
   "--query",
@@ -199,6 +207,22 @@ const queryCommandOptionNames: Readonly<Record<string, ReadonlySet<string>>> = {
     "--session-started-after",
     "--session-started-before",
     "--tool-result-max-bytes",
+  ]),
+  enrichments: new Set([
+    ...queryClientOptionNames,
+    "--project",
+    "--project-key",
+    "--session",
+    "--session-id",
+    "--namespace",
+    "--producer",
+    "--input-hash",
+    "--cursor",
+    "--limit",
+  ]),
+  "enrichment-write": new Set([
+    ...queryClientOptionNames,
+    "--ingest-token",
   ]),
   query: new Set(queryClientOptionNames),
 };
@@ -1021,6 +1045,54 @@ if (!rejectUnsupportedOptions(command)) {
     }
     break;
   }
+  case "enrichments": {
+    if (!checkIntRange("enrichments", "--limit", 1, 200)) break;
+    const base = requireServer("enrichments");
+    if (base === undefined) break;
+    try {
+      const result = await listSessionEnrichments({
+        serverUrl: base,
+        timeoutMs: httpTimeoutMs(),
+        filters: {
+          projectKey: firstArg("--project", "--project-key"),
+          sessionId: firstArg("--session", "--session-id"),
+          namespace: arg("--namespace"),
+          producer: arg("--producer"),
+          inputHash: arg("--input-hash"),
+        },
+        limit: arg("--limit") === undefined
+          ? 100
+          : Number(arg("--limit")),
+        cursor: arg("--cursor"),
+      });
+      writeJson(ok("enrichments", result));
+    } catch (error) {
+      writeJson(fail("enrichments", error));
+      process.exitCode = 1;
+    }
+    break;
+  }
+  case "enrichment-write": {
+    const base = requireServer("enrichment-write");
+    if (base === undefined) break;
+    const ingestToken = requireIngestToken("enrichment-write");
+    if (ingestToken === undefined) break;
+    try {
+      const enrichment = readSessionEnrichmentArgument(
+        parsedArguments.positionals[1],
+      );
+      const row = await writeSessionEnrichment(enrichment, {
+        serverUrl: base,
+        ingestToken,
+        timeoutMs: httpTimeoutMs(),
+      });
+      writeJson(ok("enrichment-write", { row }));
+    } catch (error) {
+      writeJson(fail("enrichment-write", error));
+      process.exitCode = 1;
+    }
+    break;
+  }
   case "ingest-runs": {
     if (!(checkEnum("ingest-runs", "--status", INGEST_RUN_STATUSES) && checkInt("ingest-runs", "--limit", 1) && checkInt("ingest-runs", "--offset", 0))) break;
     await fetchServer("ingest-runs", "/ingest-runs", { status: arg("--status"), limit: arg("--limit"), offset: arg("--offset") });
@@ -1099,6 +1171,8 @@ if (!rejectUnsupportedOptions(command)) {
       "session --id id [--message-limit n] [--tool-call-limit n] [--event-limit n] [--usage-limit n] [--edge-limit n] [--artifact-limit n] [--context-limit n]",
       "trajectory --session id [--format quasar|letta|atif] [--exclude-reasoning] [--exclude-tool-results] [--tool-result-max-bytes n]",
       "research-export --out path [--project key] [--provider name[,name]] [--session id] [--role user|assistant|reasoning] [--agent name] [--agent-role role] [--model slug] [--model-provider name] [--message-after timestamp] [--message-before timestamp] [--session-started-after timestamp] [--session-started-before timestamp] [--roots-only] [--lineage-root-session id] [--exclude-reasoning] [--exclude-tool-results] [--tool-result-max-bytes n] [--cursor token] [--limit n]",
+      "enrichments [--project key] [--session id] [--namespace name] [--producer name] [--input-hash hash] [--cursor token] [--limit n] [--server url]",
+      "enrichment-write <inline-json|@file|-> [--server url] [--ingest-token token]",
       "messages [--session id] [--project key] [--provider name[,name]] [--role user|assistant|reasoning] [--agent name] [--agent-role role] [--model slug] [--model-provider name] [--message-after timestamp] [--message-before timestamp] [--session-started-after timestamp] [--session-started-before timestamp] [--roots-only] [--lineage-root-session id] [--fields a,b] [--detail] [--cursor token] [--limit n]",
       "tool-calls [--session id] [--project key] [--provider name[,name]] [--tool name] [--agent name] [--agent-role role] [--model slug] [--model-provider name] [--fields a,b] [--detail] [--cursor token] [--limit n]",
       "tool-call --id id [--fields a,b] (full input/output detail)",
