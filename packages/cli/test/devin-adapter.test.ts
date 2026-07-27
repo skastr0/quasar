@@ -20,6 +20,7 @@ import {
 import { isSignal } from "../src/adapters/harness-schema";
 import type { AdapterReadResult } from "../src/adapters/types";
 import { DevinSessionId } from "../src/core/identity";
+import { decodeNormalizedSessionSync } from "../src/core/schemas";
 
 const MACHINE = {
   machineId: "machine:devin-test",
@@ -383,6 +384,69 @@ describe("Devin SQLite adapter", () => {
       session.sessionEdges.flatMap((edge) => [edge.fromEventId, edge.toEventId]),
     );
     expect(session.events.every((event) => connectedEventIds.has(event.id))).toBe(true);
+  });
+
+  test("scopes serially reused native tool ids to their call occurrence", async () => {
+    const { root, database } = createFixture();
+    insertSession(database, "serial-tool-id-reuse", 4);
+    insertNode(database, "serial-tool-id-reuse", 1, null, assistantMessage(
+      "first-call",
+      "",
+      "2099-01-01T00:00:00.000Z",
+      {
+        tool_calls: [
+          { id: "reused-call", index: 0, kind: "function", name: "synthetic_first", arguments: { command: "first" } },
+        ],
+      },
+    ));
+    insertNode(database, "serial-tool-id-reuse", 2, 1, toolMessage(
+      "first-result",
+      "reused-call",
+      "first result",
+      "2099-01-01T00:00:01.000Z",
+      true,
+    ));
+    insertNode(database, "serial-tool-id-reuse", 3, 2, assistantMessage(
+      "second-call",
+      "",
+      "2099-01-01T00:00:02.000Z",
+      {
+        tool_calls: [
+          { id: "reused-call", index: 0, kind: "function", name: "synthetic_second", arguments: { command: "second" } },
+        ],
+      },
+    ));
+    insertNode(database, "serial-tool-id-reuse", 4, 3, toolMessage(
+      "second-result",
+      "reused-call",
+      "second result",
+      "2099-01-01T00:00:03.000Z",
+      false,
+    ));
+    database.close();
+
+    const result = await devinAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { devin: root },
+    });
+
+    expect(result.sessions).toHaveLength(1);
+    const session = result.sessions[0]!;
+    expect(() => decodeNormalizedSessionSync(session)).not.toThrow();
+    expect(session.toolCalls.map(({ toolName, status }) => [toolName, status])).toEqual([
+      ["synthetic_first", "completed"],
+      ["synthetic_second", "failed"],
+    ]);
+    expect(new Set(session.toolCalls.map(({ id }) => id)).size).toBe(2);
+    expect(session.events.map(({ toolCallId }) => toolCallId)).toEqual([
+      session.toolCalls[0]!.id,
+      session.toolCalls[0]!.id,
+      session.toolCalls[1]!.id,
+      session.toolCalls[1]!.id,
+    ]);
+    expect(diagnosticNames(result)).not.toContain("devin.tool_call.duplicate");
+    expect(diagnosticNames(result)).not.toContain("devin.tool_result.duplicate");
   });
 
   test("uses canonical native identity and distinct per-session fingerprints across logical roots", async () => {
