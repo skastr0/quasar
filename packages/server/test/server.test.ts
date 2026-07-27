@@ -220,6 +220,194 @@ describe("HTTP server resources", () => {
     } finally { proc.kill(); await proc.exited; }
   });
 
+  test("GET messages scans globally and continues from a stable keyset page", async () => {
+    const dir = tempDir();
+    const sqlite = join(dir, "quasar.sqlite");
+    const root = mappedSession();
+    const child = descendantSession(
+      "codex:session-http:child",
+      root.session.sessionId,
+    );
+    const grandchild = descendantSession(
+      "codex:session-http:grandchild",
+      child.session.sessionId,
+    );
+    await seed(sqlite, [root, child, grandchild]);
+    const { proc, base } = startServer(sqlite);
+    try {
+      await waitFor(`${base}/health`);
+      const firstResponse = await fetch(`${base}/messages?limit=3`);
+      expect(firstResponse.status).toBe(200);
+      const first = await firstResponse.json();
+      expect(first.data.sessionId).toBeUndefined();
+      expect(first.data.rows.map((row: { sessionId: string; sequence: number }) => [
+        row.sessionId,
+        row.sequence,
+      ])).toEqual([
+        ["codex:session-http", 0],
+        ["codex:session-http", 1],
+        ["codex:session-http:child", 0],
+      ]);
+      expect(first.data.page).toEqual({
+        limit: 3,
+        snapshot: expect.any(String),
+        next: {
+          sessionId: "codex:session-http:child",
+          sequence: 0,
+        },
+      });
+
+      const next = first.data.page.next as {
+        sessionId: string;
+        sequence: number;
+      };
+      const continuation = new URLSearchParams({
+        limit: "3",
+        afterSessionId: next.sessionId,
+        afterSequence: String(next.sequence),
+        snapshot: first.data.page.snapshot,
+      });
+      const secondResponse = await fetch(`${base}/messages?${continuation}`);
+      expect(secondResponse.status).toBe(200);
+      const second = await secondResponse.json();
+      expect(second.data.rows.map((row: { sessionId: string; sequence: number }) => [
+        row.sessionId,
+        row.sequence,
+      ])).toEqual([
+        ["codex:session-http:child", 1],
+        ["codex:session-http:grandchild", 0],
+        ["codex:session-http:grandchild", 1],
+      ]);
+      expect(second.data.page).toEqual({
+        limit: 3,
+        snapshot: first.data.page.snapshot,
+        next: null,
+      });
+    } finally {
+      proc.kill();
+      await proc.exited;
+    }
+  });
+
+  test("GET messages applies time, root, and recursive lineage filters", async () => {
+    const dir = tempDir();
+    const sqlite = join(dir, "quasar.sqlite");
+    const root = mappedSession();
+    const child = descendantSession(
+      "codex:session-http:child",
+      root.session.sessionId,
+    );
+    const grandchild = descendantSession(
+      "codex:session-http:grandchild",
+      child.session.sessionId,
+    );
+    await seed(sqlite, [root, child, grandchild]);
+    const { proc, base } = startServer(sqlite);
+    try {
+      await waitFor(`${base}/health`);
+      const [
+        messageWindow,
+        inclusiveSessionStart,
+        exclusiveSessionStart,
+        roots,
+        lineage,
+      ] = await Promise.all([
+        fetch(`${base}/messages?messageAfter=2026-06-18T10%3A00%3A30.000Z&messageBefore=2026-06-18T10%3A00%3A35.000Z&limit=100`).then((response) => response.json()),
+        fetch(`${base}/messages?sessionStartedAfter=2026-06-18T10%3A00%3A00.000Z&sessionStartedBefore=2026-06-18T10%3A00%3A00.001Z&limit=100`).then((response) => response.json()),
+        fetch(`${base}/messages?sessionStartedBefore=2026-06-18T10%3A00%3A00.000Z&limit=100`).then((response) => response.json()),
+        fetch(`${base}/messages?rootsOnly=true&limit=100`).then((response) => response.json()),
+        fetch(`${base}/messages?lineageRootSessionId=codex%3Asession-http%3Achild&limit=100`).then((response) => response.json()),
+      ]);
+      expect(messageWindow.data.rows.map((row: { sequence: number }) => row.sequence)).toEqual([0, 0, 0]);
+      expect(inclusiveSessionStart.data.rows).toHaveLength(6);
+      expect(exclusiveSessionStart.data.rows).toEqual([]);
+      expect(new Set(roots.data.rows.map((row: { sessionId: string }) => row.sessionId))).toEqual(
+        new Set(["codex:session-http"]),
+      );
+      expect(new Set(lineage.data.rows.map((row: { sessionId: string }) => row.sessionId))).toEqual(
+        new Set([
+          "codex:session-http:child",
+          "codex:session-http:grandchild",
+        ]),
+      );
+      expect(lineage.data.rows).toHaveLength(4);
+    } finally {
+      proc.kill();
+      await proc.exited;
+    }
+  });
+
+  test("GET messages rejects offsets and expires a cursor after forced ingest", async () => {
+    const dir = tempDir();
+    const sqlite = join(dir, "quasar.sqlite");
+    const root = mappedSession();
+    const child = descendantSession(
+      "codex:session-http:child",
+      root.session.sessionId,
+    );
+    await seed(sqlite, [root, child]);
+    const { proc, base } = startServer(sqlite, "test-ingest-token");
+    try {
+      await waitFor(`${base}/health`);
+      const [offset, unknown, firstResponse] = await Promise.all([
+        fetch(`${base}/messages?offset=1`),
+        fetch(`${base}/messages?bogus=true`),
+        fetch(`${base}/messages?limit=1`),
+      ]);
+      expect(offset.status).toBe(400);
+      expect(await offset.json()).toMatchObject({
+        error: {
+          type: "BadRequest",
+          message: expect.stringContaining("offset"),
+        },
+      });
+      expect(unknown.status).toBe(400);
+      expect(await unknown.json()).toMatchObject({
+        error: {
+          type: "BadRequest",
+          message: expect.stringContaining("bogus"),
+        },
+      });
+      expect(firstResponse.status).toBe(200);
+      const first = await firstResponse.json();
+      expect(first.data.page.next).toEqual({
+        sessionId: "codex:session-http",
+        sequence: 0,
+      });
+
+      const forced = await fetch(`${base}/ingest/session?force=true`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-quasar-ingest-token": "test-ingest-token",
+        },
+        body: JSON.stringify({
+          session: mappedSession({ firstText: "cursor invalidation rewrite" }),
+        }),
+      });
+      expect(forced.status).toBe(200);
+      expect((await forced.json()).data.outcome.status).toBe("ok");
+
+      const continuation = new URLSearchParams({
+        limit: "1",
+        afterSessionId: first.data.page.next.sessionId,
+        afterSequence: String(first.data.page.next.sequence),
+        snapshot: first.data.page.snapshot,
+      });
+      const expired = await fetch(`${base}/messages?${continuation}`);
+      expect(expired.status).toBe(409);
+      expect(await expired.json()).toMatchObject({
+        error: {
+          type: "QuerySnapshotExpiredError",
+          action: expect.stringContaining("Restart"),
+        },
+      });
+    } finally {
+      proc.kill();
+      await proc.exited;
+    }
+  });
+
   test("ingest rejects malformed and invalid provider input without writing rows", async () => {
     const dir = tempDir();
     const { proc, base } = startServer(join(dir, "quasar.sqlite"), "test-ingest-token");
@@ -380,21 +568,25 @@ describe("HTTP server resources", () => {
     const { proc, base } = startServer(sqlite);
     try {
       await waitFor(`${base}/health`);
-      const [sessions, messages, toolCalls, toolCall, lexical, semantic, fusion, missingMessages, missingToolCall, legacy] = await Promise.all([
+      const [sessions, messages, toolCalls, toolCall, lexical, semantic, fusion, missingToolCall, legacy] = await Promise.all([
         fetch(`${base}/sessions?projectKey=project-http&sessionId=codex%3Asession-http&provider=codex&agentRole=builder&model=gpt-5.6-sol&modelProvider=openai&limit=999`).then((response) => response.json()),
-        fetch(`${base}/messages?sessionId=codex%3Asession-http&limit=1&offset=1`).then((response) => response.json()),
+        fetch(`${base}/messages?sessionId=codex%3Asession-http&limit=1`).then((response) => response.json()),
         fetch(`${base}/tool-calls?toolName=shell_command&limit=200`).then((response) => response.json()),
         fetch(`${base}/tool-call?id=tool-http`).then((response) => response.json()),
         fetch(`${base}/search/lexical?q=http&limit=20`).then((response) => response.json()),
         fetch(`${base}/search/semantic?q=http`).then((response) => ({ status: response.status, body: response.json() })),
         fetch(`${base}/search/fusion?q=http`).then((response) => ({ status: response.status, body: response.json() })),
-        fetch(`${base}/messages`), fetch(`${base}/tool-call?id=missing`), fetch(`${base}/query`, { method: "POST" }),
+        fetch(`${base}/tool-call?id=missing`), fetch(`${base}/query`, { method: "POST" }),
       ]);
       expect(sessions.data.page).toEqual({ limit: 200, offset: 0, nextOffset: null });
       expect(sessions.data.rows[0]).toMatchObject({ sessionId: "codex:session-http", sourcePath: "/history/codex-session-http.jsonl", host: "host-http", identitySchemeVersion: 1, normalizationVersion: 4 });
       expect(sessions.data.rows[0].sourceFingerprint).toContain("fingerprint-http");
-      expect(messages.data.page).toEqual({ limit: 1, offset: 1, nextOffset: null });
-      expect(messages.data.rows[0].text).toBe("assistant-only http memory");
+      expect(messages.data.page).toEqual({
+        limit: 1,
+        snapshot: expect.any(String),
+        next: { sessionId: "codex:session-http", sequence: 0 },
+      });
+      expect(messages.data.rows[0].text).toBe("hello over http");
       expect(toolCalls.data.rows[0]).toMatchObject({ toolCallId: "tool-http", inputBytes: Buffer.byteLength("echo http"), outputBytes: Buffer.byteLength("http") });
       expect(toolCalls.data.rows[0].inputText).toBeUndefined();
       expect(toolCall.data.row).toMatchObject({ toolCallId: "tool-http", inputText: "echo http", outputText: "http" });
@@ -402,7 +594,6 @@ describe("HTTP server resources", () => {
       expect(lexical.data.matches.every((match: { key: string; score: number; row: { textTruncated: boolean; textBytes: number } }) => typeof match.key === "string" && typeof match.score === "number" && typeof match.row.textTruncated === "boolean" && typeof match.row.textBytes === "number")).toBe(true);
       expect(semantic.status).toBe(503);
       expect(fusion.status).toBe(503);
-      expect(missingMessages.status).toBe(400);
       expect(missingToolCall.status).toBe(404);
       expect(legacy.status).toBe(404);
     } finally { proc.kill(); await proc.exited; }
