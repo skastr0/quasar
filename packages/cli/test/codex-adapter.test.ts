@@ -546,7 +546,24 @@ describe("codex adapter", () => {
               id,
               cwd: FIXTURE_CWD,
               model_provider: "qsr-fab-provider",
+              source: "exec",
             },
+          }),
+          line({
+            timestamp: NOW,
+            type: "world_state",
+            payload: {
+              full: true,
+              state: {
+                environments: [],
+                agents_md: "qsr-fab-must-not-cross",
+              },
+            },
+          }),
+          line({
+            timestamp: NOW,
+            type: "inter_agent_communication_metadata",
+            payload: { trigger_turn: false },
           }),
           line({
             timestamp: NOW,
@@ -657,6 +674,18 @@ describe("codex adapter", () => {
           }),
           line({
             timestamp: NOW,
+            type: "event_msg",
+            payload: {
+              type: "image_generation_end",
+              call_id: "qsrfab_call_image",
+              result: "qsr fabricated image result",
+              revised_prompt: "qsr fabricated revised prompt",
+              saved_path: "/qsr/fab/image.png",
+              status: "completed",
+            },
+          }),
+          line({
+            timestamp: NOW,
             type: "response_item",
             payload: {
               type: "agent_message",
@@ -759,6 +788,21 @@ describe("codex adapter", () => {
         arguments: { query: "qsr fabricated tool query" },
       });
       expect(toolSearch.output).toEqual([{ type: "namespace", name: "qsr_fab_tool" }]);
+      const imageGeneration = session.toolCalls.find(
+        (call) => call.toolName === "image_generation",
+      )!;
+      expect(imageGeneration.status).toBe("completed");
+      expect(imageGeneration.output).toEqual({
+        result: "qsr fabricated image result",
+        revised_prompt: "qsr fabricated revised prompt",
+        saved_path: "/qsr/fab/image.png",
+        status: "completed",
+      });
+      expect(
+        result.diagnostics.some((diagnostic) =>
+          diagnostic.message.includes("codex.unknown_record_type"),
+        ),
+      ).toBe(false);
 
       const activityKinds = session.events
         .filter((event) =>
@@ -779,7 +823,7 @@ describe("codex adapter", () => {
         })),
       ).toEqual([
         {
-          seq: 9,
+          seq: 10,
           role: "assistant",
           text: "qsr fabricated final answer",
         },
@@ -1843,6 +1887,18 @@ describe("codex full data fidelity — declarative signal/drop per record type",
         result: { Ok: { content: [] } },
       }),
     },
+    {
+      name: "event_msg.image_generation_end",
+      kind: "tool_result",
+      record: eventMsg({
+        type: "image_generation_end",
+        call_id: "qsrfab_call_image",
+        result: "qsr fabricated image result",
+        revised_prompt: "qsr fabricated revised prompt",
+        saved_path: "/qsr/fab/image.png",
+        status: "completed",
+      }),
+    },
   ];
 
   const DROP_CASES: ReadonlyArray<{
@@ -1857,6 +1913,24 @@ describe("codex full data fidelity — declarative signal/drop per record type",
         type: "turn_context",
         timestamp: NOW,
         payload: { turn_id: "0fab0000-fab0-7fab-8fab-0000000000f1", cwd: FIXTURE_CWD, model: "qsr-fab-model" },
+      }),
+    },
+    {
+      name: "world_state",
+      reason: "codex.world_state.provider_context",
+      record: assertSchemaValid({
+        type: "world_state",
+        timestamp: NOW,
+        payload: { full: true, state: { environments: [] } },
+      }),
+    },
+    {
+      name: "inter_agent_communication_metadata",
+      reason: "codex.inter_agent_communication_metadata.provider_bookkeeping",
+      record: assertSchemaValid({
+        type: "inter_agent_communication_metadata",
+        timestamp: NOW,
+        payload: { trigger_turn: false },
       }),
     },
     {

@@ -431,6 +431,8 @@ const codexToolName = (payloadType: string, payload: CodexRecord): string => {
     case "tool_search_call":
     case "tool_search_output":
       return "tool_search";
+    case "image_generation_end":
+      return "image_generation";
     default:
       return "codex_tool";
   }
@@ -461,6 +463,13 @@ const codexToolOutput = (payloadType: string, payload: CodexRecord): unknown => 
       return projectToolPayloadNativeValue(payload.result);
     case "tool_search_output":
       return projectToolPayloadNativeValue(payload.tools);
+    case "image_generation_end":
+      return projectToolPayloadNativeValue({
+        result: payload.result,
+        revised_prompt: payload.revised_prompt,
+        saved_path: payload.saved_path,
+        status: payload.status,
+      });
     default:
       return projectToolPayloadNativeValue(payload.output);
   }
@@ -522,7 +531,8 @@ const upsertCodexToolCall = (
     payloadType === "local_shell_call_output" ||
     payloadType === "custom_tool_call_output" ||
     payloadType === "tool_search_output" ||
-    payloadType === "mcp_tool_call_end"
+    payloadType === "mcp_tool_call_end" ||
+    payloadType === "image_generation_end"
   ) {
     const existing = toolCallsById.get(id);
     const output = codexToolOutput(payloadType, payload);
@@ -881,7 +891,9 @@ const trimmedNonEmpty = (value: string | null | undefined): string | undefined =
 };
 
 const codexSubagentMetadata = (meta: CodexSessionMeta): CodexSubagentMetadata | undefined => {
-  const subagent = meta.payload.source?.subagent ?? undefined;
+  const source = meta.payload.source;
+  if (typeof source !== "object" || source === null) return undefined;
+  const subagent = source.subagent ?? undefined;
   if (subagent === undefined || subagent === null) return undefined;
   const threadSpawn = subagent.thread_spawn ?? undefined;
   const parentNativeId = trimmedNonEmpty(threadSpawn?.parent_thread_id ?? undefined);

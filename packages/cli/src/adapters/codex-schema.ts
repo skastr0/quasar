@@ -24,14 +24,15 @@ import type { SessionEventKind } from "../core/schemas";
  * diagnostic — never a throw, never a silent coercion). "Data structures are the
  * project; a model rambling must never be mistaken for a legitimate response."
  *
- * Grounded through 2026-07-22 against the real on-disk corpus (~/.codex/sessions/**,
+ * Grounded through 2026-07-27 against the real on-disk corpus (~/.codex/sessions/**,
  * ~/.codex/archived_sessions/**), and re-measured 2026-07-24 for the pre-envelope
  * legacy rollout shape (31 MacBook rollouts: bare top-level `message` /
  * `function_call` / `function_call_output` / `reasoning` with zero
  * `response_item` wrappers). The distinct record types (top-level `type`,
  * and for `response_item`/`event_msg` the `payload.type`) measured there:
  *
- *   top-level : session_meta, compacted, turn_context
+ *   top-level : session_meta, compacted, turn_context, world_state,
+ *     inter_agent_communication_metadata
  *   legacy_response_item.* (pre-envelope rollouts): message, function_call,
  *     function_call_output, reasoning — same payload schemas as response_item.*
  *   response_item.* : message, function_call, function_call_output,
@@ -44,7 +45,7 @@ import type { SessionEventKind } from "../core/schemas";
  *     item_completed, thread_name_updated, thread_settings_applied,
  *     sub_agent_activity, thread_rolled_back,
  *     collab_agent_spawn_end,
- *     collab_waiting_end, error
+ *     collab_waiting_end, image_generation_end, error
  *
  * Signal-vs-drop decisions (every type is EXPLICIT):
  *  - message            -> signal message  (preamble for injected wrappers; the
@@ -76,6 +77,9 @@ import type { SessionEventKind } from "../core/schemas";
  *  - session_meta        -> signal system
  *  - compacted (top)     -> signal summary      (FIX: was unknown pass-through)
  *  - turn_context (top)  -> capture typed execution context; no event row
+ *  - world_state (top)   -> drop  codex.world_state.provider_context
+ *  - inter_agent_communication_metadata (top)
+ *                       -> drop  codex.inter_agent_communication_metadata.provider_bookkeeping
  *  - thread_settings_applied -> capture typed execution context; no event row
  *  - exec_command_end    -> drop  codex.event_msg.exec_command_end.provider_bookkeeping
  *  - patch_apply_end     -> drop  codex.event_msg.patch_apply_end.provider_bookkeeping
@@ -85,6 +89,7 @@ import type { SessionEventKind } from "../core/schemas";
  *  - context_compacted   -> drop  codex.event_msg.context_compacted.provider_bookkeeping
  *  - web_search_end      -> drop  codex.event_msg.web_search_end.provider_bookkeeping
  *                          (bookkeeping echo of response_item.web_search_call)
+ *  - image_generation_end -> signal tool_result
  *  - collab_agent_spawn_end /
  *    collab_waiting_end  -> drop  codex.event_msg.<type>.provider_bookkeeping
  *                          (subagent lineage is sourced from session_meta, not
@@ -139,10 +144,19 @@ const CodexSubagentSchema = Schema.Struct({
   thread_spawn: Schema.optional(Schema.NullOr(CodexThreadSpawnSchema)),
 });
 
-/** The `source` block on the session_meta payload (cli/subagent provenance). */
+/** The structured `source` block on subagent session metadata. */
 const CodexSourceSchema = Schema.Struct({
   subagent: Schema.optional(Schema.NullOr(CodexSubagentSchema)),
 });
+
+/**
+ * Main-session rollouts carry one of three measured scalar origins; subagents
+ * carry the structured lineage branch above.
+ */
+const CodexSessionSourceSchema = Schema.Union(
+  Schema.Literal("cli", "exec", "vscode"),
+  CodexSourceSchema,
+);
 
 const CodexSessionMetaPayloadSchema = Schema.Struct({
   // payload.id is the bare UUIDv7 — the load-bearing native session id.
@@ -153,7 +167,7 @@ const CodexSessionMetaPayloadSchema = Schema.Struct({
   originator: Schema.optional(Schema.NullOr(Schema.String)),
   cli_version: Schema.optional(Schema.NullOr(Schema.String)),
   model_provider: Schema.optional(Schema.NullOr(Schema.String)),
-  source: Schema.optional(Schema.NullOr(CodexSourceSchema)),
+  source: Schema.optional(Schema.NullOr(CodexSessionSourceSchema)),
 });
 
 export const CodexSessionMetaSchema = Schema.Struct({
@@ -467,6 +481,15 @@ const CodexErrorPayloadSchema = Schema.Struct({
   codex_error_info: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
+const CodexImageGenerationEndPayloadSchema = Schema.Struct({
+  type: Schema.Literal("image_generation_end"),
+  call_id: Schema.String,
+  result: Schema.String,
+  revised_prompt: Schema.String,
+  saved_path: Schema.String,
+  status: Schema.String,
+});
+
 // ---------------------------------------------------------------------------
 // Top-level record envelopes (the discriminator is the top-level `type`).
 //
@@ -519,6 +542,23 @@ export const CodexTurnContextSchema = Schema.Struct({
   payload: Schema.optional(Schema.NullOr(CodexTurnContextPayloadSchema)),
 });
 export type CodexTurnContext = typeof CodexTurnContextSchema.Type;
+
+const CodexWorldStateSchema = Schema.Struct({
+  type: Schema.Literal("world_state"),
+  timestamp: Schema.String,
+  payload: Schema.Struct({
+    full: Schema.Boolean,
+    state: CodexAnyRecord,
+  }),
+});
+
+const CodexInterAgentCommunicationMetadataSchema = Schema.Struct({
+  type: Schema.Literal("inter_agent_communication_metadata"),
+  timestamp: Schema.String,
+  payload: Schema.Struct({
+    trigger_turn: Schema.Boolean,
+  }),
+});
 
 const CodexThreadSettingsSchema = Schema.Struct({
   model: Schema.optional(Schema.NullOr(Schema.String)),
@@ -705,6 +745,25 @@ export const CODEX_RECORD_REGISTRY: ReadonlyMap<string, CodexRecordEntry> = new 
       decodeFailedName: "codex.turn_context.decode_failed",
     },
   ],
+  [
+    "world_state",
+    {
+      schema: asSchema(CodexWorldStateSchema),
+      verdict: dropReason("codex.world_state.provider_context"),
+      decodeFailedName: "codex.world_state.decode_failed",
+    },
+  ],
+  [
+    "inter_agent_communication_metadata",
+    {
+      schema: asSchema(CodexInterAgentCommunicationMetadataSchema),
+      verdict: dropReason(
+        "codex.inter_agent_communication_metadata.provider_bookkeeping",
+      ),
+      decodeFailedName:
+        "codex.inter_agent_communication_metadata.decode_failed",
+    },
+  ],
   // response_item.* records.
   responseItemEntry("message", asSchema(CodexMessagePayloadSchema), signalKind("message")),
   responseItemEntry(
@@ -807,6 +866,11 @@ export const CODEX_RECORD_REGISTRY: ReadonlyMap<string, CodexRecordEntry> = new 
     asSchema(CodexWebSearchEndPayloadSchema),
     // Bookkeeping echo of response_item.web_search_call (the signal carrier).
     dropReason("codex.event_msg.web_search_end.provider_bookkeeping"),
+  ),
+  eventMsgEntry(
+    "image_generation_end",
+    asSchema(CodexImageGenerationEndPayloadSchema),
+    signalKind("tool_result"),
   ),
   eventMsgEntry(
     "thread_goal_updated",
