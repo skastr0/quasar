@@ -601,6 +601,14 @@ const buildAgentSession = (
     }
   }
 
+  if (eventDrafts.length === 0) {
+    diagnostics.push({
+      name: "kimi.session.no_transcript_events",
+      message: "Kimi session contained no transcript events.",
+    });
+    return undefined;
+  }
+
   return buildSession({
     provider: "kimi",
     agentName: agentNameFor(agent),
@@ -657,8 +665,8 @@ const buildKimiSessionsFromEntry = (
   const mainSessionId = sessionIdFor("kimi", KimiSessionId(entry.sessionId));
   const agents = collectAgents(entry.sessionDir, entry.sessionId, state, diagnostics);
 
-  return agents.map((agent) =>
-    buildAgentSession(
+  return agents.flatMap((agent) => {
+    const session = buildAgentSession(
       {
         agent,
         nativeSessionId: entry.sessionId,
@@ -672,8 +680,9 @@ const buildKimiSessionsFromEntry = (
       },
       options,
       diagnostics,
-    ),
-  );
+    );
+    return session === undefined ? [] : [session];
+  });
 };
 
 // ---------------------------------------------------------------------------

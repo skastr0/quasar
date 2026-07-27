@@ -568,8 +568,8 @@ const buildHermesSessionFromRows = (
 ) => {
   const nativeSessionId = HermesSessionId(String(session.id ?? ""));
   const sessionId = sessionIdFor("hermes", nativeSessionId);
-  const toolCallsByNativeId = new Map<string, HermesToolCallDraft>();
-  const toolEventByNativeId = new Map<string, string>();
+  const toolCallsById = new Map<string, HermesToolCallDraft>();
+  const activeToolCallByNativeId = new Map<string, string>();
   const usageRecords: HermesUsageDraft[] = [];
   const sessionEdges: HermesEdgeDraft[] = [];
   const artifacts: HermesArtifactDraft[] = [];
@@ -631,17 +631,31 @@ const buildHermesSessionFromRows = (
         continue;
       }
       const nativeToolId = nativeToolIdFromCall(call, `${nativeEventId}:${callIndex}`);
+      if (activeToolCallByNativeId.has(nativeToolId)) {
+        diagnostics.push({
+          name: "hermes.tool_call.duplicate",
+          message: "Hermes reused a tool call id before its prior result.",
+        });
+        continue;
+      }
       const input = toolInputFromCall(call);
+      const toolCallId = scopedId(
+        sessionId,
+        "tool",
+        nativeEventId,
+        callIndex,
+        nativeToolId,
+      );
       const toolCall: HermesToolCallDraft = {
-        id: scopedId(sessionId, "tool", nativeToolId),
+        id: toolCallId,
         eventId,
         toolName: callDecision.value.name,
         status: statusFromFinishReason(message.finish_reason),
         ...(input !== undefined ? { input } : {}),
         startedAt: isoFromEpoch(message.timestamp),
       };
-      toolCallsByNativeId.set(nativeToolId, toolCall);
-      toolEventByNativeId.set(nativeToolId, eventId);
+      toolCallsById.set(toolCallId, toolCall);
+      activeToolCallByNativeId.set(nativeToolId, toolCallId);
       eventToolCallId ??= toolCall.id;
     }
 
@@ -649,11 +663,20 @@ const buildHermesSessionFromRows = (
     // the matching call (or synthesizes one when the call row was unseen).
     const resultNativeToolId = stringValue(message.tool_call_id);
     if (resultNativeToolId !== undefined) {
-      const existing = toolCallsByNativeId.get(resultNativeToolId);
+      const activeToolCallId = activeToolCallByNativeId.get(resultNativeToolId);
+      const existing = activeToolCallId === undefined
+        ? undefined
+        : toolCallsById.get(activeToolCallId);
       const resultToolCall =
         existing ??
         ({
-          id: scopedId(sessionId, "tool", resultNativeToolId),
+          id: scopedId(
+            sessionId,
+            "tool",
+            "result",
+            nativeEventId,
+            resultNativeToolId,
+          ),
           eventId,
           toolName: stringValue(message.tool_name) ?? "hermes_tool",
         } satisfies HermesToolCallDraft);
@@ -664,14 +687,19 @@ const buildHermesSessionFromRows = (
         ...(output !== undefined ? { output } : {}),
         completedAt: isoFromEpoch(message.timestamp),
       };
-      toolCallsByNativeId.set(resultNativeToolId, completed);
+      toolCallsById.set(completed.id, completed);
       eventToolCallId = completed.id;
-      const callEventId = toolEventByNativeId.get(resultNativeToolId);
-      if (callEventId !== undefined) {
+      activeToolCallByNativeId.delete(resultNativeToolId);
+      if (existing !== undefined && existing.eventId !== eventId) {
         sessionEdges.push({
-          id: edgeIdFor(sessionId, "tool_result_for", callEventId, eventId),
+          id: edgeIdFor(
+            sessionId,
+            "tool_result_for",
+            existing.eventId,
+            eventId,
+          ),
           kind: "tool_result_for",
-          fromEventId: callEventId,
+          fromEventId: existing.eventId,
           toEventId: eventId,
         });
       }
@@ -761,6 +789,14 @@ const buildHermesSessionFromRows = (
     return [mainEvent, reasoningEvent];
   });
 
+  if (events.length === 0) {
+    diagnostics.push({
+      name: "hermes.session.no_transcript_events",
+      message: "Hermes session contained no transcript events.",
+    });
+    return undefined;
+  }
+
   return buildSession({
     provider: "hermes",
     agentName: "hermes",
@@ -775,7 +811,7 @@ const buildHermesSessionFromRows = (
     sourcePath: dbPath,
     explicitProjectKey: `profile:${profileName}`,
     events,
-    toolCalls: [...toolCallsByNativeId.values()],
+    toolCalls: [...toolCallsById.values()],
     sessionEdges,
     usageRecords,
     artifacts,
@@ -930,6 +966,7 @@ async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStr
           profileName,
           decodeDiagnostics,
         );
+        if (session === undefined) continue;
         yield {
           type: "session",
           session,

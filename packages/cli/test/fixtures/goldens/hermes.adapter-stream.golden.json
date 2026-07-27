@@ -71,7 +71,7 @@
           "sequence": 1,
           "sessionId": "hermes:55717f63609a33c4d6a3ab09aecdb942",
           "timestamp": "1970-01-01T00:16:41.000Z",
-          "toolCallId": "hermes:55717f63609a33c4d6a3ab09aecdb942:tool:e672f46e6755b891470176643ccb0ec7"
+          "toolCallId": "hermes:55717f63609a33c4d6a3ab09aecdb942:tool:71431fc5744e8db4aff2fb836758a75a"
         }
       ],
       "executionContexts": [],
@@ -81,7 +81,7 @@
       "machineId": "machine:test",
       "nativeProjectKey": "/fixture/quasar",
       "nativeSessionId": "20260101_000000_00000061",
-      "normalizationVersion": 11,
+      "normalizationVersion": 12,
       "projectIdentity": {
         "confidence": "explicit",
         "displayName": "profile:hermes",
@@ -109,7 +109,7 @@
           "agentName": "hermes",
           "completedAt": "1970-01-01T00:16:41.000Z",
           "eventId": "hermes:55717f63609a33c4d6a3ab09aecdb942:event:c208471f3f2d6f9e0e64a5a91d683d90",
-          "id": "hermes:55717f63609a33c4d6a3ab09aecdb942:tool:e672f46e6755b891470176643ccb0ec7",
+          "id": "hermes:55717f63609a33c4d6a3ab09aecdb942:tool:71431fc5744e8db4aff2fb836758a75a",
           "machineId": "machine:test",
           "output": "fixture assistant turn",
           "projectIdentityKey": "project:profile:hermes",

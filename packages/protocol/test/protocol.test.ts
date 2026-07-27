@@ -105,6 +105,24 @@ describe("NormalizedSession v1", () => {
     ).toThrow();
   });
 
+  test("rejects provider shells without transcript events", () => {
+    const empty = sourceExample();
+    empty.events = [];
+    empty.toolCalls = [];
+    empty.sessionEdges = [];
+    empty.executionContexts = [];
+    empty.usageRecords = [];
+    empty.artifacts = [];
+    empty.eventCount = 0;
+    empty.toolCallCount = 0;
+    empty.contentBlockCount = 0;
+    empty.sessionEdgeCount = 0;
+    empty.usageRecordCount = 0;
+    empty.artifactCount = 0;
+
+    expect(() => decodeNormalizedSessionSync(empty)).toThrow();
+  });
+
   test("rejects broken references and cross-session rows before persistence", () => {
     const brokenToolReference = sourceExample();
     brokenToolReference.events[0] = {
