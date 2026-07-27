@@ -14,8 +14,8 @@
       "agentName": "antigravity-cli",
       "artifactCount": 0,
       "artifacts": [],
-      "contentBlockCount": 0,
-      "eventCount": 2,
+      "contentBlockCount": 1,
+      "eventCount": 3,
       "events": [
         {
           "agentName": "antigravity-cli",
@@ -38,10 +38,20 @@
         },
         {
           "agentName": "antigravity-cli",
-          "contentBlocks": [],
-          "contentText": "fixture assistant turn",
+          "contentBlocks": [
+            {
+              "id": "antigravity:c72403d626d5a091447e25d4c19cc607:block:fa3a81990f1e2e34480e51bbc1fb8cbe",
+              "kind": "thinking",
+              "metadata": {
+                "nativeType": "thinking"
+              },
+              "sequence": 0,
+              "thinking": "fixture reasoning turn"
+            }
+          ],
+          "contentText": "fixture reasoning turn",
           "id": "antigravity:c72403d626d5a091447e25d4c19cc607:event:99bf8736a8b3c8c75117ff7cda157ffd",
-          "kind": "message",
+          "kind": "reasoning",
           "machineId": "machine:test",
           "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
           "provider": "antigravity",
@@ -50,8 +60,27 @@
             "nativeType": "PLANNER_RESPONSE",
             "sourcePath": "<fixture-root>/brain/01900000-0000-7000-8000-000000000061/.system_generated/logs/transcript_full.jsonl"
           },
-          "role": "assistant",
+          "role": "thinking",
           "sequence": 1,
+          "sessionId": "antigravity:c72403d626d5a091447e25d4c19cc607",
+          "timestamp": "2026-06-11T00:00:00.000Z"
+        },
+        {
+          "agentName": "antigravity-cli",
+          "contentBlocks": [],
+          "contentText": "fixture assistant turn",
+          "id": "antigravity:c72403d626d5a091447e25d4c19cc607:event:fcd113380ff987314cccf376aefd2817",
+          "kind": "message",
+          "machineId": "machine:test",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "antigravity",
+          "rawReference": {
+            "line": 3,
+            "nativeType": "PLANNER_RESPONSE",
+            "sourcePath": "<fixture-root>/brain/01900000-0000-7000-8000-000000000061/.system_generated/logs/transcript_full.jsonl"
+          },
+          "role": "assistant",
+          "sequence": 2,
           "sessionId": "antigravity:c72403d626d5a091447e25d4c19cc607",
           "timestamp": "2026-06-11T00:00:00.000Z"
         }

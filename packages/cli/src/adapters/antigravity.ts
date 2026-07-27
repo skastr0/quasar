@@ -4,10 +4,11 @@ import { join } from "node:path";
 
 import { collectAdapterStream, type AdapterStreamItem, type SessionAdapter } from "./types";
 import { AntigravitySessionId } from "../core/identity";
-import type { NormalizedSession, SessionEdge, ToolCall } from "../core/schemas";
+import type { ContentBlock, NormalizedSession, SessionEdge, ToolCall } from "../core/schemas";
 import {
   buildSession,
   compactText,
+  contentBlocksFromNative,
   edgeIdFor,
   eventIdFor,
   homePath,
@@ -70,9 +71,9 @@ type AntigravityEventDraft = {
   readonly role: AntigravityRole;
   readonly kind: AntigravityKind;
   readonly contentText?: string;
+  readonly contentBlocks?: readonly ContentBlock[];
   readonly contentSource?: NativeValue;
   readonly toolCallId?: string;
-  readonly reasoning?: string;
   readonly rawReference: {
     readonly sourcePath: string;
     readonly line: number;
@@ -371,9 +372,17 @@ const buildAntigravitySession = (
         ? compactText(contentRaw)
         : undefined;
 
-    // Reasoning carried as a structural field for downstream rendering even
-    // when it rides a turn-terminal assistant message (rare).
-    const reasoningRaw = thinkingRaw;
+    // Reasoning is a canonical thinking content block, never a provider-native
+    // top-level event field. When a terminal assistant response carries both
+    // thinking and visible content, preserve both in semantic order.
+    const contentBlocks = thinkingRaw !== undefined
+      ? contentBlocksFromNative(sessionId, eventId, [
+          { type: "thinking", thinking: thinkingRaw },
+          ...(isMessage && contentRaw !== undefined
+            ? [{ type: "text", text: contentRaw }]
+            : []),
+        ])
+      : undefined;
 
     // Tool calls on PLANNER_RESPONSE records. Each is classified EXPLICITLY via
     // classifyToolCall (a SignalDecision): define_subagent / invoke_subagent /
@@ -443,9 +452,9 @@ const buildAntigravitySession = (
       role,
       kind,
       ...(contentText !== undefined ? { contentText } : {}),
+      ...(contentBlocks !== undefined ? { contentBlocks } : {}),
       ...(contentSource !== undefined ? { contentSource } : {}),
       ...(linkedToolCallId !== undefined ? { toolCallId: linkedToolCallId } : {}),
-      ...(reasoningRaw !== undefined ? { reasoning: reasoningRaw } : {}),
       rawReference: { sourcePath: transcriptPath, line: lineNumber, nativeType: type },
     });
 
