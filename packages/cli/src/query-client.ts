@@ -106,11 +106,22 @@ export const decodeQueryOutput = (input: unknown, expected?: QuerySpec): QueryRe
 
 type JsonRecord = Record<string, unknown>;
 
-interface QueryCursorPayload {
+interface OffsetQueryCursorPayload {
   readonly version: 1;
-  readonly kind: QuerySpec["kind"];
+  readonly kind: Exclude<QuerySpec["kind"], "messages">;
   readonly fingerprint: string;
   readonly offset: number;
+}
+
+interface MessageQueryCursorPayload {
+  readonly version: 2;
+  readonly kind: "messages";
+  readonly fingerprint: string;
+  readonly snapshot: string;
+  readonly after: {
+    readonly sessionId: string;
+    readonly sequence: number;
+  };
 }
 
 const isRecord = (value: unknown): value is JsonRecord =>
@@ -126,23 +137,39 @@ const queryFingerprint = (spec: QuerySpec): string => {
 const encodeCursor = (spec: QuerySpec, offset: number): string =>
   Buffer.from(JSON.stringify({
     version: 1,
-    kind: spec.kind,
+    kind: spec.kind as OffsetQueryCursorPayload["kind"],
     fingerprint: queryFingerprint(spec),
     offset,
-  } satisfies QueryCursorPayload), "utf8").toString("base64url");
+  } satisfies OffsetQueryCursorPayload), "utf8").toString("base64url");
 
-const decodeCursor = (spec: QuerySpec): number => {
-  const cursor = spec.page.cursor;
-  if (cursor === undefined) return 0;
-  let payload: unknown;
+const encodeMessageCursor = (
+  spec: QuerySpec,
+  snapshot: string,
+  after: MessageQueryCursorPayload["after"],
+): string =>
+  Buffer.from(JSON.stringify({
+    version: 2,
+    kind: "messages",
+    fingerprint: queryFingerprint(spec),
+    snapshot,
+    after,
+  } satisfies MessageQueryCursorPayload), "utf8").toString("base64url");
+
+const cursorPayload = (cursor: string): unknown => {
   try {
-    payload = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
+    return JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
   } catch (error) {
     throw new QueryInputError("query cursor is malformed", {
       cursor,
       cause: error instanceof Error ? error.message : String(error),
     });
   }
+};
+
+const decodeOffsetCursor = (spec: QuerySpec): number => {
+  const cursor = spec.page.cursor;
+  if (cursor === undefined) return 0;
+  const payload = cursorPayload(cursor);
   if (
     !isRecord(payload)
     || payload.version !== 1
@@ -157,6 +184,45 @@ const decodeCursor = (spec: QuerySpec): number => {
     });
   }
   return payload.offset as number;
+};
+
+const decodeMessageCursor = (
+  spec: QuerySpec,
+): {
+  readonly snapshot?: string;
+  readonly after?: MessageQueryCursorPayload["after"];
+} => {
+  const cursor = spec.page.cursor;
+  if (cursor === undefined) return {};
+  const payload = cursorPayload(cursor);
+  const after = isRecord(payload) && isRecord(payload.after)
+    ? payload.after
+    : undefined;
+  if (
+    !isRecord(payload)
+    || payload.version !== 2
+    || payload.kind !== "messages"
+    || payload.fingerprint !== queryFingerprint(spec)
+    || typeof payload.snapshot !== "string"
+    || payload.snapshot.trim() === ""
+    || after === undefined
+    || typeof after.sessionId !== "string"
+    || after.sessionId.trim() === ""
+    || !Number.isSafeInteger(after.sequence)
+    || (after.sequence as number) < 0
+  ) {
+    throw new QueryInputError("query cursor does not match the query shape", {
+      expectedKind: spec.kind,
+      cursor,
+    });
+  }
+  return {
+    snapshot: payload.snapshot,
+    after: {
+      sessionId: after.sessionId,
+      sequence: after.sequence as number,
+    },
+  };
 };
 
 const compactParams = (
@@ -176,6 +242,14 @@ const resourceFilters = (
   agentRole: typeof filters?.agentRole === "string" ? filters.agentRole : undefined,
   model: typeof filters?.model === "string" ? filters.model : undefined,
   modelProvider: typeof filters?.modelProvider === "string" ? filters.modelProvider : undefined,
+  messageAfter: typeof filters?.messageAfter === "string" ? filters.messageAfter : undefined,
+  messageBefore: typeof filters?.messageBefore === "string" ? filters.messageBefore : undefined,
+  sessionStartedAfter: typeof filters?.sessionStartedAfter === "string" ? filters.sessionStartedAfter : undefined,
+  sessionStartedBefore: typeof filters?.sessionStartedBefore === "string" ? filters.sessionStartedBefore : undefined,
+  rootsOnly: typeof filters?.rootsOnly === "boolean" ? String(filters.rootsOnly) : undefined,
+  lineageRootSessionId: typeof filters?.lineageRootSessionId === "string"
+    ? filters.lineageRootSessionId
+    : undefined,
   toolName: typeof filters?.toolName === "string" ? filters.toolName : undefined,
 });
 
@@ -183,25 +257,53 @@ const toolCallBodyFields = new Set(["input", "output", "error"]);
 
 export const queryResourceRequest = (input: unknown): QueryResourceRequest => {
   const spec = decodeQueryInput(input);
-  const offset = decodeCursor(spec);
   const filters = spec.filters as Readonly<Record<string, unknown>> | undefined;
-  const params = {
-    ...resourceFilters(filters),
-    limit: spec.page.limit,
-    offset,
-  };
 
   switch (spec.kind) {
-    case "sessions":
-      return { path: "sessions", params };
-    case "messages":
-      return { path: "messages", params };
-    case "search":
+    case "sessions": {
+      const offset = decodeOffsetCursor(spec);
+      return {
+        path: "sessions",
+        params: {
+          ...resourceFilters(filters),
+          limit: spec.page.limit,
+          offset,
+        },
+      };
+    }
+    case "messages": {
+      const cursor = decodeMessageCursor(spec);
+      return {
+        path: "messages",
+        params: {
+          ...resourceFilters(filters),
+          limit: spec.page.limit,
+          ...(cursor.after === undefined
+            ? {}
+            : {
+              afterSessionId: cursor.after.sessionId,
+              afterSequence: cursor.after.sequence,
+            }),
+          ...(cursor.snapshot === undefined
+            ? {}
+            : { snapshot: cursor.snapshot }),
+        },
+      };
+    }
+    case "search": {
+      const offset = decodeOffsetCursor(spec);
       return {
         path: `search/${spec.mode}`,
-        params: { ...params, q: spec.text },
+        params: {
+          ...resourceFilters(filters),
+          limit: spec.page.limit,
+          offset,
+          q: spec.text,
+        },
       };
+    }
     case "toolCalls": {
+      const offset = decodeOffsetCursor(spec);
       const toolCallId = typeof filters?.toolCallId === "string"
         ? filters.toolCallId
         : undefined;
@@ -219,7 +321,14 @@ export const queryResourceRequest = (input: unknown): QueryResourceRequest => {
           },
         );
       }
-      return { path: "tool-calls", params };
+      return {
+        path: "tool-calls",
+        params: {
+          ...resourceFilters(filters),
+          limit: spec.page.limit,
+          offset,
+        },
+      };
     }
   }
 };
@@ -255,6 +364,103 @@ const resourcePage = (
     });
   }
   return { nextOffset: page.nextOffset as number | null };
+};
+
+interface MessagePage {
+  readonly snapshot: string;
+  readonly next: MessageQueryCursorPayload["after"] | null;
+}
+
+const messageKey = (
+  value: JsonRecord,
+): MessageQueryCursorPayload["after"] => {
+  if (
+    typeof value.sessionId !== "string"
+    || value.sessionId.trim() === ""
+    || !Number.isSafeInteger(value.sequence)
+    || (value.sequence as number) < 0
+  ) {
+    throw new QueryProtocolError(
+      "message resource row must contain a sessionId and non-negative integer sequence",
+      value,
+    );
+  }
+  return {
+    sessionId: value.sessionId,
+    sequence: value.sequence as number,
+  };
+};
+
+const compareMessageKeys = (
+  left: MessageQueryCursorPayload["after"],
+  right: MessageQueryCursorPayload["after"],
+): number =>
+  left.sessionId.localeCompare(right.sessionId)
+  || left.sequence - right.sequence;
+
+const messageResourcePage = (
+  value: unknown,
+  rows: readonly JsonRecord[],
+  spec: QuerySpec,
+): MessagePage => {
+  const page = requireRecord(value, "message resource response data.page must be an object");
+  const cursor = decodeMessageCursor(spec);
+  const next = page.next === null
+    ? null
+    : isRecord(page.next)
+      ? messageKey(page.next)
+      : undefined;
+  if (
+    page.limit !== spec.page.limit
+    || typeof page.snapshot !== "string"
+    || page.snapshot.trim() === ""
+    || next === undefined
+    || (
+      cursor.snapshot !== undefined
+      && page.snapshot !== cursor.snapshot
+    )
+  ) {
+    throw new QueryProtocolError("message resource page does not match the request", {
+      expected: {
+        limit: spec.page.limit,
+        ...(cursor.snapshot === undefined ? {} : { snapshot: cursor.snapshot }),
+      },
+      received: page,
+    });
+  }
+  const keys = rows.map(messageKey);
+  for (let index = 1; index < keys.length; index += 1) {
+    if (compareMessageKeys(keys[index - 1]!, keys[index]!) >= 0) {
+      throw new QueryProtocolError(
+        "message resource rows are not in stable key order",
+        rows,
+      );
+    }
+  }
+  if (
+    cursor.after !== undefined
+    && keys[0] !== undefined
+    && compareMessageKeys(cursor.after, keys[0]) >= 0
+  ) {
+    throw new QueryProtocolError(
+      "message resource page did not advance beyond its cursor",
+      { cursor: cursor.after, first: keys[0] },
+    );
+  }
+  const last = keys.at(-1);
+  if (
+    next !== null
+    && (
+      last === undefined
+      || compareMessageKeys(next, last) !== 0
+    )
+  ) {
+    throw new QueryProtocolError(
+      "message resource next key does not match its last returned row",
+      { next, last },
+    );
+  }
+  return { snapshot: page.snapshot, next };
 };
 
 const payloadValue = (value: unknown): unknown => {
@@ -304,18 +510,27 @@ export const queryResponseFromResource = (
     throw new QueryProtocolError("resource response is not a success envelope", input);
   }
   const data = requireRecord(envelope.data, "resource response data must be an object");
-  const offset = decodeCursor(spec);
   let rows: readonly JsonRecord[];
-  let nextOffset: number | null = null;
+  let nextCursor: string | undefined;
 
   switch (spec.kind) {
-    case "sessions":
+    case "sessions": {
+      const offset = decodeOffsetCursor(spec);
+      rows = requireRows(data.rows, "resource response for sessions must contain data.rows");
+      const nextOffset = resourcePage(data.page, spec, offset).nextOffset;
+      if (nextOffset !== null) nextCursor = encodeCursor(spec, nextOffset);
+      break;
+    }
     case "messages": {
-      rows = requireRows(data.rows, `resource response for ${spec.kind} must contain data.rows`);
-      nextOffset = resourcePage(data.page, spec, offset).nextOffset;
+      rows = requireRows(data.rows, "resource response for messages must contain data.rows");
+      const page = messageResourcePage(data.page, rows, spec);
+      if (page.next !== null) {
+        nextCursor = encodeMessageCursor(spec, page.snapshot, page.next);
+      }
       break;
     }
     case "toolCalls": {
+      const offset = decodeOffsetCursor(spec);
       const filters = spec.filters as Readonly<Record<string, unknown>> | undefined;
       if (typeof filters?.toolCallId === "string") {
         const row = requireRecord(data.row, "tool-call resource response must contain data.row");
@@ -323,14 +538,17 @@ export const queryResponseFromResource = (
       } else {
         rows = requireRows(data.rows, "tool-calls resource response must contain data.rows")
           .map(normalizeToolCall);
-        nextOffset = resourcePage(data.page, spec, offset).nextOffset;
+        const nextOffset = resourcePage(data.page, spec, offset).nextOffset;
+        if (nextOffset !== null) nextCursor = encodeCursor(spec, nextOffset);
       }
       break;
     }
     case "search": {
+      const offset = decodeOffsetCursor(spec);
       rows = requireRows(data.matches, "search resource response must contain data.matches")
         .map(normalizeSearchMatch);
-      nextOffset = resourcePage(data.page, spec, offset).nextOffset;
+      const nextOffset = resourcePage(data.page, spec, offset).nextOffset;
+      if (nextOffset !== null) nextCursor = encodeCursor(spec, nextOffset);
       break;
     }
   }
@@ -342,7 +560,7 @@ export const queryResponseFromResource = (
     projection: spec.projection,
     page: {
       returned: items.length,
-      ...(nextOffset === null ? {} : { nextCursor: encodeCursor(spec, nextOffset) }),
+      ...(nextCursor === undefined ? {} : { nextCursor }),
     },
     items,
   }, spec);
