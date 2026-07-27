@@ -1053,7 +1053,7 @@ const buildAmpSession = (
             kind: "message",
             contentBlocks: [{
               id: scopedId(sessionId, "content", `${messageIndex}:${blockIndex}`),
-              sequence: blockIndex,
+              sequence: 0,
               kind: "image",
               ...(imageDecision.value.sourcePath !== undefined ? { path: imageDecision.value.sourcePath } : {}),
               ...(uri !== undefined ? { uri } : {}),
