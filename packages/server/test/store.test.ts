@@ -453,6 +453,51 @@ describe("LocalStore", () => {
     expect(result.exactSession).toHaveLength(2);
   });
 
+  test("persists corpus snapshots across restart and rolls back failed writes", async () => {
+    const path = sqlitePath();
+
+    const emptySnapshot = await withStore(path, (store) => store.querySnapshot);
+    const reopenedEmptySnapshot = await withStore(
+      path,
+      (store) => store.querySnapshot,
+    );
+    expect(reopenedEmptySnapshot).toEqual(emptySnapshot);
+
+    const populatedSnapshot = await withStore(
+      path,
+      (store) =>
+        Effect.gen(function* () {
+          yield* store.upsertSession(mappedSession());
+          return yield* store.querySnapshot;
+        }),
+    );
+    expect(populatedSnapshot.id).not.toBe(emptySnapshot.id);
+    expect(await withStore(path, (store) => store.querySnapshot)).toEqual(
+      populatedSnapshot,
+    );
+
+    const invalid = {
+      ...mappedSession(),
+      events: [{
+        id: "invalid-event",
+        sequence: 0,
+        unsupportedNativeValue: 1n,
+      } as never],
+    } satisfies MappedSession;
+    const failed = await withStore(
+      path,
+      (store) =>
+        Effect.gen(function* () {
+          const before = yield* store.querySnapshot;
+          const outcome = yield* store.upsertSession(invalid).pipe(Effect.either);
+          const after = yield* store.querySnapshot;
+          return { before, outcome, after };
+        }),
+    );
+    expect(failed.outcome._tag).toBe("Left");
+    expect(failed.after).toEqual(failed.before);
+  });
+
   test("keeps message vectors scoped by embedding profile", async () => {
     const path = sqlitePath();
 

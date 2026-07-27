@@ -745,6 +745,11 @@ const migrate = (db: Database): readonly StoreMigrationLog[] => {
       display_name TEXT NOT NULL,
       raw_path TEXT
     );
+    CREATE TABLE IF NOT EXISTS corpus_query_state (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      corpus_id TEXT NOT NULL,
+      revision INTEGER NOT NULL CHECK (revision >= 0)
+    );
     CREATE TABLE IF NOT EXISTS sessions (
       session_id TEXT PRIMARY KEY,
       project_key TEXT NOT NULL,
@@ -886,6 +891,9 @@ const migrate = (db: Database): readonly StoreMigrationLog[] => {
       PRIMARY KEY (model, content_hash)
     );
   `);
+  db.query(
+    "INSERT OR IGNORE INTO corpus_query_state(singleton, corpus_id, revision) VALUES (1, ?, 0)",
+  ).run(randomUUID());
   // Idempotent column adds for an existing sessions table predating the
   // host/identity_scheme_version provenance fields . This is an empty
   // -column add (defaults supply existing rows), NOT a data migration — real
@@ -1060,13 +1068,23 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
         ),
       ),
       Effect.map(({ db }) => {
-        const snapshotEpoch = randomUUID();
-        let corpusRevision = 0;
         let corpusWrites = 0;
-        const querySnapshot = Effect.sync(() => ({
-          id: `${snapshotEpoch}:${corpusRevision}`,
-          writing: corpusWrites > 0,
-        } satisfies QuerySnapshot));
+        const selectCorpusQueryState = db.prepare(
+          "SELECT corpus_id AS corpusId, revision FROM corpus_query_state WHERE singleton = 1",
+        );
+        const advanceCorpusRevision = db.prepare(
+          "UPDATE corpus_query_state SET revision = revision + 1 WHERE singleton = 1",
+        );
+        const querySnapshot = Effect.sync(() => {
+          const state = selectCorpusQueryState.get() as {
+            readonly corpusId: string;
+            readonly revision: number;
+          };
+          return {
+            id: `${state.corpusId}:${state.revision}`,
+            writing: corpusWrites > 0,
+          } satisfies QuerySnapshot;
+        });
         const upsertProject = db.prepare(
           `INSERT INTO projects(project_key, display_name, raw_path)
            VALUES ($projectKey, $displayName, $rawPath)
@@ -1520,6 +1538,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               context.json,
             );
           }
+          advanceCorpusRevision.run();
         });
         const applyMessageDeleteChunk = db.transaction((sessionId: string, seqs: readonly number[]) => {
           for (const seq of seqs) deleteMessageRow.run(sessionId, seq);
@@ -1588,7 +1607,6 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
         const upsertSessionDiff = (mapped: MappedSession): Effect.Effect<SessionDiffOutcome, SqliteStoreError> =>
           Effect.gen(function* () {
             yield* Effect.sync(() => {
-              corpusRevision += 1;
               corpusWrites += 1;
             });
             const plan = yield* trySqlite("upsertSession.plan", () => computeSessionDiff(mapped)).pipe(
