@@ -165,6 +165,11 @@ export const ExecutionContextRecord = Schema.Struct({
   sequence: NonNegativeInteger,
   scope: ExecutionContextScope,
   timestamp: Schema.optional(Schema.String),
+  /**
+   * Opaque provider-native turn correlation. Providers such as Codex emit a
+   * turn_context record whose turn_id names a logical turn without emitting a
+   * separate event carrying that id, so this is not an event foreign key.
+   */
   turnId: Schema.optional(Schema.String),
   model: Schema.optional(Schema.String),
   modelProvider: Schema.optional(Schema.String),
@@ -377,11 +382,6 @@ const normalizedSessionInvariant = (session: {
   }
 
   const eventIds = new Set(session.events.map((event) => event.id));
-  const nativeEventIds = new Set(
-    session.events.flatMap((event) =>
-      event.nativeEventId === undefined ? [] : [event.nativeEventId],
-    ),
-  );
   const toolCallIds = new Set(session.toolCalls.map((toolCall) => toolCall.id));
   for (const [index, event] of session.events.entries()) {
     if (event.sequence !== index) {
@@ -424,14 +424,6 @@ const normalizedSessionInvariant = (session: {
   for (const context of session.executionContexts) {
     if (!factOwnership(context)) {
       return `execution context ${context.id} has cross-session ownership`;
-    }
-    if (
-      context.scope === "turn"
-      && context.turnId !== undefined
-      && !eventIds.has(context.turnId)
-      && !nativeEventIds.has(context.turnId)
-    ) {
-      return `execution context ${context.id} references missing turn ${context.turnId}`;
     }
   }
   for (const usage of session.usageRecords) {
@@ -637,14 +629,12 @@ const mappedSessionInvariant = (mapped: {
     && fact.agentName === session.agentName
     && fact.projectIdentityKey === session.projectKey;
   const eventById = new Map<string, SessionEvent>();
-  const nativeEventIds = new Set<string>();
   for (const [index, event] of mapped.events.entries()) {
     if (event.sequence !== index) {
       return `event sequence must be dense at index ${index}`;
     }
     if (!factOwnership(event)) return `event ${event.id} has cross-session ownership`;
     eventById.set(event.id, event);
-    if (event.nativeEventId !== undefined) nativeEventIds.add(event.nativeEventId);
     for (const [blockIndex, block] of event.contentBlocks.entries()) {
       if (block.sequence !== blockIndex) {
         return `content block sequence must be dense for event ${event.id}`;
@@ -727,14 +717,6 @@ const mappedSessionInvariant = (mapped: {
   for (const context of mapped.executionContexts) {
     if (!factOwnership(context)) {
       return `execution context ${context.id} has cross-session ownership`;
-    }
-    if (
-      context.scope === "turn"
-      && context.turnId !== undefined
-      && !eventIds.has(context.turnId)
-      && !nativeEventIds.has(context.turnId)
-    ) {
-      return `execution context ${context.id} references missing turn ${context.turnId}`;
     }
   }
   for (const usage of mapped.usageRecords) {

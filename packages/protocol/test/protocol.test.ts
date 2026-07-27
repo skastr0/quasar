@@ -132,6 +132,38 @@ describe("NormalizedSession v1", () => {
     expect(() => decodeMappedSessionSync(crossSession)).toThrow();
   });
 
+  test("preserves provider-native turn ids that do not name events", () => {
+    const source = sourceExample();
+    source.executionContexts.push({
+      id: "codex:example:execution-context:0",
+      sessionId: source.id,
+      machineId: source.machineId,
+      provider: source.provider,
+      agentName: source.agentName,
+      projectIdentityKey: source.projectIdentity.projectIdentityKey,
+      sequence: source.events[0].sequence,
+      scope: "turn",
+      turnId: "opaque-provider-turn-id",
+      model: "gpt-test",
+    });
+    expect(() => decodeNormalizedSessionSync(source)).not.toThrow();
+
+    const mapped = mappedExample();
+    mapped.executionContexts.push({
+      id: "codex:example:execution-context:0",
+      sessionId: mapped.session.sessionId,
+      machineId: mapped.events[0].machineId,
+      provider: mapped.session.provider,
+      agentName: mapped.session.agentName,
+      projectIdentityKey: mapped.project.projectKey,
+      sequence: mapped.events[0].sequence,
+      scope: "turn",
+      turnId: "opaque-provider-turn-id",
+      model: "gpt-test",
+    });
+    expect(() => decodeMappedSessionSync(mapped)).not.toThrow();
+  });
+
   test("fails closed on protocol version skew", () => {
     const skewed = {
       ...mappedExample(),
@@ -543,6 +575,41 @@ describe("QuasarTrajectory v1", () => {
         sourceId: "call-a",
       }),
     ]));
+  });
+
+  test("keeps opaque provider turn contexts in the ATIF source extension", () => {
+    const value: any = structuredClone(mixedSession());
+    const sourceEvent = value.events[1];
+    value.executionContexts.push({
+      id: "codex:example:execution-context:opaque",
+      sessionId: value.session.sessionId,
+      machineId: sourceEvent.machineId,
+      provider: value.session.provider,
+      agentName: value.session.agentName,
+      projectIdentityKey: value.project.projectKey,
+      sequence: sourceEvent.sequence,
+      scope: "turn",
+      turnId: "opaque-provider-turn-id",
+      model: "gpt-context",
+    });
+    const exported = toAtifTrajectory(decodeMappedSessionSync(value));
+    const step: any = exported.trajectory.steps.find((candidate: any) =>
+      candidate.extra?.quasar?.source_event_id === sourceEvent.id
+    );
+
+    expect(step.extra.quasar.execution_contexts).toEqual([
+      expect.objectContaining({
+        id: "codex:example:execution-context:opaque",
+        turnId: "opaque-provider-turn-id",
+      }),
+    ]);
+    expect(exported.compatibility.entries).toContainEqual(
+      expect.objectContaining({
+        status: "mapped_extension",
+        sourceKind: "execution_context",
+        sourceId: "codex:example:execution-context:opaque",
+      }),
+    );
   });
 
   test("rejects ATIF semantic corruption beyond JSON field shape", () => {

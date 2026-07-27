@@ -726,7 +726,11 @@ const executionContextsForEvent = (
   mapped.executionContexts.filter((context) =>
     context.scope === "turn"
     && (
-      context.turnId === event.id
+      // Some providers expose a logical turn id without an event carrying that
+      // id. The context record's source sequence still identifies the exact
+      // event envelope that observed it, so preserve it there once.
+      context.sequence === event.sequence
+      || context.turnId === event.id
       || (
         event.nativeEventId !== undefined
         && context.turnId === event.nativeEventId
