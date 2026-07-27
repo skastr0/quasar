@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
+import { pathToFileURL } from "node:url";
 import {
   NORMALIZED_SESSION_PROTOCOL_VERSION,
   decodeSessionEnrichmentSync,
@@ -1093,7 +1094,9 @@ const makeLocalStoreLayerScoped = (
           ensureParentDir(path);
         }
         const db = readOnly
-          ? new Database(path, { readonly: true })
+          ? new Database(`${pathToFileURL(path).href}?immutable=1`, {
+              readonly: true,
+            })
           : new Database(path, { create: true });
         const migrationLogs = readOnly ? [] : migrate(db);
         return { db, migrationLogs };
