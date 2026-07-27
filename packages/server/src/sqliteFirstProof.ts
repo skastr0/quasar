@@ -8,6 +8,11 @@ import { performance } from "node:perf_hooks";
 import { embeddingProfileFromEnv, type EmbeddingProfile } from "./embeddingProfiles";
 import type { Embedder } from "./embeddings";
 import { fts5QueryForText, positiveInt } from "./fts5";
+import {
+  decodeFloat32Vector,
+  EMBEDDING_CACHE_VECTOR_ENCODING,
+  encodeFloat32Vector,
+} from "./vectorBlob";
 
 const SEARCHABLE_ROLES = ["user", "assistant", "reasoning"] as const;
 const DEFAULT_QUERIES = [
@@ -153,6 +158,7 @@ export interface SqliteFirstProofOptions {
 export type SqliteFirstProofErrorCode =
   | "work_db_exists"
   | "mixed_vector_dimensions"
+  | "unsupported_embedding_cache_encoding"
   | "invalid_parity_threshold"
   | "parity_embedder_short_response";
 
@@ -458,15 +464,26 @@ export const buildFtsProof = (
   return { rowsIndexed, buildElapsedMs: build.elapsedMs, queryTimings, filteredBenchmarks };
 };
 
-const vectorToBlob = (vector: readonly number[]): Buffer => {
-  const typed = new Float32Array(vector);
-  return Buffer.from(typed.buffer);
+const vectorToBlob = (vector: readonly number[]): Uint8Array =>
+  encodeFloat32Vector(vector);
+
+const vectorFromBlob = (blob: Uint8Array): Float32Array =>
+  new Float32Array(decodeFloat32Vector(blob));
+
+type CachedVectorRow = {
+  readonly dimensions: number;
+  readonly encoding: string;
+  readonly vectorBlob: Uint8Array;
 };
 
-const vectorFromBlob = (blob: Uint8Array): Float32Array => {
-  const copy = new Uint8Array(blob.byteLength);
-  copy.set(blob);
-  return new Float32Array(copy.buffer);
+const cachedVectorFromRow = (row: CachedVectorRow): readonly number[] => {
+  if (row.encoding !== EMBEDDING_CACHE_VECTOR_ENCODING) {
+    throw new SqliteFirstProofError(
+      "unsupported_embedding_cache_encoding",
+      `unsupported embedding cache encoding ${row.encoding}`,
+    );
+  }
+  return decodeFloat32Vector(row.vectorBlob, row.dimensions);
 };
 
 const vectorMagnitude = (vector: readonly number[]): number => {
@@ -519,7 +536,7 @@ const selectCachedParityCandidates = (
     cacheHashes.add(row.contentHash);
   }
   const selectCache = db.query(`
-    SELECT vector_json AS vectorJson
+    SELECT dimensions, encoding, vector_blob AS vectorBlob
     FROM embedding_cache
     WHERE model = $model AND content_hash = $contentHash
   `);
@@ -554,13 +571,13 @@ const selectCachedParityCandidates = (
     const cached = selectCache.get({
       $model: profile.cacheNamespace,
       $contentHash: row.documentHash,
-    }) as { vectorJson: string } | null;
+    }) as CachedVectorRow | null;
     if (cached !== null) {
       sample.push({
         sessionId: row.sessionId,
         seq: row.seq,
         text: row.text,
-        cachedVector: JSON.parse(cached.vectorJson) as readonly number[],
+        cachedVector: cachedVectorFromRow(cached),
       });
     }
   }
@@ -654,7 +671,7 @@ export const materializeProofVectors = (
     LIMIT $limit
   `);
   const selectCache = db.query(`
-    SELECT vector_json AS vectorJson
+    SELECT dimensions, encoding, vector_blob AS vectorBlob
     FROM embedding_cache
     WHERE model = $model AND content_hash = $contentHash
   `);
@@ -680,12 +697,12 @@ export const materializeProofVectors = (
       const cached = selectCache.get({
         $model: profile.cacheNamespace,
         $contentHash: documentHash,
-      }) as { vectorJson: string } | null;
+      }) as CachedVectorRow | null;
       if (cached === null) {
         rowsMissingCache += 1;
         continue;
       }
-      const vector = JSON.parse(cached.vectorJson) as number[];
+      const vector = cachedVectorFromRow(cached);
       if (dimension === undefined) dimension = vector.length;
       if (vector.length !== dimension) {
         throw new SqliteFirstProofError(

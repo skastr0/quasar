@@ -1,4 +1,5 @@
 export const VECTOR_BLOB_ENCODING = "f16le" as const;
+export const EMBEDDING_CACHE_VECTOR_ENCODING = "f32le" as const;
 
 export class VectorBlobError extends Error {
   constructor(message: string) {
@@ -84,6 +85,46 @@ export const decodeFloat16Vector = (blob: Uint8Array, dimensions?: number): read
   const vector: number[] = [];
   for (let index = 0; index < length; index += 1) {
     vector.push(float16BitsToFloat32(view.getUint16(index * 2, true)));
+  }
+  return vector;
+};
+
+export const encodeFloat32Vector = (vector: readonly number[]): Uint8Array => {
+  const bytes = new Uint8Array(vector.length * 4);
+  const view = new DataView(bytes.buffer);
+  for (let index = 0; index < vector.length; index += 1) {
+    const value = vector[index] ?? 0;
+    if (!Number.isFinite(value)) {
+      throw new VectorBlobError(
+        `cannot encode non-finite vector value at index ${index}`,
+      );
+    }
+    view.setFloat32(index * 4, value, true);
+  }
+  return bytes;
+};
+
+export const decodeFloat32Vector = (
+  blob: Uint8Array,
+  dimensions?: number,
+): readonly number[] => {
+  if (blob.byteLength % 4 !== 0) {
+    throw new VectorBlobError(
+      `invalid f32 vector blob byte length ${blob.byteLength}`,
+    );
+  }
+  const length = blob.byteLength / 4;
+  if (dimensions !== undefined && dimensions !== length) {
+    throw new VectorBlobError(
+      `f32 vector blob has dimension ${length}; expected ${dimensions}`,
+    );
+  }
+  const copy = new Uint8Array(blob.byteLength);
+  copy.set(blob);
+  const view = new DataView(copy.buffer);
+  const vector: number[] = [];
+  for (let index = 0; index < length; index += 1) {
+    vector.push(view.getFloat32(index * 4, true));
   }
   return vector;
 };

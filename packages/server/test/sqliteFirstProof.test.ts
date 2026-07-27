@@ -13,6 +13,10 @@ import {
   measureEmbeddingParity,
   runSqliteFirstProof,
 } from "../src/sqliteFirstProof";
+import {
+  EMBEDDING_CACHE_VECTOR_ENCODING,
+  encodeFloat32Vector,
+} from "../src/vectorBlob";
 
 const tempDirs: string[] = [];
 
@@ -56,7 +60,8 @@ const makeFixtureDb = (path: string) => {
       content_hash TEXT NOT NULL,
       dimensions INTEGER NOT NULL,
       text_bytes INTEGER NOT NULL,
-      vector_json TEXT NOT NULL,
+      encoding TEXT NOT NULL,
+      vector_blob BLOB NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       PRIMARY KEY (model, content_hash)
@@ -91,22 +96,24 @@ const makeFixtureDb = (path: string) => {
     $contentHash: "raw-c",
   });
   const insertCache = db.prepare(`
-    INSERT INTO embedding_cache(model, content_hash, dimensions, text_bytes, vector_json, created_at, updated_at)
-    VALUES ($model, $contentHash, $dimensions, $textBytes, $vectorJson, '2026-07-04T00:00:00.000Z', '2026-07-04T00:00:00.000Z')
+    INSERT INTO embedding_cache(model, content_hash, dimensions, text_bytes, encoding, vector_blob, created_at, updated_at)
+    VALUES ($model, $contentHash, $dimensions, $textBytes, $encoding, $vectorBlob, '2026-07-04T00:00:00.000Z', '2026-07-04T00:00:00.000Z')
   `);
   insertCache.run({
     $model: profile.cacheNamespace,
     $contentHash: documentCacheKey("alpha sqlite search proof", profile),
     $dimensions: 3,
     $textBytes: 25,
-    $vectorJson: JSON.stringify([1, 0, 0]),
+    $encoding: EMBEDDING_CACHE_VECTOR_ENCODING,
+    $vectorBlob: encodeFloat32Vector([1, 0, 0]),
   });
   insertCache.run({
     $model: profile.cacheNamespace,
     $contentHash: documentCacheKey("beta vector cache proof", profile),
     $dimensions: 3,
     $textBytes: 23,
-    $vectorJson: JSON.stringify([0, 1, 0]),
+    $encoding: EMBEDDING_CACHE_VECTOR_ENCODING,
+    $vectorBlob: encodeFloat32Vector([0, 1, 0]),
   });
   db.close();
 };
