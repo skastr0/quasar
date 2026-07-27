@@ -665,6 +665,7 @@ const contractName = (name: string): ProtocolContractName | undefined => {
     "harbor-atif": "harborAtif",
     atif: "atifTrajectory",
     "atif-trajectory": "atifTrajectory",
+    "research-export": "researchExport",
     "session-enrichment": "sessionEnrichment",
   } as const)[name] ?? name;
   if (alias in protocolContracts) return alias as ProtocolContractName;
@@ -684,6 +685,7 @@ export const protocolContract = (name?: string) => {
         "letta-trajectory",
         "harbor-atif",
         "atif-trajectory",
+        "research-export",
         "query",
         "response",
         "session-enrichment",

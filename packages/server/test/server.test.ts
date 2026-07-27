@@ -1,10 +1,14 @@
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { NORMALIZED_SESSION_PROTOCOL_VERSION } from "@skastr0/quasar-protocol";
+import {
+  NORMALIZED_SESSION_PROTOCOL_VERSION,
+  decodeResearchExportFrameSync,
+} from "@skastr0/quasar-protocol";
 import { Effect } from "effect";
 
 import type { MappedSession } from "../src/model";
@@ -455,6 +459,191 @@ describe("HTTP server resources", () => {
     } finally {
       secondServer.proc.kill();
       await secondServer.proc.exited;
+    }
+  });
+
+  test("streams deterministic snapshot-bound research export shards", async () => {
+    const dir = tempDir();
+    const sqlite = join(dir, "quasar.sqlite");
+    const root = mappedSession();
+    const child = descendantSession(
+      "codex:session-http:child",
+      root.session.sessionId,
+    );
+    await seed(sqlite, [root, child]);
+    const { proc, base } = startServer(sqlite, "test-ingest-token");
+    const requestUrl =
+      `${base}/research-export?limit=1&includeReasoning=false`;
+    try {
+      await waitFor(`${base}/health`);
+      const firstResponse = await fetch(requestUrl);
+      expect(firstResponse.status).toBe(200);
+      expect(firstResponse.headers.get("content-type")).toContain(
+        "application/x-ndjson",
+      );
+      const firstText = await firstResponse.text();
+      const repeatedText = await fetch(requestUrl)
+        .then((response) => response.text());
+      expect(repeatedText).toBe(firstText);
+
+      const lines = firstText.trimEnd().split("\n");
+      const frames = lines.map((line) =>
+        decodeResearchExportFrameSync(JSON.parse(line) as unknown)
+      );
+      expect(frames.map((frame) => frame.kind)).toEqual([
+        "manifest",
+        "message",
+        "trajectory",
+        "receipt",
+      ]);
+      const manifest = frames[0]!;
+      const message = frames[1]!;
+      const trajectory = frames[2]!;
+      const receipt = frames[3]!;
+      expect(manifest.kind).toBe("manifest");
+      expect(message.kind).toBe("message");
+      expect(trajectory.kind).toBe("trajectory");
+      expect(receipt.kind).toBe("receipt");
+      if (
+        manifest.kind !== "manifest"
+        || message.kind !== "message"
+        || trajectory.kind !== "trajectory"
+        || receipt.kind !== "receipt"
+      ) throw new Error("unexpected export frame order");
+      expect(manifest).toMatchObject({
+        page: { limit: 1, after: null },
+        trajectoryScope: "first-matching-message-in-scan",
+        trajectoryProjection: {
+          includeReasoning: false,
+          includeToolResults: true,
+        },
+      });
+      expect(message.message).toMatchObject({
+        sessionId: root.session.sessionId,
+        sequence: 0,
+      });
+      expect(trajectory.sessionId).toBe(root.session.sessionId);
+      expect(trajectory.trajectory.sessionId).toBe(root.session.sessionId);
+      expect(receipt).toMatchObject({
+        snapshot: manifest.snapshot,
+        counts: { messages: 1, trajectories: 1 },
+        next: {
+          sessionId: root.session.sessionId,
+          sequence: 0,
+        },
+      });
+      const content = `${lines.slice(0, -1).join("\n")}\n`;
+      expect(receipt.content).toEqual({
+        bytes: Buffer.byteLength(content),
+        sha256: `sha256:${createHash("sha256").update(content).digest("hex")}`,
+      });
+
+      const continuation = new URLSearchParams({
+        limit: "1",
+        includeReasoning: "false",
+        afterSessionId: receipt.next!.sessionId,
+        afterSequence: String(receipt.next!.sequence),
+        snapshot: receipt.snapshot,
+      });
+      const continuedResponse = await fetch(
+        `${base}/research-export?${continuation}`,
+      );
+      expect(continuedResponse.status).toBe(200);
+      const continued = (await continuedResponse.text())
+        .trimEnd()
+        .split("\n")
+        .map((line) =>
+          decodeResearchExportFrameSync(JSON.parse(line) as unknown)
+        );
+      expect(continued[0]).toMatchObject({
+        kind: "manifest",
+        snapshot: receipt.snapshot,
+        page: {
+          limit: 1,
+          after: receipt.next,
+        },
+      });
+      expect(continued.map((frame) => frame.kind)).toEqual([
+        "manifest",
+        "message",
+        "receipt",
+      ]);
+      const continuedReceipt = continued.at(-1);
+      expect(continuedReceipt).toMatchObject({
+        kind: "receipt",
+        counts: { messages: 1, trajectories: 0 },
+      });
+      if (
+        continuedReceipt?.kind !== "receipt"
+        || continuedReceipt.next === null
+      ) throw new Error("expected a second export continuation");
+
+      const nextSessionParams = new URLSearchParams({
+        limit: "1",
+        includeReasoning: "false",
+        afterSessionId: continuedReceipt.next.sessionId,
+        afterSequence: String(continuedReceipt.next.sequence),
+        snapshot: continuedReceipt.snapshot,
+      });
+      const nextSessionFrames = (await fetch(
+        `${base}/research-export?${nextSessionParams}`,
+      ).then((response) => response.text()))
+        .trimEnd()
+        .split("\n")
+        .map((line) =>
+          decodeResearchExportFrameSync(JSON.parse(line) as unknown)
+        );
+      expect(nextSessionFrames.map((frame) => frame.kind)).toEqual([
+        "manifest",
+        "message",
+        "trajectory",
+        "receipt",
+      ]);
+      const nextTrajectory = nextSessionFrames.find(
+        (frame) => frame.kind === "trajectory",
+      );
+      expect(nextTrajectory).toMatchObject({
+        kind: "trajectory",
+        sessionId: child.session.sessionId,
+      });
+      expect(
+        new Set([
+          trajectory.sessionId,
+          nextTrajectory?.kind === "trajectory"
+            ? nextTrajectory.sessionId
+            : "",
+        ]),
+      ).toEqual(new Set([
+        root.session.sessionId,
+        child.session.sessionId,
+      ]));
+
+      const forced = await fetch(`${base}/ingest/session?force=true`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-quasar-ingest-token": "test-ingest-token",
+        },
+        body: JSON.stringify({
+          session: mappedSession({
+            firstText: "research export cursor invalidation",
+          }),
+        }),
+      });
+      expect(forced.status).toBe(200);
+      const expired = await fetch(
+        `${base}/research-export?${continuation}`,
+      );
+      expect(expired.status).toBe(409);
+      expect(await expired.json()).toMatchObject({
+        error: {
+          type: "QuerySnapshotExpiredError",
+          action: expect.stringContaining("Restart"),
+        },
+      });
+    } finally {
+      proc.kill();
+      await proc.exited;
     }
   });
 

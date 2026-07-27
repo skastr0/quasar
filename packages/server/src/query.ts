@@ -80,6 +80,11 @@ export type ResourceQueryResult =
   | { readonly kind: "toolCall"; readonly row: QueryToolCallRow | undefined }
   | { readonly kind: "search"; readonly matches: readonly SearchHit[]; readonly page: ResourcePage; readonly receipt: SearchReceipt; readonly degraded: boolean; readonly degradedReason?: string };
 
+type MessageResourceQuery = Extract<
+  ResourceQuery,
+  { readonly kind: "messages" }
+>;
+
 export class QuerySemanticDisabledError extends Schema.TaggedError<QuerySemanticDisabledError>()(
   "QuerySemanticDisabledError",
   { message: Schema.String },
@@ -105,6 +110,66 @@ export class QuerySnapshotExpiredError extends Schema.TaggedError<QuerySnapshotE
     actual: Schema.String,
   },
 ) {}
+
+export const executeMessageQuery = (
+  request: MessageResourceQuery,
+): Effect.Effect<
+  Extract<ResourceQueryResult, { readonly kind: "messages" }>,
+  unknown,
+  LocalStore
+> =>
+  Effect.gen(function* () {
+    const store = yield* LocalStore;
+    const snapshotBefore = yield* store.querySnapshot;
+    if (snapshotBefore.writing) {
+      return yield* new QuerySnapshotBusyError({
+        message: "the session corpus is changing; retry the message scan",
+      });
+    }
+    if (
+      request.page.snapshot !== undefined
+      && request.page.snapshot !== snapshotBefore.id
+    ) {
+      return yield* new QuerySnapshotExpiredError({
+        message:
+          "the message scan cursor expired because the session corpus changed",
+        expected: request.page.snapshot,
+        actual: snapshotBefore.id,
+      });
+    }
+    const rows = yield* store.queryMessages({
+      ...request.filters,
+      after: request.page.after,
+      limit: request.page.limit + 1,
+    });
+    const snapshotAfter = yield* store.querySnapshot;
+    if (
+      snapshotAfter.writing
+      || snapshotAfter.id !== snapshotBefore.id
+    ) {
+      return yield* new QuerySnapshotExpiredError({
+        message: "the session corpus changed while the message page was read",
+        expected: snapshotBefore.id,
+        actual: snapshotAfter.id,
+      });
+    }
+    const messageRows = rows.slice(0, request.page.limit);
+    const last = messageRows.at(-1);
+    return {
+      kind: "messages",
+      rows: messageRows,
+      page: {
+        limit: request.page.limit,
+        snapshot: snapshotBefore.id,
+        next: rows.length > request.page.limit && last !== undefined
+          ? {
+              sessionId: last.sessionId,
+              sequence: last.sequence,
+            }
+          : null,
+      },
+    };
+  });
 
 const pageRows = <A>(rows: readonly A[], page: ResourcePageRequest) => ({
   rows: rows.slice(0, page.limit),
@@ -240,54 +305,7 @@ export const executeResourceQuery = (request: ResourceQuery): Effect.Effect<Reso
         return { kind: "sessions", ...result };
       }
       case "messages": {
-        const snapshotBefore = yield* store.querySnapshot;
-        if (snapshotBefore.writing) {
-          return yield* new QuerySnapshotBusyError({
-            message: "the session corpus is changing; retry the message scan",
-          });
-        }
-        if (
-          request.page.snapshot !== undefined
-          && request.page.snapshot !== snapshotBefore.id
-        ) {
-          return yield* new QuerySnapshotExpiredError({
-            message: "the message scan cursor expired because the session corpus changed",
-            expected: request.page.snapshot,
-            actual: snapshotBefore.id,
-          });
-        }
-        const rows = yield* store.queryMessages({
-          ...request.filters,
-          after: request.page.after,
-          limit: request.page.limit + 1,
-        });
-        const snapshotAfter = yield* store.querySnapshot;
-        if (
-          snapshotAfter.writing
-          || snapshotAfter.id !== snapshotBefore.id
-        ) {
-          return yield* new QuerySnapshotExpiredError({
-            message: "the session corpus changed while the message page was read",
-            expected: snapshotBefore.id,
-            actual: snapshotAfter.id,
-          });
-        }
-        const messageRows = rows.slice(0, request.page.limit);
-        const last = messageRows.at(-1);
-        return {
-          kind: "messages",
-          rows: messageRows,
-          page: {
-            limit: request.page.limit,
-            snapshot: snapshotBefore.id,
-            next: rows.length > request.page.limit && last !== undefined
-              ? {
-                sessionId: last.sessionId,
-                sequence: last.sequence,
-              }
-              : null,
-          },
-        };
+        return yield* executeMessageQuery(request);
       }
       case "toolCalls": {
         const rows = yield* store.queryToolCalls({ ...request.filters, includeInput: false, includeOutput: false, limit: request.page.limit + 1, offset: request.page.offset });

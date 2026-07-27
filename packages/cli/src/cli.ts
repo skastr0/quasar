@@ -20,6 +20,7 @@ import {
   readQueryArgument,
   runQuery,
 } from "./query-client";
+import { runResearchExport } from "./research-export";
 import {
   messagesQuery,
   searchQuery,
@@ -181,6 +182,23 @@ const queryCommandOptionNames: Readonly<Record<string, ReadonlySet<string>>> = {
     "--tool-name",
     "--tool-call",
     "--tool-call-id",
+  ]),
+  "research-export": new Set([
+    ...queryClientOptionNames,
+    ...commonQueryFilterOptionNames,
+    "--cursor",
+    "--exclude-reasoning",
+    "--exclude-tool-results",
+    "--limit",
+    "--lineage-root-session",
+    "--message-after",
+    "--message-before",
+    "--out",
+    "--role",
+    "--roots-only",
+    "--session-started-after",
+    "--session-started-before",
+    "--tool-result-max-bytes",
   ]),
   query: new Set(queryClientOptionNames),
 };
@@ -952,6 +970,57 @@ if (!rejectUnsupportedOptions(command)) {
     });
     break;
   }
+  case "research-export": {
+    const outputPath = arg("--out");
+    if (outputPath === undefined || outputPath.trim() === "") {
+      rejectInput(
+        "research-export",
+        new CommandInputError("--out is required", {
+          path: "--out",
+          expected: "a new NDJSON artifact path",
+          hint: "Pass --out <path>; existing files are never overwritten.",
+        }),
+      );
+      break;
+    }
+    if (
+      !checkEnum("research-export", "--role", QUERY_ROLES)
+      || !checkIntRange("research-export", "--limit", 1, 200)
+      || !checkInt("research-export", "--tool-result-max-bytes", 0)
+    ) break;
+    const filters = queryFilters("research-export");
+    if (filters === undefined) break;
+    const base = requireServer("research-export");
+    if (base === undefined) break;
+    try {
+      const result = await runResearchExport({
+        serverUrl: base,
+        outputPath,
+        filters,
+        limit: arg("--limit") === undefined
+          ? 100
+          : Number(arg("--limit")),
+        cursor: arg("--cursor"),
+        timeoutMs: httpTimeoutMs(),
+        trajectoryProjection: {
+          includeReasoning: !flag("--exclude-reasoning"),
+          includeToolResults: !flag("--exclude-tool-results"),
+          ...(arg("--tool-result-max-bytes") === undefined
+            ? {}
+            : {
+                toolResultMaxBytes: Number(
+                  arg("--tool-result-max-bytes"),
+                ),
+              }),
+        },
+      });
+      writeJson(ok("research-export", result));
+    } catch (error) {
+      writeJson(fail("research-export", error));
+      process.exitCode = 1;
+    }
+    break;
+  }
   case "ingest-runs": {
     if (!(checkEnum("ingest-runs", "--status", INGEST_RUN_STATUSES) && checkInt("ingest-runs", "--limit", 1) && checkInt("ingest-runs", "--offset", 0))) break;
     await fetchServer("ingest-runs", "/ingest-runs", { status: arg("--status"), limit: arg("--limit"), offset: arg("--offset") });
@@ -1029,11 +1098,12 @@ if (!rejectUnsupportedOptions(command)) {
       "sessions [--provider name[,name]] [--project key] [--agent name] [--agent-role role] [--model slug] [--model-provider name] [--fields a,b] [--detail] [--cursor token] [--limit n]",
       "session --id id [--message-limit n] [--tool-call-limit n] [--event-limit n] [--usage-limit n] [--edge-limit n] [--artifact-limit n] [--context-limit n]",
       "trajectory --session id [--format quasar|letta|atif] [--exclude-reasoning] [--exclude-tool-results] [--tool-result-max-bytes n]",
+      "research-export --out path [--project key] [--provider name[,name]] [--session id] [--role user|assistant|reasoning] [--agent name] [--agent-role role] [--model slug] [--model-provider name] [--message-after timestamp] [--message-before timestamp] [--session-started-after timestamp] [--session-started-before timestamp] [--roots-only] [--lineage-root-session id] [--exclude-reasoning] [--exclude-tool-results] [--tool-result-max-bytes n] [--cursor token] [--limit n]",
       "messages [--session id] [--project key] [--provider name[,name]] [--role user|assistant|reasoning] [--agent name] [--agent-role role] [--model slug] [--model-provider name] [--message-after timestamp] [--message-before timestamp] [--session-started-after timestamp] [--session-started-before timestamp] [--roots-only] [--lineage-root-session id] [--fields a,b] [--detail] [--cursor token] [--limit n]",
       "tool-calls [--session id] [--project key] [--provider name[,name]] [--tool name] [--agent name] [--agent-role role] [--model slug] [--model-provider name] [--fields a,b] [--detail] [--cursor token] [--limit n]",
       "tool-call --id id [--fields a,b] (full input/output detail)",
       "query <inline-json|@file|-> [--server url]",
-      "schema [normalized-session|mapped-session|trajectory|letta-trajectory|harbor-atif|atif-trajectory|query|response|session-enrichment] (local; no server required)",
+      "schema [normalized-session|mapped-session|trajectory|letta-trajectory|harbor-atif|atif-trajectory|research-export|query|response|session-enrichment] (local; no server required)",
       "examples [schema-id|example-name] (local; no server required)",
       "ingest-runs [--status running|completed|failed] [--limit n]",
       "replay-embedding-cache [--limit n] [--server url]",

@@ -23,8 +23,10 @@ import {
   QuerySnapshotExpiredError,
   RESOURCE_PAGE_MAXIMUM,
   type MessagePageRequest,
+  type ResourceFilters,
   type SearchMode,
 } from "./query";
+import { makeResearchExportStream } from "./researchExport";
 import { AppLayer } from "./runtime";
 import { DurableQueue, Embeddings, IngestCoordinator, WorkerSupervisor } from "./services";
 import { LocalStore, StoredSessionContractError } from "./store";
@@ -578,10 +580,27 @@ const trajectory = Effect.gen(function* () {
   }
 });
 
-const messages = Effect.gen(function* () {
-  const params = yield* query;
+type ParsedMessageRequest =
+  | {
+      readonly valid: true;
+      readonly value: {
+        readonly filters: ResourceFilters;
+        readonly page: MessagePageRequest;
+        readonly sessionId?: string;
+      };
+    }
+  | {
+      readonly valid: false;
+      readonly response: HttpServerResponse.HttpServerResponse;
+    };
+
+const parseMessageRequest = (
+  route: string,
+  params: URLSearchParams,
+  extraParams: readonly string[] = [],
+): ParsedMessageRequest => {
   const invalid = queryParamError(
-    "messages",
+    route,
     params,
     new Set([
       ...RESOURCE_FILTER_PARAMS,
@@ -595,11 +614,17 @@ const messages = Effect.gen(function* () {
       "afterSessionId",
       "afterSequence",
       "snapshot",
+      ...extraParams,
     ]),
   );
-  if (invalid !== undefined) return invalid;
+  if (invalid !== undefined) return { valid: false, response: invalid };
   const page = messagePage(params);
-  if (!page.valid) return badRequest("messages", page.message);
+  if (!page.valid) {
+    return {
+      valid: false,
+      response: badRequest(route, page.message),
+    };
+  }
   const timestamps = [
     strictTimestamp(params, "messageAfter"),
     strictTimestamp(params, "messageBefore"),
@@ -608,7 +633,10 @@ const messages = Effect.gen(function* () {
   ] as const;
   const timestampError = timestamps.find((candidate) => !candidate.valid);
   if (timestampError !== undefined && !timestampError.valid) {
-    return badRequest("messages", timestampError.message);
+    return {
+      valid: false,
+      response: badRequest(route, timestampError.message),
+    };
   }
   const [
     messageAfter,
@@ -623,45 +651,89 @@ const messages = Effect.gen(function* () {
     && messageBefore !== undefined
     && Date.parse(messageAfter) > Date.parse(messageBefore)
   ) {
-    return badRequest("messages", "messageAfter must not be after messageBefore");
+    return {
+      valid: false,
+      response: badRequest(
+        route,
+        "messageAfter must not be after messageBefore",
+      ),
+    };
   }
   if (
     sessionStartedAfter !== undefined
     && sessionStartedBefore !== undefined
     && Date.parse(sessionStartedAfter) > Date.parse(sessionStartedBefore)
   ) {
-    return badRequest(
-      "messages",
-      "sessionStartedAfter must not be after sessionStartedBefore",
-    );
+    return {
+      valid: false,
+      response: badRequest(
+        route,
+        "sessionStartedAfter must not be after sessionStartedBefore",
+      ),
+    };
   }
   const rootsOnly = strictBooleanParam(params, "rootsOnly", false);
   if (!rootsOnly.valid) {
-    return badRequest("messages", "rootsOnly must be true, false, 1, or 0");
+    return {
+      valid: false,
+      response: badRequest(
+        route,
+        "rootsOnly must be true, false, 1, or 0",
+      ),
+    };
   }
   const sessionId = params.get("sessionId") ?? undefined;
   const lineageRootSessionId = params.get("lineageRootSessionId") ?? undefined;
   if (sessionId !== undefined && sessionId.trim() === "") {
-    return badRequest("messages", "sessionId must not be empty");
+    return {
+      valid: false,
+      response: badRequest(route, "sessionId must not be empty"),
+    };
   }
   if (
     lineageRootSessionId !== undefined
     && lineageRootSessionId.trim() === ""
   ) {
-    return badRequest("messages", "lineageRootSessionId must not be empty");
+    return {
+      valid: false,
+      response: badRequest(
+        route,
+        "lineageRootSessionId must not be empty",
+      ),
+    };
   }
+  return {
+    valid: true,
+    value: {
+      filters: {
+        ...searchFilters(params),
+        ...(messageAfter === undefined ? {} : { messageAfter }),
+        ...(messageBefore === undefined ? {} : { messageBefore }),
+        ...(sessionStartedAfter === undefined
+          ? {}
+          : { sessionStartedAfter }),
+        ...(sessionStartedBefore === undefined
+          ? {}
+          : { sessionStartedBefore }),
+        ...(rootsOnly.value ? { rootsOnly: true } : {}),
+        ...(lineageRootSessionId === undefined
+          ? {}
+          : { lineageRootSessionId }),
+      },
+      page: page.value,
+      ...(sessionId === undefined ? {} : { sessionId }),
+    },
+  };
+};
+
+const messages = Effect.gen(function* () {
+  const params = yield* query;
+  const request = parseMessageRequest("messages", params);
+  if (!request.valid) return request.response;
   const result = yield* executeResourceQuery({
     kind: "messages",
-    filters: {
-      ...searchFilters(params),
-      ...(messageAfter === undefined ? {} : { messageAfter }),
-      ...(messageBefore === undefined ? {} : { messageBefore }),
-      ...(sessionStartedAfter === undefined ? {} : { sessionStartedAfter }),
-      ...(sessionStartedBefore === undefined ? {} : { sessionStartedBefore }),
-      ...(rootsOnly.value ? { rootsOnly: true } : {}),
-      ...(lineageRootSessionId === undefined ? {} : { lineageRootSessionId }),
-    },
-    page: page.value,
+    filters: request.value.filters,
+    page: request.value.page,
   }).pipe(Effect.either);
   if (result._tag === "Left") {
     if (
@@ -674,10 +746,111 @@ const messages = Effect.gen(function* () {
   }
   if (result.right.kind !== "messages") return yield* Effect.die("messages query returned wrong result kind");
   return json(ok("messages", {
-    ...(sessionId === undefined ? {} : { sessionId }),
+    ...(request.value.sessionId === undefined
+      ? {}
+      : { sessionId: request.value.sessionId }),
     rows: result.right.rows,
     page: result.right.page,
   }));
+});
+
+const researchExport = Effect.gen(function* () {
+  const params = yield* query;
+  const request = parseMessageRequest(
+    "research-export",
+    params,
+    [
+      "includeReasoning",
+      "includeToolResults",
+      "toolResultMaxBytes",
+    ],
+  );
+  if (!request.valid) return request.response;
+  const invalidProvider = request.value.filters.providers?.find(
+    (provider) => !providers.has(provider),
+  );
+  if (invalidProvider !== undefined) {
+    return badRequest(
+      "research-export",
+      `provider must be one of: ${[...providers].join(", ")}`,
+    );
+  }
+  if (
+    request.value.filters.role !== undefined
+    && request.value.filters.role !== "user"
+    && request.value.filters.role !== "assistant"
+    && request.value.filters.role !== "reasoning"
+  ) {
+    return badRequest(
+      "research-export",
+      "role must be user, assistant, or reasoning",
+    );
+  }
+  const includeReasoning = strictBooleanParam(
+    params,
+    "includeReasoning",
+    true,
+  );
+  if (!includeReasoning.valid) {
+    return badRequest(
+      "research-export",
+      "includeReasoning must be true, false, 1, or 0",
+    );
+  }
+  const includeToolResults = strictBooleanParam(
+    params,
+    "includeToolResults",
+    true,
+  );
+  if (!includeToolResults.valid) {
+    return badRequest(
+      "research-export",
+      "includeToolResults must be true, false, 1, or 0",
+    );
+  }
+  const maximumRaw = params.get("toolResultMaxBytes");
+  const toolResultMaxBytes = maximumRaw === null
+    ? undefined
+    : Number(maximumRaw);
+  if (
+    maximumRaw !== null
+    && (
+      !/^\d+$/.test(maximumRaw)
+      || !Number.isSafeInteger(toolResultMaxBytes)
+    )
+  ) {
+    return badRequest(
+      "research-export",
+      "toolResultMaxBytes must be a non-negative safe integer",
+    );
+  }
+  const result = yield* makeResearchExportStream({
+    filters: request.value.filters,
+    page: request.value.page,
+    trajectoryProjection: {
+      includeReasoning: includeReasoning.value,
+      includeToolResults: includeToolResults.value,
+      ...(toolResultMaxBytes === undefined ? {} : { toolResultMaxBytes }),
+    },
+  }).pipe(Effect.either);
+  if (result._tag === "Left") {
+    if (
+      result.left instanceof QuerySnapshotBusyError
+      || result.left instanceof QuerySnapshotExpiredError
+    ) {
+      return snapshotConflict("research-export", result.left);
+    }
+    return internalError(
+      "research-export",
+      "research export query failed",
+    );
+  }
+  return HttpServerResponse.stream(result.right.body, {
+    headers: {
+      "cache-control": "no-store",
+      "content-type": "application/x-ndjson; charset=utf-8",
+    },
+  });
 });
 
 const toolCalls = Effect.gen(function* () {
@@ -1019,6 +1192,7 @@ const routes = HttpRouter.empty.pipe(
   HttpRouter.get("/sessions", sessions),
   HttpRouter.get("/session-detail", sessionDetail),
   HttpRouter.get("/trajectory", trajectory),
+  HttpRouter.get("/research-export", researchExport),
   HttpRouter.get("/messages", messages),
   HttpRouter.get("/tool-calls", toolCalls),
   HttpRouter.get("/tool-call", toolCall),
