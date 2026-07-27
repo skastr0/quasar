@@ -687,6 +687,19 @@ describe("work-item grok adapter end-to-end: signal kept, telemetry dropped, gar
       expect(kinds).toContain("tool_call");
       expect(kinds).toContain("tool_result");
       expect(kinds).toContain("lifecycle");
+      const linkedResult = session.events.find(
+        (event) =>
+          event.kind === "tool_result" && event.toolCallId !== undefined,
+      );
+      expect(linkedResult?.contentText).toBeUndefined();
+      expect(linkedResult?.contentBlocks).toEqual([]);
+      expect(
+        JSON.stringify(
+          session.toolCalls.find(
+            (toolCall) => toolCall.id === linkedResult?.toolCallId,
+          )?.output,
+        ),
+      ).toContain("synthetic tool output");
       // No phase_changed-derived event leaked in.
       expect(session.events.some((e) => e.rawReference !== undefined && JSON.stringify(e.rawReference).includes("phase_changed"))).toBe(false);
 

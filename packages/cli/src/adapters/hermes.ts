@@ -695,6 +695,8 @@ const buildHermesSessionFromRows = (
     // in addition to the contentBlocks it already occupies. This ensures
     // reasoning text is findable via contentText search.
     const reasoningProse = extractReasoningText(message);
+    const linkedToolResult =
+      decision.kind === "tool_result" && eventToolCallId !== undefined;
 
     const mainEvent = {
       id: eventId,
@@ -705,14 +707,21 @@ const buildHermesSessionFromRows = (
       // heuristic (which mislabels `session_meta` as "unknown").
       role: decision.value.role satisfies SessionRole,
       kind: decision.kind,
-      // For reasoning-only events (kind="reasoning"), surfacing the reasoning
-      // prose as contentText makes it searchable. For regular messages,
-      // contentText is the extracted prose from the content column.
-      contentText: decision.kind === "reasoning" && mainContentText === undefined
-        ? (reasoningProse !== undefined ? compactText(reasoningProse) : compactText(content))
-        : (mainContentText !== undefined ? compactText(mainContentText) : compactText(content)),
-      contentSource: content,
-      contentBlocks: messageBlocks(sessionId, eventId, message, reasoning),
+      // The ToolCall is the sole input/output carrier. A linked result event
+      // keeps ordering, provenance, and its link without duplicating output.
+      ...(!linkedToolResult
+        ? {
+            // For reasoning-only events (kind="reasoning"), surfacing the
+            // reasoning prose as contentText makes it searchable. For regular
+            // messages, contentText is the extracted prose from the content
+            // column.
+            contentText: decision.kind === "reasoning" && mainContentText === undefined
+              ? (reasoningProse !== undefined ? compactText(reasoningProse) : compactText(content))
+              : (mainContentText !== undefined ? compactText(mainContentText) : compactText(content)),
+            contentSource: content,
+            contentBlocks: messageBlocks(sessionId, eventId, message, reasoning),
+          }
+        : {}),
       ...(eventToolCallId !== undefined ? { toolCallId: eventToolCallId } : {}),
       rawReference: { sourcePath: dbPath, table: "messages", rowId: nativeEventId, nativeType: "message" },
     };

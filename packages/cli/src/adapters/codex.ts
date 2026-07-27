@@ -1244,10 +1244,13 @@ async function* streamCodexSessionFromFile(
     // Message events whose payload carries no turn content (empty text stubs)
     // surface as bare events: no contentText/contentSource means no blocks and
     // no fallback JSON dump on the search surface.
-    const hasTurnContent = kind !== "message" || codexMessageHasTurnContent(payloadRecord);
+    const hasTurnContent =
+      toolCallId === undefined
+      && (kind !== "message" || codexMessageHasTurnContent(payloadRecord));
     // Peel the harness envelope to the verbatim leaf text for message/reasoning
-    // records. Tool envelopes stay structural: their payload remains in
-    // contentSource/contentBlocks and must never become searchable prose.
+    // records. Tool payloads have one canonical carrier: the linked ToolCall.
+    // Their events preserve chronology and provenance without storing the same
+    // input/output again in contentBlocks.
     // NON-NEGOTIABLE: no prose-vs-json gate, no reformatting — leaf is kept verbatim.
     const leafText = codexMessageText(payloadType, payloadRecord);
     const resolvedContentText =

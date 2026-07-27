@@ -519,6 +519,15 @@ describe("codex adapter", () => {
       .filter((event) => event.toolCallId !== undefined)
       .map((event) => event.kind);
     expect(kinds).toEqual(["tool_call", "tool_result", "tool_call", "tool_result"]);
+    const linkedToolEvents = session.events.filter(
+      (event) => event.toolCallId !== undefined,
+    );
+    expect(
+      linkedToolEvents.every(
+        (event) =>
+          event.contentText === undefined && event.contentBlocks.length === 0,
+      ),
+    ).toBe(true);
   });
 
   test("captures current execution contexts, usage aliases, search tools, and lifecycle records", async () => {
