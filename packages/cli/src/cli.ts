@@ -56,7 +56,10 @@ const valueOptionNames = new Set([
   "--ingest-token",
   "--interval-seconds",
   "--limit",
+  "--lineage-root-session",
   "--max-batches",
+  "--message-after",
+  "--message-before",
   "--message-limit",
   "--mode",
   "--model",
@@ -75,6 +78,8 @@ const valueOptionNames = new Set([
   "--server",
   "--session",
   "--session-id",
+  "--session-started-after",
+  "--session-started-before",
   "--smoke-query",
   "--status",
   "--timeout-ms",
@@ -87,6 +92,98 @@ const valueOptionNames = new Set([
   "--usage-limit",
   "-q",
 ]);
+const booleanOptionNames = new Set([
+  "--detail",
+  "--exclude-reasoning",
+  "--exclude-tool-results",
+  "--force",
+  "--help",
+  "--roots-only",
+  "--smoke",
+  "--summary",
+  "--until-empty",
+  "--version",
+  "-h",
+  "-v",
+]);
+const knownOptionNames = new Set([
+  ...valueOptionNames,
+  ...booleanOptionNames,
+]);
+const queryPageOptionNames = [
+  "--fields",
+  "--detail",
+  "--cursor",
+  "--limit",
+  "--offset",
+] as const;
+const queryClientOptionNames = [
+  "--server",
+  "--timeout-ms",
+  "--help",
+  "-h",
+] as const;
+const commonQueryFilterOptionNames = [
+  "--project",
+  "--project-key",
+  "--provider",
+  "--providers",
+  "--session",
+  "--session-id",
+  "--agent",
+  "--agent-name",
+  "--agent-role",
+  "--model",
+  "--model-provider",
+] as const;
+const queryCommandOptionNames: Readonly<Record<string, ReadonlySet<string>>> = {
+  search: new Set([
+    ...queryClientOptionNames,
+    ...queryPageOptionNames,
+    ...commonQueryFilterOptionNames,
+    "--query",
+    "-q",
+    "--mode",
+    "--role",
+  ]),
+  sessions: new Set([
+    ...queryClientOptionNames,
+    ...queryPageOptionNames,
+    ...commonQueryFilterOptionNames,
+  ]),
+  messages: new Set([
+    ...queryClientOptionNames,
+    ...queryPageOptionNames,
+    ...commonQueryFilterOptionNames,
+    "--role",
+    "--message-after",
+    "--message-before",
+    "--session-started-after",
+    "--session-started-before",
+    "--roots-only",
+    "--lineage-root-session",
+  ]),
+  "tool-calls": new Set([
+    ...queryClientOptionNames,
+    ...queryPageOptionNames,
+    ...commonQueryFilterOptionNames,
+    "--tool",
+    "--tool-name",
+    "--tool-call",
+    "--tool-call-id",
+  ]),
+  "tool-call": new Set([
+    ...queryClientOptionNames,
+    ...commonQueryFilterOptionNames,
+    "--id",
+    "--fields",
+    "--tool",
+    "--tool-name",
+    "--tool-call",
+    "--tool-call-id",
+  ]),
+  query: new Set(queryClientOptionNames),
+};
 const parsedArguments = parseCliArguments(process.argv.slice(2), valueOptionNames);
 const arg = (name: string): string | undefined => parsedArguments.first(name);
 const flag = (name: string): boolean => parsedArguments.has(name);
@@ -426,6 +523,39 @@ const rejectInput = (name: string, error: unknown): false => {
   return false;
 };
 
+const rejectUnsupportedOptions = (name: string): boolean => {
+  const unknown = parsedArguments.optionNames.find((option) =>
+    !knownOptionNames.has(option)
+  );
+  if (unknown !== undefined) {
+    return rejectInput(name, new CommandInputError(`unknown option: ${unknown}`, {
+      path: unknown,
+      expected: "a known CLI option",
+      received: unknown,
+      hint: `Run \`quasar ${name} --help\` for supported options.`,
+    }));
+  }
+
+  const allowed = queryCommandOptionNames[name];
+  if (allowed === undefined) return true;
+  const irrelevant = parsedArguments.optionNames.find((option) =>
+    !allowed.has(option)
+  );
+  if (irrelevant === undefined) return true;
+  const commandLabel = name === "query"
+    ? "the query command"
+    : `the ${name} query command`;
+  return rejectInput(name, new CommandInputError(
+    `${irrelevant} is not valid for ${commandLabel}`,
+    {
+      path: irrelevant,
+      expected: [...allowed].sort(),
+      received: irrelevant,
+      hint: `Remove ${irrelevant} or run \`quasar ${name} --help\`.`,
+    },
+  ));
+};
+
 const checkEnum = (name: string, flag: string, allowed: readonly string[]): boolean => {
   const value = arg(flag);
   if (value === undefined || allowed.includes(value)) return true;
@@ -496,6 +626,12 @@ const queryFilters = (name: string): CommonQueryFilters | undefined => {
     agentRole: arg("--agent-role"),
     model: arg("--model"),
     modelProvider: arg("--model-provider"),
+    messageAfter: arg("--message-after"),
+    messageBefore: arg("--message-before"),
+    sessionStartedAfter: arg("--session-started-after"),
+    sessionStartedBefore: arg("--session-started-before"),
+    rootsOnly: flag("--roots-only") ? true : undefined,
+    lineageRootSessionId: arg("--lineage-root-session"),
     toolCallId: firstArg("--tool-call", "--tool-call-id"),
     toolName: firstArg("--tool", "--tool-name"),
   };
@@ -666,7 +802,9 @@ const materializeEmbeddingVectors = async () => {
 };
 
 const missingValueOption = parsedArguments.missingValueOptions[0];
-if (missingValueOption !== undefined) {
+if (!rejectUnsupportedOptions(command)) {
+  // The rejection envelope is the complete command result.
+} else if (missingValueOption !== undefined) {
   rejectInput(command, new CommandInputError(`${missingValueOption} requires a value`, {
     path: missingValueOption,
     expected: `a value following ${missingValueOption}`,
@@ -729,19 +867,10 @@ if (missingValueOption !== undefined) {
     break;
   }
   case "messages": {
-    const sessionId = firstArg("--session", "--session-id");
-    if (sessionId === undefined) {
-      rejectInput("messages", new CommandInputError("--session-id is required", {
-        field: "--session-id",
-        expected: "a session id",
-        hint: "Pass --session-id <id> (find ids via `quasar sessions`).",
-      }));
-      break;
-    }
     if (!(rejectQueryOffset("messages") && checkEnum("messages", "--role", QUERY_ROLES) && checkIntRange("messages", "--limit", 1, 200))) break;
     const filters = queryFilters("messages");
     if (filters === undefined) break;
-    await executeQuery("messages", () => messagesQuery({ sessionId, filters, projection: queryProjection() }));
+    await executeQuery("messages", () => messagesQuery({ filters, projection: queryProjection() }));
     break;
   }
   case "tool-calls": {
@@ -900,7 +1029,7 @@ if (missingValueOption !== undefined) {
       "sessions [--provider name[,name]] [--project key] [--agent name] [--agent-role role] [--model slug] [--model-provider name] [--fields a,b] [--detail] [--cursor token] [--limit n]",
       "session --id id [--message-limit n] [--tool-call-limit n] [--event-limit n] [--usage-limit n] [--edge-limit n] [--artifact-limit n] [--context-limit n]",
       "trajectory --session id [--format quasar|letta|atif] [--exclude-reasoning] [--exclude-tool-results] [--tool-result-max-bytes n]",
-      "messages --session id [--role user|assistant|reasoning] [--model slug] [--model-provider name] [--fields a,b] [--detail] [--cursor token] [--limit n]",
+      "messages [--session id] [--project key] [--provider name[,name]] [--role user|assistant|reasoning] [--agent name] [--agent-role role] [--model slug] [--model-provider name] [--message-after timestamp] [--message-before timestamp] [--session-started-after timestamp] [--session-started-before timestamp] [--roots-only] [--lineage-root-session id] [--fields a,b] [--detail] [--cursor token] [--limit n]",
       "tool-calls [--session id] [--project key] [--provider name[,name]] [--tool name] [--agent name] [--agent-role role] [--model slug] [--model-provider name] [--fields a,b] [--detail] [--cursor token] [--limit n]",
       "tool-call --id id [--fields a,b] (full input/output detail)",
       "query <inline-json|@file|-> [--server url]",

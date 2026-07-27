@@ -92,6 +92,14 @@ const Timestamp = boundedString("QuasarTimestamp", 128).pipe(
   Schema.annotations({ jsonSchema: { format: "date-time" } }),
 );
 
+const isOrderedTimeRange = (
+  after: string | undefined,
+  before: string | undefined,
+): boolean =>
+  after === undefined
+  || before === undefined
+  || Date.parse(after) <= Date.parse(before);
+
 const ProviderList = Schema.Array(Provider).pipe(
   Schema.minItems(1),
   Schema.maxItems(Provider.literals.length),
@@ -130,11 +138,48 @@ const SessionFilters = Schema.Struct({
 });
 
 const MessageFilters = Schema.Struct({
-  sessionId: SessionId,
+  sessionId: Schema.optional(SessionId),
+  projectKey: Schema.optional(ProjectKey),
+  providers: Schema.optional(ProviderList),
   role: Schema.optional(MessageRole),
+  agentName: Schema.optional(AgentName),
+  agentRole: Schema.optional(AgentRole),
   model: Schema.optional(Model),
   modelProvider: Schema.optional(ModelProvider),
-});
+  messageAfter: Schema.optional(Timestamp.annotations({
+    description: "Inclusive lower bound for message timestamps.",
+  })),
+  messageBefore: Schema.optional(Timestamp.annotations({
+    description: "Exclusive upper bound for message timestamps.",
+  })),
+  sessionStartedAfter: Schema.optional(Timestamp.annotations({
+    description: "Inclusive lower bound for session start timestamps.",
+  })),
+  sessionStartedBefore: Schema.optional(Timestamp.annotations({
+    description: "Exclusive upper bound for session start timestamps.",
+  })),
+  rootsOnly: Schema.optional(Schema.Boolean),
+  lineageRootSessionId: Schema.optional(SessionId.annotations({
+    description: "Include the named root session and all recursive descendants.",
+  })),
+}).pipe(
+  Schema.filter(
+    (filters) => isOrderedTimeRange(filters.messageAfter, filters.messageBefore),
+    { message: () => "messageAfter must not be after messageBefore" },
+  ),
+  Schema.filter(
+    (filters) =>
+      isOrderedTimeRange(
+        filters.sessionStartedAfter,
+        filters.sessionStartedBefore,
+      ),
+    {
+      message: () =>
+        "sessionStartedAfter must not be after sessionStartedBefore",
+    },
+  ),
+  Schema.annotations({ identifier: "QuasarMessageFilters" }),
+);
 
 const ToolCallFilters = Schema.Struct({
   projectKey: Schema.optional(ProjectKey),
@@ -323,7 +368,7 @@ const SessionsQuerySpec = Schema.Struct({
 const MessagesQuerySpec = Schema.Struct({
   protocolVersion,
   kind: Schema.Literal("messages"),
-  filters: MessageFilters,
+  filters: Schema.optional(MessageFilters),
   projection: MessageProjection,
   page: QueryPage,
 });
@@ -612,14 +657,24 @@ const queryExamples = [
     },
   },
   {
-    name: "session messages",
+    name: "corpus messages",
     input: {
       protocolVersion: QUERY_PROTOCOL_VERSION,
       kind: "messages",
       filters: {
-        sessionId: "codex:example-session",
+        projectKey: "quasar",
+        providers: ["codex"],
         role: "assistant",
+        agentName: "codex",
+        agentRole: "builder",
+        model: "gpt-5.6-sol",
         modelProvider: "openai",
+        messageAfter: "2026-07-01T00:00:00.000Z",
+        messageBefore: "2026-08-01T00:00:00.000Z",
+        sessionStartedAfter: "2026-06-01T00:00:00.000Z",
+        sessionStartedBefore: "2026-08-01T00:00:00.000Z",
+        rootsOnly: false,
+        lineageRootSessionId: "codex:example-session",
       },
       projection: {
         detail: "detail",

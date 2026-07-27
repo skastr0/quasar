@@ -595,6 +595,98 @@ describe("CLI client/operator boundary", () => {
     }
   }, 15_000);
 
+  test("messages accepts corpus filters without a session and rejects inverted ranges locally", async () => {
+    const accepted = await runCli([
+      "messages",
+      "--project",
+      "quasar",
+      "--provider",
+      "codex,claude",
+      "--role",
+      "user",
+      "--agent",
+      "codex",
+      "--agent-role",
+      "builder",
+      "--model",
+      "gpt-5.6-sol",
+      "--model-provider",
+      "openai",
+      "--message-after",
+      "2026-07-01T00:00:00.000Z",
+      "--message-before",
+      "2026-08-01T00:00:00.000Z",
+      "--session-started-after",
+      "2026-06-01T00:00:00.000Z",
+      "--session-started-before",
+      "2026-08-01T00:00:00.000Z",
+      "--roots-only",
+      "--lineage-root-session",
+      "codex:root-session",
+    ]);
+    expect(accepted.exitCode).toBe(2);
+    expect(accepted.json.error?.type).toBe("ConfigurationError");
+    expect(accepted.json.error?.message).not.toContain("--session");
+
+    const invertedMessageRange = await runCli([
+      "messages",
+      "--message-after",
+      "2026-08-01T00:00:00.000Z",
+      "--message-before",
+      "2026-07-01T00:00:00.000Z",
+    ]);
+    expect(invertedMessageRange.exitCode).toBe(1);
+    expect(invertedMessageRange.json.error?.type).not.toBe("ConfigurationError");
+    expect(invertedMessageRange.json.error?.message).toContain("messageAfter");
+
+    const invertedSessionRange = await runCli([
+      "messages",
+      "--session-started-after",
+      "2026-08-01T00:00:00.000Z",
+      "--session-started-before",
+      "2026-07-01T00:00:00.000Z",
+    ]);
+    expect(invertedSessionRange.exitCode).toBe(1);
+    expect(invertedSessionRange.json.error?.type).not.toBe("ConfigurationError");
+    expect(invertedSessionRange.json.error?.message).toContain("sessionStartedAfter");
+  }, 15_000);
+
+  test("unknown and query-irrelevant options fail closed", async () => {
+    const unknown = await runCli(["messages", "--mystery"]);
+    expect(unknown.exitCode).toBe(1);
+    expect(unknown.json.error?.type).toBe("CommandInputError");
+    expect(unknown.json.error?.message).toContain("unknown option: --mystery");
+
+    const irrelevantMessageFilter = await runCli([
+      "sessions",
+      "--role",
+      "user",
+    ]);
+    expect(irrelevantMessageFilter.exitCode).toBe(1);
+    expect(irrelevantMessageFilter.json.error?.type).toBe("CommandInputError");
+    expect(irrelevantMessageFilter.json.error?.message).toContain(
+      "--role is not valid for the sessions query command",
+    );
+
+    const irrelevantToolFilter = await runCli([
+      "messages",
+      "--tool",
+      "exec_command",
+    ]);
+    expect(irrelevantToolFilter.exitCode).toBe(1);
+    expect(irrelevantToolFilter.json.error?.type).toBe("CommandInputError");
+    expect(irrelevantToolFilter.json.error?.message).toContain(
+      "--tool is not valid for the messages query command",
+    );
+
+    const rawQueryFlag = await runCli(["query", "{}", "--cursor", "opaque"]);
+    expect(rawQueryFlag.exitCode).toBe(1);
+    expect(rawQueryFlag.json.error?.type).toBe("CommandInputError");
+    expect(rawQueryFlag.json.error?.message).toContain(
+      "--cursor is not valid for the query command",
+    );
+  }, 15_000);
+
   test("session --id retains the rich independent-detail endpoint", async () => {
     let requestedUrl: URL | undefined;
     const server = Bun.serve({
