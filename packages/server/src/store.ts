@@ -1,6 +1,10 @@
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
+import {
+  NORMALIZED_SESSION_PROTOCOL_VERSION,
+  decodeMappedSessionSync,
+} from "@skastr0/quasar-protocol";
 import { Cause, Context, Effect, Layer, Schema } from "effect";
 
 import type {
@@ -35,6 +39,17 @@ export class SqliteStoreError extends Schema.TaggedError<SqliteStoreError>()(
     cause: Schema.optional(Schema.Unknown),
   },
 ) {}
+
+export class StoredSessionContractError extends
+  Schema.TaggedError<StoredSessionContractError>()(
+    "StoredSessionContractError",
+    {
+      sessionId: Schema.String,
+      message: Schema.String,
+      cause: Schema.optional(Schema.Unknown),
+    },
+  )
+{}
 
 export interface StoreStats {
   readonly projects: number;
@@ -233,6 +248,12 @@ export interface LocalStoreService {
     sessionId: string,
     pages: SessionDetailPageOptions,
   ) => Effect.Effect<SessionDetail | undefined, SqliteStoreError>;
+  readonly readMappedSession: (
+    sessionId: string,
+  ) => Effect.Effect<
+    MappedSession | undefined,
+    SqliteStoreError | StoredSessionContractError
+  >;
   readonly getMessage: (options: {
     readonly sessionId: string;
     readonly seq: number;
@@ -1649,6 +1670,9 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
         const countEdgesBySession = db.prepare("SELECT COUNT(*) AS count FROM session_edges WHERE session_id = ?");
         const countArtifactsBySession = db.prepare("SELECT COUNT(*) AS count FROM session_artifacts WHERE session_id = ?");
         const countContextsBySession = db.prepare("SELECT COUNT(*) AS count FROM execution_contexts WHERE session_id = ?");
+        const selectProjectByKey = db.prepare(
+          "SELECT project_key AS projectKey, display_name AS displayName, raw_path AS rawPath FROM projects WHERE project_key = ?",
+        );
 
         const page = <A>(window: PageWindow, total: number, rows: readonly A[]): Page<A> => ({
           ...window,
@@ -1659,6 +1683,12 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
         const countRows = (statement: ReturnType<Database["prepare"]>, sessionId: string): number =>
           (statement.get(sessionId) as { count: number }).count;
         const parseFact = <A>(row: { readonly json: string }): A => JSON.parse(row.json) as A;
+        const omitSqlNulls = <A>(row: A): A =>
+          Object.fromEntries(
+            Object.entries(row as Record<string, unknown>).filter(
+              ([, value]) => value !== null,
+            ),
+          ) as A;
 
         const readSessionDetail = (
           sessionId: string,
@@ -1728,6 +1758,63 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
             sessionEdges: page(pages.sessionEdges, countRows(countEdgesBySession, sessionId), edgeRows),
             artifacts: page(pages.artifacts, countRows(countArtifactsBySession, sessionId), artifactRows),
             executionContexts: page(pages.executionContexts, countRows(countContextsBySession, sessionId), contextRows),
+          };
+        };
+
+        const readMappedSessionSource = (
+          sessionId: string,
+        ): MappedSession | undefined => {
+          const head = selectSessionDetailHead.get(sessionId) as
+            | SessionDetailHeadRow
+            | null;
+          if (head === null) return undefined;
+          const total = (
+            statement: ReturnType<Database["prepare"]>,
+          ): number => countRows(statement, sessionId);
+          const window = (
+            statement: ReturnType<Database["prepare"]>,
+          ): PageWindow => ({
+            limit: Math.max(total(statement), 1),
+            offset: 0,
+          });
+          const detail = readSessionDetail(sessionId, {
+            messages: window(countMessagesBySession),
+            toolCalls: window(countToolCallsBySession),
+            events: window(countEventsBySession),
+            usageRecords: window(countUsageBySession),
+            sessionEdges: window(countEdgesBySession),
+            artifacts: window(countArtifactsBySession),
+            executionContexts: window(countContextsBySession),
+          });
+          if (detail === undefined) return undefined;
+          const project = selectProjectByKey.get(head.projectKey) as {
+            readonly projectKey: string;
+            readonly displayName: string;
+            readonly rawPath: string | null;
+          } | null;
+          if (project === null) {
+            throw new Error(
+              `session ${sessionId} references missing project ${head.projectKey}`,
+            );
+          }
+          return {
+            protocolVersion: NORMALIZED_SESSION_PROTOCOL_VERSION,
+            project: {
+              projectKey: project.projectKey,
+              displayName: project.displayName,
+              ...(project.rawPath !== null ? { rawPath: project.rawPath } : {}),
+            },
+            session: detail.session,
+            messages: detail.messages.rows.map(omitSqlNulls),
+            toolCalls: detail.toolCalls.rows.map(omitSqlNulls),
+            events: detail.events.rows,
+            usageRecords: detail.usageRecords.rows,
+            sessionEdges: detail.sessionEdges.rows,
+            artifacts: detail.artifacts.rows,
+            executionContexts: detail.executionContexts.rows,
+            ...(detail.assignment !== undefined
+              ? { assignment: detail.assignment }
+              : {}),
           };
         };
 
@@ -1810,6 +1897,26 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
             }),
           readSessionDetail: (sessionId, pages) =>
             trySqlite("readSessionDetail", () => readSessionDetail(sessionId, pages)),
+          readMappedSession: (sessionId) =>
+            trySqlite(
+              "readMappedSession",
+              () => readMappedSessionSource(sessionId),
+            ).pipe(
+              Effect.flatMap((source) =>
+                source === undefined
+                  ? Effect.succeed(undefined)
+                  : Effect.try({
+                    try: () => decodeMappedSessionSync(source),
+                    catch: (cause) =>
+                      new StoredSessionContractError({
+                        sessionId,
+                        message:
+                          `stored source facts fail ${NORMALIZED_SESSION_PROTOCOL_VERSION}`,
+                        cause,
+                      }),
+                  })
+              ),
+            ),
           hasSessionFingerprint: (sessionId, sourceFingerprint, normalizationVersion) =>
             trySqlite("hasSessionFingerprint", () => {
               const row = db

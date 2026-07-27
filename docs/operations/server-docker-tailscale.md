@@ -178,6 +178,7 @@ serving surface is read/search only:
 | Project list | `projects` | `GET /projects` | `limit`, `offset` |
 | Session list | `sessions` | `GET /sessions` | project, providers, session, agent, assignment role, model/provider; bounded page |
 | Session read | `session --id <id>` | `GET /session-detail` | bounded message, tool-call, event, usage, edge, artifact, and execution-context sections |
+| Agent trajectory | `trajectory --session <id>` | `GET /trajectory` | Quasar or Letta format; reasoning/results selection; explicit tool-result truncation |
 | Message list | `messages --session-id <id>` | `GET /messages` | role/model filters; bounded page |
 | Search | `search --query <text> --mode lexical\|semantic\|fusion` | `GET /search/{mode}` | project, providers, session, role, agent, assignment role, model/provider; bounded excerpts |
 | Tool-call list | `tool-calls` | `GET /tool-calls` | session, project, providers, tool, agent, assignment role, model/provider; body-free summaries |
@@ -192,7 +193,7 @@ Notes for wrappers:
 - `role` applies to searchable message rows (`user`, `assistant`, `reasoning`);
   tool-call input/output remains structural/lexical evidence.
 - Provider filters accept `codex`, `claude`, `opencode`, `grok`, `kimi`,
-  `hermes`, `antigravity`, `omp`, `pi`, `cursor`, and `devin`.
+  `hermes`, `antigravity`, `omp`, `pi`, `cursor`, `devin`, and `amp`.
 - Resource collections use `{ limit, offset, nextOffset }` with a server maximum
   of 200. Carry `nextOffset` into the next request until it is `null`.
 - CLI query/list commands may expose an opaque cursor; it is a local,

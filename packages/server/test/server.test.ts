@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { NORMALIZED_SESSION_PROTOCOL_VERSION } from "@skastr0/quasar-protocol";
 import { Effect } from "effect";
 
@@ -192,6 +193,38 @@ describe("HTTP server resources", () => {
       });
       expect(sessions.data.rows).toEqual([]);
     } finally { proc.kill(); await proc.exited; }
+  });
+
+  test("trajectory rejects stale stored source facts with an actionable replay error", async () => {
+    const dir = tempDir();
+    const sqlite = join(dir, "quasar.sqlite");
+    await seed(sqlite);
+    const db = new Database(sqlite);
+    try {
+      db.query(
+        "DELETE FROM session_events WHERE session_id = ? AND id = ?",
+      ).run("codex:session-http", "event-http-user");
+    } finally {
+      db.close();
+    }
+    const { proc, base } = startServer(sqlite);
+    try {
+      await waitFor(`${base}/health`);
+      const response = await fetch(
+        `${base}/trajectory?sessionId=codex%3Asession-http`,
+      );
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        error: {
+          type: "TrajectorySourceInvalid",
+          sessionId: "codex:session-http",
+          action: expect.stringContaining("Re-ingest"),
+        },
+      });
+    } finally {
+      proc.kill();
+      await proc.exited;
+    }
   });
 
   test("ingest run lifecycle persists running, completed, and failed ledger rows", async () => {

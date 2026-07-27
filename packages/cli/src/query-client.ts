@@ -436,7 +436,12 @@ export const readQueryArgument = (source: string | undefined): QuerySpec => {
 export type ProtocolContractName = keyof typeof protocolContracts;
 
 const contractName = (name: string): ProtocolContractName | undefined => {
-  const alias = name === "session-enrichment" ? "sessionEnrichment" : name;
+  const alias = ({
+    "normalized-session": "normalizedSession",
+    "mapped-session": "mappedSession",
+    "letta-trajectory": "lettaTrajectory",
+    "session-enrichment": "sessionEnrichment",
+  } as const)[name] ?? name;
   if (alias in protocolContracts) return alias as ProtocolContractName;
   return Object.entries(protocolContracts)
     .find(([, contract]) => contract.schemaId === name)?.[0] as ProtocolContractName | undefined;
@@ -447,7 +452,15 @@ export const protocolContract = (name?: string) => {
   const resolved = contractName(name);
   if (resolved === undefined) {
     throw new QueryInputError(`unknown schema ${name}`, {
-      expected: ["query", "response", "session-enrichment"],
+      expected: [
+        "normalized-session",
+        "mapped-session",
+        "trajectory",
+        "letta-trajectory",
+        "query",
+        "response",
+        "session-enrichment",
+      ],
       received: name,
     });
   }

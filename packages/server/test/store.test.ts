@@ -4,6 +4,10 @@ import { join } from "node:path";
 
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
+import {
+  decodeMappedSessionSync,
+  mappedSessionExamples,
+} from "@skastr0/quasar-protocol";
 import { Effect } from "effect";
 
 import { fts5QueryForText, ftsProjectScopeToken, ftsProviderScopeToken, ftsRoleScopeToken } from "../src/fts5";
@@ -128,6 +132,29 @@ describe("LocalStore", () => {
     const stats = await withStore(path, (store) => store.stats);
 
     expect(stats).toEqual({ projects: 0, sessions: 0, messages: 0, toolCalls: 0, ingestRuns: 0 });
+  });
+
+  test("reconstructs the complete normalized source contract without a read cap", async () => {
+    const path = sqlitePath();
+    const source = decodeMappedSessionSync(
+      structuredClone(mappedSessionExamples[0]!.input),
+    );
+
+    const reconstructed = await withStore(
+      path,
+      (store) =>
+        Effect.gen(function* () {
+          yield* store.upsertSession(source);
+          yield* store.finalizeSessionIngest(
+            source.session.sessionId,
+            source.session.sourceFingerprint,
+            source.session.normalizationVersion,
+          );
+          return yield* store.readMappedSession(source.session.sessionId);
+        }),
+    );
+
+    expect(reconstructed).toEqual(source);
   });
 
   test("adds tool payload hashes without scanning bodies and forces one safe replay", async () => {
