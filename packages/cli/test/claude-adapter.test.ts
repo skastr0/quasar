@@ -1070,6 +1070,120 @@ describe("QSR-220 lineage: parent points at a DROPPED record -> nearest kept anc
   });
 });
 
+describe("normalized Claude lineage and repeated occurrences", () => {
+  const root = mkdtempSync(join(tmpdir(), "quasar-claude-normalized-lineage-"));
+  afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+  const SID = "deadbeef-0000-4000-8000-0000000000ab";
+  const projectDir = join(root, "projects", "-Users-fixtureuser-fixtureapp");
+  mkdirSync(projectDir, { recursive: true });
+
+  const records = [
+    {
+      type: "assistant",
+      sessionId: SID,
+      uuid: "forward-child",
+      parentUuid: "forward-parent",
+      message: {
+        role: "assistant",
+        model: "claude-synthetic-model",
+        content: [{ type: "text", text: "synthetic forward child" }],
+      },
+    },
+    {
+      type: "user",
+      sessionId: SID,
+      uuid: "external-child",
+      parentUuid: "outside-this-file",
+      message: { role: "user", content: "synthetic external child" },
+    },
+    {
+      type: "user",
+      sessionId: SID,
+      uuid: "forward-parent",
+      parentUuid: null,
+      message: { role: "user", content: "synthetic forward parent" },
+    },
+    {
+      type: "assistant",
+      sessionId: SID,
+      uuid: "repeated-native-event",
+      parentUuid: "forward-parent",
+      message: {
+        role: "assistant",
+        model: "claude-synthetic-model",
+        content: [{ type: "text", text: "synthetic repeated occurrence" }],
+      },
+    },
+    {
+      type: "assistant",
+      sessionId: SID,
+      uuid: "repeated-native-event",
+      parentUuid: "forward-parent",
+      message: {
+        role: "assistant",
+        model: "claude-synthetic-model",
+        content: [{ type: "text", text: "synthetic repeated occurrence" }],
+      },
+    },
+  ];
+  writeFileSync(
+    join(projectDir, `${SID}.jsonl`),
+    records.map((record) => JSON.stringify(record)).join("\n"),
+  );
+
+  test("resolves forward references and keeps external parents out of the local event foreign key", async () => {
+    const result = await claudeAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { claude: root },
+    });
+    const session = result.sessions[0]!;
+    const forwardChild = session.events.find(
+      (event) => event.nativeEventId === "forward-child",
+    )!;
+    const forwardParent = session.events.find(
+      (event) => event.nativeEventId === "forward-parent",
+    )!;
+    const externalChild = session.events.find(
+      (event) => event.nativeEventId === "external-child",
+    )!;
+
+    expect(forwardChild.parentEventId).toBe(forwardParent.id);
+    expect(externalChild.parentEventId).toBeUndefined();
+    expect(session.sessionEdges).toContainEqual(
+      expect.objectContaining({
+        kind: "parent",
+        fromId: "outside-this-file",
+        toEventId: externalChild.id,
+      }),
+    );
+    expect(() => mapSession(session, "forward-and-external-parent")).not.toThrow();
+  });
+
+  test("qualifies repeated native event contexts by occurrence", async () => {
+    const result = await claudeAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { claude: root },
+    });
+    const session = result.sessions[0]!;
+    const repeatedEvents = session.events.filter(
+      (event) => event.nativeEventId === "repeated-native-event",
+    );
+    const repeatedContexts = session.executionContexts.filter(
+      (context) => context.turnId === "repeated-native-event",
+    );
+
+    expect(repeatedEvents).toHaveLength(2);
+    expect(new Set(repeatedEvents.map((event) => event.id)).size).toBe(2);
+    expect(repeatedContexts).toHaveLength(2);
+    expect(new Set(repeatedContexts.map((context) => context.id)).size).toBe(2);
+    expect(repeatedContexts.map((context) => context.sequence)).toEqual([3, 4]);
+    expect(() => mapSession(session, "repeated-native-event")).not.toThrow();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // QSR-220 FIX (finding 5): a subagent/workflow-agent file is a first-class child
 // session whose parent is the main session that spawned it. claude was the only
