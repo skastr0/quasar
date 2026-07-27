@@ -322,6 +322,12 @@ describe("T1: terminal-response rule — one assistant message per turn", () => 
       // row), NOT the bare planner narration.
       expect(e.contentText).toContain(`Reasoning trace for turn ${i + 1}`);
       expect(e.contentText).not.toContain("Internal narration");
+      expect(e.contentBlocks).toHaveLength(1);
+      expect(e.contentBlocks[0]).toMatchObject({
+        kind: "thinking",
+        thinking: `Reasoning trace for turn ${i + 1}: the answer is shaping up.`,
+      });
+      expect("reasoning" in e).toBe(false);
     }
   });
 

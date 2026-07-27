@@ -287,6 +287,13 @@ const buildAntigravityFixture = (root: string): AdapterFixture => {
       type: "PLANNER_RESPONSE",
       created_at: NOW,
       step_index: 1,
+      thinking: "fixture reasoning turn",
+      content: "fixture internal planner narration",
+    },
+    {
+      type: "PLANNER_RESPONSE",
+      created_at: NOW,
+      step_index: 2,
       content: "fixture assistant turn",
     },
   ]);
