@@ -18,7 +18,7 @@
       "agentName": "hermes",
       "artifactCount": 0,
       "artifacts": [],
-      "contentBlockCount": 2,
+      "contentBlockCount": 1,
       "eventCount": 2,
       "events": [
         {
@@ -54,18 +54,7 @@
         },
         {
           "agentName": "hermes",
-          "contentBlocks": [
-            {
-              "id": "hermes:55717f63609a33c4d6a3ab09aecdb942:block:02eb677f41b5e7348a8936a9f9bf6c06",
-              "kind": "text",
-              "metadata": {
-                "nativeType": "text"
-              },
-              "sequence": 0,
-              "text": "fixture assistant turn"
-            }
-          ],
-          "contentText": "fixture assistant turn",
+          "contentBlocks": [],
           "id": "hermes:55717f63609a33c4d6a3ab09aecdb942:event:c208471f3f2d6f9e0e64a5a91d683d90",
           "kind": "tool_result",
           "machineId": "machine:test",
