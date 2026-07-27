@@ -1,17 +1,22 @@
 import { describe, expect, test } from "bun:test";
 import {
   NORMALIZED_SESSION_PROTOCOL_VERSION,
+  QUASAR_TRAJECTORY_VERSION,
   QUERY_PROTOCOL_VERSION,
   QuerySpec,
   SESSION_ENRICHMENT_VERSION,
   decodeMappedSessionSync,
+  decodeLettaTrajectorySync,
   decodeNormalizedSessionSync,
+  decodeQuasarTrajectorySync,
   decodeQueryResponseSync,
   decodeQuerySpecSync,
   decodeSessionEnrichmentSync,
+  projectQuasarTrajectory,
   protocolContracts,
   protocolDiscovery,
   protocolExamples,
+  toLettaTrajectory,
 } from "../src/index";
 
 const searchQuery = {
@@ -130,6 +135,234 @@ describe("NormalizedSession v1", () => {
     expect(mappedExample().protocolVersion).toBe(
       NORMALIZED_SESSION_PROTOCOL_VERSION,
     );
+  });
+});
+
+describe("QuasarTrajectory v1", () => {
+  const mixedSession = (): any => {
+    const mapped: any = structuredClone(
+      protocolContracts.mappedSession.examples[0].input,
+    );
+    const assistantEvent = {
+      ...mapped.events[0],
+      id: "codex:example:event:1",
+      nativeEventId: "native-event-1",
+      sequence: 1,
+      timestamp: "2026-07-26T12:00:01.000Z",
+      role: "assistant",
+      contentText: "I will inspect both files.",
+      contentBlocks: [{
+        id: "codex:example:block:thinking",
+        sequence: 0,
+        kind: "thinking",
+        thinking: "Compare both sources before answering.",
+      }],
+      rawReference: {
+        sourcePath: "/history/example.jsonl",
+        line: 2,
+        nativeType: "response_item",
+        rawBytes: 256,
+      },
+    };
+    const firstResultEvent = {
+      ...mapped.events[0],
+      id: "codex:example:event:2",
+      nativeEventId: "native-event-2",
+      sequence: 2,
+      timestamp: "2026-07-26T12:00:02.000Z",
+      role: "tool",
+      kind: "tool_result",
+      contentText: "αβγ first payload",
+      contentBlocks: [],
+      toolCallId: "call-a",
+      rawReference: {
+        sourcePath: "/history/example.jsonl",
+        line: 3,
+        nativeType: "function_call_output",
+        rawBytes: 128,
+      },
+    };
+    const secondResultEvent = {
+      ...firstResultEvent,
+      id: "codex:example:event:3",
+      nativeEventId: "native-event-3",
+      sequence: 3,
+      timestamp: "2026-07-26T12:00:03.000Z",
+      contentText: "second payload",
+      toolCallId: "call-b",
+      rawReference: {
+        sourcePath: "/history/example.jsonl",
+        line: 4,
+        nativeType: "function_call_output",
+        rawBytes: 96,
+      },
+    };
+    mapped.events.push(assistantEvent, firstResultEvent, secondResultEvent);
+    mapped.messages.push({
+      sessionId: mapped.session.sessionId,
+      eventId: assistantEvent.id,
+      seq: assistantEvent.sequence,
+      role: "assistant",
+      text: assistantEvent.contentText,
+      ts: assistantEvent.timestamp,
+      projectKey: mapped.project.projectKey,
+      contentHash: "hash-assistant",
+    });
+    mapped.toolCalls.push(
+      {
+        id: "call-a",
+        sessionId: mapped.session.sessionId,
+        eventId: assistantEvent.id,
+        seq: assistantEvent.sequence,
+        toolName: "read",
+        status: "completed",
+        inputText: "{\"path\":\"a.ts\"}",
+        outputText: firstResultEvent.contentText,
+        startedAt: "2026-07-26T12:00:01.100Z",
+        completedAt: firstResultEvent.timestamp,
+        projectKey: mapped.project.projectKey,
+        provider: mapped.session.provider,
+      },
+      {
+        id: "call-b",
+        sessionId: mapped.session.sessionId,
+        eventId: assistantEvent.id,
+        seq: assistantEvent.sequence,
+        toolName: "read",
+        status: "completed",
+        inputText: "{\"path\":\"b.ts\"}",
+        outputText: "",
+        startedAt: "2026-07-26T12:00:01.200Z",
+        completedAt: secondResultEvent.timestamp,
+        projectKey: mapped.project.projectKey,
+        provider: mapped.session.provider,
+      },
+    );
+    mapped.session.messageCount = mapped.messages.length;
+    mapped.session.toolCallCount = mapped.toolCalls.length;
+    return decodeMappedSessionSync(mapped);
+  };
+
+  test("preserves mixed assistant text, reasoning, parallel calls, results, and source links deterministically", () => {
+    const source = mixedSession();
+    const first = projectQuasarTrajectory(source);
+    const second = projectQuasarTrajectory(source);
+
+    expect(first).toEqual(second);
+    expect(first.protocolVersion).toBe(QUASAR_TRAJECTORY_VERSION);
+    expect(first.records.map((record) => record.role)).toEqual([
+      "meta",
+      "user",
+      "reasoning",
+      "assistant",
+      "tool_call",
+      "tool_call",
+      "tool_result",
+      "tool_result",
+    ]);
+    expect(first.records.find((record) =>
+      record.role === "assistant"
+    )).toEqual(expect.objectContaining({
+      content: "I will inspect both files.",
+      sourceEventId: "codex:example:event:1",
+    }));
+    expect(first.records.filter((record) =>
+      record.role === "tool_call"
+    ).map((record) => record.toolCallId)).toEqual(["call-a", "call-b"]);
+    expect(first.records.filter((record) =>
+      record.role === "tool_result"
+    ).map((record) => record.toolCallId)).toEqual(["call-a", "call-b"]);
+    expect(first.records.find((record) =>
+      record.role === "tool_result" && record.toolCallId === "call-b"
+    )).toEqual(expect.objectContaining({ content: "second payload" }));
+    expect(first.records.every((record, index) =>
+      record.sequence === index
+      && record.fullRead.sessionId === source.session.sessionId
+    )).toBe(true);
+    expect(() => decodeQuasarTrajectorySync(first)).not.toThrow();
+  });
+
+  test("reports caller-selected omissions and UTF-8-safe truncation with a targeted full-read pointer", () => {
+    const trajectory = projectQuasarTrajectory(mixedSession(), {
+      includeReasoning: false,
+      includeToolResults: true,
+      toolResultMaxBytes: 5,
+    });
+
+    expect(trajectory.records.some((record) =>
+      record.role === "reasoning"
+    )).toBe(false);
+    const result = trajectory.records.find((record) =>
+      record.role === "tool_result" && record.toolCallId === "call-a"
+    );
+    expect(result).toEqual(expect.objectContaining({
+      content: "αβ",
+      originalBytes: Buffer.byteLength("αβγ first payload"),
+      returnedBytes: 4,
+      truncated: true,
+      fullRead: expect.objectContaining({
+        resource: "tool-call",
+        toolCallId: "call-a",
+      }),
+    }));
+    expect(trajectory.losses).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: "omitted",
+        sourceKind: "content_block",
+        reason: "excluded_by_option",
+      }),
+      expect.objectContaining({
+        kind: "truncated",
+        sourceId: "call-a",
+        originalBytes: Buffer.byteLength("αβγ first payload"),
+        returnedBytes: 4,
+      }),
+    ]));
+  });
+
+  test("exports strict Letta v1 while declaring mixed-event and timestamp loss", () => {
+    const exported = toLettaTrajectory(
+      projectQuasarTrajectory(mixedSession()),
+    );
+
+    expect(() => decodeLettaTrajectorySync(exported.trajectory)).not.toThrow();
+    expect(exported.trajectory).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: "assistant",
+        content: "I will inspect both files.",
+      }),
+      expect.objectContaining({
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          expect.objectContaining({ id: "call-a", name: "read" }),
+          expect.objectContaining({ id: "call-b", name: "read" }),
+        ],
+      }),
+    ]));
+    expect(exported.compatibility.issues.map((issue) => issue.kind)).toEqual(
+      expect.arrayContaining([
+        "mixed_assistant_split",
+        "tool_call_timestamps_coalesced",
+      ]),
+    );
+  });
+
+  test("rejects sequence and tool-result reference corruption", () => {
+    const trajectory: any = structuredClone(
+      projectQuasarTrajectory(mixedSession()),
+    );
+    trajectory.records[1].sequence = 9;
+    expect(() => decodeQuasarTrajectorySync(trajectory)).toThrow();
+
+    const brokenReference: any = structuredClone(
+      projectQuasarTrajectory(mixedSession()),
+    );
+    const result: any = brokenReference.records.find((record: any) =>
+      record.role === "tool_result"
+    );
+    result.toolCallId = "missing-call";
+    expect(() => decodeQuasarTrajectorySync(brokenReference)).toThrow();
   });
 });
 
@@ -441,11 +674,13 @@ describe("SessionEnrichment v1", () => {
     expect(protocolDiscovery.map((entry) => entry.schemaId)).toEqual([
       NORMALIZED_SESSION_PROTOCOL_VERSION,
       "quasar.normalized-session-ingest/v1",
+      QUASAR_TRAJECTORY_VERSION,
+      "quasar.trajectory.letta-export/v1",
       QUERY_PROTOCOL_VERSION,
       "quasar.query-response/v1",
       SESSION_ENRICHMENT_VERSION,
     ]);
-    expect(protocolExamples.length).toBe(9);
+    expect(protocolExamples.length).toBe(11);
     expect(protocolExamples.every((example) => example.schemaId.length > 0)).toBe(true);
   });
 });

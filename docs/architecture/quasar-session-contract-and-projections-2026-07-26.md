@@ -1,9 +1,8 @@
 # Quasar Session Contract and Projection Plan
 
 Date: 2026-07-26.
-Status: **implementation plan** — the current normalized model is the design
-base, but the defects named below must be repaired before its public contract is
-frozen.
+Status: **in implementation** — Slices 1–3 are delivered and executable.
+ATIF export and isolated corpus replay remain.
 
 ## Objective
 
@@ -82,17 +81,18 @@ The opportunity is therefore not to choose between Letta and ATIF. It is to make
 Quasar's richer normalized layer executable and trustworthy enough to produce
 both.
 
-## Current implementation gaps
+## Defects repaired by Slices 1–3
 
 The architecture is ahead of the implementation at five load-bearing seams.
 
-| Gap | Current evidence | Consequence |
+| Gap | Repair | Executable receipt |
 | --- | --- | --- |
-| Derived messages lose source identity | `MessageRow` in both model packages has no `eventId`; `mapSession` compacts selected events to a new index; server queries synthesize `messageId` as `sessionId:seq` | A search hit cannot reliably identify the normalized event that produced it |
-| Event kind incorrectly gates visible text | `messageEvents` admits only `message`, `reasoning`, and `summary` kinds | A mixed assistant event marked `tool_call` can contain valid visible text yet disappear from message reads and search |
-| OpenCode event order is not monotonic | OpenCode assigns main events from message indexes but starts co-occurring reasoning sequences at `messages.length` while returning the reasoning beside its main event | Stored sorting can move reasoning after later turns even though the adapter array looked chronological |
-| Model attribution is flattened | `latestModel` reduces execution contexts and usage to one session-level model; message queries join that model onto every row | Sessions that change model or provider report false per-message provenance |
-| The source contract is not shared or discoverable | The Effect schemas live in CLI adapter code; server interfaces and boundary validation duplicate the shape; `packages/protocol` exposes query and enrichment contracts but not normalized sessions | The most valuable Quasar format has no single versioned executable definition, and documentation can drift from the ingest payload |
+| Derived messages lost source identity | Persist and serve canonical `eventId`; retain normalized event sequence | Mixed OpenCode HTTP contract resolves reads/search to exact source events |
+| Event kind gated visible text | Derive conversational text from role and admitted content independently of event kind | Mixed assistant text survives beside reasoning and two tool calls |
+| OpenCode event order was not monotonic | Assign one dense chronological sequence across main and co-occurring events | Adapter and persisted-read assertions lock `[0, 1, 2, 3]` |
+| Model attribution was flattened | Persist per-event execution context/model on message and tool rows | Model-change fixture returns `model-alpha` then `model-beta` |
+| The source contract was duplicated and undiscoverable | Publish strict `quasar.normalized-session/v1` in the protocol package and decode it at ingest and reconstructed-read boundaries | Protocol examples cover every stable provider; skew and broken references fail closed |
+| No agent-readable session projection existed | Publish `quasar.trajectory/v1`, an HTTP/CLI read, and a strict Letta-compatible export | Mixed OpenCode trajectory preserves text, reasoning, two calls/results, truncation pointers, and search isolation |
 
 Relevant implementation surfaces:
 
@@ -211,6 +211,8 @@ Acceptance:
 
 ### Slice 3 — Add the agent-readable trajectory projection
 
+Status: **delivered**.
+
 Define `quasar.trajectory/v1` as a bounded projection over normalized source
 facts. It should be easy for another agent to read without loading provider
 bookkeeping.
@@ -235,6 +237,18 @@ Acceptance:
 - projection is deterministic for the same normalized input;
 - no tool payload enters lexical or semantic search as a side effect;
 - full source facts remain retrievable from every truncated record.
+
+Implemented surfaces:
+
+- `packages/protocol/src/trajectory.ts`: strict Quasar and Letta schemas,
+  deterministic projection, compatibility report, and examples;
+- `GET /trajectory`: reconstructs and validates complete persisted source facts
+  before projection; stale pre-contract rows return `TrajectorySourceInvalid`
+  with a re-ingest action;
+- `quasar trajectory --session <id>`: Quasar or Letta output, caller-selected
+  reasoning/results, and caller-selected UTF-8-safe tool-result byte limit;
+- end-to-end OpenCode proof: adapter → mapping → HTTP ingest → SQLite →
+  trajectory/Letta reads, with tool payloads still absent from search.
 
 ### Slice 4 — Add ATIF export and compatibility validation
 
@@ -271,7 +285,7 @@ Acceptance:
 | Search projection | Exact mixed-turn regression queries |
 | Agent trajectory | Snapshot plus source-pointer completeness checks |
 | ATIF export | Pinned Harbor schema validator plus compatibility report |
-| TypeScript changes | `bun run typecheck && bun run test`, Quartz diagnostics for changed type contracts, and Pulsar changed-diff score |
+| TypeScript changes | `bun run typecheck && bun run test`; additional static analyzers may be run as a separate requested gate |
 
 ## Explicit non-goals
 
@@ -286,7 +300,7 @@ Acceptance:
 
 ## Immediate next move
 
-Implement Slice 1 as the next code change. It is the smallest end-to-end proof
-that the aspirational Quasar format survives its current storage and retrieval
-implementation. Freezing the protocol or adding exports before that proof would
-standardize known data loss.
+Implement Slice 4 against a pinned Harbor ATIF schema and validator. After that,
+run an isolated full-corpus replay into a disposable database, reconcile source
+and persisted counts/provider diagnostics, and only then migrate the production
+truth store.

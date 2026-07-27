@@ -3,6 +3,8 @@ import { BunHttpServer, BunRuntime } from "@effect/platform-bun";
 import {
   NORMALIZED_SESSION_PROTOCOL_VERSION,
   decodeMappedSessionSync,
+  projectQuasarTrajectory,
+  toLettaTrajectory,
 } from "@skastr0/quasar-protocol";
 import { Effect, Layer, Schema } from "effect";
 
@@ -21,7 +23,7 @@ import {
 } from "./query";
 import { AppLayer } from "./runtime";
 import { DurableQueue, Embeddings, IngestCoordinator, WorkerSupervisor } from "./services";
-import { LocalStore } from "./store";
+import { LocalStore, StoredSessionContractError } from "./store";
 import { VectorMatrix } from "./vectorMatrix";
 import {
   publishEmbeddingReadiness,
@@ -80,6 +82,22 @@ const internalError = (route: string, message: string) =>
 
 const notFound = (route: string, message: string) =>
   json({ ok: false, route, error: { type: "NotFound", message } }, { status: 404 });
+
+const storedTrajectorySourceInvalid = (
+  sessionId: string,
+  message: string,
+) =>
+  json({
+    ok: false,
+    route: "trajectory",
+    error: {
+      type: "TrajectorySourceInvalid",
+      message,
+      sessionId,
+      action:
+        "Re-ingest this session with the current normalized-session protocol, then retry.",
+    },
+  }, { status: 409 });
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
@@ -303,6 +321,100 @@ const sessionDetail = Effect.gen(function* () {
     usageRecords: window("usage"), sessionEdges: window("edge"), artifacts: window("artifact"), executionContexts: window("context"),
   });
   return detail === undefined ? notFound("session-detail", `session not found: ${sessionId}`) : json(ok("session-detail", detail));
+});
+
+const strictBooleanParam = (
+  params: URLSearchParams,
+  name: string,
+  fallback: boolean,
+): { readonly valid: true; readonly value: boolean } | {
+  readonly valid: false;
+} => {
+  const raw = params.get(name);
+  if (raw === null) return { valid: true, value: fallback };
+  if (raw === "true" || raw === "1") return { valid: true, value: true };
+  if (raw === "false" || raw === "0") return { valid: true, value: false };
+  return { valid: false };
+};
+
+const trajectory = Effect.gen(function* () {
+  const store = yield* LocalStore;
+  const params = yield* query;
+  const sessionId = params.get("sessionId");
+  if (sessionId === null || sessionId.trim() === "") {
+    return badRequest("trajectory", "sessionId is required");
+  }
+  const format = params.get("format") ?? "quasar";
+  if (format !== "quasar" && format !== "letta") {
+    return badRequest("trajectory", "format must be quasar or letta");
+  }
+  const includeReasoning = strictBooleanParam(
+    params,
+    "includeReasoning",
+    true,
+  );
+  if (!includeReasoning.valid) {
+    return badRequest(
+      "trajectory",
+      "includeReasoning must be true, false, 1, or 0",
+    );
+  }
+  const includeToolResults = strictBooleanParam(
+    params,
+    "includeToolResults",
+    true,
+  );
+  if (!includeToolResults.valid) {
+    return badRequest(
+      "trajectory",
+      "includeToolResults must be true, false, 1, or 0",
+    );
+  }
+  const maximumRaw = params.get("toolResultMaxBytes");
+  const toolResultMaxBytes = maximumRaw === null
+    ? undefined
+    : Number(maximumRaw);
+  if (
+    maximumRaw !== null
+    && (
+      !/^\d+$/.test(maximumRaw)
+      || !Number.isSafeInteger(toolResultMaxBytes)
+    )
+  ) {
+    return badRequest(
+      "trajectory",
+      "toolResultMaxBytes must be a non-negative safe integer",
+    );
+  }
+
+  const sourceResult = yield* store.readMappedSession(sessionId).pipe(
+    Effect.either,
+  );
+  if (sourceResult._tag === "Left") {
+    if (sourceResult.left instanceof StoredSessionContractError) {
+      return storedTrajectorySourceInvalid(
+        sessionId,
+        sourceResult.left.message,
+      );
+    }
+    return internalError("trajectory", "stored session read failed");
+  }
+  if (sourceResult.right === undefined) {
+    return notFound("trajectory", `session not found: ${sessionId}`);
+  }
+  try {
+    const projected = projectQuasarTrajectory(sourceResult.right, {
+      includeReasoning: includeReasoning.value,
+      includeToolResults: includeToolResults.value,
+      ...(toolResultMaxBytes !== undefined ? { toolResultMaxBytes } : {}),
+    });
+    return json(ok(
+      "trajectory",
+      format === "letta" ? toLettaTrajectory(projected) : projected,
+    ));
+  } catch {
+    return internalError("trajectory", "trajectory projection failed");
+  }
 });
 
 const messages = Effect.gen(function* () {
@@ -635,6 +747,7 @@ const routes = HttpRouter.empty.pipe(
   HttpRouter.get("/projects", projects),
   HttpRouter.get("/sessions", sessions),
   HttpRouter.get("/session-detail", sessionDetail),
+  HttpRouter.get("/trajectory", trajectory),
   HttpRouter.get("/messages", messages),
   HttpRouter.get("/tool-calls", toolCalls),
   HttpRouter.get("/tool-call", toolCall),

@@ -32,6 +32,7 @@ server never imports CLI or provider-parser modules (enforced by
 | POST   | `/ingest/session`     | Write one normalized `MappedSession`.                                   |
 | GET    | `/projects`           | List project identities.                                                |
 | GET    | `/session-detail`     | Read bounded rich session sections, including raw normalized events.    |
+| GET    | `/trajectory`         | Project a complete stored session into Quasar or Letta trajectory form. |
 | GET    | `/sessions`           | List source-rich sessions with scoped filters and bounded pagination.   |
 | GET    | `/messages`           | Read one session's messages in sequence order with bounded pagination.  |
 | GET    | `/tool-calls`         | List body-free tool-call summaries with scoped filters.                 |
@@ -164,6 +165,40 @@ full text comes from the targeted `/messages` read. `/tool-calls` never selects
 or returns input/output bodies. `/tool-call?id=...` is the sole full-payload
 tool-call read.
 
+### Agent-readable trajectory
+
+`GET /trajectory` requires `sessionId` and accepts:
+
+- `format=quasar|letta` (default `quasar`);
+- `includeReasoning=true|false|1|0` (default `true`);
+- `includeToolResults=true|false|1|0` (default `true`);
+- optional non-negative `toolResultMaxBytes`.
+
+The server reads every persisted normalized fact for the selected session,
+reconstructs `MappedSession`, and decodes it against
+`quasar.normalized-session/v1` before projection. It does not scan provider
+history and does not mutate SQLite or search indexes. A pre-migration or corrupt
+stored session fails closed with `409 TrajectorySourceInvalid` and an explicit
+re-ingest action; the server never emits a plausible partial trajectory.
+
+The default response is strict `quasar.trajectory/v1`: a deterministic flat
+sequence of session/event metadata, user, assistant, reasoning, tool-call, and
+tool-result records. Each record carries stable projection identity, source
+event identity where applicable, and a full-read pointer. Visible assistant
+text and multiple tool calls from the same native event remain separate,
+coexisting facts.
+
+`toolResultMaxBytes` is caller-selected rather than a hidden product cap.
+Truncation is UTF-8 safe and reports original/returned bytes, SHA-256 content
+hash, and a targeted `/tool-call` pointer. Excluded or unrepresentable facts
+appear in the `losses` ledger.
+
+`format=letta` returns a strict export matching Letta Trajectory v1 plus a
+compatibility report. Quasar splits mixed assistant text and tool calls only at
+this export boundary because Letta requires assistant content to be `null` when
+`tool_calls` are present. Missing timestamps and Quasar-only provenance are
+reported, never fabricated.
+
 `quasar.query/v1`, defined and JSON-Schema-exported by `packages/protocol`, is a
 **local CLI composition input**, not an HTTP endpoint. Its discriminated kinds
 are:
@@ -196,8 +231,9 @@ enumeration cheap while retaining lossless targeted retrieval.
 
 The CLI exposes the same contract in two layers:
 
-- ergonomic `search`, `sessions`, `messages`, `tool-calls`, and `tool-call`
-  commands with common filters, local field projection, and bounded pagination;
+- ergonomic `search`, `sessions`, `messages`, `tool-calls`, `tool-call`, and
+  `trajectory` commands with common filters, local field projection, and
+  bounded pagination;
 - `query <inline-json|@file|->`, plus local `schema` and `examples`
   discovery, for jq-style machine composition over those same resources
   without a second server execution engine.
@@ -251,4 +287,7 @@ with zero rows persisted. The same suite drives a real fabricated OpenCode
 SQLite fixture through adapter parsing, mapping, HTTP ingest, bounded
 message/tool reads, and lexical search; the mixed assistant text, reasoning,
 two tool calls, later turn, model change, and exact source-event IDs are all
-asserted after persistence.
+asserted after persistence. The same fixture is read as Quasar and Letta
+trajectories; visible text, reasoning, both calls/results, compatibility loss,
+truncation pointers, and the continued absence of tool payloads from lexical
+search are asserted.

@@ -51,6 +51,7 @@ const valueOptionNames = new Set([
   "--edge-limit",
   "--event-limit",
   "--fields",
+  "--format",
   "--id",
   "--ingest-token",
   "--interval-seconds",
@@ -82,6 +83,7 @@ const valueOptionNames = new Set([
   "--tool-call-id",
   "--tool-call-limit",
   "--tool-name",
+  "--tool-result-max-bytes",
   "--usage-limit",
   "-q",
 ]);
@@ -465,6 +467,7 @@ const INGEST_RUN_STATUSES = ["running", "completed", "failed"] as const;
 const PROVIDERS = Provider.literals;
 const INGEST_PROVIDERS = ["all", ...PROVIDERS] as const;
 const QUERY_ROLES = ["user", "assistant", "reasoning"] as const;
+const TRAJECTORY_FORMATS = ["quasar", "letta"] as const;
 
 const providersArg = (name: string): readonly string[] | undefined => {
   const providers = listArg("--provider", "--providers");
@@ -793,6 +796,33 @@ if (missingValueOption !== undefined) {
     });
     break;
   }
+  case "trajectory": {
+    const id = arg("--id") ?? firstArg("--session", "--session-id");
+    if (id === undefined) {
+      rejectInput("trajectory", new CommandInputError("--session is required", {
+        field: "--session",
+        expected: "a session id",
+        hint: "Pass --session <id> (find ids via `quasar sessions`).",
+      }));
+      break;
+    }
+    if (
+      !checkEnum(
+        "trajectory",
+        "--format",
+        TRAJECTORY_FORMATS,
+      )
+      || !checkInt("trajectory", "--tool-result-max-bytes", 0)
+    ) break;
+    await fetchServer("trajectory", "/trajectory", {
+      sessionId: id,
+      format: arg("--format") ?? "quasar",
+      includeReasoning: String(!flag("--exclude-reasoning")),
+      includeToolResults: String(!flag("--exclude-tool-results")),
+      toolResultMaxBytes: arg("--tool-result-max-bytes"),
+    });
+    break;
+  }
   case "ingest-runs": {
     if (!(checkEnum("ingest-runs", "--status", INGEST_RUN_STATUSES) && checkInt("ingest-runs", "--limit", 1) && checkInt("ingest-runs", "--offset", 0))) break;
     await fetchServer("ingest-runs", "/ingest-runs", { status: arg("--status"), limit: arg("--limit"), offset: arg("--offset") });
@@ -869,11 +899,12 @@ if (missingValueOption !== undefined) {
       "projects [--limit n] [--offset n]",
       "sessions [--provider name[,name]] [--project key] [--agent name] [--agent-role role] [--model slug] [--model-provider name] [--fields a,b] [--detail] [--cursor token] [--limit n]",
       "session --id id [--message-limit n] [--tool-call-limit n] [--event-limit n] [--usage-limit n] [--edge-limit n] [--artifact-limit n] [--context-limit n]",
+      "trajectory --session id [--format quasar|letta] [--exclude-reasoning] [--exclude-tool-results] [--tool-result-max-bytes n]",
       "messages --session id [--role user|assistant|reasoning] [--model slug] [--model-provider name] [--fields a,b] [--detail] [--cursor token] [--limit n]",
       "tool-calls [--session id] [--project key] [--provider name[,name]] [--tool name] [--agent name] [--agent-role role] [--model slug] [--model-provider name] [--fields a,b] [--detail] [--cursor token] [--limit n]",
       "tool-call --id id [--fields a,b] (full input/output detail)",
       "query <inline-json|@file|-> [--server url]",
-      "schema [query|response|session-enrichment] (local; no server required)",
+      "schema [normalized-session|mapped-session|trajectory|letta-trajectory|query|response|session-enrichment] (local; no server required)",
       "examples [schema-id|example-name] (local; no server required)",
       "ingest-runs [--status running|completed|failed] [--limit n]",
       "replay-embedding-cache [--limit n] [--server url]",

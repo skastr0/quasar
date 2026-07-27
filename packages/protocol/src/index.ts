@@ -9,8 +9,16 @@ import {
   mappedSessionExamples,
   normalizedSessionExamples,
 } from "./normalized-session";
+import {
+  LettaTrajectoryExport,
+  QUASAR_TRAJECTORY_VERSION,
+  QuasarTrajectory,
+  lettaTrajectoryExamples,
+  trajectoryExamples,
+} from "./trajectory";
 
 export * from "./normalized-session";
+export * from "./trajectory";
 
 export const QUERY_PROTOCOL_VERSION = "quasar.query/v1" as const;
 export const SESSION_ENRICHMENT_VERSION = "quasar.session-enrichment/v1" as const;
@@ -751,6 +759,22 @@ export const protocolContracts = {
       "Versioned CLI-to-server ingest representation of normalized session facts.",
     schema: MappedSession,
     examples: mappedSessionExamples,
+  }),
+  trajectory: defineContract({
+    schemaId: QUASAR_TRAJECTORY_VERSION,
+    title: "Quasar agent-readable trajectory v1",
+    description:
+      "Deterministic source-linked projection of normalized session facts for agent consumption.",
+    schema: QuasarTrajectory,
+    examples: trajectoryExamples,
+  }),
+  lettaTrajectory: defineContract({
+    schemaId: "quasar.trajectory.letta-export/v1",
+    title: "Letta-compatible trajectory export v1",
+    description:
+      "Strict Letta trajectory-v1 export with explicit compatibility-loss reporting.",
+    schema: LettaTrajectoryExport,
+    examples: lettaTrajectoryExamples,
   }),
   query: defineContract({
     schemaId: QUERY_PROTOCOL_VERSION,

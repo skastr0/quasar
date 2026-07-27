@@ -839,6 +839,103 @@ describe("CLI HTTP client <-> server contract", () => {
         && row.sequence === mixedEvent.sequence
         && row.model === "model-alpha")).toBe(true);
 
+      const toolPayloadBefore = await searchQueryJson(
+        base,
+        "fixture contents",
+        "lexical",
+        { filters: { sessionId: normalized.id } },
+      );
+      expect(toolPayloadBefore.body.data.matches).toEqual([]);
+
+      const trajectory = await resourceJson(base, "trajectory", {
+        sessionId: normalized.id,
+        format: "quasar",
+        includeReasoning: "true",
+        includeToolResults: "true",
+        toolResultMaxBytes: 8,
+      });
+      expect(trajectory.status).toBe(200);
+      expect(trajectory.body.data).toMatchObject({
+        protocolVersion: "quasar.trajectory/v1",
+        sessionId: normalized.id,
+        counts: {
+          sourceEvents: 4,
+          sourceToolCalls: 2,
+        },
+      });
+      expect(trajectory.body.data.records).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          role: "assistant",
+          content: "mixed-visible-marker",
+          sourceEventId: mixedEvent.id,
+        }),
+        expect.objectContaining({
+          role: "reasoning",
+          content: "reasoning-marker-before-tools",
+          sourceEventId: reasoningEvent.id,
+        }),
+        expect.objectContaining({
+          role: "tool_call",
+          toolCallId: expect.any(String),
+          sourceEventId: mixedEvent.id,
+        }),
+        expect.objectContaining({
+          role: "tool_result",
+          truncated: true,
+          fullRead: expect.objectContaining({
+            resource: "tool-call",
+            sessionId: normalized.id,
+            toolCallId: expect.any(String),
+          }),
+        }),
+      ]));
+      expect(trajectory.body.data.records.filter((record: {
+        role: string;
+      }) => record.role === "tool_call")).toHaveLength(2);
+      expect(trajectory.body.data.records.filter((record: {
+        role: string;
+      }) => record.role === "tool_result")).toHaveLength(2);
+      expect(trajectory.body.data.losses.filter((loss: {
+        kind: string;
+      }) => loss.kind === "truncated")).toHaveLength(2);
+
+      const letta = await resourceJson(base, "trajectory", {
+        sessionId: normalized.id,
+        format: "letta",
+      });
+      expect(letta.status).toBe(200);
+      expect(letta.body.data).toMatchObject({
+        format: "letta.trajectory/v1",
+        schemaId: "https://letta.ai/schemas/trajectory/v1.json",
+      });
+      expect(letta.body.data.trajectory).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          role: "assistant",
+          content: "mixed-visible-marker",
+        }),
+        expect.objectContaining({
+          role: "assistant",
+          content: null,
+          tool_calls: expect.arrayContaining([
+            expect.objectContaining({ name: "bash" }),
+            expect.objectContaining({ name: "read" }),
+          ]),
+        }),
+      ]));
+      expect(letta.body.data.compatibility.issues).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ kind: "mixed_assistant_split" }),
+        ]),
+      );
+
+      const toolPayloadAfter = await searchQueryJson(
+        base,
+        "fixture contents",
+        "lexical",
+        { filters: { sessionId: normalized.id } },
+      );
+      expect(toolPayloadAfter.body.data.matches).toEqual([]);
+
       for (const [text, eventId] of [
         ["mixed-visible-marker", mixedEvent.id],
         ["reasoning-marker-before-tools", reasoningEvent.id],

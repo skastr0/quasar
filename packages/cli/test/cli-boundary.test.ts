@@ -304,6 +304,8 @@ describe("CLI client/operator boundary", () => {
     const examples = await runCli(["examples", "session-enrichment"]);
     const normalizedSchema = await runCli(["schema", "normalizedSession"]);
     const ingestExamples = await runCli(["examples", "mappedSession"]);
+    const trajectorySchema = await runCli(["schema", "trajectory"]);
+    const lettaExamples = await runCli(["examples", "letta-trajectory"]);
 
     expect(schema.exitCode).toBe(0);
     expect(schema.json.command).toBe("schema");
@@ -323,7 +325,69 @@ describe("CLI client/operator boundary", () => {
         name: "versioned event-faithful ingest",
       }),
     ]);
+    expect(trajectorySchema.json.data).toEqual(
+      expect.objectContaining({ schemaId: "quasar.trajectory/v1" }),
+    );
+    expect(lettaExamples.json.data).toEqual([
+      expect.objectContaining({
+        schemaId: "quasar.trajectory.letta-export/v1",
+        name: "Letta-compatible trajectory export",
+      }),
+    ]);
   }, 15_000);
+
+  test("trajectory forwards explicit projection choices and rejects invalid byte limits locally", async () => {
+    const requested: URL[] = [];
+    const server = Bun.serve({
+      port: 0,
+      fetch: (request) => {
+        requested.push(new URL(request.url));
+        return Response.json({
+          ok: true,
+          command: "trajectory",
+          data: { protocolVersion: "quasar.trajectory/v1" },
+        });
+      },
+    });
+    try {
+      const env = {
+        QUASAR_SERVER_URL: `http://127.0.0.1:${server.port}`,
+      };
+      const result = await runCli([
+        "trajectory",
+        "--session",
+        "codex:trajectory-fixture",
+        "--format",
+        "letta",
+        "--exclude-reasoning",
+        "--exclude-tool-results",
+        "--tool-result-max-bytes",
+        "0",
+      ], env);
+      expect(result.exitCode).toBe(0);
+      expect(requested).toHaveLength(1);
+      expect(requested[0]!.pathname).toBe("/trajectory");
+      expect(Object.fromEntries(requested[0]!.searchParams)).toEqual({
+        sessionId: "codex:trajectory-fixture",
+        format: "letta",
+        includeReasoning: "false",
+        includeToolResults: "false",
+        toolResultMaxBytes: "0",
+      });
+
+      const invalid = await runCli([
+        "trajectory",
+        "--session",
+        "codex:trajectory-fixture",
+        "--tool-result-max-bytes",
+        "-1",
+      ]);
+      expect(invalid.exitCode).toBe(1);
+      expect(invalid.json.error?.type).not.toBe("ConfigurationError");
+    } finally {
+      server.stop(true);
+    }
+  }, 20_000);
 
   test("query-backed list commands use cursor projection and reject offset", async () => {
     const requested: URL[] = [];
