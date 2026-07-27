@@ -161,7 +161,26 @@ const mappedSession = (overrides: Partial<MappedSession["session"]> = {}): Mappe
       provider: overrides.provider ?? "codex",
     },
   ],
-  events: [],
+  events: [
+    {
+      id: `${overrides.sessionId ?? "session-a"}:event:1`,
+      sessionId: overrides.sessionId ?? "session-a",
+      sequence: 1,
+      timestamp: "2026-06-18T10:01:00.000Z",
+      machineId: "machine-a",
+      provider: overrides.provider ?? "codex",
+      agentName: overrides.agentName ?? "codex",
+      projectIdentityKey: overrides.projectKey ?? "project-a",
+      role: "user",
+      kind: "message",
+      contentText: "First message",
+      contentBlocks: [],
+      rawReference: {
+        sourcePath: overrides.sourcePath ?? "/hist/session-a.jsonl",
+        line: 1,
+      },
+    },
+  ],
   usageRecords: [],
   sessionEdges: [],
   artifacts: [],
@@ -849,7 +868,7 @@ describe("LocalStore", () => {
     expect(afterDelete).toEqual([]);
   });
 
-  test("QSR: fresh DB migration lands PRAGMA user_version 2 with rowid-aligned scope-token FTS", async () => {
+  test("QSR: fresh DB migration lands current user_version with rowid-aligned scope-token FTS", async () => {
     const path = sqlitePath();
     const sessionId = "codex:session-scope";
 
@@ -860,7 +879,7 @@ describe("LocalStore", () => {
     const db = new Database(path);
     try {
       const { user_version: userVersion } = db.query("PRAGMA user_version").get() as { user_version: number };
-      expect(userVersion).toBe(2);
+      expect(userVersion).toBe(3);
 
       const messageRow = db
         .query("SELECT project_scope_token AS token FROM messages WHERE session_id = ? AND seq = 1")
@@ -890,6 +909,177 @@ describe("LocalStore", () => {
     }
   });
 
+  test("removes legacy zero-event session shells and their projections once", async () => {
+    const path = sqlitePath();
+    const valid = "codex:valid-session";
+    const shell = "hermes:empty-shell";
+    const project = "project-migration";
+
+    await withStore(path, (store) =>
+      store.upsertSession(
+        mappedSession({ sessionId: valid, projectKey: project }),
+      ),
+    );
+
+    const seed = new Database(path);
+    try {
+      seed.exec(`
+        CREATE TABLE queue_jobs (
+          job_id TEXT PRIMARY KEY,
+          payload_json TEXT NOT NULL
+        );
+        INSERT INTO sessions(
+          session_id, project_key, provider, agent_name, source_path,
+          source_fingerprint, host, identity_scheme_version,
+          normalization_version, message_count, tool_call_count
+        ) VALUES (
+          '${shell}', '${project}', 'hermes', 'hermes',
+          '/history/hermes-empty.json', 'legacy-empty', 'host-a', 1, 11, 1, 1
+        );
+        UPDATE sessions SET parent_session_id = '${shell}'
+        WHERE session_id = '${valid}';
+        INSERT INTO session_enrichments(
+          session_id, namespace, protocol_version, schema_version, producer,
+          input_hash, payload_json, updated_at
+        ) VALUES (
+          '${shell}', 'quasar.analysis.test', '${SESSION_ENRICHMENT_VERSION}',
+          1, 'migration-test', 'enrichment-hash', '{}', '2026-06-18T09:01:00Z'
+        );
+        INSERT INTO messages(
+          session_id, event_id, seq, role, text, project_key, content_hash,
+          project_scope_token
+        ) VALUES (
+          '${shell}', 'shell-event', 1, 'user', 'legacy shell keyword',
+          '${project}', 'shell-message-hash', '${ftsProjectScopeToken(project)}'
+        );
+        INSERT INTO tool_calls(
+          id, session_id, event_id, seq, tool_name, input_text, output_text,
+          input_hash, output_hash, project_key, provider
+        ) VALUES (
+          'shell-tool', '${shell}', 'shell-tool-event', 2, 'read', '{}',
+          'legacy', 'shell-input-hash', 'shell-output-hash', '${project}', 'hermes'
+        );
+        INSERT INTO usage_records(session_id, id, order_index, fact_hash, record_json)
+        VALUES ('${shell}', 'shell-usage', 1, 'usage-hash', '{}');
+        INSERT INTO session_edges(session_id, id, order_index, fact_hash, edge_json)
+        VALUES
+          ('${shell}', 'shell-edge', 1, 'shell-edge-hash', '{}'),
+          ('${valid}', 'legacy-parent-edge', 1, 'parent-edge-hash',
+           '{"fromId":"${shell}","toId":"${valid}"}'),
+          ('${valid}', 'valid-edge', 2, 'valid-edge-hash',
+           '{"fromId":"${valid}","toId":"${valid}"}');
+        INSERT INTO session_artifacts(session_id, id, order_index, fact_hash, artifact_json)
+        VALUES ('${shell}', 'shell-artifact', 1, 'artifact-hash', '{}');
+        INSERT INTO execution_contexts(session_id, id, sequence, fact_hash, context_json)
+        VALUES ('${shell}', 'shell-context', 1, 'context-hash', '{}');
+        INSERT INTO message_vectors(
+          model, modality, session_id, seq, role, project_key, provider,
+          content_hash, document_hash, dimensions, encoding, vector_blob,
+          created_at, updated_at
+        ) VALUES
+          ('migration-model', 'text', '${shell}', 1, 'user', '${project}',
+           'hermes', 'shell-message-hash', 'shell-document-hash', 1,
+           'f16le-v1', X'003c', '2026-06-18T09:00:50Z', '2026-06-18T09:00:50Z'),
+          ('migration-model', 'text', '${valid}', 1, 'user', '${project}',
+           'codex', 'hash-1', 'valid-document-hash', 1, 'f16le-v1', X'003c',
+           '2026-06-18T10:00:50Z', '2026-06-18T10:00:50Z');
+        INSERT INTO queue_jobs(job_id, payload_json) VALUES
+          ('shell-job', '{"sessionId":"${shell}","seq":1}'),
+          ('valid-job', '{"sessionId":"${valid}","seq":1}');
+        PRAGMA user_version = 2;
+      `);
+      expect(
+        seed
+          .query(
+            `SELECT
+               (SELECT COUNT(*) FROM sessions WHERE session_id = $shell) AS sessions,
+               (SELECT COUNT(*) FROM session_events WHERE session_id = $shell) AS events`,
+          )
+          .get({ $shell: shell }),
+      ).toEqual({ sessions: 1, events: 0 });
+    } finally {
+      seed.close();
+    }
+
+    await withStore(path, (store) => store.stats);
+
+    const readState = () => {
+      const db = new Database(path);
+      try {
+        const rows = db.query(
+          `SELECT
+             (SELECT COUNT(*) FROM sessions WHERE session_id = $shell)
+               + (SELECT COUNT(*) FROM session_enrichments WHERE session_id = $shell)
+               + (SELECT COUNT(*) FROM messages WHERE session_id = $shell)
+               + (SELECT COUNT(*) FROM tool_calls WHERE session_id = $shell)
+               + (SELECT COUNT(*) FROM usage_records WHERE session_id = $shell)
+               + (SELECT COUNT(*) FROM session_edges WHERE session_id = $shell)
+               + (SELECT COUNT(*) FROM session_artifacts WHERE session_id = $shell)
+               + (SELECT COUNT(*) FROM execution_contexts WHERE session_id = $shell)
+               + (SELECT COUNT(*) FROM messages_fts WHERE session_id = $shell)
+               + (SELECT COUNT(*) FROM messages_fts_keys WHERE session_id = $shell)
+               + (SELECT COUNT(*) FROM message_vectors WHERE session_id = $shell)
+               + (SELECT COUNT(*) FROM queue_jobs
+                  WHERE json_extract(payload_json, '$.sessionId') = $shell)
+               AS shellRows,
+             (SELECT COUNT(*) FROM session_edges
+              WHERE json_extract(edge_json, '$.fromId') = $shell
+                 OR json_extract(edge_json, '$.toId') = $shell) AS shellReferences,
+             (SELECT COUNT(*) FROM sessions WHERE session_id = $valid) AS validSessions,
+             (SELECT COUNT(*) FROM session_events WHERE session_id = $valid) AS validEvents,
+             (SELECT COUNT(*) FROM messages WHERE session_id = $valid) AS validMessages,
+             (SELECT COUNT(*) FROM message_vectors WHERE session_id = $valid) AS validVectors,
+             (SELECT COUNT(*) FROM queue_jobs
+              WHERE json_extract(payload_json, '$.sessionId') = $valid) AS validJobs,
+             (SELECT COUNT(*) FROM session_edges WHERE session_id = $valid) AS validEdges,
+             (SELECT parent_session_id FROM sessions WHERE session_id = $valid) AS validParent,
+             (SELECT COUNT(*) FROM messages
+              WHERE role IN ('user', 'assistant', 'reasoning')) AS searchableMessages,
+             (SELECT COUNT(*) FROM messages_fts) AS ftsRows,
+             (SELECT COUNT(*) FROM message_vectors AS vector
+              WHERE NOT EXISTS (
+                SELECT 1 FROM messages AS message
+                WHERE message.session_id = vector.session_id
+                  AND message.seq = vector.seq
+              )) AS orphanVectors,
+             (SELECT COUNT(*) FROM queue_jobs AS job
+              WHERE NOT EXISTS (
+                SELECT 1 FROM messages AS message
+                WHERE message.session_id = json_extract(job.payload_json, '$.sessionId')
+                  AND message.seq = json_extract(job.payload_json, '$.seq')
+              )) AS orphanJobs`,
+        ).get({ $shell: shell, $valid: valid }) as Record<string, unknown>;
+        const { user_version: userVersion } = db
+          .query("PRAGMA user_version")
+          .get() as { user_version: number };
+        return { userVersion, ...rows };
+      } finally {
+        db.close();
+      }
+    };
+
+    const migrated = readState();
+    expect(migrated).toEqual({
+      userVersion: 3,
+      shellRows: 0,
+      shellReferences: 0,
+      validSessions: 1,
+      validEvents: 1,
+      validMessages: 2,
+      validVectors: 1,
+      validJobs: 1,
+      validEdges: 1,
+      validParent: null,
+      searchableMessages: 2,
+      ftsRows: 2,
+      orphanVectors: 0,
+      orphanJobs: 0,
+    });
+    await withStore(path, (store) => store.stats);
+    expect(readState()).toEqual(migrated);
+  });
+
+
   test("QSR: version-1 FTS is rebuilt onto canonical message rowids", async () => {
     const path = sqlitePath();
     const sessionId = "codex:session-v1";
@@ -908,7 +1098,7 @@ describe("LocalStore", () => {
     const db = new Database(path);
     try {
       const { user_version: userVersion } = db.query("PRAGMA user_version").get() as { user_version: number };
-      expect(userVersion).toBe(2);
+      expect(userVersion).toBe(3);
       const rowidMismatches = (
         db
           .query(
@@ -953,7 +1143,7 @@ describe("LocalStore", () => {
     const db = new Database(path);
     try {
       const { user_version: userVersion } = db.query("PRAGMA user_version").get() as { user_version: number };
-      expect(userVersion).toBe(2);
+      expect(userVersion).toBe(3);
       const counts = db
         .query(
           `SELECT
@@ -1037,6 +1227,10 @@ describe("LocalStore", () => {
           session_id TEXT NOT NULL, seq INTEGER NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL, ts TEXT,
           project_key TEXT NOT NULL, content_hash TEXT NOT NULL, PRIMARY KEY (session_id, seq)
         );
+        CREATE TABLE session_events (
+          session_id TEXT NOT NULL, id TEXT NOT NULL, sequence INTEGER NOT NULL,
+          event_json TEXT NOT NULL, PRIMARY KEY (session_id, id)
+        );
         CREATE VIRTUAL TABLE messages_fts USING fts5(
           text, key UNINDEXED, session_id UNINDEXED, seq UNINDEXED, role UNINDEXED,
           project_key UNINDEXED, provider UNINDEXED, content_hash UNINDEXED, tokenize = 'unicode61'
@@ -1070,6 +1264,20 @@ describe("LocalStore", () => {
       );
       insertOldMessage.run(sessionId, 1, "user", "Old first message", "2026-01-01T00:00:30.000Z", "project-old", "hash-old-1");
       insertOldMessage.run(sessionId, 2, "assistant", "Old second message", "2026-01-01T00:00:45.000Z", "project-old", "hash-old-2");
+      seedDb
+        .prepare(
+          "INSERT INTO session_events(session_id, id, sequence, event_json) VALUES (?, ?, ?, ?)",
+        )
+        .run(
+          sessionId,
+          `${sessionId}:event:1`,
+          1,
+          JSON.stringify({
+            id: `${sessionId}:event:1`,
+            sessionId,
+            sequence: 1,
+          }),
+        );
       const insertOldFts = seedDb.prepare(
         "INSERT INTO messages_fts(text, key, session_id, seq, role, project_key, provider, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       );
@@ -1086,7 +1294,7 @@ describe("LocalStore", () => {
     const db = new Database(path);
     try {
       const { user_version: userVersion } = db.query("PRAGMA user_version").get() as { user_version: number };
-      expect(userVersion).toBe(2);
+      expect(userVersion).toBe(3);
 
       const messageTokens = db
         .query("SELECT project_scope_token AS token FROM messages ORDER BY seq ASC")

@@ -398,6 +398,7 @@ const trySqlite = <A>(operation: string, run: () => A): Effect.Effect<A, SqliteS
 // migrateMessagesFtsScopedTokens below — rather than re-created on every
 // boot like the rest of migrate()'s idempotent DDL.
 const FTS_SCHEMA_VERSION = 2;
+const EMPTY_SESSION_SHELL_MIGRATION_VERSION = 3;
 
 const MESSAGES_FTS_CREATE_SQL = `
   CREATE VIRTUAL TABLE messages_fts USING fts5(
@@ -607,15 +608,29 @@ const rebuildMessagesFtsKeys = (db: Database): void => {
 // survives VACUUM/VACUUM INTO unchanged. The NULL-guarded backfill and full
 // DROP+rebuild make an interrupted run safe to retry, and user_version
 // advances only after every step completes. Boot blocks until done.
-interface StoreMigrationLog {
+interface StoreMigrationLogBase {
   readonly event: string;
   readonly at: string;
-  readonly backfilledRows: number;
-  readonly rebuiltRows: number;
   readonly elapsedMs: number;
 }
 
-const migrateMessagesFtsScopedTokens = (db: Database): StoreMigrationLog | undefined => {
+interface FtsStoreMigrationLog extends StoreMigrationLogBase {
+  readonly backfilledRows: number;
+  readonly rebuiltRows: number;
+}
+
+interface EmptySessionShellMigrationLog extends StoreMigrationLogBase {
+  readonly removedSessions: number;
+  readonly detachedChildren: number;
+  readonly removedReferencingEdges: number;
+  readonly removedQueueJobs: number;
+}
+
+type StoreMigrationLog =
+  | FtsStoreMigrationLog
+  | EmptySessionShellMigrationLog;
+
+const migrateMessagesFtsScopedTokens = (db: Database): FtsStoreMigrationLog | undefined => {
   const { user_version: userVersion } = db.query("PRAGMA user_version").get() as { user_version: number };
   if (userVersion >= FTS_SCHEMA_VERSION) return undefined;
 
@@ -653,6 +668,142 @@ const migrateMessagesFtsScopedTokens = (db: Database): StoreMigrationLog | undef
     at: new Date().toISOString(),
     backfilledRows,
     rebuiltRows,
+    elapsedMs: Math.round((performance.now() - startedAt) * 100) / 100,
+  };
+};
+
+const migrateEmptySessionShells = (
+  db: Database,
+): EmptySessionShellMigrationLog | undefined => {
+  const { user_version: userVersion } = db.query("PRAGMA user_version").get() as {
+    user_version: number;
+  };
+  if (userVersion >= EMPTY_SESSION_SHELL_MIGRATION_VERSION) return undefined;
+
+  const startedAt = performance.now();
+  const queueJobsPresent = db
+    .query(
+      "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'queue_jobs'",
+    )
+    .get() !== null;
+
+  const run = db.transaction(() => {
+    db.exec(`
+      DROP TABLE IF EXISTS temp.quasar_legacy_empty_sessions;
+      CREATE TEMP TABLE quasar_legacy_empty_sessions (
+        session_id TEXT PRIMARY KEY
+      ) WITHOUT ROWID;
+      INSERT INTO quasar_legacy_empty_sessions(session_id)
+      SELECT session.session_id
+      FROM sessions AS session
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM session_events AS event
+        WHERE event.session_id = session.session_id
+      );
+    `);
+
+    const counts = db.query(
+      `SELECT
+         (SELECT COUNT(*) FROM quasar_legacy_empty_sessions) AS removedSessions,
+         (SELECT COUNT(*) FROM sessions
+          WHERE parent_session_id IN (SELECT session_id FROM quasar_legacy_empty_sessions)
+            AND session_id NOT IN (SELECT session_id FROM quasar_legacy_empty_sessions)) AS detachedChildren,
+         (SELECT COUNT(*) FROM session_edges
+          WHERE session_id NOT IN (SELECT session_id FROM quasar_legacy_empty_sessions)
+            AND json_valid(edge_json)
+            AND (json_extract(edge_json, '$.fromId') IN (SELECT session_id FROM quasar_legacy_empty_sessions)
+              OR json_extract(edge_json, '$.toId') IN (SELECT session_id FROM quasar_legacy_empty_sessions)))
+           AS removedReferencingEdges`,
+    ).get() as Omit<
+      EmptySessionShellMigrationLog,
+      "event" | "at" | "elapsedMs" | "removedQueueJobs"
+    >;
+    const removedQueueJobs = queueJobsPresent
+      ? (
+          db
+            .query(
+              `SELECT COUNT(*) AS count
+               FROM queue_jobs
+               WHERE json_valid(payload_json)
+                 AND json_extract(payload_json, '$.sessionId') IN (
+                   SELECT session_id FROM quasar_legacy_empty_sessions
+                 )`,
+            )
+            .get() as { count: number }
+        ).count
+      : 0;
+
+    if (queueJobsPresent) {
+      db.exec(`
+        DELETE FROM queue_jobs
+        WHERE json_valid(payload_json)
+          AND json_extract(payload_json, '$.sessionId') IN (
+            SELECT session_id FROM quasar_legacy_empty_sessions
+          )
+      `);
+    }
+
+    db.exec(`
+      DELETE FROM session_enrichments
+      WHERE session_id IN (SELECT session_id FROM quasar_legacy_empty_sessions);
+      DELETE FROM tool_calls
+      WHERE session_id IN (SELECT session_id FROM quasar_legacy_empty_sessions);
+      DELETE FROM usage_records
+      WHERE session_id IN (SELECT session_id FROM quasar_legacy_empty_sessions);
+      DELETE FROM session_edges
+      WHERE session_id IN (SELECT session_id FROM quasar_legacy_empty_sessions)
+         OR (
+           json_valid(edge_json)
+           AND (
+             json_extract(edge_json, '$.fromId') IN (
+               SELECT session_id FROM quasar_legacy_empty_sessions
+             )
+             OR json_extract(edge_json, '$.toId') IN (
+               SELECT session_id FROM quasar_legacy_empty_sessions
+             )
+           )
+         );
+      DELETE FROM session_artifacts
+      WHERE session_id IN (SELECT session_id FROM quasar_legacy_empty_sessions);
+      DELETE FROM execution_contexts
+      WHERE session_id IN (SELECT session_id FROM quasar_legacy_empty_sessions);
+      DELETE FROM messages
+      WHERE session_id IN (SELECT session_id FROM quasar_legacy_empty_sessions);
+      UPDATE sessions
+      SET parent_session_id = NULL
+      WHERE parent_session_id IN (
+        SELECT session_id FROM quasar_legacy_empty_sessions
+      )
+        AND session_id NOT IN (
+          SELECT session_id FROM quasar_legacy_empty_sessions
+        );
+      DELETE FROM sessions
+      WHERE session_id IN (SELECT session_id FROM quasar_legacy_empty_sessions);
+    `);
+    if (counts.removedSessions > 0) {
+      db.exec(`
+        UPDATE corpus_query_state
+        SET revision = revision + 1
+        WHERE singleton = 1
+      `);
+    }
+    db.exec(`
+      PRAGMA user_version = ${EMPTY_SESSION_SHELL_MIGRATION_VERSION};
+      DROP TABLE quasar_legacy_empty_sessions;
+    `);
+
+    return {
+      ...counts,
+      removedQueueJobs,
+    };
+  });
+
+  const counts = run();
+  return {
+    event: "store.migrate.remove_empty_session_shells",
+    at: new Date().toISOString(),
+    ...counts,
     elapsedMs: Math.round((performance.now() - startedAt) * 100) / 100,
   };
 };
@@ -1065,7 +1216,13 @@ const migrate = (db: Database): readonly StoreMigrationLog[] => {
   migrateMessageVectorsTable(db);
   db.exec(MESSAGE_VECTORS_MIGRATION_SQL);
   const ftsMigration = migrateMessagesFtsScopedTokens(db);
-  return ftsMigration === undefined ? [] : [ftsMigration];
+  const emptySessionShellMigration = migrateEmptySessionShells(db);
+  return [
+    ...(ftsMigration === undefined ? [] : [ftsMigration]),
+    ...(emptySessionShellMigration === undefined
+      ? []
+      : [emptySessionShellMigration]),
+  ];
 };
 
 const count = (db: Database, table: string): number =>
