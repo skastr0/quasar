@@ -65,7 +65,6 @@
         {
           "agentName": "grok-build",
           "contentBlocks": [],
-          "contentText": "/fixture/quasar",
           "id": "grok:c72403d626d5a091447e25d4c19cc607:event:95d40bfc2ef40f21e72ca936b93a044b",
           "kind": "tool_result",
           "machineId": "machine:test",
