@@ -669,6 +669,8 @@ describe("work-item grok adapter end-to-end: signal kept, telemetry dropped, gar
       ]);
       writeJsonLines(join(sessionDir, "hunk_records.jsonl"), [
         { eventType: "added", hunkId: "fab-hunk-1", filePath: "/synthetic/file.ts", linesAdded: 3 },
+        { eventType: "updated", hunkId: "fab-hunk-1", filePath: "/synthetic/file.ts", linesAdded: 4 },
+        { eventType: "removed", hunkId: "fab-hunk-1", filePath: "/synthetic/file.ts" },
       ]);
 
       const result = await grokAdapter.read({ machine: MACHINE, now: NOW, roots: { grok: root } });
@@ -688,9 +690,16 @@ describe("work-item grok adapter end-to-end: signal kept, telemetry dropped, gar
       // No phase_changed-derived event leaked in.
       expect(session.events.some((e) => e.rawReference !== undefined && JSON.stringify(e.rawReference).includes("phase_changed"))).toBe(false);
 
-      // The artifact stream kept the one valid hunk.
-      expect(session.artifacts).toHaveLength(1);
-      expect(session.artifacts[0]!.kind).toBe("edit_hunk");
+      // A native hunk id identifies one logical edit across multiple lifecycle
+      // records. Every occurrence remains a distinct, source-addressable fact.
+      expect(session.artifacts).toHaveLength(3);
+      expect(session.artifacts.every((artifact) => artifact.kind === "edit_hunk")).toBe(true);
+      expect(new Set(session.artifacts.map((artifact) => artifact.id)).size).toBe(3);
+      expect(session.artifacts.map((artifact) => artifact.sourceRef)).toEqual([
+        expect.objectContaining({ line: 1 }),
+        expect.objectContaining({ line: 2 }),
+        expect.objectContaining({ line: 3 }),
+      ]);
 
       // The unknown chat type surfaced a NAMED, fail-closed boundary diagnostic;
       // ingest still produced the session (available diagnostic present too).

@@ -370,7 +370,11 @@ const grokArtifacts = (
     // never a silently-kept artifact.
     if (!isSignal(classifyGrokHunk(value, diagnostics))) return [];
     const path = typeof record.filePath === "string" ? record.filePath : undefined;
-    const id = artifactIdFor(sessionId, record.hunkId ?? lineNumber);
+    // A Grok hunk id identifies the logical edit, not one record in its
+    // lifecycle. The same id legitimately recurs for added/updated/removed
+    // records, so source-line occurrence identity is required to preserve every
+    // fact without colliding in the normalized artifact collection.
+    const id = artifactIdFor(sessionId, [record.hunkId ?? null, lineNumber]);
     return [
       {
         id,
