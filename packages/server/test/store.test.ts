@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -14,7 +14,7 @@ import { Effect } from "effect";
 
 import { fts5QueryForText, ftsProjectScopeToken, ftsProviderScopeToken, ftsRoleScopeToken } from "../src/fts5";
 import type { IngestRunRow, MappedSession } from "../src/model";
-import { LocalStore, makeLocalStoreLayer } from "../src/store";
+import { LocalStore, makeLocalStoreLayer, makeReadonlyLocalStoreLayer } from "../src/store";
 import type { LocalStoreService } from "../src/store";
 
 const tempDirs: string[] = [];
@@ -23,6 +23,35 @@ const sqlitePath = () => {
   const dir = mkdtempSync(join(tmpdir(), "quasar-local-store-"));
   tempDirs.push(dir);
   return join(dir, "quasar.sqlite");
+};
+
+const sqliteFileState = (path: string) => {
+  const fileState = (filePath: string) => {
+    try {
+      const stat = statSync(filePath);
+      return {
+        exists: true,
+        mtimeMs: stat.mtimeMs,
+        size: stat.size,
+      };
+    } catch (error) {
+      if (
+        typeof error === "object"
+        && error !== null
+        && "code" in error
+        && (error as { code?: string }).code === "ENOENT"
+      ) {
+        return { exists: false };
+      }
+      throw error;
+    }
+  };
+
+  return {
+    db: fileState(path),
+    wal: fileState(`${path}-wal`),
+    shm: fileState(`${path}-shm`),
+  };
 };
 
 afterEach(() => {
@@ -38,6 +67,19 @@ const withStore = <A>(path: string, run: (store: LocalStoreService) => Effect.Ef
         const store = yield* LocalStore;
         return yield* run(store);
       }).pipe(Effect.provide(makeLocalStoreLayer(path))),
+    ),
+  );
+
+const withReadonlyStore = <A>(
+  path: string,
+  run: (store: LocalStoreService) => Effect.Effect<A, unknown, never>,
+) =>
+  Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const store = yield* LocalStore;
+        return yield* run(store);
+      }).pipe(Effect.provide(makeReadonlyLocalStoreLayer(path))),
     ),
   );
 
@@ -134,6 +176,63 @@ describe("LocalStore", () => {
     const stats = await withStore(path, (store) => store.stats);
 
     expect(stats).toEqual({ projects: 0, sessions: 0, messages: 0, toolCalls: 0, ingestRuns: 0 });
+  });
+
+  test("opens the store read-only without migrating or touching sqlite files", async () => {
+    const path = sqlitePath();
+    const source = decodeMappedSessionSync(
+      structuredClone(mappedSessionExamples[0]!.input),
+    );
+
+    await withStore(path, (store) =>
+      Effect.gen(function* () {
+        yield* store.upsertSession(source);
+        yield* store.finalizeSessionIngest(
+          source.session.sessionId,
+          source.session.sourceFingerprint,
+          source.session.normalizationVersion,
+        );
+      }));
+
+    const before = sqliteFileState(path);
+
+    const explicit = await withReadonlyStore(path, (store) =>
+      Effect.gen(function* () {
+        const snapshot = yield* store.querySnapshot;
+        const stats = yield* store.stats;
+        const read = yield* store.readMappedSession(source.session.sessionId);
+        return { snapshot, stats, read };
+      }),
+    );
+
+    expect(explicit.snapshot.writing).toBe(false);
+    expect(explicit.stats).toEqual({
+      projects: 1,
+      sessions: 1,
+      messages: source.messages.length,
+      toolCalls: source.toolCalls.length,
+      ingestRuns: 0,
+    });
+    expect(explicit.read).toEqual(source);
+
+    const originalArgv1 = process.argv[1] ?? "";
+    process.argv[1] = join(tmpdir(), "normalizedSessionCorpusAuditCli.ts");
+    try {
+      const shimmed = await withStore(path, (store) =>
+        Effect.gen(function* () {
+          const snapshot = yield* store.querySnapshot;
+          const read = yield* store.readMappedSession(source.session.sessionId);
+          return { snapshot, read };
+        }));
+
+      expect(shimmed.snapshot.writing).toBe(false);
+      expect(shimmed.read).toEqual(source);
+    } finally {
+      process.argv[1] = originalArgv1;
+    }
+
+    const after = sqliteFileState(path);
+    expect(after).toEqual(before);
   });
 
   test("reconstructs the complete normalized source contract without a read cap", async () => {

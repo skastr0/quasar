@@ -1081,14 +1081,28 @@ export class LocalStore extends Context.Tag("@quasar/LocalStore")<
   LocalStoreService
 >() {}
 
-export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore> =>
+interface LocalStoreLayerOptions {
+  readonly readOnly?: boolean;
+}
+
+const auditCorpusEntrypoint = (): boolean =>
+  process.argv.some((arg) => arg.includes("normalizedSessionCorpusAuditCli"));
+
+const makeLocalStoreLayerScoped = (
+  path: string,
+  readOnly: boolean,
+): Layer.Layer<LocalStore> =>
   Layer.scoped(
     LocalStore,
     Effect.acquireRelease(
       Effect.sync(() => {
-        ensureParentDir(path);
-        const db = new Database(path, { create: true });
-        const migrationLogs = migrate(db);
+        if (!readOnly) {
+          ensureParentDir(path);
+        }
+        const db = readOnly
+          ? new Database(path, { readonly: true })
+          : new Database(path, { create: true });
+        const migrationLogs = readOnly ? [] : migrate(db);
         return { db, migrationLogs };
       }),
       ({ db }) => Effect.sync(() => db.close()),
@@ -3036,3 +3050,14 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
       }),
     ),
   );
+
+export const makeLocalStoreLayer = (
+  path = sqlitePath(),
+  options: LocalStoreLayerOptions = {},
+): Layer.Layer<LocalStore> =>
+  makeLocalStoreLayerScoped(path, options.readOnly ?? auditCorpusEntrypoint());
+
+export const makeReadonlyLocalStoreLayer = (
+  path = sqlitePath(),
+): Layer.Layer<LocalStore> =>
+  makeLocalStoreLayerScoped(path, true);
