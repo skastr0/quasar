@@ -129,7 +129,10 @@ The canonical normalized contract must make these statements executable:
    identity.
 6. **Per-event context.** Model, model provider, reasoning effort, and other
    execution context resolve at the event/turn that observed them. Session-level
-   "latest" fields are summaries only.
+   "latest" fields are summaries only. A provider-native `turnId` is an opaque
+   correlation fact, not an event foreign key: Codex can name a logical turn
+   without emitting a separate event carrying that ID. Source sequence anchors
+   that context to the observed timeline.
 7. **Complete admitted text.** Every non-empty visible text fact selected by the
    message policy appears exactly once in the message projection. Reasoning
    appears exactly once when included. Tool payloads remain structurally
