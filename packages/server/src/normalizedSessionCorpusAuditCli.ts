@@ -321,16 +321,33 @@ const report = await Effect.runPromise(
       if (failures.length < maxErrors) failures.push(failure);
     };
 
+    const recordProgress = (
+      phase: "sessions" | "recursive_atif",
+      checked: number,
+      total: number,
+    ): void => {
+      if (checked % progressEvery !== 0 && checked !== total) return;
+      process.stderr.write(`${JSON.stringify({
+        event: "normalized_corpus_audit.progress",
+        phase,
+        checked,
+        total,
+        errors: errorCount,
+      })}\n`);
+    };
+
     for (const [index, sessionId] of sessionIds.entries()) {
       const provider = providerFromSessionId(sessionId);
       const read = yield* Effect.either(store.readMappedSession(sessionId));
       if (read._tag === "Left") {
         recordFailure("read", provider, read.left);
+        recordProgress("sessions", index + 1, sessionIds.length);
         continue;
       }
       const mapped = read.right;
       if (mapped === undefined) {
         recordFailure("read", provider, new Error("session_disappeared"));
+        recordProgress("sessions", index + 1, sessionIds.length);
         continue;
       }
 
@@ -339,6 +356,7 @@ const report = await Effect.runPromise(
         mappedSessions += 1;
       } catch (error) {
         recordFailure("mapped", provider, error);
+        recordProgress("sessions", index + 1, sessionIds.length);
         continue;
       }
 
@@ -354,6 +372,7 @@ const report = await Effect.runPromise(
         quasarTrajectories += 1;
       } catch (error) {
         recordFailure("quasar", provider, error);
+        recordProgress("sessions", index + 1, sessionIds.length);
         continue;
       }
 
@@ -380,17 +399,10 @@ const report = await Effect.runPromise(
         recordFailure("atif", provider, error);
       }
 
-      if ((index + 1) % progressEvery === 0) {
-        process.stderr.write(`${JSON.stringify({
-          event: "normalized_corpus_audit.progress",
-          checked: index + 1,
-          total: sessionIds.length,
-          errors: errorCount,
-        })}\n`);
-      }
+      recordProgress("sessions", index + 1, sessionIds.length);
     }
 
-    for (const rootId of lineage.completeRootIds) {
+    for (const [index, rootId] of lineage.completeRootIds.entries()) {
       const rootRead = yield* Effect.either(store.readMappedSession(rootId));
       const descendantsRead = yield* Effect.either(
         store.readMappedSessionDescendants(rootId),
@@ -408,6 +420,11 @@ const report = await Effect.runPromise(
             : descendantsRead._tag === "Left"
               ? descendantsRead.left
               : new Error("root_session_disappeared"),
+        );
+        recordProgress(
+          "recursive_atif",
+          index + 1,
+          lineage.completeRootIds.length,
         );
         continue;
       }
@@ -428,6 +445,11 @@ const report = await Effect.runPromise(
           error,
         );
       }
+      recordProgress(
+        "recursive_atif",
+        index + 1,
+        lineage.completeRootIds.length,
+      );
     }
 
     const projections = {
