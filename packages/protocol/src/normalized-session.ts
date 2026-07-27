@@ -7,7 +7,7 @@ export const NORMALIZED_SESSION_PROTOCOL_VERSION =
  * Increment whenever unchanged provider source must be re-normalized because
  * the canonical projection changed.
  */
-export const NORMALIZATION_VERSION = 11;
+export const NORMALIZATION_VERSION = 12;
 
 const strictParseOptions = {
   errors: "all",
@@ -471,7 +471,7 @@ const NormalizedSessionShape = Schema.Struct({
   updatedAt: Schema.optional(Schema.String),
   sourceRoot: Schema.String,
   sourcePath: Schema.String,
-  events: Schema.Array(SessionEvent),
+  events: Schema.Array(SessionEvent).pipe(Schema.minItems(1)),
   toolCalls: Schema.Array(ToolCall),
   sessionEdges: Schema.Array(SessionEdge),
   executionContexts: Schema.Array(ExecutionContextRecord),

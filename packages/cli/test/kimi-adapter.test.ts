@@ -520,9 +520,9 @@ describe("T3: missing root", () => {
 });
 
 // ---------------------------------------------------------------------------
-// T4: stub session (4 events, no messages) → valid session, zero messages, no error
+// T4: provider shell with no transcript events → named diagnostic, zero rows
 // ---------------------------------------------------------------------------
-describe("T4: stub session — empty content, valid session", () => {
+describe("T4: provider shell — no transcript events", () => {
   const root = join(testRoot, "t4");
   const sessionsDir = join(root, "sessions");
   const sessionDir = join(sessionsDir, "wd_quasar_stub", "session_test0004");
@@ -551,16 +551,19 @@ describe("T4: stub session — empty content, valid session", () => {
     { type: "permission.set_mode", mode: "auto", time: 1781000003000 },
   ]);
 
-  test("yields 1 session with zero message events and no error", async () => {
+  test("emits a named diagnostic and yields zero sessions", async () => {
     const result = await kimiAdapter.read({
       machine: MACHINE,
       now: NOW,
       roots: { kimi: root },
     });
-    expect(result.sessions).toHaveLength(1);
-    const session = result.sessions[0]!;
-    const msgEvents = session.events.filter((e) => e.kind === "message");
-    expect(msgEvents).toHaveLength(0);
+    expect(result.sessions).toHaveLength(0);
+    expect(
+      result.diagnostics.some((diagnostic) =>
+        `${diagnostic.message}\n${JSON.stringify(diagnostic.details ?? {})}`
+          .includes("kimi.session.no_transcript_events")
+      ),
+    ).toBe(true);
   });
 });
 

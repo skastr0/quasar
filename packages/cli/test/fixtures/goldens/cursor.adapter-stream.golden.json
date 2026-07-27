@@ -126,7 +126,7 @@
       "machineId": "machine:test",
       "nativeProjectKey": "3a3f2949c8b30a1cf80a6dc25949d6a9",
       "nativeSessionId": "8fd16ca4-4dfa-4fea-8c37-4df7c63c5577",
-      "normalizationVersion": 11,
+      "normalizationVersion": 12,
       "projectIdentity": {
         "confidence": "low",
         "displayName": "quasar",

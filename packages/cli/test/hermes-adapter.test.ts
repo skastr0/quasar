@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { afterAll, describe, expect, test } from "bun:test";
 import { Schema } from "effect";
+import { projectQuasarTrajectory } from "@skastr0/quasar-protocol";
 
 import { sessionIdFor } from "../src/adapters/common";
 import { hermesAdapter } from "../src/adapters/hermes";
@@ -23,10 +24,11 @@ import {
 } from "../src/adapters/hermes-schema";
 import { decodeOrDrop, isSignal } from "../src/adapters/harness-schema";
 import { HermesSessionId } from "../src/core/identity";
-import type {
-  NormalizedSession,
-  SessionEdge,
-  SessionEvent,
+import {
+  decodeNormalizedSessionSync,
+  type NormalizedSession,
+  type SessionEdge,
+  type SessionEvent,
 } from "../src/core/schemas";
 import { mapSession } from "../src/map";
 import { NORMALIZATION_VERSION } from "../src/normalization-version";
@@ -520,6 +522,19 @@ describe("work-item regression: event-level kind=parent edge must not corrupt pa
   test("a session with a subagent_of edge maps to the canonical parent SessionId", () => {
     const sessionId = sessionIdFor("hermes", HermesSessionId("20200101_000000_88888888"));
     const parentSessionId = sessionIdFor("hermes", HermesSessionId("20200101_000000_77777777"));
+    const event: SessionEvent = {
+      id: "event:0",
+      sessionId,
+      sequence: 0,
+      machineId: MACHINE.machineId,
+      provider: "hermes",
+      agentName: "hermes",
+      projectIdentityKey: "project:profile:hermes",
+      role: "assistant",
+      kind: "message",
+      contentBlocks: [],
+      rawReference: { sourcePath: "/tmp/state.db", rowId: "event:0" },
+    };
     const session = normalizedSessionForEdges(
       sessionId,
       "Subagent session",
@@ -536,6 +551,7 @@ describe("work-item regression: event-level kind=parent edge must not corrupt pa
           toId: sessionId,
         },
       ],
+      [event],
     );
 
     const mapped = mapSession(session, "fp");
@@ -833,5 +849,84 @@ describe("linked Hermes tool results keep payloads only on ToolCall", () => {
         )?.output,
       ),
     ).toContain("synthetic linked tool output");
+  });
+});
+
+describe("Hermes corpus projection regressions", () => {
+  test("scopes serially reused native tool ids to each call occurrence", async () => {
+    const root = join(testRoot, "serial-tool-id-reuse");
+    mkdirSync(root, { recursive: true });
+    const sessionId = "20990101_120002_abcdef12";
+    const calls = JSON.stringify([{
+      id: "reused-call",
+      function: {
+        name: "synthetic_tool",
+        arguments: JSON.stringify({ command: "synthetic" }),
+      },
+    }]).replaceAll("'", "''");
+    execFileSync("sqlite3", [
+      join(root, "state.db"),
+      SESSION_SCHEMA
+      + insertSession(sessionId, "Serial tool id reuse")
+      + `insert into messages (session_id, role, content, tool_calls, timestamp) values ('${sessionId}', 'assistant', NULL, '${calls}', 1000);`
+      + `insert into messages (session_id, role, content, tool_call_id, tool_name, timestamp) values ('${sessionId}', 'tool', 'first synthetic result', 'reused-call', 'synthetic_tool', 1001);`
+      + `insert into messages (session_id, role, content, tool_calls, timestamp) values ('${sessionId}', 'assistant', NULL, '${calls}', 1002);`
+      + `insert into messages (session_id, role, content, tool_call_id, tool_name, timestamp) values ('${sessionId}', 'tool', 'second synthetic result', 'reused-call', 'synthetic_tool', 1003);`,
+    ]);
+
+    const result = await hermesAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { hermes: root },
+    });
+
+    expect(result.sessions).toHaveLength(1);
+    const session = result.sessions[0]!;
+    expect(() => decodeNormalizedSessionSync(session)).not.toThrow();
+    expect(session.toolCalls).toHaveLength(2);
+    expect(new Set(session.toolCalls.map(({ id }) => id)).size).toBe(2);
+    expect(session.events.map(({ toolCallId }) => toolCallId)).toEqual([
+      session.toolCalls[0]!.id,
+      session.toolCalls[0]!.id,
+      session.toolCalls[1]!.id,
+      session.toolCalls[1]!.id,
+    ]);
+    expect(() =>
+      projectQuasarTrajectory(mapSession(session, "synthetic-fingerprint"))
+    ).not.toThrow();
+  });
+
+  test("drops an empty subagent shell while preserving its valid parent", async () => {
+    const root = join(testRoot, "empty-subagent-shell");
+    mkdirSync(root, { recursive: true });
+    const parentId = "20990101_120003_abcdef13";
+    const childId = "20990101_120004_abcdef14";
+    const insertChild =
+      `insert into sessions (id, source, title, parent_session_id, started_at, message_count, input_tokens) values ('${childId}', 'cli', 'Empty child', '${parentId}', 1001, 1, 5);`;
+    execFileSync("sqlite3", [
+      join(root, "state.db"),
+      SESSION_SCHEMA
+      + insertSession(parentId, "Valid parent")
+      + insertMessage("parent-message", parentId)
+      + insertChild
+      + `insert into messages (session_id, role, content, timestamp) values ('${childId}', 'session_meta', NULL, 1002);`,
+    ]);
+
+    const result = await hermesAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { hermes: root },
+    });
+
+    expect(result.sessions).toHaveLength(1);
+    expect(result.sessions[0]!.id).toBe(
+      sessionIdFor("hermes", HermesSessionId(parentId)),
+    );
+    expect(
+      result.diagnostics.some((diagnostic) =>
+        `${diagnostic.message}\n${JSON.stringify(diagnostic.details ?? {})}`
+          .includes("hermes.session.no_transcript_events")
+      ),
+    ).toBe(true);
   });
 });
