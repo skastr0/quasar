@@ -5,7 +5,11 @@ import { Effect, Either, Schema } from "effect";
 import type { QueryMessageRow, QuerySessionRow, QueryToolCallRow } from "./model";
 import { recordSearchReceiptMetrics } from "./metrics";
 import { Embeddings } from "./services";
-import { LocalStore, type SearchHit } from "./store";
+import {
+  LocalStore,
+  type MessageScanKey,
+  type SearchHit,
+} from "./store";
 import { VectorMatrix, type VectorMatrixHit } from "./vectorMatrix";
 
 export const RESOURCE_PAGE_MAXIMUM = 200;
@@ -13,6 +17,12 @@ export const RESOURCE_PAGE_MAXIMUM = 200;
 export interface ResourcePageRequest {
   readonly limit: number;
   readonly offset: number;
+}
+
+export interface MessagePageRequest {
+  readonly limit: number;
+  readonly after?: MessageScanKey;
+  readonly snapshot?: string;
 }
 
 export interface ResourceFilters {
@@ -25,11 +35,17 @@ export interface ResourceFilters {
   readonly model?: string;
   readonly modelProvider?: string;
   readonly toolName?: string;
+  readonly messageAfter?: string;
+  readonly messageBefore?: string;
+  readonly sessionStartedAfter?: string;
+  readonly sessionStartedBefore?: string;
+  readonly rootsOnly?: boolean;
+  readonly lineageRootSessionId?: string;
 }
 
 export type ResourceQuery =
   | { readonly kind: "sessions"; readonly filters: ResourceFilters; readonly page: ResourcePageRequest }
-  | { readonly kind: "messages"; readonly filters: ResourceFilters & { readonly sessionId: string }; readonly page: ResourcePageRequest }
+  | { readonly kind: "messages"; readonly filters: ResourceFilters; readonly page: MessagePageRequest }
   | { readonly kind: "toolCalls"; readonly filters: ResourceFilters; readonly page: ResourcePageRequest }
   | { readonly kind: "toolCall"; readonly id: string }
   | { readonly kind: "search"; readonly mode: SearchMode; readonly text: string; readonly filters: ResourceFilters; readonly page: ResourcePageRequest };
@@ -40,6 +56,12 @@ export interface ResourcePage {
   readonly limit: number;
   readonly offset: number;
   readonly nextOffset: number | null;
+}
+
+export interface MessageResourcePage {
+  readonly limit: number;
+  readonly snapshot: string;
+  readonly next: MessageScanKey | null;
 }
 
 export interface SearchReceipt {
@@ -53,7 +75,7 @@ export interface SearchReceipt {
 
 export type ResourceQueryResult =
   | { readonly kind: "sessions"; readonly rows: readonly QuerySessionRow[]; readonly page: ResourcePage }
-  | { readonly kind: "messages"; readonly rows: readonly QueryMessageRow[]; readonly page: ResourcePage }
+  | { readonly kind: "messages"; readonly rows: readonly QueryMessageRow[]; readonly page: MessageResourcePage }
   | { readonly kind: "toolCalls"; readonly rows: readonly QueryToolCallRow[]; readonly page: ResourcePage }
   | { readonly kind: "toolCall"; readonly row: QueryToolCallRow | undefined }
   | { readonly kind: "search"; readonly matches: readonly SearchHit[]; readonly page: ResourcePage; readonly receipt: SearchReceipt; readonly degraded: boolean; readonly degradedReason?: string };
@@ -66,6 +88,22 @@ export class QuerySemanticDisabledError extends Schema.TaggedError<QuerySemantic
 export class QueryEmbeddingUnavailableError extends Schema.TaggedError<QueryEmbeddingUnavailableError>()(
   "QueryEmbeddingUnavailableError",
   { message: Schema.String },
+) {}
+
+export class QuerySnapshotBusyError extends Schema.TaggedError<QuerySnapshotBusyError>()(
+  "QuerySnapshotBusyError",
+  {
+    message: Schema.String,
+  },
+) {}
+
+export class QuerySnapshotExpiredError extends Schema.TaggedError<QuerySnapshotExpiredError>()(
+  "QuerySnapshotExpiredError",
+  {
+    message: Schema.String,
+    expected: Schema.String,
+    actual: Schema.String,
+  },
 ) {}
 
 const pageRows = <A>(rows: readonly A[], page: ResourcePageRequest) => ({
@@ -202,9 +240,54 @@ export const executeResourceQuery = (request: ResourceQuery): Effect.Effect<Reso
         return { kind: "sessions", ...result };
       }
       case "messages": {
-        const rows = yield* store.queryMessages({ sessionId: request.filters.sessionId, role: request.filters.role, model: request.filters.model, modelProvider: request.filters.modelProvider, limit: request.page.limit + 1, offset: request.page.offset });
-        const result = pageRows(rows, request.page);
-        return { kind: "messages", ...result };
+        const snapshotBefore = yield* store.querySnapshot;
+        if (snapshotBefore.writing) {
+          return yield* new QuerySnapshotBusyError({
+            message: "the session corpus is changing; retry the message scan",
+          });
+        }
+        if (
+          request.page.snapshot !== undefined
+          && request.page.snapshot !== snapshotBefore.id
+        ) {
+          return yield* new QuerySnapshotExpiredError({
+            message: "the message scan cursor expired because the session corpus changed",
+            expected: request.page.snapshot,
+            actual: snapshotBefore.id,
+          });
+        }
+        const rows = yield* store.queryMessages({
+          ...request.filters,
+          after: request.page.after,
+          limit: request.page.limit + 1,
+        });
+        const snapshotAfter = yield* store.querySnapshot;
+        if (
+          snapshotAfter.writing
+          || snapshotAfter.id !== snapshotBefore.id
+        ) {
+          return yield* new QuerySnapshotExpiredError({
+            message: "the session corpus changed while the message page was read",
+            expected: snapshotBefore.id,
+            actual: snapshotAfter.id,
+          });
+        }
+        const messageRows = rows.slice(0, request.page.limit);
+        const last = messageRows.at(-1);
+        return {
+          kind: "messages",
+          rows: messageRows,
+          page: {
+            limit: request.page.limit,
+            snapshot: snapshotBefore.id,
+            next: rows.length > request.page.limit && last !== undefined
+              ? {
+                sessionId: last.sessionId,
+                sequence: last.sequence,
+              }
+              : null,
+          },
+        };
       }
       case "toolCalls": {
         const rows = yield* store.queryToolCalls({ ...request.filters, includeInput: false, includeOutput: false, limit: request.page.limit + 1, offset: request.page.offset });

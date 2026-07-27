@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import {
   NORMALIZED_SESSION_PROTOCOL_VERSION,
@@ -125,6 +125,16 @@ export interface MessageVectorKey {
   readonly seq: number;
 }
 
+export interface MessageScanKey {
+  readonly sessionId: string;
+  readonly sequence: number;
+}
+
+export interface QuerySnapshot {
+  readonly id: string;
+  readonly writing: boolean;
+}
+
 export interface MessageVectorDelete extends MessageVectorKey {
   readonly model: string;
 }
@@ -214,13 +224,24 @@ export interface LocalStoreService {
     readonly modelProvider?: string;
   }) => Effect.Effect<readonly string[], SqliteStoreError>;
   readonly queryMessages: (options: {
-    readonly sessionId: string;
+    readonly projectKey?: string;
+    readonly providers?: readonly string[];
+    readonly sessionId?: string;
     readonly role?: string;
+    readonly agentName?: string;
+    readonly agentRole?: string;
     readonly model?: string;
     readonly modelProvider?: string;
+    readonly messageAfter?: string;
+    readonly messageBefore?: string;
+    readonly sessionStartedAfter?: string;
+    readonly sessionStartedBefore?: string;
+    readonly rootsOnly?: boolean;
+    readonly lineageRootSessionId?: string;
+    readonly after?: MessageScanKey;
     readonly limit: number;
-    readonly offset: number;
   }) => Effect.Effect<readonly QueryMessageRow[], SqliteStoreError>;
+  readonly querySnapshot: Effect.Effect<QuerySnapshot>;
   readonly queryToolCalls: (options: {
     readonly projectKey?: string;
     readonly providers?: readonly string[];
@@ -750,6 +771,7 @@ const migrate = (db: Database): readonly StoreMigrationLog[] => {
     CREATE INDEX IF NOT EXISTS sessions_by_project ON sessions(project_key, updated_at);
     CREATE INDEX IF NOT EXISTS sessions_by_provider ON sessions(provider, updated_at);
     CREATE INDEX IF NOT EXISTS sessions_by_source ON sessions(source_path, source_fingerprint);
+    CREATE INDEX IF NOT EXISTS sessions_by_parent ON sessions(parent_session_id, session_id);
     CREATE INDEX IF NOT EXISTS sessions_by_recency_order
       ON sessions(COALESCE(updated_at, started_at, '') DESC, session_id ASC);
     CREATE TABLE IF NOT EXISTS messages (
@@ -1038,6 +1060,13 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
         ),
       ),
       Effect.map(({ db }) => {
+        const snapshotEpoch = randomUUID();
+        let corpusRevision = 0;
+        let corpusWrites = 0;
+        const querySnapshot = Effect.sync(() => ({
+          id: `${snapshotEpoch}:${corpusRevision}`,
+          writing: corpusWrites > 0,
+        } satisfies QuerySnapshot));
         const upsertProject = db.prepare(
           `INSERT INTO projects(project_key, display_name, raw_path)
            VALUES ($projectKey, $displayName, $rawPath)
@@ -1558,6 +1587,10 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
         // never per-row inside a chunk.
         const upsertSessionDiff = (mapped: MappedSession): Effect.Effect<SessionDiffOutcome, SqliteStoreError> =>
           Effect.gen(function* () {
+            yield* Effect.sync(() => {
+              corpusRevision += 1;
+              corpusWrites += 1;
+            });
             const plan = yield* trySqlite("upsertSession.plan", () => computeSessionDiff(mapped)).pipe(
               Effect.withSpan("ingest.diffPlan"),
             );
@@ -1625,6 +1658,9 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
               ],
             };
           }).pipe(
+            Effect.ensuring(Effect.sync(() => {
+              corpusWrites = Math.max(0, corpusWrites - 1);
+            })),
             Effect.withSpan("ingest.diffApply", {
               attributes: { sessionId: mapped.session.sessionId },
             }),
@@ -1892,6 +1928,7 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
 
         return {
           dbPath: path,
+          querySnapshot,
           listProjects: (options = {}) =>
             trySqlite("listProjects", () => {
               const limit = options.limit ?? 100;
@@ -2104,11 +2141,28 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
             }),
           queryMessages: (options) =>
             trySqlite("queryMessages", () => {
-              const filters = ["m.session_id = ?"];
-              const args: Array<string | number> = [options.sessionId];
+              const filters: string[] = [];
+              const args: Array<string | number> = [];
+              if (options.projectKey !== undefined) {
+                filters.push("m.project_key = ?");
+                args.push(options.projectKey);
+              }
+              pushProviderFilter(filters, args, "s.provider", options.providers);
+              if (options.sessionId !== undefined) {
+                filters.push("m.session_id = ?");
+                args.push(options.sessionId);
+              }
               if (options.role !== undefined) {
                 filters.push("m.role = ?");
                 args.push(options.role);
+              }
+              if (options.agentName !== undefined) {
+                filters.push("s.agent_name = ?");
+                args.push(options.agentName);
+              }
+              if (options.agentRole !== undefined) {
+                filters.push("s.assignment_role = ?");
+                args.push(options.agentRole);
               }
               if (options.model !== undefined) {
                 filters.push("m.model = ?");
@@ -2118,14 +2172,58 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                 filters.push("m.model_provider = ?");
                 args.push(options.modelProvider);
               }
+              if (options.messageAfter !== undefined) {
+                filters.push("julianday(m.ts) >= julianday(?)");
+                args.push(options.messageAfter);
+              }
+              if (options.messageBefore !== undefined) {
+                filters.push("julianday(m.ts) < julianday(?)");
+                args.push(options.messageBefore);
+              }
+              if (options.sessionStartedAfter !== undefined) {
+                filters.push("julianday(s.started_at) >= julianday(?)");
+                args.push(options.sessionStartedAfter);
+              }
+              if (options.sessionStartedBefore !== undefined) {
+                filters.push("julianday(s.started_at) < julianday(?)");
+                args.push(options.sessionStartedBefore);
+              }
+              if (options.rootsOnly === true) {
+                filters.push("s.parent_session_id IS NULL");
+              }
+              if (options.lineageRootSessionId !== undefined) {
+                filters.push("m.session_id IN (SELECT session_id FROM lineage)");
+              }
+              if (options.after !== undefined) {
+                filters.push("(m.session_id > ? OR (m.session_id = ? AND m.seq > ?))");
+                args.push(
+                  options.after.sessionId,
+                  options.after.sessionId,
+                  options.after.sequence,
+                );
+              }
+              const lineage = options.lineageRootSessionId === undefined
+                ? ""
+                : `WITH RECURSIVE lineage(session_id) AS (
+                    SELECT session_id FROM sessions WHERE session_id = ?
+                    UNION
+                    SELECT child.session_id
+                    FROM sessions AS child
+                    JOIN lineage AS parent ON child.parent_session_id = parent.session_id
+                  )`;
+              if (options.lineageRootSessionId !== undefined) {
+                args.unshift(options.lineageRootSessionId);
+              }
+              const where = filters.length === 0 ? "" : `WHERE ${filters.join(" AND ")}`;
               return db.query(`
+                ${lineage}
                 SELECT ${queryMessageColumns}
                 FROM messages AS m
                 JOIN sessions AS s ON s.session_id = m.session_id
-                WHERE ${filters.join(" AND ")}
-                ORDER BY m.seq ASC
-                LIMIT ? OFFSET ?
-              `).all(...args, options.limit, options.offset) as QueryMessageRow[];
+                ${where}
+                ORDER BY m.session_id ASC, m.seq ASC
+                LIMIT ?
+              `).all(...args, options.limit) as QueryMessageRow[];
             }),
           queryToolCalls: (options) =>
             trySqlite("queryToolCalls", () => {
