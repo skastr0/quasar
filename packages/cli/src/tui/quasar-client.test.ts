@@ -218,7 +218,8 @@ test("QuasarClient paginates TUI transcript reads through bounded GET resource p
       const url = new URL(request.url);
       requests.push(url);
       if (url.pathname !== "/messages") return new Response("wrong resource", { status: 400 });
-      const start = Number(url.searchParams.get("offset"));
+      const afterSequence = url.searchParams.get("afterSequence");
+      const start = afterSequence === null ? 0 : Number(afterSequence) + 1;
       const limit = Number(url.searchParams.get("limit"));
       const count = start === 0 ? 200 : 1;
       const rows = Array.from({ length: count }, (_, offset) => ({
@@ -236,8 +237,10 @@ test("QuasarClient paginates TUI transcript reads through bounded GET resource p
           rows,
           page: {
             limit,
-            offset: start,
-            nextOffset: start === 0 ? 200 : null,
+            snapshot: "test-process:1",
+            next: start === 0
+              ? { sessionId: "codex:s1", sequence: 199 }
+              : null,
           },
         },
       });
@@ -253,9 +256,12 @@ test("QuasarClient paginates TUI transcript reads through bounded GET resource p
     expect(requests).toHaveLength(2);
     expect(requests[0]?.pathname).toBe("/messages");
     expect(requests[0]?.searchParams.get("limit")).toBe("200");
-    expect(requests[0]?.searchParams.get("offset")).toBe("0");
+    expect(requests[0]?.searchParams.has("offset")).toBe(false);
+    expect(requests[0]?.searchParams.has("afterSequence")).toBe(false);
     expect(requests[1]?.searchParams.get("limit")).toBe("200");
-    expect(requests[1]?.searchParams.get("offset")).toBe("200");
+    expect(requests[1]?.searchParams.get("afterSessionId")).toBe("codex:s1");
+    expect(requests[1]?.searchParams.get("afterSequence")).toBe("199");
+    expect(requests[1]?.searchParams.get("snapshot")).toBe("test-process:1");
   } finally {
     server.stop(true);
   }
