@@ -88,6 +88,68 @@ const mappedSession = (overrides: { readonly fingerprint?: string; readonly firs
   usageRecords: [], sessionEdges: [], artifacts: [], executionContexts: [],
 });
 
+const descendantSession = (
+  sessionId: string,
+  parentSessionId: string,
+): MappedSession => {
+  const source: any = structuredClone(mappedSession());
+  const eventIds = new Map(
+    source.events.map((event: any, index: number) => [
+      event.id,
+      `${sessionId}:event:${index}`,
+    ]),
+  );
+  const toolIds = new Map(
+    source.toolCalls.map((toolCall: any, index: number) => [
+      toolCall.id,
+      `${sessionId}:tool:${index}`,
+    ]),
+  );
+  source.session = {
+    ...source.session,
+    sessionId,
+    parentSessionId,
+    title: `Child ${sessionId}`,
+    sourcePath: `/history/${encodeURIComponent(sessionId)}.jsonl`,
+    sourceFingerprint: `fingerprint-${sessionId}`,
+  };
+  source.messages = source.messages.map((message: any) => ({
+    ...message,
+    sessionId,
+    eventId: eventIds.get(message.eventId),
+  }));
+  source.toolCalls = source.toolCalls.map((toolCall: any) => ({
+    ...toolCall,
+    id: toolIds.get(toolCall.id),
+    sessionId,
+    eventId: eventIds.get(toolCall.eventId),
+  }));
+  source.events = source.events.map((event: any) => ({
+    ...event,
+    id: eventIds.get(event.id),
+    sessionId,
+    ...(event.toolCallId !== undefined
+      ? { toolCallId: toolIds.get(event.toolCallId) }
+      : {}),
+    rawReference: {
+      ...event.rawReference,
+      sourcePath: source.session.sourcePath,
+    },
+  }));
+  source.sessionEdges = [{
+    id: `${sessionId}:edge:subagent`,
+    sessionId,
+    machineId: source.events[0].machineId,
+    provider: source.session.provider,
+    agentName: source.session.agentName,
+    projectIdentityKey: source.session.projectKey,
+    kind: "subagent_of",
+    fromId: parentSessionId,
+    toId: sessionId,
+  }];
+  return source as MappedSession;
+};
+
 const seed = (sqlite: string, sessions: readonly MappedSession[] = [mappedSession()]) => Effect.runPromise(
   Effect.scoped(Effect.gen(function* () {
     const store = yield* LocalStore;
@@ -221,6 +283,53 @@ describe("HTTP server resources", () => {
           action: expect.stringContaining("Re-ingest"),
         },
       });
+    } finally {
+      proc.kill();
+      await proc.exited;
+    }
+  });
+
+  test("ATIF trajectory embeds the complete stored subagent tree", async () => {
+    const dir = tempDir();
+    const sqlite = join(dir, "quasar.sqlite");
+    const root = mappedSession();
+    const child = descendantSession(
+      "codex:session-http:child",
+      root.session.sessionId,
+    );
+    const grandchild = descendantSession(
+      "codex:session-http:grandchild",
+      child.session.sessionId,
+    );
+    await seed(sqlite, [root, child, grandchild]);
+    const { proc, base } = startServer(sqlite);
+    try {
+      await waitFor(`${base}/health`);
+      const response = await fetch(
+        `${base}/trajectory?sessionId=codex%3Asession-http&format=atif`,
+      );
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.data).toMatchObject({
+        format: "quasar.trajectory.atif-export/v1",
+        schemaVersion: "ATIF-v1.7",
+        compatibility: {
+          valid: true,
+          counts: {
+            sourceSessions: 3,
+            embeddedSubagents: 2,
+          },
+        },
+      });
+      const embeddedChild = body.data.trajectory.subagent_trajectories[0];
+      expect(embeddedChild.session_id).toBe(child.session.sessionId);
+      expect(embeddedChild.subagent_trajectories[0].session_id).toBe(
+        grandchild.session.sessionId,
+      );
+      expect(
+        body.data.trajectory.steps.at(-1).observation.results[0]
+          .subagent_trajectory_ref[0].trajectory_id,
+      ).toBe(child.session.sessionId);
     } finally {
       proc.kill();
       await proc.exited;

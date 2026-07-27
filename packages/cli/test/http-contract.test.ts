@@ -928,6 +928,64 @@ describe("CLI HTTP client <-> server contract", () => {
         ]),
       );
 
+      const atif = await resourceJson(base, "trajectory", {
+        sessionId: normalized.id,
+        format: "atif",
+        includeReasoning: "true",
+        includeToolResults: "true",
+        toolResultMaxBytes: 8,
+      });
+      expect(atif.status).toBe(200);
+      expect(atif.body.data).toMatchObject({
+        format: "quasar.trajectory.atif-export/v1",
+        schemaVersion: "ATIF-v1.7",
+        schemaSource: {
+          commit: "7db020ba5a5ceee918351dd8fc374d4d60bad442",
+        },
+        compatibility: {
+          valid: true,
+          counts: {
+            sourceSessions: 1,
+            sourceEvents: 4,
+            sourceToolCalls: 2,
+          },
+        },
+      });
+      const atifToolStep = atif.body.data.trajectory.steps.find((step: {
+        tool_calls?: readonly unknown[];
+      }) => step.tool_calls?.length === 2);
+      expect(atifToolStep).toMatchObject({
+        source: "agent",
+        message: "mixed-visible-marker",
+        tool_calls: expect.arrayContaining([
+          expect.objectContaining({ function_name: "bash" }),
+          expect.objectContaining({ function_name: "read" }),
+        ]),
+        observation: {
+          results: [
+            expect.objectContaining({
+              source_call_id: expect.any(String),
+              content: expect.any(String),
+            }),
+            expect.objectContaining({
+              source_call_id: expect.any(String),
+              content: expect.any(String),
+            }),
+          ],
+        },
+      });
+      expect(atif.body.data.compatibility.entries).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            status: "projection_adjustment",
+            sourceKind: "tool_result",
+          }),
+        ]),
+      );
+      expect(JSON.stringify(atif.body.data.trajectory)).not.toContain(
+        "fixture contents",
+      );
+
       const toolPayloadAfter = await searchQueryJson(
         base,
         "fixture contents",

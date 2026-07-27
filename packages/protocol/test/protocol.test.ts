@@ -1,10 +1,15 @@
 import { describe, expect, test } from "bun:test";
+import Ajv from "ajv";
 import {
+  HARBOR_ATIF_SCHEMA_ID,
+  HARBOR_ATIF_UPSTREAM_COMMIT,
+  HARBOR_ATIF_VERSION,
   NORMALIZED_SESSION_PROTOCOL_VERSION,
   QUASAR_TRAJECTORY_VERSION,
   QUERY_PROTOCOL_VERSION,
   QuerySpec,
   SESSION_ENRICHMENT_VERSION,
+  decodeAtifTrajectorySync,
   decodeMappedSessionSync,
   decodeLettaTrajectorySync,
   decodeNormalizedSessionSync,
@@ -16,6 +21,7 @@ import {
   protocolContracts,
   protocolDiscovery,
   protocolExamples,
+  toAtifTrajectory,
   toLettaTrajectory,
 } from "../src/index";
 
@@ -348,6 +354,226 @@ describe("QuasarTrajectory v1", () => {
     );
   });
 
+  test("exports mixed tools, exact usage, and embedded subagents as pinned ATIF-v1.7", () => {
+    const parentValue: any = structuredClone(mixedSession());
+    const assistantEvent = parentValue.events.find((event: any) =>
+      event.id === "codex:example:event:1"
+    );
+    parentValue.usageRecords.push({
+      id: "usage-assistant",
+      sessionId: parentValue.session.sessionId,
+      eventId: assistantEvent.id,
+      machineId: assistantEvent.machineId,
+      provider: parentValue.session.provider,
+      agentName: parentValue.session.agentName,
+      projectIdentityKey: parentValue.session.projectKey,
+      timestamp: assistantEvent.timestamp,
+      model: "gpt-test",
+      modelProvider: "openai",
+      inputTokens: 42,
+      outputTokens: 12,
+      reasoningTokens: 5,
+      cacheReadInputTokens: 7,
+      totalTokens: 54,
+      cost: 0.01,
+      currency: "USD",
+    });
+    const userEvent = parentValue.events[0];
+    parentValue.usageRecords.push({
+      id: "usage-user-event",
+      sessionId: parentValue.session.sessionId,
+      eventId: userEvent.id,
+      machineId: userEvent.machineId,
+      provider: parentValue.session.provider,
+      agentName: parentValue.session.agentName,
+      projectIdentityKey: parentValue.session.projectKey,
+      inputTokens: 3,
+    });
+    const parent = decodeMappedSessionSync(parentValue);
+
+    const childValue: any = structuredClone(
+      protocolContracts.mappedSession.examples[0].input,
+    );
+    const childSessionId = "codex:example:child";
+    const childEventId = "codex:example:child:event:0";
+    childValue.session.sessionId = childSessionId;
+    childValue.session.parentSessionId = parent.session.sessionId;
+    childValue.session.sourcePath = "/history/child.jsonl";
+    childValue.session.sourceFingerprint = "child-fingerprint";
+    childValue.events[0].id = childEventId;
+    childValue.events[0].sessionId = childSessionId;
+    childValue.events[0].nativeEventId = "child-native-event-0";
+    childValue.events[0].rawReference.sourcePath = "/history/child.jsonl";
+    childValue.messages[0].sessionId = childSessionId;
+    childValue.messages[0].eventId = childEventId;
+    childValue.sessionEdges = [{
+      id: "edge-parent-child",
+      sessionId: childSessionId,
+      machineId: childValue.events[0].machineId,
+      provider: childValue.session.provider,
+      agentName: childValue.session.agentName,
+      projectIdentityKey: childValue.session.projectKey,
+      kind: "subagent_of",
+      fromId: parent.session.sessionId,
+      toId: childSessionId,
+    }];
+    const child = decodeMappedSessionSync(childValue);
+
+    const exported = toAtifTrajectory(parent, {
+      subagentSessions: [child],
+    });
+    expect(exported.schemaVersion).toBe(HARBOR_ATIF_VERSION);
+    expect(exported.schemaId).toBe(HARBOR_ATIF_SCHEMA_ID);
+    expect(exported.schemaSource.commit).toBe(HARBOR_ATIF_UPSTREAM_COMMIT);
+    expect(() => decodeAtifTrajectorySync(exported.trajectory)).not.toThrow();
+
+    const assistantStep: any = exported.trajectory.steps.find((step: any) =>
+      step.extra?.quasar?.source_event_id === assistantEvent.id
+    );
+    expect(assistantStep).toEqual(expect.objectContaining({
+      source: "agent",
+      message: "I will inspect both files.",
+      reasoning_content: "Compare both sources before answering.",
+      metrics: expect.objectContaining({
+        prompt_tokens: 42,
+        completion_tokens: 12,
+        cached_tokens: 7,
+        cost_usd: 0.01,
+      }),
+    }));
+    expect(assistantStep.tool_calls.map((call: any) =>
+      call.tool_call_id
+    )).toEqual(["call-a", "call-b"]);
+    expect(assistantStep.observation.results.map((result: any) =>
+      result.content
+    )).toEqual(["αβγ first payload", "second payload"]);
+    expect(exported.trajectory.final_metrics).toEqual({
+      total_steps: exported.trajectory.steps.length,
+    });
+    const userStep: any = exported.trajectory.steps.find((step: any) =>
+      step.extra?.quasar?.source_event_id === userEvent.id
+    );
+    expect(userStep.metrics).toBeUndefined();
+    expect(userStep.extra.quasar.usage_records).toEqual([
+      expect.objectContaining({
+        id: "usage-user-event",
+        inputTokens: 3,
+      }),
+    ]);
+
+    const childTrajectory = exported.trajectory.subagent_trajectories?.[0];
+    expect(childTrajectory?.trajectory_id).toBe(childSessionId);
+    const relationshipStep: any = exported.trajectory.steps.at(-1);
+    expect(
+      relationshipStep.observation.results[0].subagent_trajectory_ref[0],
+    ).toEqual(expect.objectContaining({
+      trajectory_id: childSessionId,
+      session_id: childSessionId,
+    }));
+    expect(exported.compatibility.counts).toEqual(expect.objectContaining({
+      sourceSessions: 2,
+      embeddedSubagents: 1,
+      sourceUsageRecords: 2,
+      sourceSessionEdges: 1,
+    }));
+    expect(exported.compatibility.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        status: "mapped_core",
+        sourceKind: "usage_record",
+        sourceId: "usage-assistant",
+      }),
+      expect.objectContaining({
+        status: "mapped_extension",
+        sourceKind: "usage_record",
+        sourceId: "usage-user-event",
+      }),
+      expect.objectContaining({
+        status: "mapped_core",
+        sourceKind: "session_edge",
+        sourceId: "edge-parent-child",
+      }),
+      expect.objectContaining({
+        status: "unobserved_atif_field",
+        targetPath: "trajectory.agent.version",
+      }),
+    ]));
+    expect(exported.compatibility.entries.filter((entry) =>
+      entry.sourceKind === "session_edge"
+      && entry.sourceId === "edge-parent-child"
+    )).toHaveLength(1);
+
+    const ajv = new Ajv({ strict: false });
+    const validate = ajv.compile(
+      protocolContracts.harborAtif.jsonSchema as object,
+    );
+    expect(validate(exported.trajectory), JSON.stringify(validate.errors))
+      .toBe(true);
+    expect(
+      (protocolContracts.harborAtif.jsonSchema as any)["x-harbor-source"]
+        .commit,
+    ).toBe(HARBOR_ATIF_UPSTREAM_COMMIT);
+  });
+
+  test("keeps ATIF policy omissions and truncation from leaking through extensions", () => {
+    const exported = toAtifTrajectory(mixedSession(), {
+      includeReasoning: false,
+      includeToolResults: true,
+      toolResultMaxBytes: 5,
+    });
+    const serialized = JSON.stringify(exported.trajectory);
+    expect(serialized).not.toContain(
+      "Compare both sources before answering.",
+    );
+    expect(serialized).not.toContain("αβγ first payload");
+    const assistantStep: any = exported.trajectory.steps.find((step: any) =>
+      step.tool_calls?.length === 2
+    );
+    expect(assistantStep.reasoning_content).toBeUndefined();
+    expect(assistantStep.observation.results[0]).toEqual(
+      expect.objectContaining({ content: "αβ" }),
+    );
+    expect(exported.compatibility.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        status: "omitted_by_policy",
+        sourceKind: "content_block",
+      }),
+      expect.objectContaining({
+        status: "projection_adjustment",
+        sourceKind: "tool_result",
+        sourceId: "call-a",
+      }),
+    ]));
+  });
+
+  test("rejects ATIF semantic corruption beyond JSON field shape", () => {
+    const sequential: any = structuredClone(
+      toAtifTrajectory(mixedSession()).trajectory,
+    );
+    sequential.steps[1].step_id = 99;
+    expect(() => decodeAtifTrajectorySync(sequential)).toThrow();
+
+    const sourceFields: any = structuredClone(
+      toAtifTrajectory(mixedSession()).trajectory,
+    );
+    sourceFields.steps[0].model_name = "not-valid-on-user";
+    expect(() => decodeAtifTrajectorySync(sourceFields)).toThrow();
+
+    const unresolved: any = structuredClone(
+      toAtifTrajectory(mixedSession()).trajectory,
+    );
+    unresolved.steps.push({
+      step_id: unresolved.steps.length + 1,
+      source: "system",
+      message: "",
+      observation: {
+        results: [{
+          subagent_trajectory_ref: [{ trajectory_id: "missing-child" }],
+        }],
+      },
+    });
+    expect(() => decodeAtifTrajectorySync(unresolved)).toThrow();
+  });
+
   test("rejects sequence and tool-result reference corruption", () => {
     const trajectory: any = structuredClone(
       projectQuasarTrajectory(mixedSession()),
@@ -676,11 +902,13 @@ describe("SessionEnrichment v1", () => {
       "quasar.normalized-session-ingest/v1",
       QUASAR_TRAJECTORY_VERSION,
       "quasar.trajectory.letta-export/v1",
+      HARBOR_ATIF_SCHEMA_ID,
+      "quasar.trajectory.atif-export/v1",
       QUERY_PROTOCOL_VERSION,
       "quasar.query-response/v1",
       SESSION_ENRICHMENT_VERSION,
     ]);
-    expect(protocolExamples.length).toBe(11);
+    expect(protocolExamples.length).toBe(13);
     expect(protocolExamples.every((example) => example.schemaId.length > 0)).toBe(true);
   });
 });

@@ -1,8 +1,8 @@
 # Quasar Session Contract and Projection Plan
 
 Date: 2026-07-26.
-Status: **in implementation** — Slices 1–3 are delivered and executable.
-ATIF export and isolated corpus replay remain.
+Status: **in implementation** — Slices 1–4 are delivered and executable.
+The isolated corpus replay remains.
 
 ## Objective
 
@@ -81,7 +81,7 @@ The opportunity is therefore not to choose between Letta and ATIF. It is to make
 Quasar's richer normalized layer executable and trustworthy enough to produce
 both.
 
-## Defects repaired by Slices 1–3
+## Defects repaired by Slices 1–4
 
 The architecture is ahead of the implementation at five load-bearing seams.
 
@@ -93,6 +93,7 @@ The architecture is ahead of the implementation at five load-bearing seams.
 | Model attribution was flattened | Persist per-event execution context/model on message and tool rows | Model-change fixture returns `model-alpha` then `model-beta` |
 | The source contract was duplicated and undiscoverable | Publish strict `quasar.normalized-session/v1` in the protocol package and decode it at ingest and reconstructed-read boundaries | Protocol examples cover every stable provider; skew and broken references fail closed |
 | No agent-readable session projection existed | Publish `quasar.trajectory/v1`, an HTTP/CLI read, and a strict Letta-compatible export | Mixed OpenCode trajectory preserves text, reasoning, two calls/results, truncation pointers, and search isolation |
+| No benchmark interchange projection existed | Publish a pinned Harbor ATIF-v1.7 export with fact-level compatibility reporting | Mixed tools/reasoning/usage and recursive subagent fixtures pass Quasar plus vendored-schema gates; a representative export passes Harbor's upstream validator |
 
 Relevant implementation surfaces:
 
@@ -252,6 +253,8 @@ Implemented surfaces:
 
 ### Slice 4 — Add ATIF export and compatibility validation
 
+Status: **delivered**.
+
 Implement a pure normalized-session-to-ATIF adapter against Harbor's current
 schema and validator. Map Quasar event order, reasoning, tool calls/results,
 usage, and subagent relationships where supported. Put additional
@@ -274,6 +277,35 @@ Acceptance:
   inferred;
 - exporting and re-reading preserve all facts claimed by the compatibility
   report.
+
+Implemented surfaces:
+
+- `packages/protocol/src/atif.ts`: strict ATIF-v1.7 schema mirror, pure
+  normalized-session projection, recursive subagent embedding, extension
+  provenance, and a fact-level compatibility ledger;
+- `packages/protocol/schema/harbor-atif-v1.7.schema.json`: Pydantic
+  validation-mode JSON Schema generated from Harbor commit
+  `7db020ba5a5ceee918351dd8fc374d4d60bad442`, with source and license;
+- `GET /trajectory?format=atif`: reads and validates the complete root plus all
+  stored descendants, then emits one nested ATIF document;
+- `quasar trajectory --session <id> --format atif`, plus local
+  `harbor-atif`/`atif-trajectory` schema and example discovery;
+- native semantic tests cover one-based step order, source-specific fields,
+  timestamps, tool-result references, embedded IDs, and subagent resolution;
+- the emitted fixture passes Harbor's own Pydantic
+  `TrajectoryValidator` at the pinned commit with zero errors.
+
+Projection policy:
+
+- exact per-event usage maps to ATIF metrics; multiple or unbound records stay
+  in extensions rather than being aggregated;
+- USD cost maps only when the source explicitly records USD;
+- missing token metrics, token IDs, log probabilities, tool definitions, and
+  LLM-call counts remain absent;
+- required `Agent.version` uses the explicit marker
+  `unobserved-by-quasar` and is declared in the compatibility ledger;
+- caller-selected reasoning/result omission and UTF-8-safe result truncation
+  apply to extensions as well as core fields, so excluded content cannot leak.
 
 ## Verification matrix
 
@@ -300,7 +332,6 @@ Acceptance:
 
 ## Immediate next move
 
-Implement Slice 4 against a pinned Harbor ATIF schema and validator. After that,
-run an isolated full-corpus replay into a disposable database, reconcile source
-and persisted counts/provider diagnostics, and only then migrate the production
-truth store.
+Run an isolated full-corpus replay into a disposable database, reconcile source
+and persisted counts/provider diagnostics, validate every reconstructed session
+and projection, and only then migrate the production truth store.
