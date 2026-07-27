@@ -960,17 +960,29 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
     agentName: args.agentName,
     projectIdentityKey: projectIdentity.projectIdentityKey,
   }));
-  const eventSequenceByTurnId = new Map<string, number>();
+  const eventSequencesByTurnId = new Map<string, number[]>();
+  const registerEventSequence = (turnId: string, sequence: number) => {
+    const sequences = eventSequencesByTurnId.get(turnId) ?? [];
+    if (!sequences.includes(sequence)) sequences.push(sequence);
+    eventSequencesByTurnId.set(turnId, sequences);
+  };
   for (const event of events) {
-    eventSequenceByTurnId.set(event.id, event.sequence);
+    registerEventSequence(event.id, event.sequence);
     if (event.nativeEventId !== undefined) {
-      eventSequenceByTurnId.set(event.nativeEventId, event.sequence);
+      registerEventSequence(event.nativeEventId, event.sequence);
     }
   }
   const executionContexts = (args.executionContexts ?? []).map((executionContext) => {
-    const eventSequence = executionContext.turnId === undefined
+    const matchingEventSequences = executionContext.turnId === undefined
       ? undefined
-      : eventSequenceByTurnId.get(executionContext.turnId);
+      : eventSequencesByTurnId.get(executionContext.turnId);
+    // A provider-native turn id can legitimately repeat in append-only logs.
+    // Remap only an unambiguous correlation; otherwise retain the adapter's
+    // occurrence-specific sequence instead of collapsing every context onto
+    // the last repeated event.
+    const eventSequence = matchingEventSequences?.length === 1
+      ? matchingEventSequences[0]
+      : undefined;
     return {
       ...executionContext,
       ...(eventSequence !== undefined ? { sequence: eventSequence } : {}),

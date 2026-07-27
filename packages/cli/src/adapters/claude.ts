@@ -518,33 +518,106 @@ const buildClaudeSessionFromFile = (
   const toolCallsById = new Map<string, ClaudeToolCallDraft>();
   const usageRecords: ClaudeUsageDraft[] = [];
   const executionContexts: ClaudeExecutionContextDraft[] = [];
-  const nativeUuidToEventId = new Map<string, string>();
+  const decisions = records.map((record) =>
+    classifyClaudeRecord(record, diagnostics),
+  );
+  const plannedEvents: Array<
+    | {
+        readonly eventId: string;
+        readonly nativeEventId: string | undefined;
+        readonly sequence: number;
+      }
+    | undefined
+  > = [];
+  const nativeUuidToEventOccurrences = new Map<
+    string,
+    Array<{ readonly eventId: string; readonly sequence: number }>
+  >();
+  let plannedSequence = 0;
+  for (let index = 0; index < lines.length; index += 1) {
+    const decision = decisions[index]!;
+    if (!isSignal(decision)) continue;
+    const { value, lineNumber } = lines[index]!;
+    const record =
+      typeof value === "object" && value !== null
+        ? (value as Record<string, unknown>)
+        : {};
+    const conversation = isClaudeConversationRecord(decision.value)
+      ? decision.value
+      : undefined;
+    const nativeEventId =
+      conversation !== undefined && typeof conversation.uuid === "string"
+        ? conversation.uuid
+        : typeof record.uuid === "string"
+          ? record.uuid
+          : undefined;
+    const eventId = eventIdFor(
+      sessionId,
+      plannedSequence,
+      nativeEventId ?? lineNumber,
+    );
+    plannedEvents[index] = {
+      eventId,
+      nativeEventId,
+      sequence: plannedSequence,
+    };
+    if (nativeEventId !== undefined) {
+      const occurrences = nativeUuidToEventOccurrences.get(nativeEventId) ?? [];
+      occurrences.push({ eventId, sequence: plannedSequence });
+      nativeUuidToEventOccurrences.set(nativeEventId, occurrences);
+    }
+    plannedSequence += 1;
+  }
   // EVERY record's uuid -> parentUuid, across kept AND dropped records. The
-  // event lineage map (nativeUuidToEventId) holds only KEPT events, so a kept
-  // turn whose parentUuid points at a DROPPED record (e.g. an assistant turn
-  // whose parent is a dropped api_error/turn_duration system record) would lose
-  // its parent-event link. This full chain lets us walk up past dropped records
-  // to the NEAREST KEPT ancestor, preserving the thread (32 turns degraded in a
-  // real file before this fix).
+  // occurrence map holds only KEPT events. Planning all kept event ids before
+  // materializing any event handles both directions observed on disk: a child
+  // may precede its parent, and a child may point through dropped telemetry to
+  // a kept ancestor. Provider-native uuids can also repeat, so each uuid maps to
+  // ordered occurrences rather than one lossy last-write-wins value.
   const nativeUuidToParentUuid = new Map<string, string>();
   for (const record of records) {
     const uuid = typeof record.uuid === "string" ? record.uuid : undefined;
     const parent = typeof record.parentUuid === "string" ? record.parentUuid : undefined;
-    if (uuid !== undefined && parent !== undefined) {
+    if (
+      uuid !== undefined
+      && parent !== undefined
+      && !nativeUuidToParentUuid.has(uuid)
+    ) {
       nativeUuidToParentUuid.set(uuid, parent);
     }
   }
   /**
    * Resolve a parentUuid to the event id of the nearest KEPT ancestor, walking
-   * up the full uuid->parentUuid chain across dropped records. Returns undefined
-   * if no ancestor was kept (the lineage genuinely terminates in dropped rows).
+   * up the full uuid->parentUuid chain across dropped records. Prefer the latest
+   * occurrence before the child; for a provider-native forward reference, use
+   * the earliest later occurrence. Returns undefined when the parent lives
+   * outside this file (common at subagent/compaction boundaries).
    */
-  const resolveKeptAncestorEventId = (parentUuid: string): string | undefined => {
+  const resolveKeptAncestorEventId = (
+    parentUuid: string,
+    childSequence: number,
+  ): string | undefined => {
     const seen = new Set<string>();
     let current: string | undefined = parentUuid;
     while (current !== undefined && !seen.has(current)) {
-      const kept = nativeUuidToEventId.get(current);
-      if (kept !== undefined) return kept;
+      const occurrences = nativeUuidToEventOccurrences.get(current);
+      if (occurrences !== undefined) {
+        let prior:
+          | { readonly eventId: string; readonly sequence: number }
+          | undefined;
+        for (let index = occurrences.length - 1; index >= 0; index -= 1) {
+          const occurrence = occurrences[index]!;
+          if (occurrence.sequence < childSequence) {
+            prior = occurrence;
+            break;
+          }
+        }
+        if (prior !== undefined) return prior.eventId;
+        const forward = occurrences.find(
+          (occurrence) => occurrence.sequence > childSequence,
+        );
+        if (forward !== undefined) return forward.eventId;
+      }
       seen.add(current);
       current = nativeUuidToParentUuid.get(current);
     }
@@ -557,7 +630,6 @@ const buildClaudeSessionFromFile = (
   // record, never a throw and never a silent "unknown" pass-through.
   // Sequencing is over KEPT (signal) events only, so dropped bookkeeping does
   // not leave gaps or claim event ids in the lineage map.
-  let sequence = 0;
   const events = [];
   for (let index = 0; index < lines.length; index += 1) {
     const { value, lineNumber } = lines[index]!;
@@ -566,11 +638,13 @@ const buildClaudeSessionFromFile = (
         ? (value as Record<string, unknown>)
         : {};
     const type = typeof record.type === "string" ? record.type : "unknown";
-    const decision = classifyClaudeRecord(record, diagnostics);
+    const decision = decisions[index]!;
     // DROP: malformed, unmodeled, or declared harness bookkeeping/telemetry.
     // It contributes its named diagnostic (already pushed) but no event, no
     // tool-call, no usage, and no lineage entry.
     if (!isSignal(decision)) continue;
+    const plannedEvent = plannedEvents[index]!;
+    const { eventId, nativeEventId, sequence } = plannedEvent;
     const kind = decision.kind;
     // Move 3: prefer schema-decoded conversation fields over re-peeking the raw
     // record. Non-conversation signals (system/attachment/snapshot/…) still use
@@ -588,24 +662,27 @@ const buildClaudeSessionFromFile = (
     const usageMessage =
       conversation !== undefined ? conversation.message : undefined;
     const content = claudeContentProjection(message, record);
-    const nativeEventId =
-      conversation !== undefined && typeof conversation.uuid === "string"
-        ? conversation.uuid
-        : typeof record.uuid === "string"
-          ? record.uuid
-          : undefined;
-    const eventId = eventIdFor(sessionId, sequence, nativeEventId ?? lineNumber);
-    if (nativeEventId !== undefined) nativeUuidToEventId.set(nativeEventId, eventId);
     const parentUuid =
       conversation !== undefined && typeof conversation.parentUuid === "string"
         ? conversation.parentUuid
         : typeof record.parentUuid === "string"
           ? record.parentUuid
           : undefined;
+    const parentEventId =
+      parentUuid === undefined
+        ? undefined
+        : resolveKeptAncestorEventId(parentUuid, sequence);
     if (parentUuid !== undefined) {
-      const parentEventId = resolveKeptAncestorEventId(parentUuid);
+      const nativeEventOccurrences =
+        nativeEventId === undefined
+          ? undefined
+          : nativeUuidToEventOccurrences.get(nativeEventId);
+      const childEdgeKey =
+        nativeEventId !== undefined && nativeEventOccurrences?.length === 1
+          ? nativeEventId
+          : eventId;
       parentEdges.push({
-        id: edgeIdFor(sessionId, "parent", parentUuid, nativeEventId ?? eventId),
+        id: edgeIdFor(sessionId, "parent", parentUuid, childEdgeKey),
         kind: "parent",
         ...(parentEventId !== undefined ? { fromEventId: parentEventId } : { fromId: parentUuid }),
         toEventId: eventId,
@@ -640,7 +717,13 @@ const buildClaudeSessionFromFile = (
         : undefined;
     if (messageModel !== undefined) {
       executionContexts.push({
-        id: scopedId(sessionId, "execution-context", "message", nativeEventId ?? lineNumber),
+        id: scopedId(
+          sessionId,
+          "execution-context",
+          "message",
+          sequence,
+          nativeEventId ?? lineNumber,
+        ),
         sequence,
         scope: "turn",
         ...(timestamp !== undefined ? { timestamp } : {}),
@@ -657,8 +740,7 @@ const buildClaudeSessionFromFile = (
     events.push({
       id: eventId,
       nativeEventId,
-      parentEventId:
-        parentUuid === undefined ? undefined : resolveKeptAncestorEventId(parentUuid) ?? parentUuid,
+      ...(parentEventId !== undefined ? { parentEventId } : {}),
       sequence,
       timestamp,
       role: claudeRoleFor(kind, messageRole),
@@ -671,7 +753,6 @@ const buildClaudeSessionFromFile = (
       ...(toolCallId !== undefined ? { toolCallId } : {}),
       rawReference: { sourcePath, line: lineNumber, nativeType: type },
     });
-    sequence += 1;
   }
   const session = buildSession({
     provider: "claude",

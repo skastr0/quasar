@@ -347,4 +347,70 @@ Search line three`,
     ]);
     expect(JSON.stringify(session.events[0]!.contentBlocks)).not.toContain(secret);
   });
+
+  test("buildSession preserves occurrence sequences for ambiguous native turn ids", () => {
+    const nativeSessionId = ClaudeSessionId("common-repeated-turn-id");
+    const sessionId = sessionIdFor("claude", nativeSessionId);
+    const session = buildSession({
+      provider: "claude",
+      agentName: "claude",
+      machine: {
+        machineId: "machine:common-repeated-turn-id",
+        hostname: "test-host",
+        platform: "darwin",
+      },
+      sessionId,
+      nativeSessionId,
+      nativeProjectKey: "common:test",
+      sourceRoot: "/fixtures",
+      sourcePath: "/fixtures/session.jsonl",
+      events: [
+        {
+          id: `${sessionId}:event:first`,
+          nativeEventId: "provider-repeated-turn",
+          sequence: 0,
+          role: "assistant",
+          kind: "message",
+          contentText: "first occurrence",
+          rawReference: {
+            sourcePath: "/fixtures/session.jsonl",
+            line: 1,
+          },
+        },
+        {
+          id: `${sessionId}:event:second`,
+          nativeEventId: "provider-repeated-turn",
+          sequence: 1,
+          role: "assistant",
+          kind: "message",
+          contentText: "second occurrence",
+          rawReference: {
+            sourcePath: "/fixtures/session.jsonl",
+            line: 2,
+          },
+        },
+      ],
+      executionContexts: [
+        {
+          id: `${sessionId}:context:first`,
+          sequence: 0,
+          scope: "turn",
+          turnId: "provider-repeated-turn",
+          model: "model-a",
+        },
+        {
+          id: `${sessionId}:context:second`,
+          sequence: 1,
+          scope: "turn",
+          turnId: "provider-repeated-turn",
+          model: "model-a",
+        },
+      ],
+    });
+
+    expect(session.executionContexts.map((context) => context.sequence)).toEqual([
+      0,
+      1,
+    ]);
+  });
 });
