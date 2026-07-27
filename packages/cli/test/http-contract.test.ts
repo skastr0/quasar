@@ -791,7 +791,6 @@ describe("CLI HTTP client <-> server contract", () => {
       const messages = await resourceJson(base, "messages", {
         sessionId: normalized.id,
         limit: 20,
-        offset: 0,
       });
       expect(messages.body.data.rows.map((row: {
         messageId: string;
@@ -1066,13 +1065,13 @@ describe("CLI HTTP client <-> server contract", () => {
       ] = await Promise.all([
         resourceJson(base, "sessions", { limit: 20, offset: 0 }).then(({ body }) => body),
         resourceJson(base, "messages", {
-          sessionId: "contract-session", limit: 20, offset: 0,
+          sessionId: "contract-session", limit: 20,
         }).then(({ body }) => body),
         resourceJson(base, "messages", {
-          sessionId: "contract-session", model: "gpt-5.6-sol", limit: 20, offset: 0,
+          sessionId: "contract-session", model: "gpt-5.6-sol", limit: 20,
         }).then(({ body }) => body),
         resourceJson(base, "messages", {
-          sessionId: "contract-session", model: "gpt-5.6-terra", limit: 20, offset: 0,
+          sessionId: "contract-session", model: "gpt-5.6-terra", limit: 20,
         }).then(({ body }) => body),
         resourceJson(base, "tool-calls", {
           provider: "codex", toolName: "shell_command", limit: 20, offset: 0,
@@ -1302,7 +1301,7 @@ describe("CLI HTTP client <-> server contract", () => {
       const sessions = await resourceJson(base, "sessions", { limit: 20, offset: 0 });
       expect(sessions.body.data.rows).toEqual([]);
       const messages = await resourceJson(base, "messages", {
-        sessionId: "contract-session", limit: 20, offset: 0,
+        sessionId: "contract-session", limit: 20,
       });
       expect(messages.body.data.rows).toEqual([]);
     } finally {
