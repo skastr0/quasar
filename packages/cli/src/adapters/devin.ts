@@ -20,7 +20,6 @@ import {
   type DevinGraphCoordinate,
   type DevinMessageNodeRow,
   type DevinSessionRow,
-  type DevinToolMessage,
   classifyDevinMessage,
   classifyDevinRole,
   classifyDevinSession,
@@ -361,9 +360,9 @@ const buildDevinSession = (
   const firstEventByNodeId = new Map<number, string>();
   const lastEventByNodeId = new Map<number, string>();
   const callDrafts = new Map<string, DevinToolCallDraft>();
-  const callEventByNativeId = new Map<string, string>();
-  const results = new Map<string, { readonly message: DevinToolMessage; readonly eventId: string }>();
-  const duplicateResults = new Set<string>();
+  const activeCallByNativeId = new Map<string, string>();
+  const completedNativeCallIds = new Set<string>();
+  const toolResultEdges: DevinEdgeDraft[] = [];
   const executionContexts: DevinExecutionContextDraft[] = [];
   let sequence = 0;
 
@@ -435,30 +434,84 @@ const buildDevinSession = (
           diagnostics.push({ name: callDecision.reason, message: callDecision.reason });
           continue;
         }
-        if (callDrafts.has(call.id)) {
+        if (activeCallByNativeId.has(call.id)) {
           diagnostics.push({
             name: "devin.tool_call.duplicate",
-            message: `Duplicate tool call id '${call.id}' on the canonical chain.`,
+            message: `Tool call id '${call.id}' was reused before its prior result.`,
           });
           continue;
         }
-        const toolCallId = scopedId(sessionId, "tool", call.id);
-        callDrafts.set(call.id, {
+        const toolCallId = scopedId(
+          sessionId,
+          "tool",
+          row.node_id,
+          call.index,
+          call.id,
+        );
+        callDrafts.set(toolCallId, {
           id: toolCallId,
           eventId: mainEventId,
           toolName: call.name,
           input: projectToolPayloadNativeValue(call.arguments),
         });
-        callEventByNativeId.set(call.id, mainEventId);
+        activeCallByNativeId.set(call.id, toolCallId);
+        completedNativeCallIds.delete(call.id);
         eventToolCallId ??= toolCallId;
       }
     }
 
     if (message.role === "tool") {
-      const toolCallId = scopedId(sessionId, "tool", message.tool_call_id);
-      eventToolCallId = toolCallId;
-      if (results.has(message.tool_call_id)) duplicateResults.add(message.tool_call_id);
-      else results.set(message.tool_call_id, { message, eventId: mainEventId });
+      const toolCallId = activeCallByNativeId.get(message.tool_call_id);
+      if (toolCallId === undefined) {
+        diagnostics.push({
+          name: completedNativeCallIds.has(message.tool_call_id)
+            ? "devin.tool_result.duplicate"
+            : "devin.tool_result.orphaned",
+          message: completedNativeCallIds.has(message.tool_call_id)
+            ? `Duplicate tool result for '${message.tool_call_id}' on the canonical chain.`
+            : `Tool result '${message.tool_call_id}' has no canonical assistant call.`,
+        });
+      } else {
+        const draft = callDrafts.get(toolCallId)!;
+        const resultDecision = classifyDevinToolResult(message);
+        if (!isSignal(resultDecision)) {
+          diagnostics.push({ name: resultDecision.reason, message: resultDecision.reason });
+        } else {
+          const extensions = message.metadata.extensions;
+          const resultMeta = extensions["chisel/tool_result_meta"];
+          const timing = extensions["chisel/tool_call_timing"];
+          const output = projectToolPayloadNativeValue({
+            content: message.content,
+            result: resultMeta,
+            ...(extensions["chisel/terminal_output"] === undefined
+              ? {}
+              : { terminalOutput: extensions["chisel/terminal_output"] }),
+            ...(extensions["chisel/tool_failure"] === undefined
+              ? {}
+              : { failure: extensions["chisel/tool_failure"] }),
+          });
+          callDrafts.set(toolCallId, {
+            ...draft,
+            status: resultDecision.value.status,
+            ...(output === undefined ? {} : { output }),
+            ...(timing === undefined || Number.isNaN(Date.parse(timing.started_at))
+              ? {}
+              : { startedAt: timing.started_at }),
+            ...(timing === undefined || Number.isNaN(Date.parse(timing.finished_at))
+              ? {}
+              : { completedAt: timing.finished_at }),
+          });
+          activeCallByNativeId.delete(message.tool_call_id);
+          completedNativeCallIds.add(message.tool_call_id);
+          eventToolCallId = toolCallId;
+          toolResultEdges.push({
+            id: edgeIdFor(sessionId, "tool_result_for", draft.eventId, mainEventId),
+            kind: "tool_result_for",
+            fromEventId: draft.eventId,
+            toEventId: mainEventId,
+          });
+        }
+      }
     }
 
     events.push({
@@ -514,63 +567,7 @@ const buildDevinSession = (
       },
     });
   }
-
-  for (const [nativeCallId, result] of results) {
-    if (duplicateResults.has(nativeCallId)) {
-      diagnostics.push({
-        name: "devin.tool_result.duplicate",
-        message: `Duplicate tool result for '${nativeCallId}' on the canonical chain.`,
-      });
-      callDrafts.delete(nativeCallId);
-      continue;
-    }
-    const draft = callDrafts.get(nativeCallId);
-    if (draft === undefined) {
-      diagnostics.push({
-        name: "devin.tool_result.orphaned",
-        message: `Tool result '${nativeCallId}' has no canonical assistant call.`,
-      });
-      continue;
-    }
-    const resultDecision = classifyDevinToolResult(result.message);
-    if (!isSignal(resultDecision)) {
-      diagnostics.push({ name: resultDecision.reason, message: resultDecision.reason });
-      continue;
-    }
-    const extensions = result.message.metadata.extensions;
-    const resultMeta = extensions["chisel/tool_result_meta"];
-    const timing = extensions["chisel/tool_call_timing"];
-    const output = projectToolPayloadNativeValue({
-      content: result.message.content,
-      result: resultMeta,
-      ...(extensions["chisel/terminal_output"] === undefined
-        ? {}
-        : { terminalOutput: extensions["chisel/terminal_output"] }),
-      ...(extensions["chisel/tool_failure"] === undefined
-        ? {}
-        : { failure: extensions["chisel/tool_failure"] }),
-    });
-    callDrafts.set(nativeCallId, {
-      ...draft,
-      status: resultDecision.value.status,
-      ...(output === undefined ? {} : { output }),
-      ...(timing === undefined || Number.isNaN(Date.parse(timing.started_at))
-        ? {}
-        : { startedAt: timing.started_at }),
-      ...(timing === undefined || Number.isNaN(Date.parse(timing.finished_at))
-        ? {}
-        : { completedAt: timing.finished_at }),
-    });
-    const fromEventId = callEventByNativeId.get(nativeCallId);
-    if (fromEventId !== undefined) {
-      edges.push({
-        id: edgeIdFor(sessionId, "tool_result_for", fromEventId, result.eventId),
-        kind: "tool_result_for",
-        fromEventId,
-        toEventId: result.eventId,
-      });
-    }
-  }
+  edges.push(...toolResultEdges);
 
   const startedAt = epochSecondsToIso(sessionRow.created_at);
   const updatedAt = epochSecondsToIso(sessionRow.last_activity_at);
