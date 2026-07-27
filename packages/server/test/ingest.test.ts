@@ -30,6 +30,7 @@ afterEach(() => {
 // get its own embed-message job; keying the job by contentHash alone collapses
 // them to one and leaves the second row zero-vector forever.
 const duplicateContentSession = (): MappedSession => ({
+  protocolVersion: "quasar.normalized-session/v1",
   project: { projectKey: "project-a", displayName: "Project A", rawPath: "/tmp/project-a" },
   session: {
     sessionId: "session-a",

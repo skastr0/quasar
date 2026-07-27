@@ -16,7 +16,10 @@
     },
     "session": {
       "agentName": "Pi CLI",
+      "artifactCount": 0,
       "artifacts": [],
+      "contentBlockCount": 2,
+      "eventCount": 2,
       "events": [
         {
           "agentName": "Pi CLI",
@@ -82,6 +85,7 @@
       "machineId": "machine:test",
       "nativeProjectKey": "/fixture/quasar",
       "nativeSessionId": "pi-fixture061",
+      "normalizationVersion": 11,
       "projectIdentity": {
         "confidence": "low",
         "displayName": "quasar",
@@ -97,10 +101,12 @@
         ]
       },
       "provider": "pi",
+      "sessionEdgeCount": 0,
       "sessionEdges": [],
       "sourcePath": "/fixture/pi/--fixture-quasar--/fixture.jsonl",
       "sourceRoot": "/fixture/pi",
       "startedAt": "2026-06-11T00:00:00.000Z",
+      "toolCallCount": 1,
       "toolCalls": [
         {
           "agentName": "Pi CLI",
@@ -124,6 +130,7 @@
         }
       ],
       "updatedAt": "2026-06-11T00:00:00.000Z",
+      "usageRecordCount": 0,
       "usageRecords": []
     },
     "sourceUnit": {

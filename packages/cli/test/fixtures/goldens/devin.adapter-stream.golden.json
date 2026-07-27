@@ -17,7 +17,10 @@
     },
     "session": {
       "agentName": "devin",
+      "artifactCount": 0,
       "artifacts": [],
+      "contentBlockCount": 2,
+      "eventCount": 2,
       "events": [
         {
           "agentName": "devin",
@@ -103,7 +106,7 @@
           "sequence": 1,
           "sessionId": "devin:93eb6f6331d9c7a0ea9165f5490f0db2",
           "timestamp": "2026-06-11T00:00:00.000Z",
-          "turnId": "devin-assistant-1"
+          "turnId": "devin:93eb6f6331d9c7a0ea9165f5490f0db2:event:757a6fd21c76e16b89138b486bbcbce9"
         }
       ],
       "host": "test-host",
@@ -112,6 +115,7 @@
       "machineId": "machine:test",
       "nativeProjectKey": "/fixture/quasar",
       "nativeSessionId": "devin-fixture061",
+      "normalizationVersion": 11,
       "projectIdentity": {
         "confidence": "low",
         "displayName": "quasar",
@@ -127,6 +131,7 @@
         ]
       },
       "provider": "devin",
+      "sessionEdgeCount": 1,
       "sessionEdges": [
         {
           "agentName": "devin",
@@ -150,8 +155,10 @@
       "sourceRoot": "/fixture/devin",
       "startedAt": "2026-06-11T00:00:00.000Z",
       "title": "Fixture Devin Session",
+      "toolCallCount": 0,
       "toolCalls": [],
       "updatedAt": "2026-06-11T00:00:02.000Z",
+      "usageRecordCount": 0,
       "usageRecords": []
     },
     "sourceUnit": {

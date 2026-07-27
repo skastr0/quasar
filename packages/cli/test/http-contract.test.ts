@@ -29,6 +29,7 @@ import { mapSession } from "../src/map";
 import type { MappedSession } from "../src/model";
 import type { NormalizedSession } from "../src/core/schemas";
 import { NORMALIZATION_VERSION } from "../src/normalization-version";
+import { NORMALIZED_SESSION_PROTOCOL_VERSION } from "@skastr0/quasar-protocol";
 
 const serverRoot = join(import.meta.dir, "..", "..", "server");
 
@@ -62,6 +63,7 @@ const mappedSession = (overrides: {
   readonly firstText?: string;
   readonly normalizationVersion?: number;
 } = {}): MappedSession => ({
+  protocolVersion: NORMALIZED_SESSION_PROTOCOL_VERSION,
   project: { projectKey: "contract-project", displayName: "Contract Project", rawPath: "/tmp/contract-project" },
   session: {
     sessionId: "contract-session",
@@ -534,6 +536,13 @@ describe("CLI HTTP client <-> server contract", () => {
         kind: "trace",
         metadata: { apiKey: "sk-abcdefghijklmnopqrstuvwxyz123456" },
       }],
+      normalizationVersion: NORMALIZATION_VERSION,
+      eventCount: 5,
+      toolCallCount: 1,
+      contentBlockCount: 0,
+      sessionEdgeCount: 0,
+      usageRecordCount: 0,
+      artifactCount: 1,
     };
 
     const mapped = mapSession(normalized, "mapped-fingerprint");

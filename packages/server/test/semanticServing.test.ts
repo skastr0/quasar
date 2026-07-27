@@ -53,6 +53,7 @@ const fixtureSession = (
   texts: readonly string[],
   model?: string,
 ): MappedSession => ({
+  protocolVersion: "quasar.normalized-session/v1",
   project: { projectKey, displayName: projectKey, rawPath: `/tmp/${projectKey}` },
   session: {
     sessionId,

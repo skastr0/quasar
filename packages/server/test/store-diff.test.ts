@@ -68,6 +68,7 @@ const session = (
   toolCalls: readonly ToolCallRow[] = [],
   overrides: Partial<MappedSession["session"]> = {},
 ): MappedSession => ({
+  protocolVersion: "quasar.normalized-session/v1",
   project: {
     projectKey: overrides.projectKey ?? PROJECT_KEY,
     displayName: "Diff Project",

@@ -16,7 +16,10 @@
     },
     "session": {
       "agentName": "oh-my-pi",
+      "artifactCount": 0,
       "artifacts": [],
+      "contentBlockCount": 4,
+      "eventCount": 3,
       "events": [
         {
           "agentName": "oh-my-pi",
@@ -127,6 +130,7 @@
       "machineId": "machine:test",
       "nativeProjectKey": "/fixture/quasar",
       "nativeSessionId": "01900000-0000-7000-8000-000000000061",
+      "normalizationVersion": 11,
       "projectIdentity": {
         "confidence": "low",
         "displayName": "quasar",
@@ -142,6 +146,7 @@
         ]
       },
       "provider": "omp",
+      "sessionEdgeCount": 3,
       "sessionEdges": [
         {
           "agentName": "oh-my-pi",
@@ -181,6 +186,7 @@
       "sourceRoot": "/fixture/omp",
       "startedAt": "2026-06-11T00:00:00.000Z",
       "title": "Fixture OMP Session",
+      "toolCallCount": 1,
       "toolCalls": [
         {
           "agentName": "oh-my-pi",
@@ -206,6 +212,7 @@
         }
       ],
       "updatedAt": "2026-06-11T00:00:00.000Z",
+      "usageRecordCount": 1,
       "usageRecords": [
         {
           "agentName": "oh-my-pi",

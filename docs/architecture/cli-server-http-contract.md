@@ -1,10 +1,9 @@
 # CLI ⇄ Server HTTP Contract
 
 This is the binding wire contract between the Quasar **CLI** (the sole ingest
-writer) and the Quasar **server** (storage and serving only). It is duplicated —
-on purpose — across `packages/cli/src` and `packages/server/src`; there is no
-shared ingest package. Drift is caught by executable tests, not prevented by a
-shared module.
+writer) and the Quasar **server** (storage and serving only). It is not
+duplicated in either package. `@skastr0/quasar-protocol` owns the one versioned
+Effect Schema and generated TypeScript type consumed by both packages.
 
 ## Ingestion is CLI-side only
 
@@ -18,7 +17,7 @@ enqueues derived-index work.
 - CLI ingest client: `packages/cli/src/ingest.ts`
   (`ingestRemote` → `postFingerprintProbe` / `postMappedSession`).
 - Server HTTP boundary: `packages/server/src/server.ts`
-  (`isMappedSession` validation → `ingestMappedSession`).
+  (`decodeMappedSessionSync` → `ingestMappedSession`).
 
 The CLI never runs the server's SQLite store, search substrate, or server runtime
 in-process (enforced by `packages/cli/test/package-boundary.test.ts`). The
@@ -73,10 +72,12 @@ only agent-facing read surface. The server deliberately has no generic
 }
 ```
 
-`MappedSession` (see `packages/{cli,server}/src/model.ts`):
+`MappedSession` (see
+`packages/protocol/src/normalized-session.ts`):
 
 ```ts
 interface MappedSession {
+  protocolVersion: "quasar.normalized-session/v1";
   project: { projectKey: string; displayName: string; rawPath?: string };
   session: SessionRow;       // includes messageCount, toolCallCount
   messages: MessageRow[];    // event-faithful search/read projection
@@ -100,6 +101,8 @@ cheap session listing; they are not used as per-message attribution.
 
 The server rejects anything outside these at the ingest boundary:
 
+- **Protocol version:** missing or mismatched `protocolVersion` returns a typed
+  `ProtocolVersionMismatch` `400` with expected and received versions.
 - **Provider enum — exactly twelve literals:** `codex`, `claude`, `opencode`,
   `grok`, `kimi`, `hermes`, `antigravity`, `omp`, `pi`, `cursor`, `devin`, `amp`
   (`packages/server/src/provider.ts`).
@@ -117,9 +120,12 @@ The server rejects anything outside these at the ingest boundary:
 - **Context references:** projected execution-context IDs must resolve to an
   execution-context record in the same payload.
 
-The `SessionRow` interface is held byte-for-byte identical across the two
-packages by `packages/cli/test/wire-contract.test.ts`. The provider enum and
-role allowlist are locked by `packages/server/test/boundary.test.ts`.
+The protocol package publishes strict JSON Schemas and executable examples for
+both provider-normalized source sessions and the mapped ingest representation.
+The source schema requires its normalization version plus exact event, tool-call,
+content-block, relationship, usage, and artifact counts; mismatches fail decode.
+`packages/cli/test/wire-contract.test.ts` prevents CLI/server redeclarations;
+provider and role enums remain locked by server boundary tests.
 
 ## Re-ingest without rebuilds or duplicates
 

@@ -15,7 +15,10 @@
     },
     "session": {
       "agentName": "opencode",
+      "artifactCount": 0,
       "artifacts": [],
+      "contentBlockCount": 3,
+      "eventCount": 2,
       "events": [
         {
           "agentName": "opencode",
@@ -100,6 +103,7 @@
       "machineId": "machine:test",
       "nativeProjectKey": "/fixture/quasar",
       "nativeSessionId": "ses_fixture061",
+      "normalizationVersion": 11,
       "projectIdentity": {
         "confidence": "low",
         "displayName": "quasar",
@@ -115,10 +119,12 @@
         ]
       },
       "provider": "opencode",
+      "sessionEdgeCount": 0,
       "sessionEdges": [],
       "sourcePath": "/fixture/opencode/opencode.db",
       "sourceRoot": "/fixture/opencode",
       "title": "fixture session",
+      "toolCallCount": 1,
       "toolCalls": [
         {
           "agentName": "opencode",
@@ -136,6 +142,7 @@
           "toolName": "bash"
         }
       ],
+      "usageRecordCount": 0,
       "usageRecords": []
     },
     "sourceUnit": {

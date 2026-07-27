@@ -16,7 +16,10 @@
     },
     "session": {
       "agentName": "hermes",
+      "artifactCount": 0,
       "artifacts": [],
+      "contentBlockCount": 2,
+      "eventCount": 2,
       "events": [
         {
           "agentName": "hermes",
@@ -89,6 +92,7 @@
       "machineId": "machine:test",
       "nativeProjectKey": "/fixture/quasar",
       "nativeSessionId": "20260101_000000_00000061",
+      "normalizationVersion": 11,
       "projectIdentity": {
         "confidence": "explicit",
         "displayName": "profile:hermes",
@@ -104,11 +108,13 @@
         ]
       },
       "provider": "hermes",
+      "sessionEdgeCount": 0,
       "sessionEdges": [],
       "sourcePath": "/fixture/hermes/state.db",
       "sourceRoot": "/fixture/hermes",
       "startedAt": "1970-01-01T00:16:40.000Z",
       "title": "Fixture Hermes Session",
+      "toolCallCount": 1,
       "toolCalls": [
         {
           "agentName": "hermes",
@@ -124,6 +130,7 @@
           "toolName": "bash"
         }
       ],
+      "usageRecordCount": 1,
       "usageRecords": [
         {
           "agentName": "hermes",

@@ -1095,18 +1095,7 @@ async function* streamCodexSessionFromFile(
     });
     slice = emptyCodexSlice();
 
-    return {
-      ...session,
-      eventCount: session.events.length,
-      toolCallCount: session.toolCalls.length,
-      contentBlockCount: session.events.reduce(
-        (count, event) => count + event.contentBlocks.length,
-        0,
-      ),
-      sessionEdgeCount: session.sessionEdges.length,
-      usageRecordCount: session.usageRecords.length,
-      artifactCount: session.artifacts.length,
-    };
+    return session;
   };
 
   for await (const { value, lineNumber, recordIndex } of readCodexJsonLines(path, {

@@ -12,7 +12,10 @@
   {
     "session": {
       "agentName": "claude-code",
+      "artifactCount": 0,
       "artifacts": [],
+      "contentBlockCount": 2,
+      "eventCount": 2,
       "events": [
         {
           "agentName": "claude-code",
@@ -83,6 +86,7 @@
       "machineId": "machine:test",
       "nativeProjectKey": "-fixture-quasar",
       "nativeSessionId": "aaaa1111-0001-4001-8001-000000000061",
+      "normalizationVersion": 11,
       "projectIdentity": {
         "confidence": "low",
         "displayName": "quasar",
@@ -98,6 +102,7 @@
         ]
       },
       "provider": "claude",
+      "sessionEdgeCount": 1,
       "sessionEdges": [
         {
           "agentName": "claude-code",
@@ -118,7 +123,9 @@
       ],
       "sourcePath": "/fixture/claude/projects/-fixture-quasar/aaaa1111-0001-4001-8001-000000000061.jsonl",
       "sourceRoot": "/fixture/claude/projects",
+      "toolCallCount": 0,
       "toolCalls": [],
+      "usageRecordCount": 0,
       "usageRecords": []
     },
     "sourceUnit": {

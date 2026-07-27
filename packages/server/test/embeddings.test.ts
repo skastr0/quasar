@@ -32,6 +32,7 @@ const vector = (seed: number) => Array.from({ length: 1536 }, (_, index) => (ind
 const hashText = (text: string) => createHash("sha256").update(text).digest("hex");
 
 const mappedSession = (text = "alpha terminal"): MappedSession => ({
+  protocolVersion: "quasar.normalized-session/v1",
   project: { projectKey: "project-a", displayName: "Project A", rawPath: "/tmp/project-a" },
   session: {
     sessionId: "session-a",

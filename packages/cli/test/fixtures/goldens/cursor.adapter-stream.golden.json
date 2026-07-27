@@ -15,7 +15,10 @@
     },
     "session": {
       "agentName": "cursor-agent",
+      "artifactCount": 0,
       "artifacts": [],
+      "contentBlockCount": 2,
+      "eventCount": 4,
       "events": [
         {
           "agentName": "cursor-agent",
@@ -123,6 +126,7 @@
       "machineId": "machine:test",
       "nativeProjectKey": "3a3f2949c8b30a1cf80a6dc25949d6a9",
       "nativeSessionId": "8fd16ca4-4dfa-4fea-8c37-4df7c63c5577",
+      "normalizationVersion": 11,
       "projectIdentity": {
         "confidence": "low",
         "displayName": "quasar",
@@ -138,6 +142,7 @@
         ]
       },
       "provider": "cursor",
+      "sessionEdgeCount": 1,
       "sessionEdges": [
         {
           "agentName": "cursor-agent",
@@ -155,6 +160,7 @@
       "sourceRoot": "/fixture/cursor/chats",
       "startedAt": "2026-06-11T00:00:00.000Z",
       "title": "Fixture Cursor Session",
+      "toolCallCount": 1,
       "toolCalls": [
         {
           "agentName": "cursor-agent",
@@ -173,6 +179,7 @@
         }
       ],
       "updatedAt": "2026-06-11T00:00:01.000Z",
+      "usageRecordCount": 0,
       "usageRecords": []
     },
     "sourceUnit": {

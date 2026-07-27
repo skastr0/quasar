@@ -64,6 +64,7 @@ const withMatrix = <A>(
   );
 
 const sessionFixture = (sessionId: string, projectKey: string, messageCount: number): MappedSession => ({
+  protocolVersion: "quasar.normalized-session/v1",
   project: { projectKey, displayName: projectKey, rawPath: `/tmp/${projectKey}` },
   session: {
     sessionId,

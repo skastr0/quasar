@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { NORMALIZED_SESSION_PROTOCOL_VERSION } from "@skastr0/quasar-protocol";
 import { Effect } from "effect";
 
 import type { MappedSession } from "../src/model";
@@ -21,6 +22,7 @@ afterEach(() => {
 });
 
 const mappedSession = (overrides: { readonly fingerprint?: string; readonly firstText?: string } = {}): MappedSession => ({
+  protocolVersion: NORMALIZED_SESSION_PROTOCOL_VERSION,
   project: { projectKey: "project-http", displayName: "HTTP Project", rawPath: "/tmp/project-http" },
   session: {
     sessionId: "codex:session-http", projectKey: "project-http", provider: "codex", agentName: "codex",
@@ -163,10 +165,31 @@ describe("HTTP server resources", () => {
       const missingToken = await fetch(`${base}/ingest/session`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ session: mappedSession() }) });
       const malformed = await fetch(`${base}/ingest/session`, { method: "POST", headers: { "content-type": "application/json", "x-quasar-ingest-token": "test-ingest-token" }, body: "{" });
       const invalid = await fetch(`${base}/ingest/session`, { method: "POST", headers: { "content-type": "application/json", "x-quasar-ingest-token": "test-ingest-token" }, body: JSON.stringify({ session: { ...mappedSession(), session: { ...mappedSession().session, provider: "nova-cli" } } }) });
+      const skewed = await fetch(`${base}/ingest/session`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-quasar-ingest-token": "test-ingest-token",
+        },
+        body: JSON.stringify({
+          session: {
+            ...mappedSession(),
+            protocolVersion: "quasar.normalized-session/v0",
+          },
+        }),
+      });
       const sessions = await fetch(`${base}/sessions?limit=100`).then((response) => response.json());
       expect(missingToken.status).toBe(401);
       expect(malformed.status).toBe(400);
       expect(invalid.status).toBe(400);
+      expect(skewed.status).toBe(400);
+      expect(await skewed.json()).toMatchObject({
+        error: {
+          type: "ProtocolVersionMismatch",
+          expected: NORMALIZED_SESSION_PROTOCOL_VERSION,
+          received: "quasar.normalized-session/v0",
+        },
+      });
       expect(sessions.data.rows).toEqual([]);
     } finally { proc.kill(); await proc.exited; }
   });

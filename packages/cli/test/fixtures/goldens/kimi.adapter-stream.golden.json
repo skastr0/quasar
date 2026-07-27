@@ -12,7 +12,10 @@
   {
     "session": {
       "agentName": "kimi-code",
+      "artifactCount": 0,
       "artifacts": [],
+      "contentBlockCount": 0,
+      "eventCount": 2,
       "events": [
         {
           "agentName": "kimi-code",
@@ -24,8 +27,10 @@
           "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
           "provider": "kimi",
           "rawReference": {
-            "agentId": "main",
             "line": 1,
+            "metadata": {
+              "agentId": "main"
+            },
             "nativeType": "context.append_message",
             "sourcePath": "<fixture-root>/sessions/fixture-quasar/session_fixture061/agents/main/wire.jsonl"
           },
@@ -44,8 +49,10 @@
           "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
           "provider": "kimi",
           "rawReference": {
-            "agentId": "main",
             "line": 2,
+            "metadata": {
+              "agentId": "main"
+            },
             "nativeType": "context.append_message",
             "sourcePath": "<fixture-root>/sessions/fixture-quasar/session_fixture061/agents/main/wire.jsonl"
           },
@@ -61,6 +68,7 @@
       "identitySchemeVersion": 1,
       "machineId": "machine:test",
       "nativeSessionId": "session_fixture061",
+      "normalizationVersion": 11,
       "projectIdentity": {
         "confidence": "low",
         "displayName": "quasar",
@@ -76,13 +84,16 @@
         ]
       },
       "provider": "kimi",
+      "sessionEdgeCount": 0,
       "sessionEdges": [],
       "sourcePath": "<fixture-root>/sessions/fixture-quasar/session_fixture061/agents/main",
       "sourceRoot": "<fixture-root>/sessions",
       "startedAt": "2026-06-11T00:00:00.000Z",
       "title": "Fixture Kimi Session",
+      "toolCallCount": 0,
       "toolCalls": [],
       "updatedAt": "2026-06-11T00:00:00.000Z",
+      "usageRecordCount": 0,
       "usageRecords": []
     },
     "sourceUnit": {

@@ -425,7 +425,7 @@ const buildDevinSession = (
           sequence,
           scope: "turn",
           ...(timestamp === undefined ? {} : { timestamp }),
-          turnId: message.message_id,
+          turnId: mainEventId,
           model: generationModel,
         });
       }

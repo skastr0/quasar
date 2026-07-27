@@ -35,6 +35,7 @@ const workerEmbeddingProfile = makeEmbeddingProfile({
 });
 
 const mappedSession = (): MappedSession => ({
+  protocolVersion: "quasar.normalized-session/v1",
   project: { projectKey: "project-a", displayName: "Project A" },
   session: {
     sessionId: "session-a",

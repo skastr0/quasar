@@ -312,6 +312,7 @@ describe("DurableQueue", () => {
       sessionId: SID, eventId: `event-${seq}`, seq, role: "assistant", text: `body ${seq}`, ts: null, projectKey: PK, contentHash: hash,
     });
     const mapped: MappedSession = {
+      protocolVersion: "quasar.normalized-session/v1",
       project: { projectKey: PK, displayName: "Prune", rawPath: "/tmp/prune" },
       session: {
         sessionId: SID, projectKey: PK, provider: "codex", agentName: "codex", title: "Prune",

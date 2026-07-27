@@ -302,15 +302,26 @@ describe("CLI client/operator boundary", () => {
     const schema = await runCli(["schema", "query"]);
     const responseSchema = await runCli(["schema", "--name", "response"]);
     const examples = await runCli(["examples", "session-enrichment"]);
+    const normalizedSchema = await runCli(["schema", "normalizedSession"]);
+    const ingestExamples = await runCli(["examples", "mappedSession"]);
 
     expect(schema.exitCode).toBe(0);
     expect(schema.json.command).toBe("schema");
     expect(schema.json.data).toEqual(expect.objectContaining({ schemaId: "quasar.query/v1" }));
     expect(responseSchema.json.data).toEqual(expect.objectContaining({ schemaId: "quasar.query-response/v1" }));
+    expect(normalizedSchema.json.data).toEqual(
+      expect.objectContaining({ schemaId: "quasar.normalized-session/v1" }),
+    );
     expect(examples.exitCode).toBe(0);
     expect(examples.json.command).toBe("examples");
     expect(examples.json.data).toEqual([
       expect.objectContaining({ schemaId: "quasar.session-enrichment/v1", name: "thread analysis" }),
+    ]);
+    expect(ingestExamples.json.data).toEqual([
+      expect.objectContaining({
+        schemaId: "quasar.normalized-session-ingest/v1",
+        name: "versioned event-faithful ingest",
+      }),
     ]);
   }, 15_000);
 

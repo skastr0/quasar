@@ -16,7 +16,10 @@
     },
     "session": {
       "agentName": "grok-build",
+      "artifactCount": 0,
       "artifacts": [],
+      "contentBlockCount": 0,
+      "eventCount": 3,
       "events": [
         {
           "agentName": "grok-build",
@@ -88,6 +91,7 @@
       "machineId": "machine:test",
       "nativeProjectKey": "%2Ffixture%2Fquasar",
       "nativeSessionId": "01900000-0000-7000-8000-000000000061",
+      "normalizationVersion": 11,
       "projectIdentity": {
         "confidence": "low",
         "displayName": "quasar",
@@ -103,6 +107,7 @@
         ]
       },
       "provider": "grok",
+      "sessionEdgeCount": 1,
       "sessionEdges": [
         {
           "agentName": "grok-build",
@@ -119,6 +124,7 @@
       "sourcePath": "<fixture-root>/sessions/%2Ffixture%2Fquasar/01900000-0000-7000-8000-000000000061",
       "sourceRoot": "<fixture-root>/sessions",
       "title": "Fixture Grok Session",
+      "toolCallCount": 1,
       "toolCalls": [
         {
           "agentName": "grok-build",
@@ -138,6 +144,7 @@
           "toolName": "bash"
         }
       ],
+      "usageRecordCount": 0,
       "usageRecords": []
     },
     "sourceUnit": {

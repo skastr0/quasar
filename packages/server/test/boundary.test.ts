@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { describe, expect, test } from "bun:test";
+import { MessageRole } from "@skastr0/quasar-protocol";
 
 import { Provider } from "../src/provider";
 
@@ -53,15 +54,10 @@ describe("ingest boundary contract is locked", () => {
   });
 
   test("the message-role allowlist is exactly user/assistant/reasoning at the HTTP boundary", () => {
-    // The HTTP ingest validator's role allowlist is the locked boundary; if a new
-    // role is added it must be made explicit here AND in server.ts isMessageRow.
-    const serverSrc = readFileSync(join(srcRoot, "server.ts"), "utf8");
-    const match = serverSrc.match(/const roles = new Set<string>\(\[([^\]]*)\]\);/);
-    expect(match).not.toBeNull();
-    const literals = (match?.[1] ?? "")
-      .split(",")
-      .map((part) => part.trim().replace(/^["']|["']$/g, ""))
-      .filter((part) => part !== "");
-    expect(literals).toEqual(["user", "assistant", "reasoning"]);
+    expect([...MessageRole.literals]).toEqual([
+      "user",
+      "assistant",
+      "reasoning",
+    ]);
   });
 });

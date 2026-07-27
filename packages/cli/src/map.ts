@@ -13,7 +13,7 @@ import type {
 } from "./core/schemas";
 
 import type { MappedSession, MessageRole } from "./model";
-import { NORMALIZATION_VERSION } from "./normalization-version";
+import { NORMALIZED_SESSION_PROTOCOL_VERSION } from "@skastr0/quasar-protocol";
 
 const stringifyPayload = (value: unknown): string => {
   if (value === undefined || value === null) return "";
@@ -275,6 +275,7 @@ export const mapSession = (
     ? undefined
     : redactSourceFact<AgentAssignment>(session.assignment);
   return {
+    protocolVersion: NORMALIZED_SESSION_PROTOCOL_VERSION,
     project: {
       projectKey,
       displayName: session.projectIdentity.displayName,
@@ -294,7 +295,7 @@ export const mapSession = (
       sourceFingerprint,
       host: session.host,
       identitySchemeVersion: session.identitySchemeVersion,
-      normalizationVersion: NORMALIZATION_VERSION,
+      normalizationVersion: session.normalizationVersion,
       ...(executionModel.model !== undefined
         ? { model: String(redactSensitive(executionModel.model)) }
         : {}),
