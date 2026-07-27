@@ -36,6 +36,7 @@ const withStore = <A>(path: string, run: (store: LocalStoreService) => Effect.Ef
   );
 
 const mappedSession = (overrides: Partial<MappedSession["session"]> = {}): MappedSession => ({
+  protocolVersion: "quasar.normalized-session/v1",
   project: {
     projectKey: overrides.projectKey ?? "project-a",
     displayName: "Project A",

@@ -12,7 +12,10 @@
   {
     "session": {
       "agentName": "antigravity-cli",
+      "artifactCount": 0,
       "artifacts": [],
+      "contentBlockCount": 0,
+      "eventCount": 2,
       "events": [
         {
           "agentName": "antigravity-cli",
@@ -59,6 +62,7 @@
       "identitySchemeVersion": 1,
       "machineId": "machine:test",
       "nativeSessionId": "01900000-0000-7000-8000-000000000061",
+      "normalizationVersion": 11,
       "projectIdentity": {
         "confidence": "low",
         "displayName": "quasar",
@@ -74,10 +78,13 @@
         ]
       },
       "provider": "antigravity",
+      "sessionEdgeCount": 0,
       "sessionEdges": [],
       "sourcePath": "<fixture-root>/brain/01900000-0000-7000-8000-000000000061",
       "sourceRoot": "<fixture-root>/brain",
+      "toolCallCount": 0,
       "toolCalls": [],
+      "usageRecordCount": 0,
       "usageRecords": []
     },
     "sourceUnit": {

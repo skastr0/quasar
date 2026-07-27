@@ -1,5 +1,17 @@
 import { JSONSchema, Schema } from "effect";
 
+import {
+  MappedSession,
+  MessageRole,
+  NORMALIZED_SESSION_PROTOCOL_VERSION,
+  NormalizedSession,
+  Provider,
+  mappedSessionExamples,
+  normalizedSessionExamples,
+} from "./normalized-session";
+
+export * from "./normalized-session";
+
 export const QUERY_PROTOCOL_VERSION = "quasar.query/v1" as const;
 export const SESSION_ENRICHMENT_VERSION = "quasar.session-enrichment/v1" as const;
 
@@ -52,30 +64,6 @@ const OpaqueCursor = boundedString("QuasarOpaqueCursor", 4_096).pipe(
   Schema.brand("QuasarOpaqueCursor"),
 );
 
-const Provider = Schema.Literal(
-  "codex",
-  "claude",
-  "opencode",
-  "grok",
-  "kimi",
-  "hermes",
-  "antigravity",
-  "omp",
-  "pi",
-  "cursor",
-  "devin",
-  "amp",
-).annotations({
-  identifier: "QuasarProvider",
-  description: "A provider supported by the Quasar query protocol v1.",
-});
-
-const SessionRole = Schema.Literal(
-  "user",
-  "assistant",
-  "reasoning",
-).annotations({ identifier: "QuasarSessionRole" });
-
 const SearchMode = Schema.Literal("lexical", "semantic", "fusion")
   .annotations({ identifier: "QuasarSearchMode" });
 
@@ -106,7 +94,7 @@ const SearchFilters = Schema.Struct({
   projectKey: Schema.optional(ProjectKey),
   providers: Schema.optional(ProviderList),
   sessionId: Schema.optional(SessionId),
-  role: Schema.optional(SessionRole),
+  role: Schema.optional(MessageRole),
   agentName: Schema.optional(AgentName),
   agentRole: Schema.optional(AgentRole),
   model: Schema.optional(Model),
@@ -125,7 +113,7 @@ const SessionFilters = Schema.Struct({
 
 const MessageFilters = Schema.Struct({
   sessionId: SessionId,
-  role: Schema.optional(SessionRole),
+  role: Schema.optional(MessageRole),
   model: Schema.optional(Model),
   modelProvider: Schema.optional(ModelProvider),
 });
@@ -375,7 +363,7 @@ const SearchItem = Schema.Struct({
   projectKey: Schema.optional(ProjectKey),
   provider: Schema.optional(Provider),
   title: Schema.optional(Schema.NullOr(Schema.String)),
-  role: Schema.optional(SessionRole),
+  role: Schema.optional(MessageRole),
   text: Schema.optional(Schema.String),
   score: Schema.optional(Schema.Number),
   messageId: Schema.optional(MessageId),
@@ -419,7 +407,7 @@ const MessageItem = Schema.Struct({
   messageId: Schema.optional(MessageId),
   sessionId: Schema.optional(SessionId),
   sequence: Schema.optional(NonNegativeInteger),
-  role: Schema.optional(SessionRole),
+  role: Schema.optional(MessageRole),
   text: Schema.optional(Schema.String),
   timestamp: Schema.optional(Schema.NullOr(Timestamp)),
   projectKey: Schema.optional(ProjectKey),
@@ -748,6 +736,22 @@ const defineContract = <S extends Schema.Schema.All, const Examples extends Read
 });
 
 export const protocolContracts = {
+  normalizedSession: defineContract({
+    schemaId: NORMALIZED_SESSION_PROTOCOL_VERSION,
+    title: "NormalizedSession v1",
+    description:
+      "Provider-neutral source facts with strict identity, ownership, order, and reference invariants.",
+    schema: NormalizedSession,
+    examples: normalizedSessionExamples,
+  }),
+  mappedSession: defineContract({
+    schemaId: "quasar.normalized-session-ingest/v1",
+    title: "MappedSession v1",
+    description:
+      "Versioned CLI-to-server ingest representation of normalized session facts.",
+    schema: MappedSession,
+    examples: mappedSessionExamples,
+  }),
   query: defineContract({
     schemaId: QUERY_PROTOCOL_VERSION,
     title: "QuerySpec v1",

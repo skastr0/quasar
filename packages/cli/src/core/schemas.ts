@@ -1,38 +1,33 @@
+import {
+  Provider,
+} from "@skastr0/quasar-protocol";
 import { Schema } from "effect";
 
-const NonNegativeInteger = Schema.Number.pipe(
-  Schema.filter((value) => Number.isInteger(value) && value >= 0, {
-    message: () => "Expected a non-negative integer",
-  }),
-);
-
-const PositiveInteger = Schema.Number.pipe(
-  Schema.filter((value) => Number.isInteger(value) && value > 0, {
-    message: () => "Expected a positive integer",
-  }),
-);
-
-const NonNegativeNumber = Schema.Number.pipe(
-  Schema.filter((value) => Number.isFinite(value) && value >= 0, {
-    message: () => "Expected a non-negative finite number",
-  }),
-);
-
-export const Provider = Schema.Literal(
-  "codex",
-  "claude",
-  "opencode",
-  "grok",
-  "kimi",
-  "hermes",
-  "antigravity",
-  "omp",
-  "pi",
-  "cursor",
-  "devin",
-  "amp",
-);
-export type Provider = typeof Provider.Type;
+export {
+  AgentAssignment,
+  Artifact,
+  ContentBlock,
+  ContentBlockKind,
+  ExecutionContextRecord,
+  ExecutionContextScope,
+  MachineIdentity,
+  NormalizedSession,
+  ProjectIdentityConfidence,
+  ProjectResolution,
+  ProjectSignal,
+  Provider,
+  RawReference,
+  SessionEdge,
+  SessionEdgeKind,
+  SessionEvent,
+  SessionEventKind,
+  SessionRole,
+  SourceRoot,
+  ToolCall,
+  UsageRecord,
+  decodeNormalizedSession,
+  decodeNormalizedSessionSync,
+} from "@skastr0/quasar-protocol";
 
 export const AdapterStatus = Schema.Literal(
   "available",
@@ -49,302 +44,6 @@ export const ParserConfidence = Schema.Literal(
   "capture-file",
 );
 export type ParserConfidence = typeof ParserConfidence.Type;
-
-export const ProjectIdentityConfidence = Schema.Literal(
-  "explicit",
-  "high",
-  "medium",
-  "low",
-);
-export type ProjectIdentityConfidence =
-  typeof ProjectIdentityConfidence.Type;
-
-export const SessionEventKind = Schema.Literal(
-  "message",
-  "tool_call",
-  "tool_result",
-  "reasoning",
-  "preamble",
-  "system",
-  "summary",
-  "edit",
-  "snapshot",
-  "lifecycle",
-  "usage",
-  "unknown",
-);
-export type SessionEventKind = typeof SessionEventKind.Type;
-
-export const SessionRole = Schema.Literal(
-  "user",
-  "assistant",
-  "developer",
-  "system",
-  "tool",
-  "thinking",
-  "unknown",
-);
-export type SessionRole = typeof SessionRole.Type;
-
-export const ContentBlockKind = Schema.Literal(
-  "text",
-  "markdown",
-  "thinking",
-  "image",
-  "file",
-  "json",
-);
-export type ContentBlockKind = typeof ContentBlockKind.Type;
-
-export const ContentBlock = Schema.Struct({
-  id: Schema.String,
-  sequence: NonNegativeInteger,
-  kind: ContentBlockKind,
-  text: Schema.optional(Schema.String),
-  markdown: Schema.optional(Schema.String),
-  thinking: Schema.optional(Schema.String),
-  path: Schema.optional(Schema.String),
-  uri: Schema.optional(Schema.String),
-  mediaType: Schema.optional(Schema.String),
-  value: Schema.optional(Schema.Unknown),
-  metadata: Schema.optional(Schema.Unknown),
-});
-export type ContentBlock = typeof ContentBlock.Type;
-
-export const SessionEdgeKind = Schema.Literal(
-  "next",
-  "parent",
-  "tool_result_for",
-  "forked_from",
-  "subagent_of",
-  "compacted_into",
-  "artifact_of",
-);
-export type SessionEdgeKind = typeof SessionEdgeKind.Type;
-
-export const SessionEdge = Schema.Struct({
-  id: Schema.String,
-  sessionId: Schema.String,
-  machineId: Schema.String,
-  provider: Provider,
-  agentName: Schema.String,
-  projectIdentityKey: Schema.String,
-  kind: SessionEdgeKind,
-  fromEventId: Schema.optional(Schema.String),
-  toEventId: Schema.optional(Schema.String),
-  fromId: Schema.optional(Schema.String),
-  toId: Schema.optional(Schema.String),
-  rawReference: Schema.optional(Schema.Unknown),
-  metadata: Schema.optional(Schema.Unknown),
-});
-export type SessionEdge = typeof SessionEdge.Type;
-
-/** Provider-neutral identity and structural placement for a spawned agent. */
-export const AgentAssignment = Schema.Struct({
-  nickname: Schema.optional(Schema.String),
-  role: Schema.optional(Schema.String),
-  path: Schema.optional(Schema.String),
-  depth: Schema.optional(NonNegativeInteger),
-});
-export type AgentAssignment = typeof AgentAssignment.Type;
-
-export const ExecutionContextScope = Schema.Literal("session", "turn");
-export type ExecutionContextScope = typeof ExecutionContextScope.Type;
-
-/**
- * A typed provider configuration snapshot. Provider adapters select only these
- * canonical facts; arbitrary settings, instructions, and working-directory
- * blobs never cross this boundary.
- */
-export const ExecutionContextRecord = Schema.Struct({
-  id: Schema.String,
-  sessionId: Schema.String,
-  machineId: Schema.String,
-  provider: Provider,
-  agentName: Schema.String,
-  projectIdentityKey: Schema.String,
-  sequence: NonNegativeInteger,
-  scope: ExecutionContextScope,
-  timestamp: Schema.optional(Schema.String),
-  turnId: Schema.optional(Schema.String),
-  model: Schema.optional(Schema.String),
-  modelProvider: Schema.optional(Schema.String),
-  reasoningEffort: Schema.optional(Schema.String),
-  serviceTier: Schema.optional(Schema.String),
-  approvalPolicy: Schema.optional(Schema.String),
-  collaborationMode: Schema.optional(Schema.String),
-  multiAgentMode: Schema.optional(Schema.String),
-  personality: Schema.optional(Schema.String),
-  permissionProfileType: Schema.optional(Schema.String),
-});
-export type ExecutionContextRecord = typeof ExecutionContextRecord.Type;
-
-export const UsageRecord = Schema.Struct({
-  id: Schema.String,
-  sessionId: Schema.String,
-  eventId: Schema.optional(Schema.String),
-  machineId: Schema.String,
-  provider: Provider,
-  agentName: Schema.String,
-  projectIdentityKey: Schema.String,
-  timestamp: Schema.optional(Schema.String),
-  model: Schema.optional(Schema.String),
-  modelProvider: Schema.optional(Schema.String),
-  inputTokens: Schema.optional(NonNegativeInteger),
-  outputTokens: Schema.optional(NonNegativeInteger),
-  reasoningTokens: Schema.optional(NonNegativeInteger),
-  cacheCreationInputTokens: Schema.optional(NonNegativeInteger),
-  cacheReadInputTokens: Schema.optional(NonNegativeInteger),
-  totalTokens: Schema.optional(NonNegativeInteger),
-  cost: Schema.optional(NonNegativeNumber),
-  currency: Schema.optional(Schema.String),
-});
-export type UsageRecord = typeof UsageRecord.Type;
-
-export const Artifact = Schema.Struct({
-  id: Schema.String,
-  sessionId: Schema.String,
-  eventId: Schema.optional(Schema.String),
-  machineId: Schema.String,
-  provider: Provider,
-  agentName: Schema.String,
-  projectIdentityKey: Schema.String,
-  kind: Schema.String,
-  path: Schema.optional(Schema.String),
-  uri: Schema.optional(Schema.String),
-  contentHash: Schema.optional(Schema.String),
-  sourcePath: Schema.optional(Schema.String),
-  sourceRef: Schema.optional(Schema.Unknown),
-  metadata: Schema.optional(Schema.Unknown),
-});
-export type Artifact = typeof Artifact.Type;
-
-export const ProjectSignal = Schema.Struct({
-  kind: Schema.Literal(
-    "explicit",
-    "git_remote",
-    "package",
-    "workspace",
-    "path",
-  ),
-  value: Schema.String,
-  confidence: ProjectIdentityConfidence,
-});
-export type ProjectSignal = typeof ProjectSignal.Type;
-
-export const ProjectResolution = Schema.Struct({
-  projectIdentityKey: Schema.String,
-  displayName: Schema.String,
-  confidence: ProjectIdentityConfidence,
-  rawPath: Schema.optional(Schema.String),
-  normalizedPath: Schema.optional(Schema.String),
-  gitRemote: Schema.optional(Schema.String),
-  gitRemoteNormalized: Schema.optional(Schema.String),
-  packageName: Schema.optional(Schema.String),
-  signals: Schema.Array(ProjectSignal),
-});
-export type ProjectResolution = typeof ProjectResolution.Type;
-
-export const MachineIdentity = Schema.Struct({
-  machineId: Schema.String,
-  hostname: Schema.optional(Schema.String),
-  tailscaleName: Schema.optional(Schema.String),
-  platform: Schema.optional(Schema.String),
-});
-export type MachineIdentity = typeof MachineIdentity.Type;
-
-export const SourceRoot = Schema.Struct({
-  provider: Provider,
-  adapterId: Schema.String,
-  rootPath: Schema.String,
-  machineId: Schema.String,
-  discoveredAt: Schema.String,
-});
-export type SourceRoot = typeof SourceRoot.Type;
-
-export const RawReference = Schema.Struct({
-  sourcePath: Schema.String,
-  line: Schema.optional(PositiveInteger),
-  table: Schema.optional(Schema.String),
-  rowId: Schema.optional(Schema.String),
-  nativeType: Schema.optional(Schema.String),
-  /** UTF-8 bytes of the raw source row before any adapter pruning — the
-   * measurement the ingest boundary uses to name provider garbage even when
-   * machinery-key pruning shrinks what the CLI actually receives. */
-  rawBytes: Schema.optional(NonNegativeInteger),
-});
-export type RawReference = typeof RawReference.Type;
-
-export const ToolCall = Schema.Struct({
-  id: Schema.String,
-  sessionId: Schema.String,
-  eventId: Schema.String,
-  machineId: Schema.String,
-  provider: Provider,
-  agentName: Schema.String,
-  projectIdentityKey: Schema.String,
-  toolName: Schema.String,
-  status: Schema.optional(Schema.String),
-  input: Schema.optional(Schema.Unknown),
-  output: Schema.optional(Schema.Unknown),
-  startedAt: Schema.optional(Schema.String),
-  completedAt: Schema.optional(Schema.String),
-});
-export type ToolCall = typeof ToolCall.Type;
-
-export const SessionEvent = Schema.Struct({
-  id: Schema.String,
-  sessionId: Schema.String,
-  nativeEventId: Schema.optional(Schema.String),
-  sequence: NonNegativeInteger,
-  timestamp: Schema.optional(Schema.String),
-  machineId: Schema.String,
-  provider: Provider,
-  agentName: Schema.String,
-  projectIdentityKey: Schema.String,
-  role: SessionRole,
-  kind: SessionEventKind,
-  contentText: Schema.optional(Schema.String),
-  contentBlocks: Schema.Array(ContentBlock),
-  toolCallId: Schema.optional(Schema.String),
-  parentEventId: Schema.optional(Schema.String),
-  rawReference: RawReference,
-});
-export type SessionEvent = typeof SessionEvent.Type;
-
-export const NormalizedSession = Schema.Struct({
-  id: Schema.String,
-  nativeSessionId: Schema.String,
-  provider: Provider,
-  agentName: Schema.String,
-  assignment: Schema.optional(AgentAssignment),
-  machineId: Schema.String,
-  /** Readable hostname/machine the session was observed on — provenance only,
-   * NOT part of the machine/path-independent identity key. */
-  host: Schema.String,
-  /** Version of the canonical identity scheme this session was stamped under. */
-  identitySchemeVersion: Schema.Number,
-  projectIdentity: ProjectResolution,
-  nativeProjectKey: Schema.optional(Schema.String),
-  title: Schema.optional(Schema.String),
-  startedAt: Schema.optional(Schema.String),
-  updatedAt: Schema.optional(Schema.String),
-  sourceRoot: Schema.String,
-  sourcePath: Schema.String,
-  events: Schema.Array(SessionEvent),
-  toolCalls: Schema.Array(ToolCall),
-  sessionEdges: Schema.Array(SessionEdge),
-  executionContexts: Schema.Array(ExecutionContextRecord),
-  usageRecords: Schema.Array(UsageRecord),
-  artifacts: Schema.Array(Artifact),
-  eventCount: Schema.optional(NonNegativeInteger),
-  toolCallCount: Schema.optional(NonNegativeInteger),
-  contentBlockCount: Schema.optional(NonNegativeInteger),
-  sessionEdgeCount: Schema.optional(NonNegativeInteger),
-  usageRecordCount: Schema.optional(NonNegativeInteger),
-  artifactCount: Schema.optional(NonNegativeInteger),
-});
-export type NormalizedSession = typeof NormalizedSession.Type;
 
 export const AdapterDiagnostic = Schema.Struct({
   adapterId: Schema.String,

@@ -328,14 +328,14 @@ describe("Devin SQLite adapter", () => {
       {
         scope: "turn",
         sequence: 3,
-        turnId: "assistant-reasoning",
+        turnId: session.events[3]!.id,
         model: "synthetic-model",
         permissionProfileType: undefined,
       },
       {
         scope: "turn",
         sequence: 4,
-        turnId: "assistant-tools",
+        turnId: session.events[4]!.id,
         model: "synthetic-model",
         permissionProfileType: undefined,
       },

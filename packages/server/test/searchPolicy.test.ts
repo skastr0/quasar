@@ -29,6 +29,7 @@ const withStore = <A>(run: Effect.Effect<A, unknown, LocalStore>) => {
 };
 
 const reasoningSession = (text: string): MappedSession => ({
+  protocolVersion: "quasar.normalized-session/v1",
   project: { projectKey: "project-r", displayName: "Project R", rawPath: "/tmp/project-r" },
   session: {
     sessionId: "session-r",

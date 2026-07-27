@@ -63,7 +63,9 @@ type KimiEventDraft = {
     readonly sourcePath: string;
     readonly line: number;
     readonly nativeType: string;
-    readonly agentId?: string;
+    readonly metadata?: {
+      readonly agentId: string;
+    };
   };
 };
 
@@ -384,7 +386,12 @@ const buildAgentSession = (
           kind: "message",
           contentText: messageContentText(msg),
           contentSource: messageContentText(msg),
-          rawReference: { sourcePath: wirePath, line: lineNumber, nativeType: outerType, agentId },
+          rawReference: {
+            sourcePath: wirePath,
+            line: lineNumber,
+            nativeType: outerType,
+            metadata: { agentId },
+          },
         });
         break;
       }
@@ -398,7 +405,12 @@ const buildAgentSession = (
           kind: "preamble",
           contentText: messageContentText(msg),
           contentSource: messageContentText(msg),
-          rawReference: { sourcePath: wirePath, line: lineNumber, nativeType: outerType, agentId },
+          rawReference: {
+            sourcePath: wirePath,
+            line: lineNumber,
+            nativeType: outerType,
+            metadata: { agentId },
+          },
         });
         break;
       }
@@ -418,7 +430,7 @@ const buildAgentSession = (
             sourcePath: wirePath,
             line: lineNumber,
             nativeType: "content.part:text",
-            agentId,
+            metadata: { agentId },
           },
         });
         break;
@@ -439,7 +451,7 @@ const buildAgentSession = (
             sourcePath: wirePath,
             line: lineNumber,
             nativeType: "content.part:think",
-            agentId,
+            metadata: { agentId },
           },
         });
         break;
@@ -470,7 +482,7 @@ const buildAgentSession = (
             sourcePath: wirePath,
             line: lineNumber,
             nativeType: "tool.call",
-            agentId,
+            metadata: { agentId },
           },
         });
         break;
@@ -511,7 +523,7 @@ const buildAgentSession = (
               sourcePath: wirePath,
               line: lineNumber,
               nativeType: "tool.result",
-              agentId,
+              metadata: { agentId },
             },
           });
         } else {
@@ -537,7 +549,7 @@ const buildAgentSession = (
               sourcePath: wirePath,
               line: lineNumber,
               nativeType: "tool.result",
-              agentId,
+              metadata: { agentId },
             },
           });
         }
@@ -558,7 +570,7 @@ const buildAgentSession = (
             sourcePath: wirePath,
             line: lineNumber,
             nativeType: outerType,
-            agentId,
+            metadata: { agentId },
           },
         });
         break;

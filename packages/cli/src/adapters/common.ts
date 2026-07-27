@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 
 import { Option, Schema } from "effect";
+import { NORMALIZATION_VERSION } from "@skastr0/quasar-protocol";
 
 import { stableJsonHash, stableWideHash } from "../core/hash";
 import { IDENTITY_SCHEME_VERSION } from "../core/identity";
@@ -1015,6 +1016,16 @@ export const buildSession = (input: BuildSessionArgs): NormalizedSession => {
     executionContexts,
     usageRecords,
     artifacts,
+    normalizationVersion: NORMALIZATION_VERSION,
+    eventCount: events.length,
+    toolCallCount: toolCalls.length,
+    contentBlockCount: events.reduce(
+      (count, event) => count + event.contentBlocks.length,
+      0,
+    ),
+    sessionEdgeCount: sessionEdges.length,
+    usageRecordCount: usageRecords.length,
+    artifactCount: artifacts.length,
   };
 };
 

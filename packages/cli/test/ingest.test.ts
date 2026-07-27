@@ -1,4 +1,8 @@
 import type { NormalizedSession } from "../src/core/schemas";
+import {
+  NORMALIZATION_VERSION,
+  NORMALIZED_SESSION_PROTOCOL_VERSION,
+} from "@skastr0/quasar-protocol";
 import { afterEach, describe, expect, test } from "bun:test";
 
 import { adaptersByProvider } from "../src/adapters/registry";
@@ -84,6 +88,13 @@ const session = (id = "session-a"): NormalizedSession => ({
   executionContexts: [],
   usageRecords: [],
   artifacts: [],
+  normalizationVersion: NORMALIZATION_VERSION,
+  eventCount: 2,
+  toolCallCount: 1,
+  contentBlockCount: 0,
+  sessionEdgeCount: 0,
+  usageRecordCount: 0,
+  artifactCount: 0,
 });
 
 const fingerprintForSession = (item: NormalizedSession) => ({ tag: `fingerprint:${item.id}` });
@@ -495,6 +506,7 @@ describe("ingestRemote", () => {
         sessionsSeen: 0, sessionsWritten: 0, sessionsSkipped: 0, sessionsFailed: 0,
       }, options)).rejects.toThrow();
       await expect(postMappedSession(base, {
+        protocolVersion: NORMALIZED_SESSION_PROTOCOL_VERSION,
         project: { projectKey: "timeout-project", displayName: "Timeout Project" },
         session: { sessionId: "timeout-session", projectKey: "timeout-project", provider: "claude", agentName: "claude", sourcePath: "/tmp/timeout", sourceFingerprint: "timeout", host: "timeout-host", identitySchemeVersion: 1, normalizationVersion: 1, messageCount: 0, toolCallCount: 0 },
         messages: [], toolCalls: [], events: [], usageRecords: [], sessionEdges: [], artifacts: [], executionContexts: [],

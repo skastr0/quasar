@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import {
+  decodeMappedSessionSync,
+  decodeNormalizedSessionSync,
+} from "@skastr0/quasar-protocol";
 import { Schema } from "effect";
 
 import {
@@ -13,7 +17,6 @@ import { AmpExportSchema, AmpThreadListEntrySchema } from "../src/adapters/amp-s
 import { sessionIdFor } from "../src/adapters/common";
 import { adaptersByProvider, stableAdapters } from "../src/adapters/registry";
 import { AmpSessionId } from "../src/core/identity";
-import { NormalizedSession } from "../src/core/schemas";
 import { mapSession } from "../src/map";
 
 // ---------------------------------------------------------------------------
@@ -393,8 +396,7 @@ describe("amp content mapping", () => {
     expect(session.sourcePath).toBe(`https://ampcode.com/threads/${THREAD_A}`);
     expect(session.nativeSessionId).toBe(THREAD_A);
 
-    const decoded = Schema.decodeUnknownEither(NormalizedSession)(session);
-    expect(decoded._tag).toBe("Right");
+    expect(() => decodeNormalizedSessionSync(session)).not.toThrow();
 
     const reasoning = session.events.filter((event) => event.kind === "reasoning");
     expect(reasoning).toHaveLength(1);
@@ -448,6 +450,7 @@ describe("amp content mapping", () => {
     if (sessionItem?.type !== "session") return;
     const fingerprint = JSON.stringify(sessionItem.fingerprint);
     const mapped = mapSession(sessionItem.session, fingerprint);
+    expect(() => decodeMappedSessionSync(mapped)).not.toThrow();
     expect(mapped.session.sessionId).toBe(sessionItem.session.id);
     expect(mapped.session.sourceFingerprint).toBe(fingerprint);
     expect(mapped.messages.length).toBeGreaterThan(0);

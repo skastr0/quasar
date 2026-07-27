@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
+  NORMALIZED_SESSION_PROTOCOL_VERSION,
   QUERY_PROTOCOL_VERSION,
   QuerySpec,
   SESSION_ENRICHMENT_VERSION,
+  decodeMappedSessionSync,
+  decodeNormalizedSessionSync,
   decodeQueryResponseSync,
   decodeQuerySpecSync,
   decodeSessionEnrichmentSync,
@@ -28,6 +31,107 @@ const searchQuery = {
   },
   page: { limit: 25 },
 } as const;
+
+describe("NormalizedSession v1", () => {
+  const sourceExample = (): any =>
+    structuredClone(protocolContracts.normalizedSession.examples[0].input);
+  const mappedExample = (): any =>
+    structuredClone(protocolContracts.mappedSession.examples[0].input);
+
+  test("publishes and decodes source and ingest schemas", () => {
+    expect(() => decodeNormalizedSessionSync(sourceExample())).not.toThrow();
+    expect(() => decodeMappedSessionSync(mappedExample())).not.toThrow();
+    expect(
+      JSON.stringify(protocolContracts.normalizedSession.jsonSchema),
+    ).toContain('"additionalProperties":false');
+    expect(
+      JSON.stringify(protocolContracts.mappedSession.jsonSchema),
+    ).toContain('"additionalProperties":false');
+  });
+
+  test("rejects invalid roles, kinds, duplicate ids, and duplicate sequences", () => {
+    const invalidRole = sourceExample();
+    invalidRole.events[0] = { ...invalidRole.events[0], role: "reasoning" } as never;
+    expect(() => decodeNormalizedSessionSync(invalidRole)).toThrow();
+
+    const invalidKind = sourceExample();
+    invalidKind.events[0] = { ...invalidKind.events[0], kind: "chat" } as never;
+    expect(() => decodeNormalizedSessionSync(invalidKind)).toThrow();
+
+    const duplicateId = sourceExample();
+    duplicateId.events.push({
+      ...duplicateId.events[0],
+      sequence: 1,
+    });
+    duplicateId.eventCount = 2;
+    expect(() => decodeNormalizedSessionSync(duplicateId)).toThrow();
+
+    const duplicateSequence = sourceExample();
+    duplicateSequence.events.push({
+      ...duplicateSequence.events[0],
+      id: "codex:example:event:1",
+    });
+    duplicateSequence.eventCount = 2;
+    expect(() => decodeNormalizedSessionSync(duplicateSequence)).toThrow();
+  });
+
+  test("requires explicit normalization and source-fact counts", () => {
+    const missingCount = sourceExample();
+    delete missingCount.artifactCount;
+    expect(() => decodeNormalizedSessionSync(missingCount)).toThrow();
+
+    const wrongCount = sourceExample();
+    wrongCount.eventCount = 2;
+    expect(() => decodeNormalizedSessionSync(wrongCount)).toThrow();
+
+    const missingNormalizationVersion = sourceExample();
+    delete missingNormalizationVersion.normalizationVersion;
+    expect(
+      () => decodeNormalizedSessionSync(missingNormalizationVersion),
+    ).toThrow();
+  });
+
+  test("rejects broken references and cross-session rows before persistence", () => {
+    const brokenToolReference = sourceExample();
+    brokenToolReference.events[0] = {
+      ...brokenToolReference.events[0],
+      toolCallId: "missing-tool-call",
+    };
+    expect(() => decodeNormalizedSessionSync(brokenToolReference)).toThrow();
+
+    const brokenUsageReference = sourceExample();
+    brokenUsageReference.usageRecords.push({
+      id: "usage-missing-event",
+      sessionId: "codex:example",
+      eventId: "missing-event",
+      machineId: "machine-example",
+      provider: "codex",
+      agentName: "codex",
+      projectIdentityKey: "project-example",
+      inputTokens: 1,
+    });
+    brokenUsageReference.usageRecordCount = 1;
+    expect(() => decodeNormalizedSessionSync(brokenUsageReference)).toThrow();
+
+    const crossSession = mappedExample();
+    crossSession.events[0] = {
+      ...crossSession.events[0],
+      sessionId: "codex:other",
+    };
+    expect(() => decodeMappedSessionSync(crossSession)).toThrow();
+  });
+
+  test("fails closed on protocol version skew", () => {
+    const skewed = {
+      ...mappedExample(),
+      protocolVersion: "quasar.normalized-session/v0",
+    };
+    expect(() => decodeMappedSessionSync(skewed)).toThrow();
+    expect(mappedExample().protocolVersion).toBe(
+      NORMALIZED_SESSION_PROTOCOL_VERSION,
+    );
+  });
+});
 
 describe("QuerySpec v1", () => {
   test("accepts every registered query example", () => {
@@ -335,11 +439,13 @@ describe("SessionEnrichment v1", () => {
 
   test("is discoverable from the same registry as query contracts", () => {
     expect(protocolDiscovery.map((entry) => entry.schemaId)).toEqual([
+      NORMALIZED_SESSION_PROTOCOL_VERSION,
+      "quasar.normalized-session-ingest/v1",
       QUERY_PROTOCOL_VERSION,
       "quasar.query-response/v1",
       SESSION_ENRICHMENT_VERSION,
     ]);
-    expect(protocolExamples.length).toBe(7);
+    expect(protocolExamples.length).toBe(9);
     expect(protocolExamples.every((example) => example.schemaId.length > 0)).toBe(true);
   });
 });

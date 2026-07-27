@@ -62,6 +62,13 @@ const session = (id: string, sourcePath: string): NormalizedSession => ({
   executionContexts: [],
   usageRecords: [],
   artifacts: [],
+  normalizationVersion: NORMALIZATION_VERSION,
+  eventCount: 1,
+  toolCallCount: 0,
+  contentBlockCount: 0,
+  sessionEdgeCount: 0,
+  usageRecordCount: 0,
+  artifactCount: 0,
 });
 
 /**
