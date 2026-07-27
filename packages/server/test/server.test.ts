@@ -408,6 +408,56 @@ describe("HTTP server resources", () => {
     }
   });
 
+  test("GET messages continues an unchanged scan after server restart", async () => {
+    const dir = tempDir();
+    const sqlite = join(dir, "quasar.sqlite");
+    await seed(sqlite, [mappedSession()]);
+
+    const firstServer = startServer(sqlite);
+    let continuation: URLSearchParams;
+    try {
+      await waitFor(`${firstServer.base}/health`);
+      const firstResponse = await fetch(
+        `${firstServer.base}/messages?limit=1`,
+      );
+      expect(firstResponse.status).toBe(200);
+      const first = await firstResponse.json();
+      continuation = new URLSearchParams({
+        limit: "1",
+        afterSessionId: first.data.page.next.sessionId,
+        afterSequence: String(first.data.page.next.sequence),
+        snapshot: first.data.page.snapshot,
+      });
+    } finally {
+      firstServer.proc.kill();
+      await firstServer.proc.exited;
+    }
+
+    const secondServer = startServer(sqlite);
+    try {
+      await waitFor(`${secondServer.base}/health`);
+      const continued = await fetch(
+        `${secondServer.base}/messages?${continuation!}`,
+      );
+      expect(continued.status).toBe(200);
+      expect(await continued.json()).toMatchObject({
+        data: {
+          rows: [{
+            sessionId: "codex:session-http",
+            sequence: 1,
+          }],
+          page: {
+            snapshot: continuation!.get("snapshot"),
+            next: null,
+          },
+        },
+      });
+    } finally {
+      secondServer.proc.kill();
+      await secondServer.proc.exited;
+    }
+  });
+
   test("ingest rejects malformed and invalid provider input without writing rows", async () => {
     const dir = tempDir();
     const { proc, base } = startServer(join(dir, "quasar.sqlite"), "test-ingest-token");

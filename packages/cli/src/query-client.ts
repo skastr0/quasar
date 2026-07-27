@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
@@ -395,7 +396,10 @@ const compareMessageKeys = (
   left: MessageQueryCursorPayload["after"],
   right: MessageQueryCursorPayload["after"],
 ): number =>
-  left.sessionId.localeCompare(right.sessionId)
+  Buffer.compare(
+    Buffer.from(left.sessionId, "utf8"),
+    Buffer.from(right.sessionId, "utf8"),
+  )
   || left.sequence - right.sequence;
 
 const messageResourcePage = (

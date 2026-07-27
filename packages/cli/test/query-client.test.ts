@@ -136,6 +136,42 @@ describe("query resource transport", () => {
     expect(second.page.nextCursor).toBeUndefined();
   });
 
+  test("validates message keys with SQLite binary string ordering", () => {
+    const response = queryResponseFromResource({
+      ok: true,
+      command: "messages",
+      data: {
+        rows: [
+          {
+            messageId: "message-ascii",
+            sessionId: "Z",
+            sequence: 0,
+            role: "user",
+            text: "ascii",
+            timestamp: null,
+          },
+          {
+            messageId: "message-unicode",
+            sessionId: "Å",
+            sequence: 0,
+            role: "user",
+            text: "unicode",
+            timestamp: null,
+          },
+        ],
+        page: {
+          limit: 2,
+          snapshot: "corpus:7",
+          next: { sessionId: "Å", sequence: 0 },
+        },
+      },
+    }, messageScanQuery);
+
+    expect(response.items.map((item) =>
+      (item as { readonly sessionId?: string }).sessionId)).toEqual(["Z", "Å"]);
+    expect(typeof response.page.nextCursor).toBe("string");
+  });
+
   test("rejects message cursor drift and inconsistent server snapshots", () => {
     const first = queryResponseFromResource({
       ok: true,
