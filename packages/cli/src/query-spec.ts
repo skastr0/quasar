@@ -13,6 +13,12 @@ export interface CommonQueryFilters {
   readonly agentRole?: string;
   readonly model?: string;
   readonly modelProvider?: string;
+  readonly messageAfter?: string;
+  readonly messageBefore?: string;
+  readonly sessionStartedAfter?: string;
+  readonly sessionStartedBefore?: string;
+  readonly rootsOnly?: boolean;
+  readonly lineageRootSessionId?: string;
   readonly toolCallId?: string;
   readonly toolName?: string;
 }
@@ -105,6 +111,26 @@ const sessionFilters = (filters: CommonQueryFilters) => compact({
   modelProvider: filters.modelProvider,
 });
 
+const messageFilters = (
+  filters: CommonQueryFilters,
+  sessionId: string | undefined,
+) => compact({
+  sessionId: sessionId ?? filters.sessionId,
+  projectKey: filters.projectKey,
+  providers: filters.providers,
+  role: filters.role,
+  agentName: filters.agentName,
+  agentRole: filters.agentRole,
+  model: filters.model,
+  modelProvider: filters.modelProvider,
+  messageAfter: filters.messageAfter,
+  messageBefore: filters.messageBefore,
+  sessionStartedAfter: filters.sessionStartedAfter,
+  sessionStartedBefore: filters.sessionStartedBefore,
+  rootsOnly: filters.rootsOnly,
+  lineageRootSessionId: filters.lineageRootSessionId,
+});
+
 const toolCallFilters = (filters: CommonQueryFilters) => compact({
   projectKey: filters.projectKey,
   providers: filters.providers,
@@ -144,18 +170,13 @@ export const sessionsQuery = (input: {
 });
 
 export const messagesQuery = (input: {
-  readonly sessionId: string;
+  readonly sessionId?: string;
   readonly filters?: CommonQueryFilters;
   readonly projection?: QueryProjectionOptions;
-}): QuerySpec => decodeQueryInput({
+} = {}): QuerySpec => decodeQueryInput({
   protocolVersion: QUERY_PROTOCOL_VERSION,
   kind: "messages",
-  filters: compact({
-    sessionId: input.sessionId,
-    role: input.filters?.role,
-    model: input.filters?.model,
-    modelProvider: input.filters?.modelProvider,
-  }),
+  filters: messageFilters(input.filters ?? {}, input.sessionId),
   projection: projection("messages", input.projection ?? {}),
   page: page(input.projection ?? {}, 100),
 });

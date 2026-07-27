@@ -676,6 +676,13 @@ describe("QuerySpec v1", () => {
       ...searchQuery,
       projection: { ...searchQuery.projection, surprise: true },
     })).toThrow();
+    expect(() => decodeQuerySpecSync({
+      protocolVersion: QUERY_PROTOCOL_VERSION,
+      kind: "messages",
+      filters: { surprise: true },
+      projection: { detail: "summary", fields: ["text"] },
+      page: { limit: 10 },
+    })).toThrow();
   });
 
   test("rejects invalid kind-specific combinations", () => {
@@ -683,7 +690,7 @@ describe("QuerySpec v1", () => {
     expect(() => decodeQuerySpecSync({
       protocolVersion: QUERY_PROTOCOL_VERSION,
       kind: "messages",
-      filters: { role: "assistant" },
+      filters: { sessionId: "   " },
       projection: { detail: "summary", fields: ["text"] },
       page: { limit: 10 },
     })).toThrow();
@@ -699,11 +706,113 @@ describe("QuerySpec v1", () => {
       kind: "messages",
       filters: {
         sessionId: "codex:example-session",
-        agentRole: "codebase-archeologist",
+        toolName: "exec_command",
       },
       projection: { detail: "summary", fields: ["text"] },
       page: { limit: 10 },
     })).toThrow();
+  });
+
+  test("accepts unfiltered corpus scans and every optional message filter", () => {
+    const projection = {
+      detail: "detail",
+      fields: [
+        "messageId",
+        "sessionId",
+        "role",
+        "text",
+        "projectKey",
+        "provider",
+        "agentName",
+        "agentRole",
+        "model",
+        "modelProvider",
+      ],
+    } as const;
+    const unfiltered = decodeQuerySpecSync({
+      protocolVersion: QUERY_PROTOCOL_VERSION,
+      kind: "messages",
+      projection,
+      page: { limit: 100 },
+    });
+    expect(unfiltered.kind).toBe("messages");
+    if (unfiltered.kind === "messages") {
+      expect(unfiltered.filters).toBeUndefined();
+    }
+
+    const filtered = decodeQuerySpecSync({
+      protocolVersion: QUERY_PROTOCOL_VERSION,
+      kind: "messages",
+      filters: {
+        sessionId: "codex:child-session",
+        projectKey: "quasar",
+        providers: ["codex", "claude"],
+        role: "user",
+        agentName: "codex",
+        agentRole: "builder",
+        model: "gpt-5.6-sol",
+        modelProvider: "openai",
+        messageAfter: "2026-07-01T00:00:00.000Z",
+        messageBefore: "2026-08-01T00:00:00.000Z",
+        sessionStartedAfter: "2026-06-01T00:00:00.000Z",
+        sessionStartedBefore: "2026-08-01T00:00:00.000Z",
+        rootsOnly: false,
+        lineageRootSessionId: "codex:root-session",
+      },
+      projection,
+      page: { limit: 100 },
+    });
+    expect(filtered.kind).toBe("messages");
+    if (filtered.kind === "messages") {
+      expect(JSON.parse(JSON.stringify(filtered.filters))).toEqual({
+        sessionId: "codex:child-session",
+        projectKey: "quasar",
+        providers: ["codex", "claude"],
+        role: "user",
+        agentName: "codex",
+        agentRole: "builder",
+        model: "gpt-5.6-sol",
+        modelProvider: "openai",
+        messageAfter: "2026-07-01T00:00:00.000Z",
+        messageBefore: "2026-08-01T00:00:00.000Z",
+        sessionStartedAfter: "2026-06-01T00:00:00.000Z",
+        sessionStartedBefore: "2026-08-01T00:00:00.000Z",
+        rootsOnly: false,
+        lineageRootSessionId: "codex:root-session",
+      });
+    }
+  });
+
+  test("rejects inverted message and session time ranges", () => {
+    const base = {
+      protocolVersion: QUERY_PROTOCOL_VERSION,
+      kind: "messages",
+      projection: { detail: "summary", fields: ["messageId", "text"] },
+      page: { limit: 10 },
+    } as const;
+    expect(() => decodeQuerySpecSync({
+      ...base,
+      filters: {
+        messageAfter: "2026-08-01T00:00:00.000Z",
+        messageBefore: "2026-07-01T00:00:00.000Z",
+      },
+    })).toThrow();
+    expect(() => decodeQuerySpecSync({
+      ...base,
+      filters: {
+        sessionStartedAfter: "2026-08-01T00:00:00.000Z",
+        sessionStartedBefore: "2026-07-01T00:00:00.000Z",
+      },
+    })).toThrow();
+    expect(() => decodeQuerySpecSync({
+      ...base,
+      filters: {
+        messageAfter: "2026-07-01T00:00:00.000Z",
+        messageBefore: "2026-07-01T00:00:00.000Z",
+        sessionStartedAfter: "2026-07-01T00:00:00.000Z",
+        sessionStartedBefore: "2026-07-01T00:00:00.000Z",
+      },
+    })).not.toThrow();
   });
 
   test("keeps assignment role distinct from message role", () => {
@@ -852,6 +961,24 @@ describe("QuerySpec v1", () => {
       ...searchQuery,
       page: { limit: 10, cursor: "   " },
     })).toThrow();
+  });
+
+  test("keeps request and response cursors opaque", () => {
+    const cursor = "snapshot=v7/messages:eyJzZXEiOjQyfQ==?not-client-decoded";
+    const request = decodeQuerySpecSync({
+      ...searchQuery,
+      page: { limit: 10, cursor },
+    });
+    expect(String(request.page.cursor)).toBe(cursor);
+
+    const response = decodeQueryResponseSync({
+      ...protocolContracts.response.examples[0].input,
+      page: {
+        ...protocolContracts.response.examples[0].input.page,
+        nextCursor: cursor,
+      },
+    });
+    expect(String(response.page.nextCursor)).toBe(cursor);
   });
 
   test("publishes a closed JSON Schema", () => {
