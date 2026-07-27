@@ -1,4 +1,5 @@
 import { JSONSchema, Schema } from "effect";
+import harborAtifJsonSchema from "../schema/harbor-atif-v1.7.schema.json";
 
 import {
   MappedSession,
@@ -10,6 +11,14 @@ import {
   normalizedSessionExamples,
 } from "./normalized-session";
 import {
+  AtifTrajectory,
+  AtifTrajectoryExport,
+  HARBOR_ATIF_SCHEMA_ID,
+  QUASAR_ATIF_EXPORT_VERSION,
+  atifTrajectoryExamples,
+  harborAtifExamples,
+} from "./atif";
+import {
   LettaTrajectoryExport,
   QUASAR_TRAJECTORY_VERSION,
   QuasarTrajectory,
@@ -19,6 +28,7 @@ import {
 
 export * from "./normalized-session";
 export * from "./trajectory";
+export * from "./atif";
 
 export const QUERY_PROTOCOL_VERSION = "quasar.query/v1" as const;
 export const SESSION_ENRICHMENT_VERSION = "quasar.session-enrichment/v1" as const;
@@ -738,9 +748,14 @@ const defineContract = <S extends Schema.Schema.All, const Examples extends Read
   readonly description: string;
   readonly schema: S;
   readonly examples: Examples;
+  readonly jsonSchema?: unknown;
 }) => ({
   ...definition,
-  jsonSchema: JSONSchema.make(Schema.asSchema(definition.schema), { target: "jsonSchema7" }),
+  jsonSchema: definition.jsonSchema
+    ?? JSONSchema.make(
+      Schema.asSchema(definition.schema),
+      { target: "jsonSchema7" },
+    ),
 });
 
 export const protocolContracts = {
@@ -775,6 +790,23 @@ export const protocolContracts = {
       "Strict Letta trajectory-v1 export with explicit compatibility-loss reporting.",
     schema: LettaTrajectoryExport,
     examples: lettaTrajectoryExamples,
+  }),
+  harborAtif: defineContract({
+    schemaId: HARBOR_ATIF_SCHEMA_ID,
+    title: "Harbor ATIF v1.7",
+    description:
+      "Official Harbor ATIF-v1.7 Pydantic schema pinned to one upstream commit.",
+    schema: AtifTrajectory,
+    examples: harborAtifExamples,
+    jsonSchema: harborAtifJsonSchema,
+  }),
+  atifTrajectory: defineContract({
+    schemaId: QUASAR_ATIF_EXPORT_VERSION,
+    title: "Quasar Harbor ATIF export v1",
+    description:
+      "Strict ATIF-v1.7 output plus fact-level compatibility and validation reporting.",
+    schema: AtifTrajectoryExport,
+    examples: atifTrajectoryExamples,
   }),
   query: defineContract({
     schemaId: QUERY_PROTOCOL_VERSION,

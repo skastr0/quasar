@@ -254,6 +254,12 @@ export interface LocalStoreService {
     MappedSession | undefined,
     SqliteStoreError | StoredSessionContractError
   >;
+  readonly readMappedSessionDescendants: (
+    sessionId: string,
+  ) => Effect.Effect<
+    readonly MappedSession[],
+    SqliteStoreError | StoredSessionContractError
+  >;
   readonly getMessage: (options: {
     readonly sessionId: string;
     readonly seq: number;
@@ -1663,6 +1669,21 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
             message_count AS messageCount, tool_call_count AS toolCallCount
           FROM sessions WHERE session_id = ?
         `);
+        const selectDescendantSessionIds = db.prepare(`
+          WITH RECURSIVE descendants(session_id) AS (
+            SELECT session_id
+            FROM sessions
+            WHERE parent_session_id = ?
+            UNION
+            SELECT child.session_id
+            FROM sessions AS child
+            JOIN descendants AS parent
+              ON child.parent_session_id = parent.session_id
+          )
+          SELECT session_id AS sessionId
+          FROM descendants
+          ORDER BY session_id ASC
+        `);
         const countMessagesBySession = db.prepare("SELECT COUNT(*) AS count FROM messages WHERE session_id = ?");
         const countToolCallsBySession = db.prepare("SELECT COUNT(*) AS count FROM tool_calls WHERE session_id = ?");
         const countEventsBySession = db.prepare("SELECT COUNT(*) AS count FROM session_events WHERE session_id = ?");
@@ -1915,6 +1936,48 @@ export const makeLocalStoreLayer = (path = sqlitePath()): Layer.Layer<LocalStore
                         cause,
                       }),
                   })
+              ),
+            ),
+          readMappedSessionDescendants: (sessionId) =>
+            trySqlite(
+              "readMappedSessionDescendants",
+              () =>
+                (selectDescendantSessionIds.all(sessionId) as Array<{
+                  readonly sessionId: string;
+                }>).map(({ sessionId: descendantId }) => ({
+                  sessionId: descendantId,
+                  source: readMappedSessionSource(descendantId),
+                })),
+            ).pipe(
+              Effect.flatMap((descendants) =>
+                Effect.try({
+                  try: () =>
+                    descendants.map(({ sessionId: descendantId, source }) => {
+                      if (source === undefined) {
+                        throw new Error(
+                          `descendant session disappeared: ${descendantId}`,
+                        );
+                      }
+                      try {
+                        return decodeMappedSessionSync(source);
+                      } catch (cause) {
+                        throw new StoredSessionContractError({
+                          sessionId: descendantId,
+                          message:
+                            `stored source facts fail ${NORMALIZED_SESSION_PROTOCOL_VERSION}`,
+                          cause,
+                        });
+                      }
+                    }),
+                  catch: (cause) =>
+                    cause instanceof StoredSessionContractError
+                      ? cause
+                      : new SqliteStoreError({
+                        operation: "readMappedSessionDescendants",
+                        message: "failed to decode stored descendant session",
+                        cause,
+                      }),
+                })
               ),
             ),
           hasSessionFingerprint: (sessionId, sourceFingerprint, normalizationVersion) =>

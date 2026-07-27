@@ -306,6 +306,8 @@ describe("CLI client/operator boundary", () => {
     const ingestExamples = await runCli(["examples", "mappedSession"]);
     const trajectorySchema = await runCli(["schema", "trajectory"]);
     const lettaExamples = await runCli(["examples", "letta-trajectory"]);
+    const harborAtifSchema = await runCli(["schema", "harbor-atif"]);
+    const atifExamples = await runCli(["examples", "atif-trajectory"]);
 
     expect(schema.exitCode).toBe(0);
     expect(schema.json.command).toBe("schema");
@@ -334,6 +336,22 @@ describe("CLI client/operator boundary", () => {
         name: "Letta-compatible trajectory export",
       }),
     ]);
+    expect(harborAtifSchema.json.data).toEqual(
+      expect.objectContaining({
+        schemaId: expect.stringContaining("#ATIF-v1.7"),
+        jsonSchema: expect.objectContaining({
+          "x-harbor-source": expect.objectContaining({
+            commit: "7db020ba5a5ceee918351dd8fc374d4d60bad442",
+          }),
+        }),
+      }),
+    );
+    expect(atifExamples.json.data).toEqual([
+      expect.objectContaining({
+        schemaId: "quasar.trajectory.atif-export/v1",
+        name: "Harbor ATIF-v1.7 export with compatibility ledger",
+      }),
+    ]);
   }, 15_000);
 
   test("trajectory forwards explicit projection choices and rejects invalid byte limits locally", async () => {
@@ -358,7 +376,7 @@ describe("CLI client/operator boundary", () => {
         "--session",
         "codex:trajectory-fixture",
         "--format",
-        "letta",
+        "atif",
         "--exclude-reasoning",
         "--exclude-tool-results",
         "--tool-result-max-bytes",
@@ -369,7 +387,7 @@ describe("CLI client/operator boundary", () => {
       expect(requested[0]!.pathname).toBe("/trajectory");
       expect(Object.fromEntries(requested[0]!.searchParams)).toEqual({
         sessionId: "codex:trajectory-fixture",
-        format: "letta",
+        format: "atif",
         includeReasoning: "false",
         includeToolResults: "false",
         toolResultMaxBytes: "0",

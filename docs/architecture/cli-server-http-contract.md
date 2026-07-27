@@ -32,7 +32,7 @@ server never imports CLI or provider-parser modules (enforced by
 | POST   | `/ingest/session`     | Write one normalized `MappedSession`.                                   |
 | GET    | `/projects`           | List project identities.                                                |
 | GET    | `/session-detail`     | Read bounded rich session sections, including raw normalized events.    |
-| GET    | `/trajectory`         | Project a complete stored session into Quasar or Letta trajectory form. |
+| GET    | `/trajectory`         | Project a complete stored session into Quasar, Letta, or Harbor ATIF trajectory form. |
 | GET    | `/sessions`           | List source-rich sessions with scoped filters and bounded pagination.   |
 | GET    | `/messages`           | Read one session's messages in sequence order with bounded pagination.  |
 | GET    | `/tool-calls`         | List body-free tool-call summaries with scoped filters.                 |
@@ -169,7 +169,7 @@ tool-call read.
 
 `GET /trajectory` requires `sessionId` and accepts:
 
-- `format=quasar|letta` (default `quasar`);
+- `format=quasar|letta|atif` (default `quasar`);
 - `includeReasoning=true|false|1|0` (default `true`);
 - `includeToolResults=true|false|1|0` (default `true`);
 - optional non-negative `toolResultMaxBytes`.
@@ -198,6 +198,15 @@ compatibility report. Quasar splits mixed assistant text and tool calls only at
 this export boundary because Letta requires assistant content to be `null` when
 `tool_calls` are present. Missing timestamps and Quasar-only provenance are
 reported, never fabricated.
+
+`format=atif` returns `quasar.trajectory.atif-export/v1`: a Harbor
+ATIF-v1.7 trajectory plus a fact-level compatibility ledger. The schema is
+pinned to Harbor commit `7db020ba5a5ceee918351dd8fc374d4d60bad442`.
+The server loads every stored descendant selected by `parent_session_id` and
+embeds the resulting subagent tree in one document. Quasar-only source
+identity, relationships, execution contexts, artifacts, and non-core usage
+remain under ATIF `extra` fields. Missing metrics are absent rather than
+zero-filled or inferred.
 
 `quasar.query/v1`, defined and JSON-Schema-exported by `packages/protocol`, is a
 **local CLI composition input**, not an HTTP endpoint. Its discriminated kinds

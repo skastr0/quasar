@@ -4,6 +4,7 @@ import {
   NORMALIZED_SESSION_PROTOCOL_VERSION,
   decodeMappedSessionSync,
   projectQuasarTrajectory,
+  toAtifTrajectory,
   toLettaTrajectory,
 } from "@skastr0/quasar-protocol";
 import { Effect, Layer, Schema } from "effect";
@@ -345,8 +346,8 @@ const trajectory = Effect.gen(function* () {
     return badRequest("trajectory", "sessionId is required");
   }
   const format = params.get("format") ?? "quasar";
-  if (format !== "quasar" && format !== "letta") {
-    return badRequest("trajectory", "format must be quasar or letta");
+  if (format !== "quasar" && format !== "letta" && format !== "atif") {
+    return badRequest("trajectory", "format must be quasar, letta, or atif");
   }
   const includeReasoning = strictBooleanParam(
     params,
@@ -402,12 +403,40 @@ const trajectory = Effect.gen(function* () {
   if (sourceResult.right === undefined) {
     return notFound("trajectory", `session not found: ${sessionId}`);
   }
+  const subagentSessions = format === "atif"
+    ? yield* store.readMappedSessionDescendants(sessionId).pipe(Effect.either)
+    : undefined;
+  if (subagentSessions?._tag === "Left") {
+    if (subagentSessions.left instanceof StoredSessionContractError) {
+      return storedTrajectorySourceInvalid(
+        subagentSessions.left.sessionId,
+        subagentSessions.left.message,
+      );
+    }
+    return internalError(
+      "trajectory",
+      "stored subagent session read failed",
+    );
+  }
   try {
-    const projected = projectQuasarTrajectory(sourceResult.right, {
+    const projection = {
       includeReasoning: includeReasoning.value,
       includeToolResults: includeToolResults.value,
       ...(toolResultMaxBytes !== undefined ? { toolResultMaxBytes } : {}),
-    });
+    };
+    if (format === "atif") {
+      return json(ok(
+        "trajectory",
+        toAtifTrajectory(sourceResult.right, {
+          ...projection,
+          subagentSessions: subagentSessions?.right ?? [],
+        }),
+      ));
+    }
+    const projected = projectQuasarTrajectory(
+      sourceResult.right,
+      projection,
+    );
     return json(ok(
       "trajectory",
       format === "letta" ? toLettaTrajectory(projected) : projected,

@@ -440,6 +440,9 @@ const contractName = (name: string): ProtocolContractName | undefined => {
     "normalized-session": "normalizedSession",
     "mapped-session": "mappedSession",
     "letta-trajectory": "lettaTrajectory",
+    "harbor-atif": "harborAtif",
+    atif: "atifTrajectory",
+    "atif-trajectory": "atifTrajectory",
     "session-enrichment": "sessionEnrichment",
   } as const)[name] ?? name;
   if (alias in protocolContracts) return alias as ProtocolContractName;
@@ -457,6 +460,8 @@ export const protocolContract = (name?: string) => {
         "mapped-session",
         "trajectory",
         "letta-trajectory",
+        "harbor-atif",
+        "atif-trajectory",
         "query",
         "response",
         "session-enrichment",

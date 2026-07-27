@@ -467,7 +467,7 @@ const INGEST_RUN_STATUSES = ["running", "completed", "failed"] as const;
 const PROVIDERS = Provider.literals;
 const INGEST_PROVIDERS = ["all", ...PROVIDERS] as const;
 const QUERY_ROLES = ["user", "assistant", "reasoning"] as const;
-const TRAJECTORY_FORMATS = ["quasar", "letta"] as const;
+const TRAJECTORY_FORMATS = ["quasar", "letta", "atif"] as const;
 
 const providersArg = (name: string): readonly string[] | undefined => {
   const providers = listArg("--provider", "--providers");
@@ -899,12 +899,12 @@ if (missingValueOption !== undefined) {
       "projects [--limit n] [--offset n]",
       "sessions [--provider name[,name]] [--project key] [--agent name] [--agent-role role] [--model slug] [--model-provider name] [--fields a,b] [--detail] [--cursor token] [--limit n]",
       "session --id id [--message-limit n] [--tool-call-limit n] [--event-limit n] [--usage-limit n] [--edge-limit n] [--artifact-limit n] [--context-limit n]",
-      "trajectory --session id [--format quasar|letta] [--exclude-reasoning] [--exclude-tool-results] [--tool-result-max-bytes n]",
+      "trajectory --session id [--format quasar|letta|atif] [--exclude-reasoning] [--exclude-tool-results] [--tool-result-max-bytes n]",
       "messages --session id [--role user|assistant|reasoning] [--model slug] [--model-provider name] [--fields a,b] [--detail] [--cursor token] [--limit n]",
       "tool-calls [--session id] [--project key] [--provider name[,name]] [--tool name] [--agent name] [--agent-role role] [--model slug] [--model-provider name] [--fields a,b] [--detail] [--cursor token] [--limit n]",
       "tool-call --id id [--fields a,b] (full input/output detail)",
       "query <inline-json|@file|-> [--server url]",
-      "schema [normalized-session|mapped-session|trajectory|letta-trajectory|query|response|session-enrichment] (local; no server required)",
+      "schema [normalized-session|mapped-session|trajectory|letta-trajectory|harbor-atif|atif-trajectory|query|response|session-enrichment] (local; no server required)",
       "examples [schema-id|example-name] (local; no server required)",
       "ingest-runs [--status running|completed|failed] [--limit n]",
       "replay-embedding-cache [--limit n] [--server url]",

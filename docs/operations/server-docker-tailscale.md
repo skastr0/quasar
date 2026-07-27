@@ -178,7 +178,7 @@ serving surface is read/search only:
 | Project list | `projects` | `GET /projects` | `limit`, `offset` |
 | Session list | `sessions` | `GET /sessions` | project, providers, session, agent, assignment role, model/provider; bounded page |
 | Session read | `session --id <id>` | `GET /session-detail` | bounded message, tool-call, event, usage, edge, artifact, and execution-context sections |
-| Agent trajectory | `trajectory --session <id>` | `GET /trajectory` | Quasar or Letta format; reasoning/results selection; explicit tool-result truncation |
+| Agent trajectory | `trajectory --session <id>` | `GET /trajectory` | Quasar, Letta, or Harbor ATIF-v1.7; reasoning/results selection; explicit tool-result truncation |
 | Message list | `messages --session-id <id>` | `GET /messages` | role/model filters; bounded page |
 | Search | `search --query <text> --mode lexical\|semantic\|fusion` | `GET /search/{mode}` | project, providers, session, role, agent, assignment role, model/provider; bounded excerpts |
 | Tool-call list | `tool-calls` | `GET /tool-calls` | session, project, providers, tool, agent, assignment role, model/provider; body-free summaries |
