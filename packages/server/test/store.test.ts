@@ -909,10 +909,12 @@ describe("LocalStore", () => {
     }
   });
 
-  test("removes legacy zero-event session shells and their projections once", async () => {
+  test("removes proven normalized empty shells while preserving pre-source-fact sessions", async () => {
     const path = sqlitePath();
     const valid = "codex:valid-session";
     const shell = "hermes:empty-shell";
+    const legacy = "opencode:legacy-session";
+    const unclassified = "kimi:unclassified-session";
     const project = "project-migration";
 
     await withStore(path, (store) =>
@@ -932,10 +934,19 @@ describe("LocalStore", () => {
           session_id, project_key, provider, agent_name, source_path,
           source_fingerprint, host, identity_scheme_version,
           normalization_version, message_count, tool_call_count
-        ) VALUES (
-          '${shell}', '${project}', 'hermes', 'hermes',
-          '/history/hermes-empty.json', 'legacy-empty', 'host-a', 1, 11, 1, 1
-        );
+        ) VALUES
+          (
+            '${shell}', '${project}', 'hermes', 'hermes',
+            '/history/hermes-empty.json', 'legacy-empty', 'host-a', 1, 11, 0, 0
+          ),
+          (
+            '${legacy}', '${project}', 'opencode', 'opencode',
+            '/history/opencode-legacy.json', 'legacy-v2', 'host-a', 1, 2, 1, 1
+          ),
+          (
+            '${unclassified}', '${project}', 'kimi', 'kimi',
+            '/history/kimi-unclassified.json', 'unclassified-v0', 'host-a', 1, 0, 0, 0
+          );
         UPDATE sessions SET parent_session_id = '${shell}'
         WHERE session_id = '${valid}';
         INSERT INTO session_enrichments(
@@ -949,15 +960,15 @@ describe("LocalStore", () => {
           session_id, event_id, seq, role, text, project_key, content_hash,
           project_scope_token
         ) VALUES (
-          '${shell}', 'shell-event', 1, 'user', 'legacy shell keyword',
-          '${project}', 'shell-message-hash', '${ftsProjectScopeToken(project)}'
+          '${legacy}', 'legacy-event', 1, 'user', 'preserved legacy keyword',
+          '${project}', 'legacy-message-hash', '${ftsProjectScopeToken(project)}'
         );
         INSERT INTO tool_calls(
           id, session_id, event_id, seq, tool_name, input_text, output_text,
           input_hash, output_hash, project_key, provider
         ) VALUES (
-          'shell-tool', '${shell}', 'shell-tool-event', 2, 'read', '{}',
-          'legacy', 'shell-input-hash', 'shell-output-hash', '${project}', 'hermes'
+          'legacy-tool', '${legacy}', 'legacy-tool-event', 2, 'read', '{}',
+          'preserved', 'legacy-input-hash', 'legacy-output-hash', '${project}', 'opencode'
         );
         INSERT INTO usage_records(session_id, id, order_index, fact_hash, record_json)
         VALUES ('${shell}', 'shell-usage', 1, 'usage-hash', '{}');
@@ -1025,6 +1036,21 @@ describe("LocalStore", () => {
              (SELECT COUNT(*) FROM session_edges
               WHERE json_extract(edge_json, '$.fromId') = $shell
                  OR json_extract(edge_json, '$.toId') = $shell) AS shellReferences,
+             (SELECT COUNT(*) FROM sessions WHERE session_id = $legacy) AS legacySessions,
+             (SELECT normalization_version FROM sessions WHERE session_id = $legacy) AS legacyVersion,
+             (SELECT COUNT(*) FROM session_events WHERE session_id = $legacy) AS legacyEvents,
+             (SELECT COUNT(*) FROM messages WHERE session_id = $legacy) AS legacyMessages,
+             (SELECT COUNT(*) FROM tool_calls WHERE session_id = $legacy) AS legacyTools,
+             (SELECT COUNT(*) FROM sessions WHERE session_id = $unclassified)
+               AS unclassifiedSessions,
+             (SELECT normalization_version FROM sessions WHERE session_id = $unclassified)
+               AS unclassifiedVersion,
+             (SELECT COUNT(*) FROM session_events WHERE session_id = $unclassified)
+               AS unclassifiedEvents,
+             (SELECT COUNT(*) FROM messages WHERE session_id = $unclassified)
+               AS unclassifiedMessages,
+             (SELECT COUNT(*) FROM tool_calls WHERE session_id = $unclassified)
+               AS unclassifiedTools,
              (SELECT COUNT(*) FROM sessions WHERE session_id = $valid) AS validSessions,
              (SELECT COUNT(*) FROM session_events WHERE session_id = $valid) AS validEvents,
              (SELECT COUNT(*) FROM messages WHERE session_id = $valid) AS validMessages,
@@ -1048,7 +1074,12 @@ describe("LocalStore", () => {
                 WHERE message.session_id = json_extract(job.payload_json, '$.sessionId')
                   AND message.seq = json_extract(job.payload_json, '$.seq')
               )) AS orphanJobs`,
-        ).get({ $shell: shell, $valid: valid }) as Record<string, unknown>;
+        ).get({
+          $shell: shell,
+          $legacy: legacy,
+          $unclassified: unclassified,
+          $valid: valid,
+        }) as Record<string, unknown>;
         const { user_version: userVersion } = db
           .query("PRAGMA user_version")
           .get() as { user_version: number };
@@ -1063,6 +1094,16 @@ describe("LocalStore", () => {
       userVersion: 3,
       shellRows: 0,
       shellReferences: 0,
+      legacySessions: 1,
+      legacyVersion: 2,
+      legacyEvents: 0,
+      legacyMessages: 1,
+      legacyTools: 1,
+      unclassifiedSessions: 1,
+      unclassifiedVersion: 0,
+      unclassifiedEvents: 0,
+      unclassifiedMessages: 0,
+      unclassifiedTools: 0,
       validSessions: 1,
       validEvents: 1,
       validMessages: 2,
@@ -1070,8 +1111,8 @@ describe("LocalStore", () => {
       validJobs: 1,
       validEdges: 1,
       validParent: null,
-      searchableMessages: 2,
-      ftsRows: 2,
+      searchableMessages: 3,
+      ftsRows: 3,
       orphanVectors: 0,
       orphanJobs: 0,
     });
