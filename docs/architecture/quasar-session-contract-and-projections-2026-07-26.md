@@ -1,8 +1,9 @@
 # Quasar Session Contract and Projection Plan
 
 Date: 2026-07-26.
-Status: **in implementation** — Slices 1–4 are delivered and executable.
-The isolated corpus replay remains.
+Status: **in implementation** — Slices 1–4 delivered; contract harden F-1/2/3 in
+flight; production cutover of normalized-session remaining (isolated corpus
+replay / truth-store migration not done).
 
 ## Objective
 

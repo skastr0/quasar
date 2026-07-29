@@ -1,7 +1,8 @@
 # Quasar
 
 Status: the 0.5 CLI and local-server contract are operational; Quasar remains
-pre-1.0 while its storage and protocol contracts settle.
+pre-1.0. Storage and protocol contracts continue to settle; production cutover
+of the normalized-session path may still be in progress.
 
 Quasar is a local-first repository for AI agent sessions. It ingests local
 agent histories, normalizes them into session and tool-call rows, and serves
@@ -16,15 +17,39 @@ The single current architecture direction is
 [docs/architecture/quasar-first-principles-rearchitecture-2026-07-03.md](docs/architecture/quasar-first-principles-rearchitecture-2026-07-03.md).
 The measured corpus evidence and normalized entity model live in
 [docs/architecture/quasar-data-reality-plan-2026-06-11.md](docs/architecture/quasar-data-reality-plan-2026-06-11.md).
+The session-contract and projection plan is
+[docs/architecture/quasar-session-contract-and-projections-2026-07-26.md](docs/architecture/quasar-session-contract-and-projections-2026-07-26.md).
 
 Honest current state: this repository contains provider session parsing,
 normalization, redaction, a CLI, and a server serving all three search modes
 (lexical, semantic, fusion) from SQLite plus the resident vector matrix.
-Adapters exist for the providers with data on a real host: Codex, Claude Code,
-OpenCode, Grok, Kimi, Hermes, and Antigravity. Extraction is read-only; brittle
-local formats fail soft with diagnostics rather than writing to native history.
-Session re-ingest applies row-level diffs, so live sessions cost only their
-delta on each daemon tick and ingest never blocks search.
+Stable adapters included in `ingest --provider all` (registry order):
+
+- Codex
+- Claude Code
+- OpenCode
+- Grok
+- Hermes
+- Kimi
+- Antigravity
+- OMP
+- Pi
+- Cursor
+- Devin
+- Amp
+
+Extraction is read-only; brittle local formats fail soft with diagnostics rather
+than writing to native history. Session re-ingest applies row-level diffs, so
+live sessions cost only their delta on each daemon tick and ingest never blocks
+search.
+
+Research and forensics surfaces (beyond core search / session reads):
+
+- filtered message scans (`quasar messages` with project/provider/role/time filters)
+- research-export (`quasar research-export`)
+- enrichments read/write (`quasar enrichments`, `quasar enrichment-write`)
+- tool-calls list and tool-call by id (`quasar tool-calls`, `quasar tool-call`)
+- trajectory projection (`quasar trajectory --format quasar|letta|atif`)
 
 ## Workspace
 

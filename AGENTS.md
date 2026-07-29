@@ -23,11 +23,16 @@ data.
 
 ## Three principles
 
-1. **Measured data is the contract.** Never invent caps, clamps, gates,
-   amplification ratios, or byte budgets. The local store should accept legitimate
-   session data directly. A value beyond measured corpus reality is provider garbage:
-   emit a named diagnostic `(provider, sessionId, field, observedBytes)`, write zero
-   rows for that session, continue. Boundary rejection, never "robust handling."
+1. **Measured data is the contract.** Never invent free-form product byte budgets,
+   caps, clamps, gates, or amplification ratios for legitimate session text. The
+   local store accepts product turns that remain after adapter pruning. Measured
+   provider **machinery** keys may be pruned with a named diagnostic
+   `(provider, sessionId, field, observedBytes)`; if recoverable product turns
+   remain, the session may still be admitted. Unrecoverable cases — no product
+   text after prune, or a true garbage session — emit the same named diagnostic
+   shape, write zero rows for that session, and continue. Boundary rejection of
+   garbage, never "robust handling" of it, and never invented budgets on real
+   product text.
 2. **Store at the grain you read.** Rows are turns. Reading a session is a paginated
    index walk in `seq` order. No chunking, compaction, or reconstruction layers.
 3. **Indexing is a separate decision from storing.** `messages` in SQLite is the
