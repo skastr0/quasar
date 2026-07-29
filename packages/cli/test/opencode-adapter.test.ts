@@ -236,6 +236,15 @@ insert into part values ('prt_child', 'msg_child', '${CHILD_ID}', 2, json_object
   );
 });
 
+const prunedGarbageDetails = (result: Awaited<ReturnType<typeof opencodeAdapter.read>>) =>
+  result.diagnostics.flatMap((diagnostic) => {
+    const details = diagnostic.details;
+    if (details === undefined || typeof details !== "object" || details === null) return [];
+    const record = details as Record<string, unknown>;
+    if (record.diagnostic !== "opencode.message.pruned_garbage") return [];
+    return [record];
+  });
+
 describe("opencode adapter", () => {
   test(
     "maps parts to turns, drops machinery, and reports pre-prune raw bytes",
@@ -310,6 +319,19 @@ describe("opencode adapter", () => {
       // Sound rows still report small raw byte counts.
       expect(userEvent.rawReference.rawBytes).toBeLessThan(1_000);
 
+      // QSR-300 / F-1: mixed session (product turns + pruned summary.diffs)
+      // still admits, and surfaces a named diagnostic for the pruned garbage.
+      const pruned = prunedGarbageDetails(result);
+      expect(pruned).toHaveLength(1);
+      expect(pruned[0]).toMatchObject({
+        diagnostic: "opencode.message.pruned_garbage",
+        provider: "opencode",
+        sessionId: SESSION_ID,
+        field: "summary.diffs",
+        messageId: "msg_garbage",
+      });
+      expect(pruned[0]!.observedBytes as number).toBeGreaterThanOrEqual(1_048_576);
+
       // Empty stubs (blank reasoning plaintext, blank text) are machinery: the
       // event carries no turn content, so no {"type":"reasoning"} envelope dump
       // can reach the search surface.
@@ -318,6 +340,57 @@ describe("opencode adapter", () => {
       expect(emptyEvent.contentText).toBeUndefined();
       expect(emptyEvent.contentBlocks).toHaveLength(0);
       expect(JSON.stringify(emptyEvent)).not.toContain("gAAAAAB");
+    },
+    15_000,
+  );
+
+  // QSR-300 / F-1: garbage-only session — oversized summary.diffs machinery,
+  // no product text parts → zero sessions + named diagnostic.
+  test(
+    "garbage-only session emits zero sessions and a named pruned-garbage diagnostic",
+    async () => {
+      const GARBAGE_ONLY_ID = "ses_garbage_only01";
+      const GARBAGE_ONLY_SQL = `
+create table session (id text primary key, title text, directory text, time_created integer, time_updated integer);
+create table message (id text primary key, session_id text, time_created integer, data text);
+create table part (id text primary key, message_id text, session_id text, time_created integer, data text);
+
+insert into session values ('${GARBAGE_ONLY_ID}', 'garbage only', '/tmp/garbage', 1, 2);
+-- Oversized summary.diffs only; no product text parts after SQL prune.
+insert into message values (
+  'msg_garbage_only',
+  '${GARBAGE_ONLY_ID}',
+  1,
+  json_object(
+    'role', 'user',
+    'time', json_object('created', 1),
+    'summary', json_object('diffs', json_array(hex(zeroblob(600000))))
+  )
+);
+`;
+      const garbageRoot = mkdtempSync(join(tmpdir(), "quasar-oc-garbage-only-"));
+      try {
+        execFileSync("sqlite3", [join(garbageRoot, "opencode.db"), GARBAGE_ONLY_SQL]);
+        const result = await opencodeAdapter.read({
+          machine: MACHINE,
+          now: NOW,
+          roots: { opencode: garbageRoot },
+        });
+
+        expect(result.sessions).toHaveLength(0);
+        const pruned = prunedGarbageDetails(result);
+        expect(pruned).toHaveLength(1);
+        expect(pruned[0]).toMatchObject({
+          diagnostic: "opencode.message.pruned_garbage",
+          provider: "opencode",
+          sessionId: GARBAGE_ONLY_ID,
+          field: "summary.diffs",
+          messageId: "msg_garbage_only",
+        });
+        expect(pruned[0]!.observedBytes as number).toBeGreaterThanOrEqual(1_048_576);
+      } finally {
+        rmSync(garbageRoot, { recursive: true, force: true });
+      }
     },
     15_000,
   );

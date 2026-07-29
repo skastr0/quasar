@@ -10,8 +10,10 @@ import type {
 } from "./types";
 import { OpenCodeSessionId, type SessionId } from "../core/identity";
 import type {
+  AdapterDiagnostic,
   Artifact,
   ExecutionContextRecord,
+  NormalizedSession,
   SessionEdge,
   SessionRole,
   ToolCall,
@@ -102,8 +104,17 @@ const classifyPart = (raw: NativeValue, diagnostics: DecodeDiagnostic[]): Classi
   decision: classifyOpenCodePart(raw, diagnostics),
 });
 
-// Machinery-key pruning only — never byte caps. Provider garbage surfaces as
-// named diagnostics at the ingest layer.
+// Machinery-key pruning only — never product-text byte caps. A pre-prune
+// raw_bytes observation at/above this floor (the fixture / measured corpus
+// signal for a bloated summary.diffs machinery blob) becomes a *named*
+// diagnostic. Product text is never rejected by size; sessions with
+// recoverable product turns after prune are still admitted.
+const OPENCODE_PRUNED_GARBAGE_OBSERVED_BYTES = 1_048_576;
+const OPENCODE_PRUNED_GARBAGE_DIAGNOSTIC = "opencode.message.pruned_garbage" as const;
+// Primary machinery field the SQL prune targets; used as the named `field` on
+// the diagnostic (AGENTS.md: provider, sessionId, field, observedBytes).
+const OPENCODE_PRUNED_GARBAGE_FIELD = "summary.diffs" as const;
+
 const OPENCODE_PRUNED_MESSAGE_DATA_SQL = [
   "case",
   "when json_valid(data) then",
@@ -154,6 +165,90 @@ const OPENCODE_PRUNED_MESSAGE_DATA_SQL = [
  * `summary.diffs` blob) as a named diagnostic instead of silently omitting it.
  */
 const OPENCODE_RAW_BYTES_SQL = "length(cast(data as blob))";
+
+/**
+ * Named diagnostic for a message row whose pre-prune size witnesses that SQL
+ * machinery-key pruning removed provider garbage. Never rejects product text.
+ */
+const prunedGarbageDiagnostic = (args: {
+  readonly rootPath: string;
+  readonly nativeSessionId: string;
+  readonly messageId: string;
+  readonly observedBytes: number;
+}): AdapterDiagnostic => ({
+  adapterId: opencodeAdapter.id,
+  provider: "opencode",
+  status: "unsupported",
+  parserConfidence: "observed",
+  rootPath: args.rootPath,
+  message: `OpenCode pruned provider garbage at ${OPENCODE_PRUNED_GARBAGE_FIELD} (${args.observedBytes} bytes pre-prune).`,
+  details: {
+    diagnostic: OPENCODE_PRUNED_GARBAGE_DIAGNOSTIC,
+    provider: "opencode",
+    sessionId: args.nativeSessionId,
+    field: OPENCODE_PRUNED_GARBAGE_FIELD,
+    observedBytes: args.observedBytes,
+    messageId: args.messageId,
+  },
+});
+
+const collectPrunedGarbageDiagnostics = (
+  messages: readonly OpenCodeMessageRow[],
+  nativeSessionId: string,
+  rootPath: string,
+): AdapterDiagnostic[] =>
+  messages.flatMap((message) => {
+    const observedBytes = message.raw_bytes;
+    if (
+      typeof observedBytes !== "number"
+      || !Number.isFinite(observedBytes)
+      || observedBytes < OPENCODE_PRUNED_GARBAGE_OBSERVED_BYTES
+    ) {
+      return [];
+    }
+    return [
+      prunedGarbageDiagnostic({
+        rootPath,
+        nativeSessionId,
+        messageId: message.id,
+        observedBytes,
+      }),
+    ];
+  });
+
+/**
+ * A session still has recoverable product after machinery-key prune when any
+ * turn carries conversational text/thinking or a tool call. Garbage-only
+ * sessions (oversized summary.diffs, no product parts) fail this check.
+ */
+const openCodeSessionHasRecoverableProduct = (session: NormalizedSession): boolean => {
+  if (session.toolCalls.length > 0) return true;
+  return session.events.some((event) => {
+    if (event.contentText !== undefined && event.contentText.trim().length > 0) {
+      return true;
+    }
+    return event.contentBlocks.some((block) => {
+      if (block.kind === "text" && typeof block.text === "string" && block.text.trim().length > 0) {
+        return true;
+      }
+      if (
+        block.kind === "thinking"
+        && typeof block.thinking === "string"
+        && block.thinking.trim().length > 0
+      ) {
+        return true;
+      }
+      if (
+        block.kind === "markdown"
+        && typeof block.markdown === "string"
+        && block.markdown.trim().length > 0
+      ) {
+        return true;
+      }
+      return false;
+    });
+  });
+};
 
 const OPENCODE_PRUNED_PART_DATA_SQL = [
   "case",
@@ -772,6 +867,11 @@ const eventFromMessage = (
   };
 };
 
+type BuiltOpenCodeSession = {
+  readonly session: NormalizedSession;
+  readonly prunedGarbageDiagnostics: readonly AdapterDiagnostic[];
+};
+
 const buildOpenCodeSession = (
   db: OpenCodeDatabase,
   dbPath: string,
@@ -779,7 +879,7 @@ const buildOpenCodeSession = (
   options: AdapterOptions,
   sessionRow: OpenCodeSessionRow,
   diagnostics: DecodeDiagnostic[],
-) => {
+): BuiltOpenCodeSession => {
   const partsByMessage = readPartsByMessage(db, sessionRow.id, diagnostics);
   return buildOpenCodeSessionFromRows(
     dbPath,
@@ -800,7 +900,7 @@ const buildOpenCodeSessionFromRows = (
   messages: OpenCodeMessageRow[],
   partsByMessage: Map<string, ClassifiedPart[]>,
   diagnostics: DecodeDiagnostic[],
-) => {
+): BuiltOpenCodeSession => {
   const toolCalls: Omit<ToolCall, "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey">[] = [];
   const usageRecords: OpenCodeUsageDraft[] = [];
   const executionContexts: OpenCodeExecutionContextDraft[] = [];
@@ -808,6 +908,11 @@ const buildOpenCodeSessionFromRows = (
   const artifacts: OpenCodeArtifactDraft[] = [];
   const nativeSessionId = OpenCodeSessionId(sessionRow.id);
   const sessionId = sessionIdFor("opencode", nativeSessionId);
+  const prunedGarbageDiagnostics = collectPrunedGarbageDiagnostics(
+    messages,
+    nativeSessionId,
+    dbPath,
+  );
   // Session-to-session subagent lineage (QSR-220): a non-null `session.parent_id`
   // is the subagent's own parent ses_ id. This is SESSION lineage, NOT the
   // event-to-event `message.parentID` threading below (which uses kind="parent"
@@ -867,24 +972,27 @@ const buildOpenCodeSessionFromRows = (
     artifacts.push(...result.artifacts);
     return result.events;
   });
-  return buildSession({
-    provider: "opencode",
-    agentName,
-    machine: options.machine,
-    sessionId,
-    nativeSessionId,
-    nativeProjectKey: sessionRow.directory,
-    title: sessionRow.title,
-    sourceRoot: root,
-    sourcePath: dbPath,
-    projectPath: sessionRow.path ?? sessionRow.directory,
-    events,
-    toolCalls,
-    sessionEdges,
-    executionContexts,
-    usageRecords,
-    artifacts,
-  });
+  return {
+    session: buildSession({
+      provider: "opencode",
+      agentName,
+      machine: options.machine,
+      sessionId,
+      nativeSessionId,
+      nativeProjectKey: sessionRow.directory,
+      title: sessionRow.title,
+      sourceRoot: root,
+      sourcePath: dbPath,
+      projectPath: sessionRow.path ?? sessionRow.directory,
+      events,
+      toolCalls,
+      sessionEdges,
+      executionContexts,
+      usageRecords,
+      artifacts,
+    }),
+    prunedGarbageDiagnostics,
+  };
 };
 
 const buildOpenCodeSessionCli = (
@@ -894,7 +1002,7 @@ const buildOpenCodeSessionCli = (
   options: AdapterOptions,
   sessionRow: OpenCodeSessionRow,
   diagnostics: DecodeDiagnostic[],
-) =>
+): BuiltOpenCodeSession =>
   buildOpenCodeSessionFromRows(
     sourceDbPath,
     root,
@@ -904,6 +1012,43 @@ const buildOpenCodeSessionCli = (
     readPartsByMessageCli(queryDbPath, sessionRow.id, diagnostics),
     diagnostics,
   );
+
+/**
+ * Yield pruned-garbage diagnostics, then the session only when it still has
+ * recoverable product (or no garbage was observed). Garbage-only sessions
+ * emit the named diagnostic and zero sessions.
+ */
+const yieldBuiltOpenCodeSession = function* (
+  built: BuiltOpenCodeSession,
+  args: {
+    readonly root: string;
+    readonly dbPath: string;
+    readonly fingerprint: UnitFingerprint | undefined;
+  },
+): Generator<AdapterStreamItem, boolean> {
+  for (const diagnostic of built.prunedGarbageDiagnostics) {
+    yield { type: "diagnostic", diagnostic };
+  }
+  const hasProduct = openCodeSessionHasRecoverableProduct(built.session);
+  // Drop only when oversized machinery was the whole story — empty but
+  // non-garbage sessions keep today's admission shape.
+  if (!hasProduct && built.prunedGarbageDiagnostics.length > 0) {
+    return false;
+  }
+  yield {
+    type: "session",
+    session: built.session,
+    sourceUnit: {
+      provider: "opencode" as const,
+      adapterId: opencodeAdapter.id,
+      rootPath: args.root,
+      sourcePath: built.session.sourcePath,
+      physicalPath: args.dbPath,
+    },
+    ...(args.fingerprint !== undefined ? { fingerprint: args.fingerprint } : {}),
+  };
+  return true;
+};
 
 const opencodeDbPath = (root: string | undefined) => {
   if (root === undefined) return undefined;
@@ -1055,7 +1200,7 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
       let sessionCount = 0;
       for (const sessionEntry of rows) {
         if (await skipOpenCodeSession(options, sessionEntry, logicalDbPath ?? dbPath)) continue;
-        const session = buildOpenCodeSessionCli(
+        const built = buildOpenCodeSessionCli(
           tempDb.path,
           logicalDbPath ?? dbPath,
           logicalRoot ?? root,
@@ -1063,20 +1208,12 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
           sessionEntry,
           decodeDiagnostics,
         );
-        const fingerprint = opencodeSessionFingerprint(sessionEntry);
-        yield {
-          type: "session",
-          session,
-          sourceUnit: {
-            provider: "opencode" as const,
-            adapterId: opencodeAdapter.id,
-            rootPath: logicalRoot ?? root,
-            sourcePath: session.sourcePath,
-            physicalPath: dbPath,
-          },
-          ...(fingerprint !== undefined ? { fingerprint } : {}),
-        };
-        sessionCount += 1;
+        const admitted = yield* yieldBuiltOpenCodeSession(built, {
+          root: logicalRoot ?? root,
+          dbPath,
+          fingerprint: opencodeSessionFingerprint(sessionEntry),
+        });
+        if (admitted) sessionCount += 1;
       }
       for (const item of decodeDropDiagnostics(decodeDiagnostics, logicalDbPath ?? dbPath)) {
         yield item;
@@ -1132,7 +1269,7 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
     }
     for (const sessionEntry of sessionRows) {
       if (await skipOpenCodeSession(options, sessionEntry, logicalDbPath ?? dbPath)) continue;
-      const session = buildOpenCodeSession(
+      const built = buildOpenCodeSession(
         db,
         logicalDbPath ?? dbPath,
         logicalRoot ?? root,
@@ -1140,20 +1277,12 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
         sessionEntry,
         decodeDiagnostics,
       );
-      const fingerprint = opencodeSessionFingerprint(sessionEntry);
-      yield {
-        type: "session",
-        session,
-        sourceUnit: {
-          provider: "opencode" as const,
-          adapterId: opencodeAdapter.id,
-          rootPath: logicalRoot ?? root,
-          sourcePath: session.sourcePath,
-          physicalPath: dbPath,
-        },
-        ...(fingerprint !== undefined ? { fingerprint } : {}),
-      };
-      sessionCount += 1;
+      const admitted = yield* yieldBuiltOpenCodeSession(built, {
+        root: logicalRoot ?? root,
+        dbPath,
+        fingerprint: opencodeSessionFingerprint(sessionEntry),
+      });
+      if (admitted) sessionCount += 1;
     }
     for (const item of decodeDropDiagnostics(decodeDiagnostics, logicalDbPath ?? dbPath)) {
       yield item;
