@@ -43,16 +43,46 @@
 | trajectory | ok after re-ingest |
 | research-export | returns `QuerySnapshotBusyError` while full re-ingest mutates corpus — expected; retry after quiet |
 
+## Re-ingest completion (continued)
+
+- Long `--provider all` pass ran ~40+ min then hung at 0% CPU (likely Amp remote); process killed.
+- Per-provider second pass (timed):
+
+| provider | seen | written | skipped | failed | notes |
+| --- | ---: | ---: | ---: | ---: | --- |
+| codex | 1 | 0 | 1 | 0 | local root sparse on this host |
+| claude | 3790 | 14 | 3762 | 14 | map_session_failed on 14 (ContentBlock/contract) |
+| opencode | 0 | 0 | 0 | 0 | no sources on this machine path |
+| grok | 497 | 2 | 494 | 1 | 1 map_session_failed |
+| kimi | 0 | 0 | 0 | 0 | |
+| hermes | 0* | 0 | 0 | 0 | *prior dedicated pass: 62 write then 62 skip |
+| antigravity / omp / pi | 0 | 0 | 0 | 0 | |
+| cursor | 7 | 7 | 0 | 0 | |
+| devin | 46 | 0 | 46 | 0 | idempotent skip |
+| amp | — | — | — | — | **TIMEOUT** (180s); stored amp sessions may 409 on trajectory |
+
+- Queue after recovery: **failed embed-message = 0** (23 requeued earlier).
+- Live corpus after cutover work: **~861k messages**, queue pending 0, failed 0.
+
+## Dogfood (filesystem-free) — quiet
+
+| surface | result |
+| --- | --- |
+| search lexical/fusion | ok |
+| tool-calls | ok |
+| enrichments | ok |
+| trajectory | ok: hermes, devin, kimi, cursor, omp; **amp 409** until re-ingest |
+| research-export | ok with `--provider hermes` (30 msgs, sha256 receipt); unfiltered hits amp invalid source |
+
 ## Residual
 
 | item | note |
 | --- | --- |
-| Full multi-provider re-ingest | in progress (background) |
-| Full-corpus audit/idempotency receipt | after ingest completes |
-| Embed dead letters | 23 failed `embed-message` remain after `prune-dead-letters` (not auto-resolved) |
-| npm | `@skastr0/quasar-cli@0.5.1` already on registry; **harden commits need `0.5.2`** for a new publish (CI-first) |
-| Plugin | `prism-plugins/quasar` at 0.4.0 — align after CLI tag |
+| Amp full re-ingest | hangs/timeouts on remote CLI — residual |
+| 14 Claude + 1 Grok map failures | fail-closed ingest; not silent |
+| npm | **0.5.2 prepared** on main (`c2f55ce`); **do not push/tag until operator approves** (0.5.1 already published) |
+| Plugin | 0.4.1 committed in prism-plugins; no publish push |
 
 ## CLI for cutover ops
 
-Use **`quasar-dev`** (linked to packages/cli dist, reports 0.5.1 + HEAD code), not global `quasar` 0.5.0, until a new npm tag ships.
+Use **`quasar-dev`** (0.5.2 HEAD), not global `quasar` 0.5.0, until a new npm tag ships.
