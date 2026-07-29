@@ -8,6 +8,13 @@ formats may still change.
 
 ## [Unreleased]
 
+### Changed
+
+- Docs: align README stable adapters and research surfaces, and AGENTS garbage
+  doctrine (machinery prune vs zero-row sessions), with the session-contract
+  review; status line notes Slices 1–4 delivered and production cutover still
+  remaining.
+
 ## [0.5.1] - 2026-07-26
 
 ### Added
