@@ -685,6 +685,33 @@ describe("CLI client/operator boundary", () => {
     expect(rawQueryFlag.json.error?.message).toContain(
       "--cursor is not valid for the query command",
     );
+
+    const irrelevantSessionFlag = await runCli([
+      "session",
+      "--id",
+      "codex:s1",
+      "--role",
+      "user",
+    ]);
+    expect(irrelevantSessionFlag.exitCode).toBe(1);
+    expect(irrelevantSessionFlag.json.error?.type).toBe("CommandInputError");
+    expect(irrelevantSessionFlag.json.error?.message).toContain(
+      "--role is not valid for the session command",
+    );
+
+    const irrelevantStatsFlag = await runCli(["stats", "--limit", "5"]);
+    expect(irrelevantStatsFlag.exitCode).toBe(1);
+    expect(irrelevantStatsFlag.json.error?.type).toBe("CommandInputError");
+    expect(irrelevantStatsFlag.json.error?.message).toContain(
+      "--limit is not valid for the stats command",
+    );
+
+    const irrelevantProjectsFlag = await runCli(["projects", "--mode", "fusion"]);
+    expect(irrelevantProjectsFlag.exitCode).toBe(1);
+    expect(irrelevantProjectsFlag.json.error?.type).toBe("CommandInputError");
+    expect(irrelevantProjectsFlag.json.error?.message).toContain(
+      "--mode is not valid for the projects command",
+    );
   }, 15_000);
 
   test("session --id retains the rich independent-detail endpoint", async () => {

@@ -295,4 +295,48 @@ describe("query resource transport", () => {
 
     expect(attempts).toBe(1);
   });
+
+  test("surfaces search degraded signals from the resource envelope", () => {
+    const searchQuery = {
+      protocolVersion: QUERY_PROTOCOL_VERSION,
+      kind: "search",
+      text: "fusion",
+      mode: "fusion",
+      projection: {
+        detail: "summary",
+        fields: ["sessionId", "projectKey", "provider", "title", "role", "text", "score"],
+      },
+      page: { limit: 1 },
+    } as const;
+
+    const degraded = queryResponseFromResource({
+      ok: true,
+      command: "search/fusion",
+      data: {
+        matches: [],
+        page: { limit: 1, offset: 0, nextOffset: null },
+        receipt: {},
+        degraded: true,
+        degradedReason: "semantic index unavailable; lexical only",
+      },
+    }, searchQuery);
+
+    expect(degraded.kind).toBe("search");
+    expect(degraded.degraded).toBe(true);
+    expect(degraded.degradedReason).toBe("semantic index unavailable; lexical only");
+
+    const healthy = queryResponseFromResource({
+      ok: true,
+      command: "search/fusion",
+      data: {
+        matches: [],
+        page: { limit: 1, offset: 0, nextOffset: null },
+        receipt: {},
+        degraded: false,
+      },
+    }, searchQuery);
+
+    expect(healthy.degraded).toBe(false);
+    expect(healthy.degradedReason).toBeUndefined();
+  });
 });

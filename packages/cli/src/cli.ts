@@ -225,6 +225,43 @@ const queryCommandOptionNames: Readonly<Record<string, ReadonlySet<string>>> = {
     "--ingest-token",
   ]),
   query: new Set(queryClientOptionNames),
+  // Resource / ops commands — fail closed on irrelevant flags (same gate as query).
+  session: new Set([
+    ...queryClientOptionNames,
+    "--id",
+    "--session",
+    "--session-id",
+    "--message-limit",
+    "--tool-call-limit",
+    "--event-limit",
+    "--usage-limit",
+    "--edge-limit",
+    "--artifact-limit",
+    "--context-limit",
+  ]),
+  trajectory: new Set([
+    ...queryClientOptionNames,
+    "--id",
+    "--session",
+    "--session-id",
+    "--format",
+    "--exclude-reasoning",
+    "--exclude-tool-results",
+    "--tool-result-max-bytes",
+  ]),
+  stats: new Set(queryClientOptionNames),
+  doctor: new Set(queryClientOptionNames),
+  projects: new Set([
+    ...queryClientOptionNames,
+    "--limit",
+    "--offset",
+  ]),
+  "ingest-runs": new Set([
+    ...queryClientOptionNames,
+    "--status",
+    "--limit",
+    "--offset",
+  ]),
 };
 const parsedArguments = parseCliArguments(process.argv.slice(2), valueOptionNames);
 const arg = (name: string): string | undefined => parsedArguments.first(name);
@@ -579,14 +616,29 @@ const rejectUnsupportedOptions = (name: string): boolean => {
   }
 
   const allowed = queryCommandOptionNames[name];
+  // Commands without an allowlist still reject unknown global options above;
+  // relevant-flag checks only apply where we listed legitimate flags.
   if (allowed === undefined) return true;
   const irrelevant = parsedArguments.optionNames.find((option) =>
     !allowed.has(option)
   );
   if (irrelevant === undefined) return true;
+  const queryAllowlistCommands = new Set([
+    "search",
+    "sessions",
+    "messages",
+    "tool-calls",
+    "tool-call",
+    "research-export",
+    "enrichments",
+    "enrichment-write",
+    "query",
+  ]);
   const commandLabel = name === "query"
     ? "the query command"
-    : `the ${name} query command`;
+    : queryAllowlistCommands.has(name)
+      ? `the ${name} query command`
+      : `the ${name} command`;
   return rejectInput(name, new CommandInputError(
     `${irrelevant} is not valid for ${commandLabel}`,
     {
@@ -712,6 +764,8 @@ const executeQuery = async (name: string, build: () => QuerySpec) => {
       serverUrl: base,
       timeoutMs: httpTimeoutMs(),
     });
+    // Dual envelope: query-backed commands emit protocol QueryResponse (+ optional
+    // search degraded*) at the top level; resource/ops commands emit {ok,command,data}.
     writeJson(response);
   } catch (error) {
     writeJson(fail(name, error));

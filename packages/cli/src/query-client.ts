@@ -504,10 +504,16 @@ const projectRows = (
     row[field] === undefined ? null : row[field],
   ])));
 
+/** QueryResponse plus optional search degradation signals from the resource surface. */
+export type CliQueryResponse = QueryResponse & {
+  readonly degraded?: boolean;
+  readonly degradedReason?: string;
+};
+
 export const queryResponseFromResource = (
   input: unknown,
   expected: unknown,
-): QueryResponse => {
+): CliQueryResponse => {
   const spec = decodeQueryInput(expected);
   const envelope = requireRecord(input, "resource response must be an object");
   if (envelope.ok !== true) {
@@ -516,6 +522,9 @@ export const queryResponseFromResource = (
   const data = requireRecord(envelope.data, "resource response data must be an object");
   let rows: readonly JsonRecord[];
   let nextCursor: string | undefined;
+  // Resource search can report partial capability (e.g. fusion→lexical). Protocol
+  // QueryResponse is strict and omits these; re-attach after decode so agents see them.
+  let searchDegraded: { readonly degraded?: boolean; readonly degradedReason?: string } = {};
 
   switch (spec.kind) {
     case "sessions": {
@@ -553,12 +562,20 @@ export const queryResponseFromResource = (
         .map(normalizeSearchMatch);
       const nextOffset = resourcePage(data.page, spec, offset).nextOffset;
       if (nextOffset !== null) nextCursor = encodeCursor(spec, nextOffset);
+      if (typeof data.degraded === "boolean") {
+        searchDegraded = {
+          degraded: data.degraded,
+          ...(typeof data.degradedReason === "string" && data.degradedReason.trim() !== ""
+            ? { degradedReason: data.degradedReason }
+            : {}),
+        };
+      }
       break;
     }
   }
 
   const items = projectRows(rows, spec);
-  return decodeQueryOutput({
+  const response = decodeQueryOutput({
     protocolVersion: spec.protocolVersion,
     kind: spec.kind,
     projection: spec.projection,
@@ -568,6 +585,9 @@ export const queryResponseFromResource = (
     },
     items,
   }, spec);
+  return searchDegraded.degraded === undefined
+    ? response
+    : { ...response, ...searchDegraded };
 };
 
 const resourceUrl = (
@@ -617,7 +637,7 @@ export const fetchWithRetry = async (
 export const runQuery = async (
   input: unknown,
   options: QueryRequestOptions,
-): Promise<QueryResponse> => {
+): Promise<CliQueryResponse> => {
   const spec = decodeQueryInput(input);
   const request = queryResourceRequest(spec);
   const response = await fetchWithRetry(resourceUrl(options.serverUrl, request), options);
