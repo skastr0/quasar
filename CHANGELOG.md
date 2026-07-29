@@ -8,12 +8,27 @@ formats may still change.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-07-29
+
+### Fixed
+
+- Seal MappedSession message text and contentHash to the linked source event
+  .
+- Require ContentBlock kind payload fields so kind is an executable
+  discriminator .
+- Surface OpenCode machinery prune of oversized summary.diffs as a named
+  diagnostic; admit sessions that still carry product turns .
+- Surface search `degraded` / `degradedReason` on the CLI query path; reject
+  irrelevant flags on session/trajectory/stats/doctor/projects/ingest-runs.
+
 ### Changed
 
 - Docs: align README stable adapters and research surfaces, and AGENTS garbage
   doctrine (machinery prune vs zero-row sessions), with the session-contract
-  review; status line notes Slices 1–4 delivered and production cutover still
-  remaining.
+  review.
+- Live cutover receipt for hardened image deploy and Hermes re-ingest
+  idempotency/trajectory dogfood:
+  `docs/proofs/normalized-session-cutover-2026-07-29.md`.
 
 ## [0.5.1] - 2026-07-26
 
