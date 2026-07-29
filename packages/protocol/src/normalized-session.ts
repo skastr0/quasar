@@ -101,7 +101,7 @@ export const ContentBlockKind = Schema.Literal(
 );
 export type ContentBlockKind = typeof ContentBlockKind.Type;
 
-export const ContentBlock = Schema.Struct({
+const ContentBlockShape = Schema.Struct({
   id: Schema.String,
   sequence: NonNegativeInteger,
   kind: ContentBlockKind,
@@ -114,7 +114,116 @@ export const ContentBlock = Schema.Struct({
   value: Schema.optional(Schema.Unknown),
   metadata: Schema.optional(Schema.Unknown),
 });
+
+/** Kind must carry its payload field(s); cross-kind soup still fails closed. */
+const contentBlockKindPayloadHolds = (
+  block: typeof ContentBlockShape.Type,
+): true | string => {
+  switch (block.kind) {
+    case "text":
+      return typeof block.text === "string"
+        ? true
+        : "content block kind=text requires text";
+    case "markdown":
+      return typeof block.markdown === "string"
+        ? true
+        : "content block kind=markdown requires markdown";
+    case "thinking":
+      return typeof block.thinking === "string"
+        ? true
+        : "content block kind=thinking requires thinking";
+    case "image":
+      return typeof block.path === "string" || typeof block.uri === "string"
+        ? true
+        : "content block kind=image requires path or uri";
+    case "file":
+      return typeof block.path === "string" || typeof block.uri === "string"
+        ? true
+        : "content block kind=file requires path or uri";
+    case "json":
+      return block.value !== undefined
+        ? true
+        : "content block kind=json requires value";
+  }
+};
+
+export const ContentBlock = ContentBlockShape.pipe(
+  Schema.filter(contentBlockKindPayloadHolds),
+).annotations({
+  identifier: "QuasarContentBlockV1",
+  description:
+    "A content block whose kind is an executable discriminator for its payload fields.",
+});
 export type ContentBlock = typeof ContentBlock.Type;
+
+/** Kind-gated visible text (message/search projection policy). */
+export const contentBlockVisibleText = (
+  block: ContentBlock,
+): string | undefined => {
+  if (block.kind === "text") return block.text;
+  if (block.kind === "markdown") return block.markdown;
+  if (block.kind === "thinking") return block.thinking;
+  return undefined;
+};
+
+/**
+ * Conversational text derived from a source event — same policy as CLI mapSession.
+ * Tool-payload blocks are excluded when metadata.nativeType looks tool-like.
+ */
+export const eventMessageText = (event: {
+  readonly contentText?: string;
+  readonly contentBlocks: ReadonlyArray<ContentBlock>;
+}): string => {
+  if (event.contentText !== undefined && event.contentText.trim().length > 0) {
+    return event.contentText;
+  }
+  return event.contentBlocks
+    .flatMap((block) => {
+      if (isToolPayloadContentBlock(block)) return [];
+      const text = contentBlockVisibleText(block);
+      return text === undefined ? [] : [text];
+    })
+    .join("\n\n");
+};
+
+const isToolPayloadContentBlock = (block: ContentBlock): boolean => {
+  if (block.metadata === null || typeof block.metadata !== "object") return false;
+  const nativeType = (block.metadata as Record<string, unknown>).nativeType;
+  if (typeof nativeType !== "string") return false;
+  const normalized = nativeType.toLowerCase();
+  return (
+    normalized.includes("tool")
+    || normalized.endsWith("_call")
+    || normalized.endsWith("_output")
+    || normalized.endsWith("_result")
+  );
+};
+
+/** FNV-1a wide hash used for message contentHash (must match CLI stableWideHash). */
+export const messageContentHash = (parts: {
+  readonly sessionId: string;
+  readonly eventId: string;
+  readonly seq: number;
+  readonly role: string;
+  readonly text: string;
+}): string => {
+  const value =
+    `${parts.sessionId}:${parts.eventId}:${parts.seq}:${parts.role}:${parts.text}`;
+  const stableHash = (input: string) => {
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < input.length; index += 1) {
+      hash ^= input.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return (hash >>> 0).toString(16).padStart(8, "0");
+  };
+  return [
+    stableHash(`a:${value}`),
+    stableHash(`b:${value}`),
+    stableHash(`c:${value}`),
+    stableHash(`d:${value}`),
+  ].join("");
+};
 
 export const SessionEdgeKind = Schema.Literal(
   "next",
@@ -665,6 +774,25 @@ const mappedSessionInvariant = (mapped: {
     if (message.role !== expectedRole) {
       return `message ${message.eventId} role differs from its event`;
     }
+    // Event-faithful projection: text is derived from the linked source event
+    // (already redacted on the wire). contentHash must recompute from identity+text.
+    const expectedText = eventMessageText(event).trim();
+    if (message.text !== expectedText) {
+      return `message ${message.eventId} text differs from its event-derived projection`;
+    }
+    if (message.text.trim().length === 0) {
+      return `message ${message.eventId} text must be non-empty`;
+    }
+    const expectedHash = messageContentHash({
+      sessionId: message.sessionId,
+      eventId: message.eventId,
+      seq: message.seq,
+      role: message.role,
+      text: message.text,
+    });
+    if (message.contentHash !== expectedHash) {
+      return `message ${message.eventId} contentHash does not match identity and text`;
+    }
     if (
       message.executionContextId !== undefined
       && !contextIds.has(message.executionContextId)
@@ -880,7 +1008,13 @@ export const mappedSessionExamples = [{
       text: "Inspect the session contract.",
       ts: "2026-07-26T12:00:00.000Z",
       projectKey: "project-example",
-      contentHash: "hash-example",
+      contentHash: messageContentHash({
+        sessionId: "codex:example",
+        eventId: "codex:example:event:0",
+        seq: 0,
+        role: "user",
+        text: "Inspect the session contract.",
+      }),
     }],
     toolCalls: [],
     events: [exampleEvent],
