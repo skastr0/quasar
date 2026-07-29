@@ -29,7 +29,10 @@ import { mapSession } from "../src/map";
 import type { MappedSession } from "../src/model";
 import type { NormalizedSession } from "../src/core/schemas";
 import { NORMALIZATION_VERSION } from "../src/normalization-version";
-import { NORMALIZED_SESSION_PROTOCOL_VERSION } from "@skastr0/quasar-protocol";
+import {
+  messageContentHash,
+  NORMALIZED_SESSION_PROTOCOL_VERSION,
+} from "@skastr0/quasar-protocol";
 import {
   EMBEDDING_CACHE_VECTOR_ENCODING,
   encodeFloat32Vector,
@@ -66,7 +69,10 @@ const mappedSession = (overrides: {
   readonly fingerprint?: string;
   readonly firstText?: string;
   readonly normalizationVersion?: number;
-} = {}): MappedSession => ({
+} = {}): MappedSession => {
+  const firstText = overrides.firstText ?? "contract handshake over http";
+  const assistantText = "assistant contract reply";
+  return {
   protocolVersion: NORMALIZED_SESSION_PROTOCOL_VERSION,
   project: { projectKey: "contract-project", displayName: "Contract Project", rawPath: "/tmp/contract-project" },
   session: {
@@ -94,10 +100,16 @@ const mappedSession = (overrides: {
       eventId: "contract-event-user",
       seq: 0,
       role: "user",
-      text: overrides.firstText ?? "contract handshake over http",
+      text: firstText,
       ts: "2026-06-18T10:00:30.000Z",
       projectKey: "contract-project",
-      contentHash: "contract-hash-1",
+      contentHash: messageContentHash({
+        sessionId: "contract-session",
+        eventId: "contract-event-user",
+        seq: 0,
+        role: "user",
+        text: firstText,
+      }),
       executionContextId: "contract-context-1",
       model: "gpt-5.6-sol",
       modelProvider: "openai",
@@ -108,10 +120,16 @@ const mappedSession = (overrides: {
       eventId: "contract-event-assistant",
       seq: 1,
       role: "assistant",
-      text: "assistant contract reply",
+      text: assistantText,
       ts: "2026-06-18T10:00:35.000Z",
       projectKey: "contract-project",
-      contentHash: "contract-hash-2",
+      contentHash: messageContentHash({
+        sessionId: "contract-session",
+        eventId: "contract-event-assistant",
+        seq: 1,
+        role: "assistant",
+        text: assistantText,
+      }),
       executionContextId: "contract-context-2",
       model: "gpt-5.6-terra",
       modelProvider: "openai",
@@ -151,13 +169,15 @@ const mappedSession = (overrides: {
       projectIdentityKey: "contract-project",
       role: "user",
       kind: "message",
-      contentText: "contract handshake over http",
-      contentBlocks: [{
-        id: "contract-content-user",
-        sequence: 0,
-        kind: "text",
-        text: exactEventText,
-      }],
+      contentText: firstText,
+      contentBlocks: firstText === "contract handshake over http"
+        ? [{
+          id: "contract-content-user",
+          sequence: 0,
+          kind: "text" as const,
+          text: exactEventText,
+        }]
+        : [],
       rawReference: { sourcePath: "/history/contract-session.jsonl", line: 1 },
     },
     {
@@ -172,7 +192,7 @@ const mappedSession = (overrides: {
       projectIdentityKey: "contract-project",
       role: "assistant",
       kind: "message",
-      contentText: "assistant contract reply",
+      contentText: assistantText,
       contentBlocks: [],
       rawReference: { sourcePath: "/history/contract-session.jsonl", line: 2 },
     },
@@ -314,7 +334,8 @@ const mappedSession = (overrides: {
     path: "/root/rich-store-roundtrip",
     depth: 1,
   },
-});
+};
+};
 
 const waitFor = async (url: string) => {
   const deadline = Date.now() + 5_000;

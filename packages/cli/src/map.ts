@@ -1,4 +1,3 @@
-import { stableWideHash } from "./core/hash";
 import { redactSensitive } from "./core/redaction";
 import type {
   AgentAssignment,
@@ -15,6 +14,8 @@ import type {
 import type { MappedSession, MessageRole } from "./model";
 import {
   decodeNormalizedSessionSync,
+  eventMessageText,
+  messageContentHash,
   NORMALIZED_SESSION_PROTOCOL_VERSION,
 } from "@skastr0/quasar-protocol";
 
@@ -183,42 +184,11 @@ const contextForEvent = (
   };
 };
 
-const blockText = (block: ContentBlock): string | undefined => {
-  if (block.kind === "text") return block.text;
-  if (block.kind === "markdown") return block.markdown;
-  if (block.kind === "thinking") return block.thinking;
-  return undefined;
-};
-
-const isToolPayloadBlock = (block: ContentBlock): boolean => {
-  if (block.metadata === null || typeof block.metadata !== "object") return false;
-  const nativeType = (block.metadata as Record<string, unknown>).nativeType;
-  if (typeof nativeType !== "string") return false;
-  const normalized = nativeType.toLowerCase();
-  return (
-    normalized.includes("tool")
-    || normalized.endsWith("_call")
-    || normalized.endsWith("_output")
-    || normalized.endsWith("_result")
-  );
-};
-
-const eventText = (event: SessionEvent): string => {
-  if (event.contentText !== undefined && event.contentText.trim().length > 0) {
-    return event.contentText;
-  }
-  return event.contentBlocks
-    .flatMap((block) =>
-      isToolPayloadBlock(block) ? [] : (blockText(block) ?? []),
-    )
-    .join("\n\n");
-};
-
 const messageEvents = (session: NormalizedSession) =>
   session.events.flatMap((event) => {
     const role = roleForEvent(event);
     if (role === undefined) return [];
-    const text = String(redactSensitive(eventText(event))).trim();
+    const text = String(redactSensitive(eventMessageText(event))).trim();
     if (text.length === 0) return [];
     return [{ event, role, text, context: contextForEvent(session, event) }];
   });
@@ -251,7 +221,22 @@ export const mapSession = (
 ): MappedSession => {
   const session = decodeNormalizedSessionSync(sourceSession);
   const projectKey = session.projectIdentity.projectIdentityKey;
-  const messages = messageEvents(session).map(({ event, role, text, context }) => ({
+  // Redact source facts first so message projection and MappedSession invariant
+  // both derive conversational text from the same redacted events.
+  const events = session.events.map(redactEvent);
+  const usageRecords = session.usageRecords.map(redactUsageRecord);
+  const sessionEdges = session.sessionEdges.map(redactSessionEdge);
+  const artifacts = session.artifacts.map(redactArtifact);
+  const executionContexts = session.executionContexts.map(redactExecutionContext);
+  const redactedSession: NormalizedSession = {
+    ...session,
+    events,
+    usageRecords,
+    sessionEdges,
+    artifacts,
+    executionContexts,
+  };
+  const messages = messageEvents(redactedSession).map(({ event, role, text, context }) => ({
     sessionId: session.id,
     eventId: event.id,
     seq: event.sequence,
@@ -259,11 +244,17 @@ export const mapSession = (
     text,
     ts: event.timestamp,
     projectKey,
-    contentHash: stableWideHash(`${session.id}:${event.id}:${event.sequence}:${role}:${text}`),
+    contentHash: messageContentHash({
+      sessionId: session.id,
+      eventId: event.id,
+      seq: event.sequence,
+      role,
+      text,
+    }),
     ...context,
   }));
 
-  const toolCalls = toolCallsForSession(session, projectKey);
+  const toolCalls = toolCallsForSession(redactedSession, projectKey);
   // Canonical parent lineage: ONLY a `kind="subagent_of"` SessionEdge encodes
   // SESSION-to-session subagent lineage, carrying the parent's canonical
   // SessionId on `fromId`. We project it onto the persisted-and-served
@@ -272,9 +263,9 @@ export const mapSession = (
   // opencode) whose `fromId` may be a raw message uuid — projecting it here
   // would write a message uuid into the served session column (corruption), so
   // it is deliberately excluded.
-  const parentEdge = session.sessionEdges.find((edge) => edge.kind === "subagent_of");
+  const parentEdge = sessionEdges.find((edge) => edge.kind === "subagent_of");
   const parentSessionId = parentEdge?.fromId;
-  const executionModel = latestModel(session);
+  const executionModel = latestModel(redactedSession);
   const assignment = session.assignment === undefined
     ? undefined
     : redactSourceFact<AgentAssignment>(session.assignment);
@@ -313,11 +304,11 @@ export const mapSession = (
     },
     messages,
     toolCalls,
-    events: session.events.map(redactEvent),
-    usageRecords: session.usageRecords.map(redactUsageRecord),
-    sessionEdges: session.sessionEdges.map(redactSessionEdge),
-    artifacts: session.artifacts.map(redactArtifact),
-    executionContexts: session.executionContexts.map(redactExecutionContext),
+    events,
+    usageRecords,
+    sessionEdges,
+    artifacts,
+    executionContexts,
     ...(assignment !== undefined ? { assignment } : {}),
   };
 };

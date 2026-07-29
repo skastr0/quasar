@@ -20,6 +20,7 @@ import {
   decodeSessionEnrichmentFiltersSync,
   decodeSessionEnrichmentPageSync,
   decodeSessionEnrichmentSync,
+  messageContentHash,
   projectQuasarTrajectory,
   protocolContracts,
   protocolDiscovery,
@@ -61,6 +62,38 @@ describe("NormalizedSession v1", () => {
     expect(
       JSON.stringify(protocolContracts.mappedSession.jsonSchema),
     ).toContain('"additionalProperties":false');
+  });
+
+  test("rejects content blocks that omit kind payload fields", () => {
+    const missingText = sourceExample();
+    missingText.events[0] = {
+      ...missingText.events[0],
+      contentText: undefined,
+      contentBlocks: [{
+        id: "block-bad",
+        sequence: 0,
+        kind: "text",
+        thinking: "not the right field",
+      }],
+    };
+    missingText.contentBlockCount = 1;
+    expect(() => decodeNormalizedSessionSync(missingText)).toThrow();
+  });
+
+  test("rejects mapped messages whose text or contentHash diverges from the event", () => {
+    const divergentText = mappedExample();
+    divergentText.messages[0] = {
+      ...divergentText.messages[0],
+      text: "lie-not-from-event",
+    };
+    expect(() => decodeMappedSessionSync(divergentText)).toThrow();
+
+    const divergentHash = mappedExample();
+    divergentHash.messages[0] = {
+      ...divergentHash.messages[0],
+      contentHash: "not-the-real-hash",
+    };
+    expect(() => decodeMappedSessionSync(divergentHash)).toThrow();
   });
 
   test("rejects invalid roles, kinds, duplicate ids, and duplicate sequences", () => {
@@ -265,7 +298,13 @@ describe("QuasarTrajectory v1", () => {
       text: assistantEvent.contentText,
       ts: assistantEvent.timestamp,
       projectKey: mapped.project.projectKey,
-      contentHash: "hash-assistant",
+      contentHash: messageContentHash({
+        sessionId: mapped.session.sessionId,
+        eventId: assistantEvent.id,
+        seq: assistantEvent.sequence,
+        role: "assistant",
+        text: assistantEvent.contentText,
+      }),
     });
     mapped.toolCalls.push(
       {
@@ -459,6 +498,13 @@ describe("QuasarTrajectory v1", () => {
     childValue.events[0].rawReference.sourcePath = "/history/child.jsonl";
     childValue.messages[0].sessionId = childSessionId;
     childValue.messages[0].eventId = childEventId;
+    childValue.messages[0].contentHash = messageContentHash({
+      sessionId: childSessionId,
+      eventId: childEventId,
+      seq: childValue.messages[0].seq,
+      role: childValue.messages[0].role,
+      text: childValue.messages[0].text,
+    });
     childValue.sessionEdges = [{
       id: "edge-parent-child",
       sessionId: childSessionId,

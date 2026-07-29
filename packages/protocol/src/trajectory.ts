@@ -9,6 +9,7 @@ import {
   SessionEventKind,
   SessionRole,
   decodeMappedSessionSync,
+  eventMessageText,
   mappedSessionExamples,
   type ContentBlock,
   type MappedSession as MappedSessionType,
@@ -390,19 +391,16 @@ const normalizedOptions = (
 const nonEmpty = (value: string | undefined): string | undefined =>
   value !== undefined && value.trim().length > 0 ? value : undefined;
 
-const blockText = (block: ContentBlock): string | undefined =>
-  nonEmpty(block.thinking)
-  ?? nonEmpty(block.text)
-  ?? nonEmpty(block.markdown);
+const blockText = (block: ContentBlock): string | undefined => {
+  if (block.kind === "text") return nonEmpty(block.text);
+  if (block.kind === "markdown") return nonEmpty(block.markdown);
+  if (block.kind === "thinking") return nonEmpty(block.thinking);
+  return undefined;
+};
 
 const visibleEventText = (event: SessionEvent): string | undefined => {
-  const direct = nonEmpty(event.contentText);
-  if (direct !== undefined) return direct;
-  const text = event.contentBlocks
-    .filter((block) => block.kind === "text" || block.kind === "markdown")
-    .flatMap((block) => blockText(block) ?? [])
-    .join("\n\n");
-  return nonEmpty(text);
+  // Same kind-gated derivation as eventMessageText / mapSession (not field-priority soup).
+  return nonEmpty(eventMessageText(event));
 };
 
 const sha256 = (value: string): string =>
