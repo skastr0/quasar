@@ -5,11 +5,10 @@ import { createHash } from "node:crypto";
 import { statSync } from "node:fs";
 import { isIP } from "node:net";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 
 import { Effect, Schema } from "effect";
 
-import { LocalStore, makeReadonlyLocalStoreLayer } from "./store";
+import { LocalStore, makeReadonlyLocalStoreLayer, openReadonlySqlite } from "./store";
 
 const COMMAND = "normalized-session-replay-proof";
 const args = process.argv.slice(2);
@@ -322,10 +321,7 @@ const verifyQuiescentServer = async (server: URL): Promise<void> => {
 const inspectCheckpoint = (dbPath: string): void => {
   let database: Database | undefined;
   try {
-    database = new Database(
-      `${pathToFileURL(dbPath).href}?immutable=1`,
-      { readonly: true },
-    );
+    database = openReadonlySqlite(dbPath);
     const applying = database.query(
       "SELECT COUNT(*) AS count FROM sessions WHERE source_fingerprint LIKE 'applying:%'",
     ).get() as { readonly count: number } | null;

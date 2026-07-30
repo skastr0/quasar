@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
+import { resolve as resolvePath } from "node:path";
 import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
 import {
@@ -1252,6 +1253,22 @@ export class LocalStore extends Context.Tag("@quasar/LocalStore")<
   LocalStoreService
 >() {}
 
+/**
+ * Open an existing SQLite database for read-only use.
+ * Prefer `immutable=1` (no -wal/-shm sidecars). Fall back to plain readonly when
+ * the URI open fails — observed on some Linux/Bun combinations as SQLITE_CANTOPEN.
+ */
+export const openReadonlySqlite = (path: string): Database => {
+  const absolute = resolvePath(path);
+  try {
+    return new Database(`${pathToFileURL(absolute).href}?immutable=1`, {
+      readonly: true,
+    });
+  } catch {
+    return new Database(absolute, { readonly: true });
+  }
+};
+
 const makeLocalStoreLayerScoped = (
   path: string,
   readOnly: boolean,
@@ -1264,9 +1281,7 @@ const makeLocalStoreLayerScoped = (
           ensureParentDir(path);
         }
         const db = readOnly
-          ? new Database(`${pathToFileURL(path).href}?immutable=1`, {
-              readonly: true,
-            })
+          ? openReadonlySqlite(path)
           : new Database(path, { create: true });
         const migrationLogs = readOnly ? [] : migrate(db);
         return { db, migrationLogs };
