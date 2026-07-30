@@ -9,6 +9,7 @@ import {
   NORMALIZED_SESSION_PROTOCOL_VERSION,
   SESSION_ENRICHMENT_VERSION,
   decodeResearchExportFrameSync,
+  messageContentHash,
 } from "@skastr0/quasar-protocol";
 import { Effect } from "effect";
 
@@ -27,7 +28,45 @@ afterEach(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-const mappedSession = (overrides: { readonly fingerprint?: string; readonly firstText?: string } = {}): MappedSession => ({
+const mappedSession = (overrides: { readonly fingerprint?: string; readonly firstText?: string } = {}): MappedSession => {
+  const firstText = overrides.firstText ?? "hello over http";
+  const userMessage = {
+    sessionId: "codex:session-http" as const,
+    eventId: "event-http-user" as const,
+    seq: 0 as const,
+    role: "user" as const,
+    text: firstText,
+    ts: "2026-06-18T10:00:30.000Z",
+    projectKey: "project-http",
+    contentHash: messageContentHash({
+      sessionId: "codex:session-http",
+      eventId: "event-http-user",
+      seq: 0,
+      role: "user",
+      text: firstText,
+    }),
+    model: "gpt-5.6-sol",
+    modelProvider: "openai",
+  };
+  const assistantMessage = {
+    sessionId: "codex:session-http" as const,
+    eventId: "event-http-assistant" as const,
+    seq: 1 as const,
+    role: "assistant" as const,
+    text: "assistant-only http memory",
+    ts: "2026-06-18T10:00:35.000Z",
+    projectKey: "project-http",
+    contentHash: messageContentHash({
+      sessionId: "codex:session-http",
+      eventId: "event-http-assistant",
+      seq: 1,
+      role: "assistant",
+      text: "assistant-only http memory",
+    }),
+    model: "gpt-5.6-sol",
+    modelProvider: "openai",
+  };
+  return {
   protocolVersion: NORMALIZED_SESSION_PROTOCOL_VERSION,
   project: { projectKey: "project-http", displayName: "HTTP Project", rawPath: "/tmp/project-http" },
   session: {
@@ -38,10 +77,7 @@ const mappedSession = (overrides: { readonly fingerprint?: string; readonly firs
     modelProvider: "openai", assignmentRole: "builder", messageCount: 2, toolCallCount: 1,
   },
   assignment: { nickname: "server-query", role: "builder", path: "/root/server-query", depth: 1 },
-  messages: [
-    { sessionId: "codex:session-http", eventId: "event-http-user", seq: 0, role: "user", text: overrides.firstText ?? "hello over http", ts: "2026-06-18T10:00:30.000Z", projectKey: "project-http", contentHash: `hash-http-1-${(overrides.firstText ?? "hello over http").length}`, model: "gpt-5.6-sol", modelProvider: "openai" },
-    { sessionId: "codex:session-http", eventId: "event-http-assistant", seq: 1, role: "assistant", text: "assistant-only http memory", ts: "2026-06-18T10:00:35.000Z", projectKey: "project-http", contentHash: "hash-http-2", model: "gpt-5.6-sol", modelProvider: "openai" },
-  ],
+  messages: [userMessage, assistantMessage],
   toolCalls: [{ id: "tool-http", sessionId: "codex:session-http", eventId: "event-http-tool", seq: 2, toolName: "shell_command", status: "ok", inputText: "echo http", outputText: "http", startedAt: "2026-06-18T10:00:40.000Z", completedAt: "2026-06-18T10:00:41.000Z", projectKey: "project-http", provider: "codex", model: "gpt-5.6-sol", modelProvider: "openai" }],
   events: [
     {
@@ -91,7 +127,8 @@ const mappedSession = (overrides: { readonly fingerprint?: string; readonly firs
     },
   ],
   usageRecords: [], sessionEdges: [], artifacts: [], executionContexts: [],
-});
+};
+};
 
 const descendantSession = (
   sessionId: string,
@@ -118,11 +155,21 @@ const descendantSession = (
     sourcePath: `/history/${encodeURIComponent(sessionId)}.jsonl`,
     sourceFingerprint: `fingerprint-${sessionId}`,
   };
-  source.messages = source.messages.map((message: any) => ({
-    ...message,
-    sessionId,
-    eventId: eventIds.get(message.eventId),
-  }));
+  source.messages = source.messages.map((message: any) => {
+    const eventId = eventIds.get(message.eventId);
+    return {
+      ...message,
+      sessionId,
+      eventId,
+      contentHash: messageContentHash({
+        sessionId,
+        eventId,
+        seq: message.seq,
+        role: message.role,
+        text: message.text,
+      }),
+    };
+  });
   source.toolCalls = source.toolCalls.map((toolCall: any) => ({
     ...toolCall,
     id: toolIds.get(toolCall.id),

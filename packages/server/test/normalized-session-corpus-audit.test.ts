@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import {
   decodeMappedSessionSync,
   mappedSessionExamples,
+  messageContentHash,
 } from "@skastr0/quasar-protocol";
 import { Effect } from "effect";
 
@@ -170,6 +171,13 @@ describe("normalized session corpus audit", () => {
       childValue.session.sourcePath;
     childValue.messages[0].sessionId = childSessionId;
     childValue.messages[0].eventId = childEventId;
+    childValue.messages[0].contentHash = messageContentHash({
+      sessionId: childSessionId,
+      eventId: childEventId,
+      seq: childValue.messages[0].seq,
+      role: childValue.messages[0].role,
+      text: childValue.messages[0].text,
+    });
     childValue.sessionEdges = [{
       id: `${childSessionId}:edge:parent`,
       sessionId: childSessionId,

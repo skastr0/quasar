@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import {
   decodeMappedSessionSync,
   mappedSessionExamples,
+  messageContentHash,
 } from "@skastr0/quasar-protocol";
 import { Effect } from "effect";
 
@@ -42,12 +43,19 @@ const fixture = (
     sourcePath: `/private/${suffix}.jsonl`,
     sourceFingerprint: `fingerprint-${suffix}`,
   };
+  const text = `private message ${suffix}`;
   source.messages = source.messages.map((message: any) => ({
     ...message,
     sessionId,
     eventId,
-    text: `private message ${suffix}`,
-    contentHash: `hash-${suffix}`,
+    text,
+    contentHash: messageContentHash({
+      sessionId,
+      eventId,
+      seq: message.seq,
+      role: message.role,
+      text,
+    }),
   }));
   source.events = source.events.map((event: any) => ({
     ...event,
