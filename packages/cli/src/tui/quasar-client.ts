@@ -139,7 +139,15 @@ const queryItems = (input: unknown, spec: QuerySpec): QueryResponse =>
 export const parseSearch = (input: unknown, spec = searchQuery({ text: "fixture", mode: "lexical" })): Outcome<readonly SearchMatch[]> => {
   if (isRecord(input) && input.ok === false) return failure(input, "search failed");
   try {
-    const response = queryItems(input, spec);
+    // Resource→query conversion may re-attach degraded signals for agents.
+    // Strict QueryResponse decode rejects them; strip before re-decode.
+    const payload = isRecord(input) && ("degraded" in input || "degradedReason" in input)
+      ? (() => {
+        const { degraded: _degraded, degradedReason: _degradedReason, ...rest } = input;
+        return rest;
+      })()
+      : input;
+    const response = queryItems(payload, spec);
     if (response.kind !== "search") return { ok: false, code: "Protocol", message: "expected search response" };
     return {
       ok: true,

@@ -596,6 +596,10 @@ const metadataContentBlock = (
         id: scopedId(sessionId, "content", nativeEventId),
         sequence: 0,
         kind: "json",
+        // Kind-gated payload: json requires `value` . Keep `metadata`
+        // as the observed native facts surface for tool-payload exclusion and
+        // amp fixture expectations.
+        value: metadata,
         metadata,
       }];
 
