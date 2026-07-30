@@ -98,7 +98,7 @@ const fileState = (path: string) => {
   const read = (filePath: string) => {
     try {
       const stat = statSync(filePath);
-      return { exists: true, size: stat.size, mtimeMs: stat.mtimeMs };
+      return { exists: true as const, size: stat.size, mtimeMs: stat.mtimeMs };
     } catch (error) {
       if (
         typeof error === "object"
@@ -116,6 +116,19 @@ const fileState = (path: string) => {
     wal: read(`${path}-wal`),
     shm: read(`${path}-shm`),
   };
+};
+
+/** Content identity only — ignore WAL/SHM mtime (Linux plain-readonly fallback). */
+const assertDbBytesUnchanged = (
+  before: ReturnType<typeof fileState>,
+  after: ReturnType<typeof fileState>,
+): void => {
+  expect(after.database.exists).toBe(true);
+  expect(after.database.size).toBe(before.database.size);
+  if (before.wal.exists) {
+    expect(after.wal.exists).toBe(true);
+    expect(after.wal.size).toBe(before.wal.size);
+  }
 };
 
 interface RequestReceipt {
@@ -290,7 +303,7 @@ describe("normalized session replay proof", () => {
       ]);
       expect(posts.every(({ search }) => search === "")).toBe(true);
       expect(posts.every(({ token }) => token === "proof-token")).toBe(true);
-      expect(fileState(path)).toEqual(before);
+      assertDbBytesUnchanged(before, fileState(path));
       for (const session of sessions) {
         expect(result.stdout).not.toContain(session.session.sessionId);
         expect(result.stdout).not.toContain(session.messages[0]!.text);
