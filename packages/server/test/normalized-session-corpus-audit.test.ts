@@ -54,6 +54,19 @@ const fileState = (path: string) => {
   };
 };
 
+/** Content identity only — ignore WAL/SHM mtime (Linux plain-readonly fallback). */
+const assertDbBytesUnchanged = (
+  before: ReturnType<typeof fileState>,
+  after: ReturnType<typeof fileState>,
+): void => {
+  expect(after.database.exists).toBe(true);
+  expect(after.database.size).toBe(before.database.size);
+  if (before.wal.exists) {
+    expect(after.wal.exists).toBe(true);
+    expect(after.wal.size).toBe(before.wal.size);
+  }
+};
+
 const seedDatabase = async (path: string) => {
   const source = decodeMappedSessionSync(
     structuredClone(mappedSessionExamples[0]!.input),
@@ -151,15 +164,7 @@ describe("normalized session corpus audit", () => {
     expect(result.stdout).not.toContain(source.session.sessionId);
     expect(result.stderr).not.toContain(path);
     expect(result.stderr).not.toContain(source.session.sessionId);
-    const after = fileState(path);
-    // Main DB bytes must not change. WAL/SHM mtime can move when the
-    // immutable URI open falls back to plain readonly on Linux.
-    expect(after.database.exists).toBe(true);
-    expect(after.database.size).toBe(before.database.size);
-    if (before.wal.exists) {
-      expect(after.wal.exists).toBe(true);
-      expect(after.wal.size).toBe(before.wal.size);
-    }
+    assertDbBytesUnchanged(before, fileState(path));
   });
 
   test("validates a complete recursive ATIF descendant tree", async () => {
@@ -239,7 +244,7 @@ describe("normalized session corpus audit", () => {
     });
     expect(result.stdout).not.toContain(parent.session.sessionId);
     expect(result.stdout).not.toContain(child.session.sessionId);
-    expect(fileState(path)).toEqual(before);
+    assertDbBytesUnchanged(before, fileState(path));
   });
 
   test("groups failures into content-free diagnostics", async () => {
@@ -277,7 +282,7 @@ describe("normalized session corpus audit", () => {
     expect(result.stdout).not.toContain(sensitiveMarker);
     expect(result.stderr).not.toContain(path);
     expect(result.stderr).not.toContain(source.session.sessionId);
-    expect(fileState(path)).toEqual(before);
+    assertDbBytesUnchanged(before, fileState(path));
   });
 
   test("refuses an uncheckpointed WAL without touching proof state", async () => {
@@ -315,7 +320,7 @@ describe("normalized session corpus audit", () => {
     expect(result.stdout).not.toContain(source.session.sessionId);
     expect(result.stderr).not.toContain(path);
     expect(result.stderr).not.toContain(source.session.sessionId);
-    expect(fileState(path)).toEqual(before);
+    assertDbBytesUnchanged(before, fileState(path));
     writer.close();
   });
 
