@@ -1,10 +1,8 @@
 #!/usr/bin/env bun
 
-import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { statSync } from "node:fs";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 
 import {
   decodeAtifTrajectorySync,
@@ -17,7 +15,7 @@ import {
 } from "@skastr0/quasar-protocol";
 import { Effect } from "effect";
 
-import { LocalStore, makeReadonlyLocalStoreLayer } from "./store";
+import { LocalStore, makeReadonlyLocalStoreLayer, openReadonlySqlite } from "./store";
 
 const args = process.argv.slice(2);
 
@@ -62,7 +60,6 @@ if (dbArgument === undefined || dbArgument.trim() === "") {
 }
 
 const dbPath = resolve(dbArgument);
-const immutableDbUri = `${pathToFileURL(dbPath).href}?immutable=1`;
 const progressEvery = positiveIntFor("--progress-every", 100);
 const maxErrors = positiveIntFor("--max-errors", 100);
 const startedAt = Date.now();
@@ -241,7 +238,7 @@ const addAtifCompatibilityCounts = (
   }
 };
 
-const lineageDb = new Database(immutableDbUri, { readonly: true });
+const lineageDb = openReadonlySqlite(dbPath);
 const lineage = (() => {
   try {
     const childSessions = (
