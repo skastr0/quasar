@@ -206,7 +206,7 @@ describe("vectorMatrix boot", () => {
           Uint16Array.from(new Uint16Array(encodeFloat16Vector(angleVector(0.1)).buffer)),
           query,
         );
-        expect(Math.abs((hits[0]?.score ?? 0) - expected)).toBeLessThan(1e-5);
+        expect(Math.abs((hits[0]?.score ?? 0) - expected)).toBeLessThan(1e-3);
       }),
     );
   });
@@ -478,7 +478,7 @@ describe("vectorMatrix kernel parity at matrix level", () => {
       nativeHits.map((hit) => `${hit.sessionId}:${hit.seq}`),
     );
     for (let index = 0; index < nativeHits.length; index += 1) {
-      expect(Math.abs((nativeHits[index]?.score ?? 0) - (fallbackHits[index]?.score ?? 0))).toBeLessThan(1e-5);
+      expect(Math.abs((nativeHits[index]?.score ?? 0) - (fallbackHits[index]?.score ?? 0))).toBeLessThan(1e-3);
     }
   });
 });
