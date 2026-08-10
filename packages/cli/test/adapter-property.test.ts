@@ -112,6 +112,15 @@ insert into messages (session_id, role, content, timestamp) values ('20260101_00
             : { type: "message", id: "pi-mut-missing", parentId: null, timestamp: "2026-06-11T00:00:00.000Z" },
       )}\n`);
       return;
+    case "prime":
+      appendText(fixture.primaryPath, `${JSON.stringify(
+        mutation === "unknown_type"
+          ? { type: "zztest_unknown", id: "prime-mut-unknown", parentId: null, timestamp: "2026-06-11T00:00:00.000Z" }
+          : mutation === "wrong_type"
+            ? { type: "message", id: "prime-mut-wrong", parentId: null, timestamp: "2026-06-11T00:00:00.000Z", message: { role: "assistant", content: 5 } }
+            : { type: "message", id: "prime-mut-missing", parentId: null, timestamp: "2026-06-11T00:00:00.000Z" },
+      )}\n`);
+      return;
     case "cursor": {
       const mutated = mutation === "unknown_type"
         ? { role: "user", content: [{ type: "zztest_unknown" }] }

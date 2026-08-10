@@ -1,0 +1,766 @@
+[
+  {
+    "sourceRoot": {
+      "adapterId": "prime-agent-local-jsonl",
+      "discoveredAt": "2026-06-11T00:00:00.000Z",
+      "machineId": "machine:test",
+      "provider": "prime",
+      "rootPath": "/fixture/prime"
+    },
+    "type": "sourceRoot"
+  },
+  {
+    "fingerprint": {
+      "mtimeMs": "<mtimeMs>",
+      "size": 585
+    },
+    "session": {
+      "agentName": "fixture-child-agent",
+      "artifactCount": 0,
+      "artifacts": [],
+      "assignment": {
+        "depth": 1
+      },
+      "contentBlockCount": 2,
+      "eventCount": 2,
+      "events": [
+        {
+          "agentName": "fixture-child-agent",
+          "contentBlocks": [
+            {
+              "id": "prime:c1a8372e5c4011ff06e2d1b062daa9a1:block:7ab16d87f39aa63ed831939139988c60",
+              "kind": "text",
+              "metadata": {
+                "name": "fixture-child-agent"
+              },
+              "sequence": 0,
+              "text": "{\"name\":\"fixture-child-agent\"}"
+            }
+          ],
+          "id": "prime:c1a8372e5c4011ff06e2d1b062daa9a1:event:fc19ed85d76622de01641fd35deedbd4",
+          "kind": "lifecycle",
+          "machineId": "machine:test",
+          "nativeEventId": "child-info:0",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "prime",
+          "rawReference": {
+            "line": 2,
+            "nativeType": "session_info",
+            "rawBytes": 125,
+            "sourcePath": "/fixture/prime/session-artifacts/prime-fixture061/sub-00000001/fixture-child.jsonl"
+          },
+          "role": "system",
+          "sequence": 0,
+          "sessionId": "prime:c1a8372e5c4011ff06e2d1b062daa9a1",
+          "timestamp": "2026-06-11T00:00:00.000Z"
+        },
+        {
+          "agentName": "fixture-child-agent",
+          "contentBlocks": [
+            {
+              "id": "prime:c1a8372e5c4011ff06e2d1b062daa9a1:block:d4039bfdd196f38c944f4aef51d07cbe",
+              "kind": "text",
+              "sequence": 0,
+              "text": "fixture child turn"
+            }
+          ],
+          "contentText": "fixture child turn",
+          "id": "prime:c1a8372e5c4011ff06e2d1b062daa9a1:event:c831a0a99308c32a99650b2b1420f464",
+          "kind": "message",
+          "machineId": "machine:test",
+          "nativeEventId": "child-user:0",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "prime",
+          "rawReference": {
+            "line": 3,
+            "nativeType": "message",
+            "rawBytes": 207,
+            "sourcePath": "/fixture/prime/session-artifacts/prime-fixture061/sub-00000001/fixture-child.jsonl"
+          },
+          "role": "user",
+          "sequence": 1,
+          "sessionId": "prime:c1a8372e5c4011ff06e2d1b062daa9a1",
+          "timestamp": "2026-06-11T00:00:00.000Z"
+        }
+      ],
+      "executionContexts": [],
+      "host": "test-host",
+      "id": "prime:c1a8372e5c4011ff06e2d1b062daa9a1",
+      "identitySchemeVersion": 1,
+      "machineId": "machine:test",
+      "nativeProjectKey": "/fixture/quasar",
+      "nativeSessionId": "prime-fixture-child",
+      "normalizationVersion": 12,
+      "projectIdentity": {
+        "confidence": "low",
+        "displayName": "quasar",
+        "normalizedPath": "/fixture/quasar",
+        "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+        "rawPath": "/fixture/quasar",
+        "signals": [
+          {
+            "confidence": "low",
+            "kind": "path",
+            "value": "/fixture/quasar"
+          }
+        ]
+      },
+      "provider": "prime",
+      "sessionEdgeCount": 3,
+      "sessionEdges": [
+        {
+          "agentName": "fixture-child-agent",
+          "fromEventId": "prime:c1a8372e5c4011ff06e2d1b062daa9a1:event:fc19ed85d76622de01641fd35deedbd4",
+          "id": "prime:c1a8372e5c4011ff06e2d1b062daa9a1:edge:dd83fd2499d584ab2ae99a1ea01ccc9d",
+          "kind": "parent",
+          "machineId": "machine:test",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "prime",
+          "rawReference": {
+            "line": 3,
+            "nativeType": "message",
+            "sourcePath": "/fixture/prime/session-artifacts/prime-fixture061/sub-00000001/fixture-child.jsonl"
+          },
+          "sessionId": "prime:c1a8372e5c4011ff06e2d1b062daa9a1",
+          "toEventId": "prime:c1a8372e5c4011ff06e2d1b062daa9a1:event:c831a0a99308c32a99650b2b1420f464"
+        },
+        {
+          "agentName": "fixture-child-agent",
+          "fromEventId": "prime:c1a8372e5c4011ff06e2d1b062daa9a1:event:fc19ed85d76622de01641fd35deedbd4",
+          "id": "prime:c1a8372e5c4011ff06e2d1b062daa9a1:edge:ca1f6981a8633e4eaed9666f0ce4f04c",
+          "kind": "next",
+          "machineId": "machine:test",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "prime",
+          "sessionId": "prime:c1a8372e5c4011ff06e2d1b062daa9a1",
+          "toEventId": "prime:c1a8372e5c4011ff06e2d1b062daa9a1:event:c831a0a99308c32a99650b2b1420f464"
+        },
+        {
+          "agentName": "fixture-child-agent",
+          "fromId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "id": "prime:c1a8372e5c4011ff06e2d1b062daa9a1:edge:714c5359ce98074c4c70228bde531846",
+          "kind": "subagent_of",
+          "machineId": "machine:test",
+          "projectIdentityKey": "path:machine:test:98126238f60274c16df4b5221de58f8b",
+          "provider": "prime",
+          "rawReference": {
+            "nativeType": "parentSession",
+            "sourcePath": "<fixture-root>/sessions/fixture.jsonl"
+          },
+          "sessionId": "prime:c1a8372e5c4011ff06e2d1b062daa9a1",
+          "toId": "prime:c1a8372e5c4011ff06e2d1b062daa9a1"
+        }
+      ],
+      "sourcePath": "/fixture/prime/session-artifacts/prime-fixture061/sub-00000001/fixture-child.jsonl",
+      "sourceRoot": "/fixture/prime",
+      "startedAt": "2026-06-11T00:00:00.000Z",
+      "title": "fixture-child-agent",
+      "toolCallCount": 0,
+      "toolCalls": [],
+      "updatedAt": "2026-06-11T00:00:00.000Z",
+      "usageRecordCount": 0,
+      "usageRecords": []
+    },
+    "sourceUnit": {
+      "adapterId": "prime-agent-local-jsonl",
+      "physicalPath": "<fixture-root>/session-artifacts/prime-fixture061/sub-00000001/fixture-child.jsonl",
+      "provider": "prime",
+      "rootPath": "/fixture/prime",
+      "sourcePath": "/fixture/prime/session-artifacts/prime-fixture061/sub-00000001/fixture-child.jsonl"
+    },
+    "type": "session"
+  },
+  {
+    "fingerprint": {
+      "mtimeMs": "<mtimeMs>",
+      "size": 2051
+    },
+    "session": {
+      "agentName": "prime-agent",
+      "artifactCount": 0,
+      "artifacts": [],
+      "assignment": {
+        "depth": 0
+      },
+      "contentBlockCount": 9,
+      "eventCount": 9,
+      "events": [
+        {
+          "agentName": "prime-agent",
+          "contentBlocks": [
+            {
+              "id": "prime:34cb89fe232dd521a9a9eff43c401d77:block:429b010c2b5b0df9440f0996b5e5e95b",
+              "kind": "text",
+              "metadata": {
+                "name": "fixture-session"
+              },
+              "sequence": 0,
+              "text": "{\"name\":\"fixture-session\"}"
+            }
+          ],
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:event:6fe4dc0c415759331a5018da82b8e0a9",
+          "kind": "lifecycle",
+          "machineId": "machine:test",
+          "nativeEventId": "prime-info-1:0",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "rawReference": {
+            "line": 2,
+            "nativeType": "session_info",
+            "rawBytes": 123,
+            "sourcePath": "/fixture/prime/sessions/fixture.jsonl"
+          },
+          "role": "system",
+          "sequence": 0,
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "timestamp": "2026-06-11T00:00:00.000Z"
+        },
+        {
+          "agentName": "prime-agent",
+          "contentBlocks": [
+            {
+              "id": "prime:34cb89fe232dd521a9a9eff43c401d77:block:8b4ada19580e9b3ca1b1ea6f1edc017a",
+              "kind": "text",
+              "metadata": {},
+              "sequence": 0,
+              "text": "{\"provider\":\"fixture-provider\",\"modelId\":\"fixture-model\"}"
+            }
+          ],
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:event:2ae1285e410390f3b0bb6000cccb78a5",
+          "kind": "lifecycle",
+          "machineId": "machine:test",
+          "nativeEventId": "prime-model-1:0",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "rawReference": {
+            "line": 3,
+            "nativeType": "model_change",
+            "rawBytes": 165,
+            "sourcePath": "/fixture/prime/sessions/fixture.jsonl"
+          },
+          "role": "system",
+          "sequence": 1,
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "timestamp": "2026-06-11T00:00:00.000Z"
+        },
+        {
+          "agentName": "prime-agent",
+          "contentBlocks": [
+            {
+              "id": "prime:34cb89fe232dd521a9a9eff43c401d77:block:b3c8bb57b9384e662fb7454d83006dbc",
+              "kind": "text",
+              "metadata": {},
+              "sequence": 0,
+              "text": "{\"thinkingLevel\":\"high\"}"
+            }
+          ],
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:event:f0c9f58643bb09c50408df044b6ceecb",
+          "kind": "lifecycle",
+          "machineId": "machine:test",
+          "nativeEventId": "prime-thinking-1:0",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "rawReference": {
+            "line": 4,
+            "nativeType": "thinking_level_change",
+            "rawBytes": 145,
+            "sourcePath": "/fixture/prime/sessions/fixture.jsonl"
+          },
+          "role": "system",
+          "sequence": 2,
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "timestamp": "2026-06-11T00:00:00.000Z"
+        },
+        {
+          "agentName": "prime-agent",
+          "contentBlocks": [
+            {
+              "id": "prime:34cb89fe232dd521a9a9eff43c401d77:block:6117bc9b5486326ac86e3115033de76c",
+              "kind": "text",
+              "metadata": {},
+              "sequence": 0,
+              "text": "{\"serviceTier\":\"default\"}"
+            }
+          ],
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:event:d29f380126b35a36c53e90cbddcb6708",
+          "kind": "lifecycle",
+          "machineId": "machine:test",
+          "nativeEventId": "prime-tier-1:0",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "rawReference": {
+            "line": 5,
+            "nativeType": "service_tier_change",
+            "rawBytes": 143,
+            "sourcePath": "/fixture/prime/sessions/fixture.jsonl"
+          },
+          "role": "system",
+          "sequence": 3,
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "timestamp": "2026-06-11T00:00:00.000Z"
+        },
+        {
+          "agentName": "prime-agent",
+          "contentBlocks": [
+            {
+              "id": "prime:34cb89fe232dd521a9a9eff43c401d77:block:d44cef30c37860791c68e3bab2b3d033",
+              "kind": "text",
+              "sequence": 0,
+              "text": "fixture user turn"
+            }
+          ],
+          "contentText": "fixture user turn",
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:event:0805c90ffbb46040fdc060594e1e6d52",
+          "kind": "message",
+          "machineId": "machine:test",
+          "nativeEventId": "prime-user-1:0",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "rawReference": {
+            "line": 6,
+            "nativeType": "message",
+            "rawBytes": 210,
+            "sourcePath": "/fixture/prime/sessions/fixture.jsonl"
+          },
+          "role": "user",
+          "sequence": 4,
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "timestamp": "2026-06-11T00:00:00.000Z"
+        },
+        {
+          "agentName": "prime-agent",
+          "contentBlocks": [
+            {
+              "id": "prime:34cb89fe232dd521a9a9eff43c401d77:block:c2ef3601378c37c4f3d3d10b8d72981e",
+              "kind": "thinking",
+              "metadata": {
+                "redacted": false
+              },
+              "sequence": 0,
+              "thinking": "fixture reasoning turn"
+            }
+          ],
+          "contentText": "fixture reasoning turn",
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:event:36469d2b7b95ee8a7dea63b928f6a5f8",
+          "kind": "reasoning",
+          "machineId": "machine:test",
+          "nativeEventId": "prime-assistant-1:0",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "rawReference": {
+            "line": 7,
+            "nativeType": "message",
+            "rawBytes": 603,
+            "sourcePath": "/fixture/prime/sessions/fixture.jsonl"
+          },
+          "role": "thinking",
+          "sequence": 5,
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "timestamp": "2026-06-11T00:00:00.000Z"
+        },
+        {
+          "agentName": "prime-agent",
+          "contentBlocks": [
+            {
+              "id": "prime:34cb89fe232dd521a9a9eff43c401d77:block:79f79604781dd835ca8d9f663534980f",
+              "kind": "text",
+              "sequence": 0,
+              "text": "fixture assistant turn"
+            }
+          ],
+          "contentText": "fixture assistant turn",
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:event:4614325fc334668a4959a19970503104",
+          "kind": "message",
+          "machineId": "machine:test",
+          "nativeEventId": "prime-assistant-1:1",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "rawReference": {
+            "line": 7,
+            "nativeType": "message",
+            "rawBytes": 603,
+            "sourcePath": "/fixture/prime/sessions/fixture.jsonl"
+          },
+          "role": "assistant",
+          "sequence": 6,
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "timestamp": "2026-06-11T00:00:00.000Z"
+        },
+        {
+          "agentName": "prime-agent",
+          "contentBlocks": [
+            {
+              "id": "prime:34cb89fe232dd521a9a9eff43c401d77:block:f9615b3d5cae68d82ebd9c2fca8022fa",
+              "kind": "json",
+              "sequence": 0,
+              "value": {
+                "arguments": {
+                  "cmd": "pwd"
+                },
+                "name": "bash"
+              }
+            }
+          ],
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:event:a3d3145bad0a4a4e9e9b0049ba132f74",
+          "kind": "tool_call",
+          "machineId": "machine:test",
+          "nativeEventId": "prime-assistant-1:2",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "rawReference": {
+            "line": 7,
+            "nativeType": "message",
+            "rawBytes": 603,
+            "sourcePath": "/fixture/prime/sessions/fixture.jsonl"
+          },
+          "role": "assistant",
+          "sequence": 7,
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "timestamp": "2026-06-11T00:00:00.000Z",
+          "toolCallId": "prime:34cb89fe232dd521a9a9eff43c401d77:tool:d60ac7ea33f1915dfe558558183a2303"
+        },
+        {
+          "agentName": "prime-agent",
+          "contentBlocks": [
+            {
+              "id": "prime:34cb89fe232dd521a9a9eff43c401d77:block:d228cc54e61f35b571135c4ef0765627",
+              "kind": "text",
+              "sequence": 0,
+              "text": "/fixture/quasar"
+            }
+          ],
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:event:d7a7c8eda80992eae596b4ef94e9921c",
+          "kind": "tool_result",
+          "machineId": "machine:test",
+          "nativeEventId": "prime-result-1:0",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "rawReference": {
+            "line": 8,
+            "nativeType": "message",
+            "rawBytes": 283,
+            "sourcePath": "/fixture/prime/sessions/fixture.jsonl"
+          },
+          "role": "tool",
+          "sequence": 8,
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "timestamp": "2026-06-11T00:00:00.000Z",
+          "toolCallId": "prime:34cb89fe232dd521a9a9eff43c401d77:tool:d60ac7ea33f1915dfe558558183a2303"
+        }
+      ],
+      "executionContexts": [
+        {
+          "agentName": "prime-agent",
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:execution-context:097d4ef54e0fd338034efaef995c4aba",
+          "machineId": "machine:test",
+          "model": "fixture-model",
+          "modelProvider": "fixture-provider",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "reasoningEffort": "high",
+          "scope": "turn",
+          "sequence": 5,
+          "serviceTier": "default",
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "timestamp": "2026-06-11T00:00:00.000Z",
+          "turnId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:36469d2b7b95ee8a7dea63b928f6a5f8"
+        }
+      ],
+      "host": "test-host",
+      "id": "prime:34cb89fe232dd521a9a9eff43c401d77",
+      "identitySchemeVersion": 1,
+      "machineId": "machine:test",
+      "nativeProjectKey": "/fixture/quasar",
+      "nativeSessionId": "prime-fixture061",
+      "normalizationVersion": 12,
+      "projectIdentity": {
+        "confidence": "high",
+        "displayName": "quasar",
+        "gitRemote": "git@github.com:fixture/quasar.git",
+        "gitRemoteNormalized": "github.com/fixture/quasar",
+        "normalizedPath": "/fixture/quasar",
+        "projectIdentityKey": "git:github.com/fixture/quasar",
+        "rawPath": "/fixture/quasar",
+        "signals": [
+          {
+            "confidence": "high",
+            "kind": "git_remote",
+            "value": "github.com/fixture/quasar"
+          }
+        ]
+      },
+      "provider": "prime",
+      "sessionEdgeCount": 15,
+      "sessionEdges": [
+        {
+          "agentName": "prime-agent",
+          "fromEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:a3d3145bad0a4a4e9e9b0049ba132f74",
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:edge:008bf2ab86d5cfca1748100db0b75a64",
+          "kind": "tool_result_for",
+          "machineId": "machine:test",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "toEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:d7a7c8eda80992eae596b4ef94e9921c"
+        },
+        {
+          "agentName": "prime-agent",
+          "fromEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:6fe4dc0c415759331a5018da82b8e0a9",
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:edge:23b8422b04a24404c988f069d9f1b64a",
+          "kind": "parent",
+          "machineId": "machine:test",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "rawReference": {
+            "line": 3,
+            "nativeType": "model_change",
+            "sourcePath": "/fixture/prime/sessions/fixture.jsonl"
+          },
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "toEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:2ae1285e410390f3b0bb6000cccb78a5"
+        },
+        {
+          "agentName": "prime-agent",
+          "fromEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:6fe4dc0c415759331a5018da82b8e0a9",
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:edge:ee060c5edabb02198d2998089f90c5b3",
+          "kind": "next",
+          "machineId": "machine:test",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "toEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:2ae1285e410390f3b0bb6000cccb78a5"
+        },
+        {
+          "agentName": "prime-agent",
+          "fromEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:2ae1285e410390f3b0bb6000cccb78a5",
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:edge:d18132ac43369307c01a2e2ebc6cf961",
+          "kind": "parent",
+          "machineId": "machine:test",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "rawReference": {
+            "line": 4,
+            "nativeType": "thinking_level_change",
+            "sourcePath": "/fixture/prime/sessions/fixture.jsonl"
+          },
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "toEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:f0c9f58643bb09c50408df044b6ceecb"
+        },
+        {
+          "agentName": "prime-agent",
+          "fromEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:2ae1285e410390f3b0bb6000cccb78a5",
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:edge:5f952ba5fcec2cbeecbe356bc1096884",
+          "kind": "next",
+          "machineId": "machine:test",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "toEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:f0c9f58643bb09c50408df044b6ceecb"
+        },
+        {
+          "agentName": "prime-agent",
+          "fromEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:f0c9f58643bb09c50408df044b6ceecb",
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:edge:64ade246290612a91629786c4943a357",
+          "kind": "parent",
+          "machineId": "machine:test",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "rawReference": {
+            "line": 5,
+            "nativeType": "service_tier_change",
+            "sourcePath": "/fixture/prime/sessions/fixture.jsonl"
+          },
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "toEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:d29f380126b35a36c53e90cbddcb6708"
+        },
+        {
+          "agentName": "prime-agent",
+          "fromEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:f0c9f58643bb09c50408df044b6ceecb",
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:edge:1156a60302e7447cbf85d3f5a1519e6e",
+          "kind": "next",
+          "machineId": "machine:test",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "toEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:d29f380126b35a36c53e90cbddcb6708"
+        },
+        {
+          "agentName": "prime-agent",
+          "fromEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:d29f380126b35a36c53e90cbddcb6708",
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:edge:5fc3b1b566e51bda25e5088fb9d4dac4",
+          "kind": "parent",
+          "machineId": "machine:test",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "rawReference": {
+            "line": 6,
+            "nativeType": "message",
+            "sourcePath": "/fixture/prime/sessions/fixture.jsonl"
+          },
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "toEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:0805c90ffbb46040fdc060594e1e6d52"
+        },
+        {
+          "agentName": "prime-agent",
+          "fromEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:d29f380126b35a36c53e90cbddcb6708",
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:edge:0a282ad0b308887f73f541a626edaf4d",
+          "kind": "next",
+          "machineId": "machine:test",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "toEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:0805c90ffbb46040fdc060594e1e6d52"
+        },
+        {
+          "agentName": "prime-agent",
+          "fromEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:36469d2b7b95ee8a7dea63b928f6a5f8",
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:edge:c8be4efa00490cdd56d1c2e804ef25d3",
+          "kind": "next",
+          "machineId": "machine:test",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "toEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:4614325fc334668a4959a19970503104"
+        },
+        {
+          "agentName": "prime-agent",
+          "fromEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:4614325fc334668a4959a19970503104",
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:edge:a00b34a2299ffb3512a6dfc0b25cb54b",
+          "kind": "next",
+          "machineId": "machine:test",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "toEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:a3d3145bad0a4a4e9e9b0049ba132f74"
+        },
+        {
+          "agentName": "prime-agent",
+          "fromEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:0805c90ffbb46040fdc060594e1e6d52",
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:edge:bd7ac72b187c427c948fe5ed68e34c4e",
+          "kind": "parent",
+          "machineId": "machine:test",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "rawReference": {
+            "line": 7,
+            "nativeType": "message",
+            "sourcePath": "/fixture/prime/sessions/fixture.jsonl"
+          },
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "toEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:36469d2b7b95ee8a7dea63b928f6a5f8"
+        },
+        {
+          "agentName": "prime-agent",
+          "fromEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:0805c90ffbb46040fdc060594e1e6d52",
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:edge:466a5cb282bf63bd128bf3f0671adb83",
+          "kind": "next",
+          "machineId": "machine:test",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "toEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:36469d2b7b95ee8a7dea63b928f6a5f8"
+        },
+        {
+          "agentName": "prime-agent",
+          "fromEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:a3d3145bad0a4a4e9e9b0049ba132f74",
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:edge:f97c9c4fc8f387d00a9c16f9a1e218a2",
+          "kind": "parent",
+          "machineId": "machine:test",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "rawReference": {
+            "line": 8,
+            "nativeType": "message",
+            "sourcePath": "/fixture/prime/sessions/fixture.jsonl"
+          },
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "toEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:d7a7c8eda80992eae596b4ef94e9921c"
+        },
+        {
+          "agentName": "prime-agent",
+          "fromEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:a3d3145bad0a4a4e9e9b0049ba132f74",
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:edge:d438c3367ef5d7e93cc6fd141dec0467",
+          "kind": "next",
+          "machineId": "machine:test",
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "toEventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:d7a7c8eda80992eae596b4ef94e9921c"
+        }
+      ],
+      "sourcePath": "/fixture/prime/sessions/fixture.jsonl",
+      "sourceRoot": "/fixture/prime",
+      "startedAt": "2026-06-11T00:00:00.000Z",
+      "title": "fixture-session",
+      "toolCallCount": 1,
+      "toolCalls": [
+        {
+          "agentName": "prime-agent",
+          "completedAt": "2026-06-11T00:00:00.000Z",
+          "eventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:a3d3145bad0a4a4e9e9b0049ba132f74",
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:tool:d60ac7ea33f1915dfe558558183a2303",
+          "input": {
+            "cmd": "pwd"
+          },
+          "machineId": "machine:test",
+          "output": {
+            "content": [
+              {
+                "text": "/fixture/quasar",
+                "type": "text"
+              }
+            ]
+          },
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "startedAt": "2026-06-11T00:00:00.000Z",
+          "status": "completed",
+          "toolName": "bash"
+        }
+      ],
+      "updatedAt": "2026-06-11T00:00:00.000Z",
+      "usageRecordCount": 1,
+      "usageRecords": [
+        {
+          "agentName": "prime-agent",
+          "cacheCreationInputTokens": 0,
+          "cacheReadInputTokens": 0,
+          "cost": 0,
+          "currency": "USD",
+          "eventId": "prime:34cb89fe232dd521a9a9eff43c401d77:event:36469d2b7b95ee8a7dea63b928f6a5f8",
+          "id": "prime:34cb89fe232dd521a9a9eff43c401d77:usage:c2ef3601378c37c4f3d3d10b8d72981e",
+          "inputTokens": 1,
+          "machineId": "machine:test",
+          "model": "fixture-model",
+          "modelProvider": "fixture-provider",
+          "outputTokens": 1,
+          "projectIdentityKey": "git:github.com/fixture/quasar",
+          "provider": "prime",
+          "sessionId": "prime:34cb89fe232dd521a9a9eff43c401d77",
+          "timestamp": "2026-06-11T00:00:00.000Z",
+          "totalTokens": 2
+        }
+      ]
+    },
+    "sourceUnit": {
+      "adapterId": "prime-agent-local-jsonl",
+      "physicalPath": "<fixture-root>/sessions/fixture.jsonl",
+      "provider": "prime",
+      "rootPath": "/fixture/prime",
+      "sourcePath": "/fixture/prime/sessions/fixture.jsonl"
+    },
+    "type": "session"
+  },
+  {
+    "diagnostic": {
+      "adapterId": "prime-agent-local-jsonl",
+      "message": "Discovered 2 Prime Agent session(s).",
+      "parserConfidence": "documented",
+      "provider": "prime",
+      "rootPath": "/fixture/prime",
+      "status": "available"
+    },
+    "type": "diagnostic"
+  }
+]

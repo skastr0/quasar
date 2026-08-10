@@ -39,6 +39,7 @@ export const Provider = Schema.Literal(
   "antigravity",
   "omp",
   "pi",
+  "prime",
   "cursor",
   "devin",
   "amp",

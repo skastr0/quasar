@@ -193,7 +193,7 @@ Notes for wrappers:
 - `role` applies to searchable message rows (`user`, `assistant`, `reasoning`);
   tool-call input/output remains structural/lexical evidence.
 - Provider filters accept `codex`, `claude`, `opencode`, `grok`, `kimi`,
-  `hermes`, `antigravity`, `omp`, `pi`, `cursor`, `devin`, and `amp`.
+  `hermes`, `antigravity`, `omp`, `pi`, `prime`, `cursor`, `devin`, and `amp`.
 - Resource collections use `{ limit, offset, nextOffset }` with a server maximum
   of 200. Carry `nextOffset` into the next request until it is `null`.
 - CLI query/list commands may expose an opaque cursor; it is a local,

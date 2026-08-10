@@ -34,6 +34,7 @@ Stable adapters included in `ingest --provider all` (registry order):
 - Antigravity
 - OMP
 - Pi
+- Prime
 - Cursor
 - Devin
 - Amp

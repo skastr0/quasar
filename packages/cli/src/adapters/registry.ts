@@ -9,6 +9,7 @@ import { hermesAdapter } from "./hermes";
 import { kimiAdapter } from "./kimi";
 import { ompAdapter } from "./omp";
 import { piAdapter } from "./pi";
+import { primeAdapter } from "./prime";
 import { opencodeAdapter } from "./opencode";
 
 /** Stable adapters included in `ingest --provider all`. */
@@ -22,6 +23,7 @@ export const stableAdapters = [
   antigravityAdapter,
   ompAdapter,
   piAdapter,
+  primeAdapter,
   cursorAdapter,
   devinAdapter,
   ampAdapter,

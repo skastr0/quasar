@@ -98,6 +98,7 @@ const providerRootEnv: Partial<Record<Provider, string>> = {
   antigravity: "QUASAR_ANTIGRAVITY_ROOT",
   omp: "QUASAR_OMP_ROOT",
   pi: "QUASAR_PI_ROOT",
+  prime: "QUASAR_PRIME_ROOT",
   cursor: "QUASAR_CURSOR_ROOT",
   devin: "QUASAR_DEVIN_ROOT",
   amp: "QUASAR_AMP_ROOT",

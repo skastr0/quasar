@@ -35,6 +35,9 @@ export const OmpSessionId = Brand.nominal<OmpSessionId>();
 export type PiSessionId = string & Brand.Brand<"PiSessionId">;
 export const PiSessionId = Brand.nominal<PiSessionId>();
 
+export type PrimeSessionId = string & Brand.Brand<"PrimeSessionId">;
+export const PrimeSessionId = Brand.nominal<PrimeSessionId>();
+
 export type CursorSessionId = string & Brand.Brand<"CursorSessionId">;
 export const CursorSessionId = Brand.nominal<CursorSessionId>();
 
@@ -57,6 +60,7 @@ export type NativeSessionId =
   | KimiSessionId
   | OmpSessionId
   | PiSessionId
+  | PrimeSessionId
   | CursorSessionId
   | DevinSessionId
   | AntigravitySessionId

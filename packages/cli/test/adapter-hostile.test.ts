@@ -17,7 +17,7 @@ import {
   type AdapterProvider,
 } from "./adapter-test-harness";
 
-const lineProviders = ["codex", "claude", "grok", "kimi", "antigravity", "omp", "pi"] as const;
+const lineProviders = ["codex", "claude", "grok", "kimi", "antigravity", "omp", "pi", "prime"] as const;
 const sqliteProviders = ["opencode", "hermes", "cursor", "devin"] as const;
 const allProviders = [...lineProviders, ...sqliteProviders] as const;
 const tempRoots: string[] = [];
@@ -50,6 +50,7 @@ const UNKNOWN_RECORD_DIAGNOSTIC: Record<(typeof lineProviders)[number], string> 
   antigravity: "antigravity.record.decode_failed",
   omp: "omp.record.unknown_type",
   pi: "pi.entry.unknown_type",
+  prime: "prime.entry.unknown_type",
 };
 
 /** Exact unknown-row diagnostic ids per SQLite provider (probe-locked). */

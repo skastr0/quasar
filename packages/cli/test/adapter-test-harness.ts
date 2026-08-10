@@ -24,6 +24,7 @@ export const filesystemAdapterProviders = [
   "antigravity",
   "omp",
   "pi",
+  "prime",
   "cursor",
   "devin",
 ] as const;
@@ -463,6 +464,130 @@ const buildPiFixture = (root: string): AdapterFixture => {
   return { provider: "pi", root, logicalRoot: "/fixture/pi", primaryPath };
 };
 
+const buildPrimeFixture = (root: string): AdapterFixture => {
+  // Root sessions live at <root>/sessions/*.jsonl; RLM subagent sessions live
+  // under <root>/session-artifacts/<parentId>/sub-*/*.jsonl (recursive).
+  const sessionsDir = join(root, "sessions");
+  mkdirSync(sessionsDir, { recursive: true });
+  const parentPath = join(sessionsDir, "fixture.jsonl");
+  writeJsonLines(parentPath, [
+    {
+      type: "session",
+      version: 3,
+      id: "prime-fixture061",
+      timestamp: NOW,
+      cwd: "/fixture/quasar",
+      rlmDepth: 0,
+      git: { repoUrl: "git@github.com:fixture/quasar.git" },
+    },
+    { type: "session_info", id: "prime-info-1", parentId: null, timestamp: NOW, name: "fixture-session" },
+    { type: "model_change", id: "prime-model-1", parentId: "prime-info-1", timestamp: NOW, provider: "fixture-provider", modelId: "fixture-model" },
+    { type: "thinking_level_change", id: "prime-thinking-1", parentId: "prime-model-1", timestamp: NOW, thinkingLevel: "high" },
+    { type: "service_tier_change", id: "prime-tier-1", parentId: "prime-thinking-1", timestamp: NOW, serviceTier: "default" },
+    {
+      type: "message",
+      id: "prime-user-1",
+      parentId: "prime-tier-1",
+      timestamp: NOW,
+      message: {
+        role: "user",
+        content: [{ type: "text", text: "fixture user turn" }],
+        timestamp: Date.parse(NOW),
+      },
+    },
+    {
+      type: "message",
+      id: "prime-assistant-1",
+      parentId: "prime-user-1",
+      timestamp: NOW,
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "fixture reasoning turn" },
+          { type: "text", text: "fixture assistant turn" },
+          { type: "toolCall", id: "fixture-call", name: "bash", arguments: { cmd: "pwd" } },
+        ],
+        api: "fixture-api",
+        provider: "fixture-provider",
+        model: "fixture-model",
+        usage: {
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 2,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "toolUse",
+        timestamp: Date.parse(NOW),
+      },
+    },
+    {
+      type: "message",
+      id: "prime-result-1",
+      parentId: "prime-assistant-1",
+      timestamp: NOW,
+      message: {
+        role: "toolResult",
+        toolCallId: "fixture-call",
+        toolName: "bash",
+        content: [{ type: "text", text: "/fixture/quasar" }],
+        isError: false,
+        timestamp: Date.parse(NOW),
+      },
+    },
+    // Append-only daemon status tick: expected machinery, dropped silently.
+    {
+      type: "agent_status",
+      id: "prime-status-1",
+      parentId: "prime-result-1",
+      timestamp: NOW,
+      status: { summary: "", taskState: "needs_input", basedOnMessageCount: 4 },
+    },
+  ]);
+
+  // RLM subagent session: v3 header carrying the parent file + rlmDepth 1.
+  const childDir = join(root, "session-artifacts", "prime-fixture061", "sub-00000001");
+  mkdirSync(childDir, { recursive: true });
+  // primaryPath is the CHILD file: hostile tests corrupt it, and corrupting
+  // the parent instead would trip an unguarded realpathSync(parentSession)
+  // inside subagent lineage resolution when the parent file is unreadable.
+  const primaryPath = join(childDir, "fixture-child.jsonl");
+  writeJsonLines(primaryPath, [
+    {
+      type: "session",
+      version: 3,
+      id: "prime-fixture-child",
+      timestamp: NOW,
+      cwd: "/fixture/quasar",
+      parentSession: parentPath,
+      rlmDepth: 1,
+    },
+    { type: "session_info", id: "child-info", parentId: null, timestamp: NOW, name: "fixture-child-agent" },
+    {
+      type: "message",
+      id: "child-user",
+      parentId: "child-info",
+      timestamp: NOW,
+      message: {
+        role: "user",
+        content: [{ type: "text", text: "fixture child turn" }],
+        timestamp: Date.parse(NOW),
+      },
+    },
+  ]);
+
+  // The rlm-subagents.jsonl registry file has no session header and must be
+  // excluded from discovery: it yields no session and no diagnostic.
+  writeFileSync(
+    join(root, "session-artifacts", "prime-fixture061", "rlm-subagents.jsonl"),
+    `${JSON.stringify({ type: "rlm_subagent", childId: "sub-00000001", sessionName: "registry-only" })}
+`,
+    "utf8",
+  );
+  return { provider: "prime", root, logicalRoot: "/fixture/prime", primaryPath };
+};
+
 const encodeCursorVarint = (value: number): Buffer => {
   const bytes: number[] = [];
   let remaining = value;
@@ -711,6 +836,8 @@ export const buildFixtureFor = (provider: AdapterProvider, root: string): Adapte
       return buildOmpFixture(root);
     case "pi":
       return buildPiFixture(root);
+    case "prime":
+      return buildPrimeFixture(root);
     case "cursor":
       return buildCursorFixture(root);
     case "devin":
