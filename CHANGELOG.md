@@ -8,6 +8,15 @@ formats may still change.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-08-11
+
+### Added
+
+- Prime Agent (`prime`) session adapter: ingest root sessions under
+  `~/.prime/agent/sessions` and RLM subagent sessions under
+  `session-artifacts/**/sub-*`, with subagent lineage, usage, and execution
+  contexts.
+
 ## [0.5.2] - 2026-07-29
 
 ### Fixed
