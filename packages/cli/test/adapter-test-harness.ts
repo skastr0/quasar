@@ -553,6 +553,9 @@ const buildPrimeFixture = (root: string): AdapterFixture => {
   // the parent instead would trip an unguarded realpathSync(parentSession)
   // inside subagent lineage resolution when the parent file is unreadable.
   const primaryPath = join(childDir, "fixture-child.jsonl");
+  // Relative parentSession keeps fingerprint.size platform-stable (absolute
+  // temp roots differ in length between macOS /var/folders and Linux /tmp).
+  const parentSessionRelative = join("..", "..", "..", "sessions", "fixture.jsonl");
   writeJsonLines(primaryPath, [
     {
       type: "session",
@@ -560,7 +563,7 @@ const buildPrimeFixture = (root: string): AdapterFixture => {
       id: "prime-fixture-child",
       timestamp: NOW,
       cwd: "/fixture/quasar",
-      parentSession: parentPath,
+      parentSession: parentSessionRelative,
       rlmDepth: 1,
     },
     { type: "session_info", id: "child-info", parentId: null, timestamp: NOW, name: "fixture-child-agent" },
