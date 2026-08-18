@@ -1,6 +1,6 @@
 # Pulsar Observer baseline — 2026-07-08 (pre-refactor reference)
 
-Reference point for the the current work sequence adapter-refactor arc and the the current work sequence
+Reference point for the adapter-refactor arc and the
 observability arc. Compare future runs against this file; the raw machine-readable
 output is `pulsar-baseline-2026-07-08.json` next to it.
 

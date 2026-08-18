@@ -55,8 +55,7 @@ and `docs/architecture/quasar-first-principles-rearchitecture-2026-07-03.md` for
 and resident f16 vector matrix search substrate. The measured corpus facts and normalized entity
 model in `docs/architecture/quasar-data-reality-plan-2026-06-11.md` remain live evidence.
 
-Work is tracked in Tower (project `quasar`, forge orbit), current migration sequence
-the current work sequence. Read
+Work is tracked in Tower (project `quasar`, forge orbit). Read
 the glyph before building; never put board identifiers into code, tests, schemas,
 fixtures, or file paths.
 

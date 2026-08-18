@@ -12,5 +12,6 @@ logs
 .release/
 .grok/
 .prism/
+workflows/
 
 .native/

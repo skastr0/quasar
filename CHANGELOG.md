@@ -21,12 +21,11 @@ formats may still change.
 
 ### Fixed
 
-- Seal MappedSession message text and contentHash to the linked source event
-  .
+- Seal MappedSession message text and contentHash to the linked source event.
 - Require ContentBlock kind payload fields so kind is an executable
-  discriminator .
+  discriminator.
 - Surface OpenCode machinery prune of oversized summary.diffs as a named
-  diagnostic; admit sessions that still carry product turns .
+  diagnostic; admit sessions that still carry product turns.
 - Surface search `degraded` / `degradedReason` on the CLI query path; reject
   irrelevant flags on session/trajectory/stats/doctor/projects/ingest-runs.
 
