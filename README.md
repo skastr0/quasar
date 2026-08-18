@@ -409,18 +409,33 @@ The daemon automatically acquires a file-based lock (`~/.config/quasar/remote-in
 
 The production Quasar server runs as a lightweight Docker container on a central machine (e.g. Mac mini, Linux server) accessible securely over Tailscale.
 
-### Docker Compose Setup
+### Local Docker Build & Compose Setup
+
+The Quasar server is built from the local repository context and supervised by Docker Compose on your host machine (e.g. Mac mini, Linux server):
+
+```bash
+# 1. Configure environment
+cp platform/server/.env.example platform/server/.env
+chmod 600 platform/server/.env
+
+# 2. Build and deploy the server container locally
+bun run server:deploy
+```
+
+The supervised compose configuration (`platform/server/compose.yaml`) builds the container directly from the repo context:
 
 ```yaml
-# platform/server/compose.yaml
 services:
-  quasar:
-    image: ghcr.io/skastr0/quasar-server:0.5.3
+  server:
+    build:
+      context: ../..
+      dockerfile: platform/server/Dockerfile
+    image: quasar-server:latest
     restart: unless-stopped
     ports:
-      - "7180:6180"
+      - "${QUASAR_PUBLISH_HOST:-0.0.0.0}:${QUASAR_PUBLISH_PORT:-7180}:6180"
     volumes:
-      - /data/quasar:/data/quasar
+      - quasar-data:/data/quasar
     environment:
       - QUASAR_HOME=/data/quasar
       - QUASAR_LOCAL_SQLITE=/data/quasar/quasar.sqlite
@@ -431,7 +446,7 @@ services:
 ### Server Management Scripts
 
 ```bash
-# Deploy / update service container
+# Deploy / update service container (builds and restarts)
 bun run server:deploy
 
 # View service logs & status
