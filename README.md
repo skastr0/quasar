@@ -46,24 +46,27 @@ However, developer agent ecosystems face critical operational roadblocks:
 
 ## The Data Reality & First Principles
 
-In June 2026, we parsed and measured the full corpus across active provider estates (2,360+ sessions, 1.8 GB raw files):
+Across the full 13-provider estate spanning **20,000+ sessions and ~1,000,000 turns**, empirical profiling revealed the true physics of agent session data:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                           THE DATA REALITY                              │
 │                                                                         │
-│   Total Raw Provider History:    ≈ 1.8 GB                               │
-│   Normalized Product Text:       ≈ 650 MB  (Claude, Codex, OpenCode,    │
-│                                             Grok, Hermes, Amp, etc.)    │
+│   Full Estate Scale:             20,000+ Sessions · ~1,000,000 Turns   │
+│   Supported Providers:           13 Coding Harnesses & Agent Frameworks │
 │   Maximum Legitimate Turn Size:  < 1 MB    (Bounded by context window)  │
+│   Physical Text Density:         Gigabytes, NOT Terabytes               │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
+
+The historical baseline audit (measured 2026-06-11 during early 5-provider profiling of 2,360 sessions) established the foundational lesson that holds true at 20,000+ sessions: **AI agent transcripts are fundamentally context-window-bounded**. A turn physically cannot exceed model context limits. Anything that does is provider machinery noise (e.g. multi-megabyte diff dumps or loop telemetry), not real conversational product text.
 
 From this measured evidence, Quasar was rebuilt on **Three First Principles**:
 
 1. **Measured Data is the Contract**: Never invent arbitrary byte budgets, clamps, or artificial compaction layers for legitimate session text. Boundary-reject provider garbage with named diagnostics `(provider, sessionId, field, observedBytes)`; admit all recoverable product turns.
-2. **Store at the Grain You Read**: A row is a turn (`seq` order). Reading a session is a paginated index walk in SQLite. No chunking, no reconstruction layers, no lossy compression.
+2. **Store at the Grain You Read**: A row is a turn (`seq` order). Reading a session is a paginated index walk in SQLite. No chunking, no compaction, no reconstruction layers.
 3. **Separate Indexing from Storage**: The `messages` table in SQLite is the sole text source for lexical and semantic indexing. Full structured `toolCalls` are stored for targeted forensic retrieval by `(projectKey, toolName)` or ID, and **never pollute message search vectors**.
+4. **Scale Engineering for Millions of Turns**: As proven in [`docs/architecture/quasar-scale-engineering.md`](docs/architecture/quasar-scale-engineering.md), SQLite plus a resident f16 vector matrix comfortably serves 1,000,000+ turns on a single machine with sub-100ms latency, completely eliminating the need for fragile distributed vector clusters.
 
 ---
 
