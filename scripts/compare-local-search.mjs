@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 
 const DEFAULT_SERVER = process.env.QUASAR_SERVER_URL ?? "http://127.0.0.1:7180";
 const DEFAULT_LIMIT = 5;
@@ -69,7 +70,7 @@ if (profiles.length === 0) {
   profiles.push({ name: valueFor("--name", "active"), url: valueFor("--server", DEFAULT_SERVER) });
 }
 
-const outPath = valueFor("--out", `docs/proofs/embedding-retrieval-comparison-${new Date().toISOString().slice(0, 10)}.md`);
+const outPath = valueFor("--out", join(tmpdir(), `quasar-search-comparison-${new Date().toISOString().slice(0, 10)}.md`));
 const jsonPath = valueFor("--json", outPath.replace(/\.md$/, ".json"));
 
 const usage = () => {

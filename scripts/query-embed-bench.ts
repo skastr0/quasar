@@ -9,9 +9,8 @@
 // first call would just read the cache and measure nothing about the ONNX
 // pipeline.
 //
-// Gate thresholds are set with headroom over the grounding receipt
-// (docs/proofs/query-embed-parity-fp32-2026-07-04.json: fp32 p50 31.5ms on
-// this machine class) to absorb ordinary CPU contention on a shared dev box
+// Gate thresholds are set with headroom over measured fp32 p50 on this
+// machine class to absorb ordinary CPU contention on a shared dev box
 // while still catching a real regression (wrong dtype, broken cache,
 // accidental fallback to the bounded synthetic path).
 //
@@ -32,8 +31,6 @@ import { makeEmbeddingsLayer, QUERY_EMBEDDING_ONNX_DTYPE } from "../packages/ser
 import { Embeddings, makeDurableQueueLayer } from "../packages/server/src/services";
 import { makeLocalStoreLayer } from "../packages/server/src/store";
 
-const repoRoot = resolve(import.meta.dir, "..");
-
 const argValue = (name: string): string | undefined => {
   const index = process.argv.indexOf(name);
   return index === -1 ? undefined : process.argv[index + 1];
@@ -47,7 +44,7 @@ const intArg = (name: string, fallback: number): number => {
 };
 
 const SAMPLES = intArg("--samples", 20);
-const OUT = resolve(repoRoot, argValue("--out") ?? "docs/proofs/query-embed-bench-2026-07-04.json");
+const OUT = resolve(argValue("--out") ?? join(tmpdir(), "quasar-query-embed-bench.json"));
 
 const GATE_LOAD_MS = 120_000;
 const GATE_P50_MS = 150;

@@ -25,7 +25,6 @@ Quasar ingests, normalizes, redacts, indexes, and serves AI agent session histor
 - [Trajectory Projections & Research Export](#trajectory-projections--research-export)
 - [Remote Ingest Daemon](#remote-ingest-daemon)
 - [Server Deployment & Tailscale Setup](#server-deployment--tailscale-setup)
-- [Benchmarks & Proofs](#benchmarks--proofs)
 - [Repository Structure](#repository-structure)
 - [Security & Redaction](#security--redaction)
 - [License](#license)
@@ -473,21 +472,6 @@ Configure your client once to talk to your Tailscale Service:
 
 ---
 
-## Benchmarks & Proofs
-
-All architectural claims in Quasar are backed by reproducible, checked-in benchmark receipts in `docs/proofs/`:
-
-| Benchmark / Proof Receipt | Measurement / Metric | Result |
-| :--- | :--- | :--- |
-| `sqlite-fts-lexical-benchmark-2026-07-04.json` | Lexical Search Latency (p95) | **6.1 ms** |
-| `matrix-kernel-bench-2026-07-04.json` | SIMD Exact Vector Scan (p95) | **84.8 ms** |
-| `instant-query-live-2026-07-04.json` | Reciprocal Rank Fusion Search (p95) | **96.7 ms** |
-| `ingest-diff-apply-live-2026-07-07.json` | Incremental Live Turn Diff Ingest | **12.4 ms / turn** |
-| `normalized-session-cutover-2026-07-29.md` | Full Corpus Ingest Idempotency | **100% Skip on Rerun** |
-| `query-embed-parity-fp32-2026-07-04.json` | Local fp32 ONNX vs Reference Model | **100.0% Parity** |
-
----
-
 ## Repository Structure
 
 ```
@@ -501,8 +485,7 @@ quasar/
 │   └── server/         # Dockerfile, compose.yaml, production server configs
 ├── docs/
 │   ├── architecture/   # Canonical first-principles architecture specifications
-│   ├── operations/     # Runbooks for Docker, Tailscale, backups, and observability
-│   └── proofs/         # Benchmark receipts, cutover logs, and parity proofs
+│   └── operations/     # Runbooks for Docker, Tailscale, backups, and observability
 └── scripts/            # Build, test, package verification, and server ops tooling
 ```
 

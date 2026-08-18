@@ -29,7 +29,7 @@ const usage = {
   examples: [
     "bun scripts/server-ops.mjs deploy",
     "bun scripts/server-ops.mjs status",
-    "bun scripts/server-ops.mjs materialize --out docs/proofs/materialization-closure.json",
+    "bun scripts/server-ops.mjs materialize",
     "bun scripts/server-ops.mjs exec -- sh -lc 'ls -lah /data/quasar'",
   ],
 };
@@ -114,7 +114,7 @@ function backupTruth() {
 function materializeVectors() {
   const serverUrl = optionValue("--server", process.env.QUASAR_SERVER_URL ?? `http://127.0.0.1:${process.env.QUASAR_PUBLISH_PORT ?? "7180"}`);
   const timestamp = new Date().toISOString().replaceAll(":", "-");
-  const outPath = optionValue("--out", `docs/proofs/materialization-closure-${timestamp}.json`);
+  const outPath = optionValue("--out", `/tmp/quasar-materialize-${timestamp}.json`);
   // The deployed provider is pinned to synthetic in compose.yaml; a flip to
   // local is an explicit receipted cutover, passed here as --require-provider.
   const requiredProvider = optionValue("--require-provider", "synthetic");

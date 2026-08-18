@@ -56,12 +56,12 @@ const optionalUnitNumberFor = (name: string): number | undefined => {
 
 const usage = () => {
   writeStdout(`Usage:
-  bun run proof:sqlite-first --source-db /path/to/quasar.sqlite [--work-db /tmp/proof.sqlite] [--out docs/proofs/sqlite-first-proof.json]
+  bun run proof:sqlite-first --source-db /path/to/quasar.sqlite [--work-db /tmp/proof.sqlite] [--out /tmp/sqlite-first-proof.json]
 
 Options:
   --source-db       Required. SQLite truth database to snapshot with VACUUM INTO.
   --work-db         Optional. Destination proof DB. Must not already exist.
-  --out             Optional JSON report path. Defaults under docs/proofs/.
+  --out             Optional JSON report path. Defaults under /tmp.
   --query           Repeatable FTS query. Defaults to a small built-in set.
   --fts-samples     Repeated filtered FTS samples per query. Use 60 for the p95/p99 gate. Default 1.
   --filter-project-key Optional project_key filter for filtered FTS timing. Defaults to the most common project.
@@ -96,7 +96,7 @@ if (sourceDb === undefined || sourceDb.trim() === "") {
 
 const generatedAt = new Date().toISOString().replaceAll(":", "-");
 const workDb = valueFor("--work-db", join(tmpdir(), `quasar-sqlite-first-proof-${generatedAt}.sqlite`));
-const outPath = valueFor("--out", `docs/proofs/sqlite-first-proof-${generatedAt}.json`)!;
+const outPath = valueFor("--out", join(tmpdir(), `quasar-sqlite-first-proof-${generatedAt}.json`))!;
 const queries = args.flatMap((arg, index) => (arg === "--query" && args[index + 1] !== undefined ? [args[index + 1]!] : []));
 const ftsBenchmarkSamples = numberFor("--fts-samples", 1);
 const ftsFilterProjectKey = valueFor("--filter-project-key");

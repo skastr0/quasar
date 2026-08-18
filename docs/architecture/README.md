@@ -50,15 +50,8 @@ Quasar Effect Server (Bun + Effect Runtime)
 | **[Quasar — Data-Reality Plan](quasar-data-reality-plan-2026-06-11.md)** | **Measured corpus evidence & normalized entity model.** Provider reality, turn-mapping rules, mandatory sensitive-text redaction (`redactSensitive`), and the fundamental store-at-read-grain principle. |
 | **[Provider Native Identity Rules](provider-native-identity.md)** | **Content-derived session identity.** Rules for extracting stable, path-independent session IDs from provider payloads across all 13 supported providers. |
 | **[Adapter Boundary Hardening and Triage](adapter-boundary-hardening-triage.md)** | **Adapter resilience & diagnostic triage.** Boundary rejection of corrupt or unrecoverable provider records without crashing ingest or persister loops. |
-| **[Quasar Scale Engineering](quasar-scale-engineering.md)** | **Scale benchmark evidence.** Measurement evidence, indexing benchmarks, and scale verification. |
 | **[Observability Sink and Watchdog](observability-sink-and-watchdog.md)** | **Telemetry & diagnostics.** Opt-in OTLP sink (`grafana/otel-lgtm`), metrics gauges, trace spans, and server watchdog. |
 | **[Server Docker & Tailscale Runbook](../operations/server-docker-tailscale.md)** | **Operational deployment.** Mac mini Docker compose setup, persistent volumes, secrets, `svc:quasar` Tailscale Service resolution, maintenance flows, backup/restore, and daemon installation. |
-
----
-
-## Superseded Documents (Historical Provenance)
-
-- **[Quasar — Effect Local Server Plan](quasar-effect-server-plan-2026-06-18.md)** — The 2026-06 migration architecture (LanceDB derived index era). Its SQLite truth-store and queue design carried forward into the 0.5.x architecture; its LanceDB search half was completely replaced by SQLite FTS5 and the resident f16 vector matrix.
 
 ---
 

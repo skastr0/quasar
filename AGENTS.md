@@ -50,10 +50,10 @@ any shape decision.
 ## Canonical direction
 
 Exactly one implementation direction:
-`docs/architecture/quasar-effect-server-plan-2026-06-18.md` for the service graph and domain model,
-and `docs/architecture/quasar-first-principles-rearchitecture-2026-07-03.md` for the SQLite FTS5
+`docs/architecture/quasar-first-principles-rearchitecture-2026-07-03.md` for the SQLite FTS5
 and resident f16 vector matrix search substrate. The measured corpus facts and normalized entity
 model in `docs/architecture/quasar-data-reality-plan-2026-06-11.md` remain live evidence.
+The live HTTP surface is `docs/architecture/cli-server-http-contract.md`.
 
 Work is tracked in Tower (project `quasar`, forge orbit). Read
 the glyph before building; never put board identifiers into code, tests, schemas,

@@ -192,7 +192,7 @@ export const HEALTHY_ENVELOPE = {
 
 // --- Bench-gate thresholds → alert rule DEFINITIONS -------------------------
 //
-// Numbers match the live serving gates used in proofs/ops:
+// Numbers match the live serving gates used in ops:
 //   scan p95 < 60ms, embed p50 < 150 / p95 < 300, warm total < 100ms.
 // These are structured definitions for operators / future pollers — not a
 // live alerter process. Each rule names a concrete Metric.snapshot series

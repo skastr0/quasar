@@ -1,11 +1,9 @@
 # Quasar — First-Principles Re-Architecture Map
 
 Date: 2026-07-03.
-Status: **design map** — the destination the eventual refactor lands in. The live
-system (LanceDB, optimize off, manual reclaim) stays canonical until this is
-scheduled. Companion to `quasar-effect-server-plan-2026-06-18.md`, whose service
-graph and domain model survive unchanged; only the search substrate is re-derived
-from the problem instead of inherited.
+Status: **authoritative search substrate.** SQLite FTS5 plus the resident f16
+vector matrix is the live system. Historical LanceDB cutover receipts live in
+git history, not in-tree.
 
 ## Method
 
@@ -261,32 +259,3 @@ tier (deterministic pass/fail):
 
 The residual bug risk concentrates in the two native deps (kernel, ONNX) and in
 ranking taste — exactly where review/verification spend should go.
-
-## 10. Proof addendum, 2026-07-04
-
-Receipts:
-- `docs/proofs/sqlite-fts-filtered-hit-benchmark-2026-07-04.json` proves the
-  naive shape is not good enough: hit-bearing filtered FTS with SQL predicates
-  landed at p95 104–506 ms.
-- `docs/proofs/sqlite-fts-scoped-hit-benchmark-2026-07-04.json` proves the
-  scoped shape: 683,010 rows, rebuild 32.1 s, p95 22–37 ms and p99 24–65 ms for
-  four hit-bearing filtered queries.
-- `docs/proofs/embedding-parity-cached-vs-local-2026-07-04.json` proves the
-  cache is saved and replayable, but not namespace-compatible with local ONNX:
-  678,250 eligible cached messages, 200-row sample, min 0.9237, mean 0.9620,
-  p95 0.9718, threshold 0.99 failed. Preserve the old cache, re-embed local.
-- `docs/proofs/sqlite-exact-scan-usearch-2026-07-04.json` proves full replayed
-  vector scan over 678,249 candidates works functionally, but the current
-  usearch f32 exact binding is not the final semantic kernel: p95 3.59 s, p99
-  15.64 s at one thread.
-
-Current go/no-go:
-- **Go**: SQLite truth plus scoped FTS lexical search.
-- **Go**: saved embedding cache as replayable source evidence.
-- **No-go**: reusing the synthetic/HF cached vectors as the local ONNX semantic
-  namespace.
-- **No-go**: cutting semantic/fusion to the current usearch f32 exact scan.
-
-Next hard gate: build the real resident vector kernel or a candidate-aware exact
-scan path and prove sub-100 ms filtered semantic/fusion on the same corpus before
-the single provider switch.

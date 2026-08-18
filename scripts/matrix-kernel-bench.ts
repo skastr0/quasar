@@ -10,7 +10,7 @@
 //   - filtered scan p95         < 60ms   (~10% scope match, in-matrix
 //                                         dictionary-code mask + scan — no
 //                                         SQL, no store round trip)
-// Writes the raw numbers to --out (default docs/proofs/) and exits non-zero
+// Writes the raw numbers to --out (default under /tmp) and exits non-zero
 // when any gate fails.
 //
 // Usage: bun scripts/matrix-kernel-bench.ts [--rows N] [--dims N]
@@ -53,7 +53,7 @@ const ROWS = intArg("--rows", 700_000);
 const DIMS = intArg("--dims", 768);
 const SAMPLES = intArg("--samples", 60);
 const KEEP_DB = process.argv.includes("--keep-db");
-const OUT = resolve(repoRoot, argValue("--out") ?? "docs/proofs/matrix-kernel-bench-2026-07-04.json");
+const OUT = resolve(argValue("--out") ?? join(tmpdir(), "quasar-matrix-kernel-bench.json"));
 const EXPLICIT_DB = argValue("--db");
 const DB_PATH = EXPLICIT_DB ?? join(mkdtempSync(join(tmpdir(), "quasar-matrix-bench-")), "bench.sqlite");
 

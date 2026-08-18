@@ -34,9 +34,6 @@ formats may still change.
 - Docs: align README stable adapters and research surfaces, and AGENTS garbage
   doctrine (machinery prune vs zero-row sessions), with the session-contract
   review.
-- Live cutover receipt for hardened image deploy and Hermes re-ingest
-  idempotency/trajectory dogfood:
-  `docs/proofs/normalized-session-cutover-2026-07-29.md`.
 
 ## [0.5.1] - 2026-07-26
 

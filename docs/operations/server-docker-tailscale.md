@@ -50,7 +50,7 @@ bun run server:backup      # write ./quasar-truth-backup.tar
 Raw helper form (`scripts/server-ops.mjs`):
 
 ```bash
-bun scripts/server-ops.mjs materialize --out docs/proofs/materialization-closure.json
+bun scripts/server-ops.mjs materialize
 bun scripts/server-ops.mjs exec -- sh -lc 'du -sh /data/quasar/*'
 ```
 
@@ -209,10 +209,10 @@ Then run the materialization loop from the host against the published server por
 bun run server:materialize
 ```
 
-By default this writes `docs/proofs/materialization-closure-<timestamp>.json` and also prints the same JSON envelope to stdout. The wrapper requires the active embedding provider to match the pinned deploy provider (`synthetic`) by default; pass `--require-provider local` only as part of an explicit provider cutover. Pass `--out` to choose a stable proof path:
+By default this writes a timestamped JSON receipt under `/tmp` and also prints the same envelope to stdout. The wrapper requires the active embedding provider to match the pinned deploy provider (`synthetic`) by default; pass `--require-provider local` only as part of an explicit provider cutover. Pass `--out` to choose a path:
 
 ```bash
-bun scripts/server-ops.mjs materialize --out docs/proofs/materialization-closure.json
+bun scripts/server-ops.mjs materialize --out /tmp/quasar-materialize.json
 ```
 
 The receipt is accepted only when the CLI loop reaches both gates:
@@ -259,7 +259,7 @@ bun run proof:sqlite-first --source-db /path/to/quasar.sqlite \
   --scan-threads 1 \
   --parity-sample 1000 \
   --parity-threshold <cosine-threshold> \
-  --out docs/proofs/sqlite-first-proof.json
+  --out /tmp/quasar-sqlite-first-proof.json
 ```
 
 ---
@@ -383,10 +383,3 @@ bun run server:restart
 6. If search misses fresh sessions, re-run ingest from the source machine's CLI (`quasar ingest --provider all`); lexical search serves them immediately from the trigger-maintained FTS index.
 7. If semantic search returns 503 (`SemanticDisabled`), run `bun run server:materialize` to populate missing vectors in SQLite, then restart the server to load the resident f16 matrix into memory.
 
----
-
-## Production Proof Artifacts
-
-- `docs/proofs/server-production-proof-2026-06-19.md`
-- `docs/proofs/embedding-retrieval-comparison-2026-06-19.md`
-- `docs/proofs/embedding-retrieval-comparison-2026-06-19.json`

@@ -57,8 +57,7 @@ export interface EmbeddingsLayerOptions {
 /** Query-side ONNX dtype is PINNED to fp32: q8 query vectors fail retrieval
  * parity against the synthetic-embedded matrix (overlap@10 0.77 < 0.8 gate),
  * and fp16 needs graph optimizations disabled to dodge an onnxruntime
- * LayerNormFusion bug. Receipts: docs/proofs/query-embed-parity-2026-07-04.json
- * and query-embed-parity-fp32-2026-07-04.json. Never make this configurable.
+ * LayerNormFusion bug. Never make this configurable.
  * Exported so the Docker build's model-baking step (scripts/bake-onnx-model.ts)
  * warms the exact dtype this layer will load at runtime — one pin, not two. */
 export const QUERY_EMBEDDING_ONNX_DTYPE = "fp32";

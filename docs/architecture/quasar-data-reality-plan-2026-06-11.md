@@ -3,7 +3,8 @@
 Date: 2026-06-11; updated 2026-06-18 for the Effect server direction.
 Status: **canonical evidence**. This document owns measured corpus reality, provider
 mapping rules, and the normalized entity model. The implementation architecture lives in
-[quasar-effect-server-plan-2026-06-18.md](quasar-effect-server-plan-2026-06-18.md).
+[quasar-first-principles-rearchitecture-2026-07-03.md](quasar-first-principles-rearchitecture-2026-07-03.md)
+and [cli-server-http-contract.md](cli-server-http-contract.md).
 Provenance: owner decisions of 2026-06-11 after a full-corpus measurement (every file
 and row of all five providers parsed), superseding the v2 greenfield plan and the
 sync-contract/stop-line apparatus.

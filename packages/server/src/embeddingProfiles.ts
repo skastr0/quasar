@@ -60,8 +60,7 @@ export const embeddingProviderFromEnv = (): EmbeddingProvider => {
 };
 
 /** Query-side embedding provider (D8b). Documents keep
- * QUASAR_EMBEDDING_PROVIDER; queries default to the local fp32 ONNX pipeline
- * (parity receipt docs/proofs/query-embed-parity-fp32-2026-07-04.json).
+ * QUASAR_EMBEDDING_PROVIDER; queries default to the local fp32 ONNX pipeline.
  * "synthetic" disables the local pipeline entirely (tests, emergency
  * rollback) and serves queries from the bounded synthetic path. */
 export const queryEmbeddingProviderFromEnv = (): EmbeddingProvider => {

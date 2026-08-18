@@ -2,10 +2,11 @@
 
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 
 const DEFAULT_SERVER = process.env.QUASAR_SERVER_URL ?? "http://127.0.0.1:7180";
-const DEFAULT_OUT = `docs/proofs/search-battery-${new Date().toISOString().replaceAll(":", "-")}.json`;
+const DEFAULT_OUT = join(tmpdir(), `quasar-search-battery-${new Date().toISOString().replaceAll(":", "-")}.json`);
 
 const args = process.argv.slice(2);
 
