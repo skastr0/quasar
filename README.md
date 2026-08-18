@@ -14,7 +14,7 @@ Quasar ingests, normalizes, redacts, indexes, and serves AI agent session histor
 ## Table of Contents
 
 - [The Problem: Agent Amnesia & Session Fragmentation](#the-problem-agent-amnesia--session-fragmentation)
-- [The Data Reality & First Principles](#the-data-reality--first-principles)
+- [First Principles & Local Scale](#first-principles--local-scale)
 - [How Quasar Works: The Core Mechanism](#how-quasar-works-the-core-mechanism)
 - [Key Features](#key-features)
 - [Supported Provider Adapters](#supported-provider-adapters)
@@ -44,29 +44,16 @@ However, developer agent ecosystems face critical operational roadblocks:
 
 ---
 
-## The Data Reality & First Principles
+## First Principles & Local Scale
 
-Across the full 13-provider estate spanning **20,000+ sessions and ~1,000,000 turns**, empirical profiling revealed the true physics of agent session data:
+Quasar is engineered to comfortably handle **20,000+ agent sessions and 1,000,000+ turns locally** on a single machine (e.g. Mac mini, Linux server, or developer workstation) with sub-100ms query latency, zero external database clusters, and zero lock contention.
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           THE DATA REALITY                              │
-│                                                                         │
-│   Full Estate Scale:             20,000+ Sessions · ~1,000,000 Turns   │
-│   Supported Providers:           13 Coding Harnesses & Agent Frameworks │
-│   Maximum Legitimate Turn Size:  < 1 MB    (Bounded by context window)  │
-│   Physical Text Density:         Gigabytes, NOT Terabytes               │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+Four core principles govern its architecture:
 
-The historical baseline audit (measured 2026-06-11 during early 5-provider profiling of 2,360 sessions) established the foundational lesson that holds true at 20,000+ sessions: **AI agent transcripts are fundamentally context-window-bounded**. A turn physically cannot exceed model context limits. Anything that does is provider machinery noise (e.g. multi-megabyte diff dumps or loop telemetry), not real conversational product text.
-
-From this measured evidence, Quasar was rebuilt on **Three First Principles**:
-
-1. **Measured Data is the Contract**: Never invent arbitrary byte budgets, clamps, or artificial compaction layers for legitimate session text. Boundary-reject provider garbage with named diagnostics `(provider, sessionId, field, observedBytes)`; admit all recoverable product turns.
-2. **Store at the Grain You Read**: A row is a turn (`seq` order). Reading a session is a paginated index walk in SQLite. No chunking, no compaction, no reconstruction layers.
-3. **Separate Indexing from Storage**: The `messages` table in SQLite is the sole text source for lexical and semantic indexing. Full structured `toolCalls` are stored for targeted forensic retrieval by `(projectKey, toolName)` or ID, and **never pollute message search vectors**.
-4. **Scale Engineering for Millions of Turns**: As proven in [`docs/architecture/quasar-scale-engineering.md`](docs/architecture/quasar-scale-engineering.md), SQLite plus a resident f16 vector matrix comfortably serves 1,000,000+ turns on a single machine with sub-100ms latency, completely eliminating the need for fragile distributed vector clusters.
+1. **Zero-Overhead Local Storage**: SQLite is the entire data plane (OLTP truth store, durable job queue, trigger-maintained FTS5 lexical index, and vector table). No multi-node clusters, no distributed reconcilers, no maintenance sprawl.
+2. **Store at the Grain You Read**: A row is a turn (`seq` order). Reading a session is a fast, paginated B-tree index walk in SQLite. No artificial chunking, lossy compression, or multi-stage reconstruction layers.
+3. **Separation of Search and Forensics**: The `messages` table in SQLite is the sole text source for search indexing. Full structured `toolCalls` are stored for forensic retrieval by `(projectKey, toolName)` or ID, and **never pollute message search vectors**.
+4. **Resident SIMD Vector Matrix**: Message vectors load into a contiguous in-memory half-precision (`f16`) matrix. Semantic search scans millions of vectors in parallel using native `simsimd` AVX-512 and ARM NEON kernels in under 100ms.
 
 ---
 
