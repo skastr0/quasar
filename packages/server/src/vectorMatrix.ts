@@ -20,8 +20,9 @@
 // message updates/deletes are applied online through exact model-key
 // invalidations; a reboot is not required for those mutations.
 import { performance } from "node:perf_hooks";
-import { Context, Deferred, Effect, Layer, Schema } from "effect";
+import { Context, Deferred, Effect, Layer, Runtime, Schema } from "effect";
 
+import { vectorScanDeadlineMs, vectorWorkerInitTimeoutMs } from "./config";
 import { embeddingProfileFromEnv, type EmbeddingProfile } from "./embeddingProfiles";
 import {
   LocalStore,
@@ -125,6 +126,16 @@ export interface VectorMatrixOptions {
   readonly profile?: EmbeddingProfile;
   /** "js" forces the pure-JS fallback kernel (used by parity tests). */
   readonly kernel?: "auto" | "js";
+  /** Liveness deadline for one scan. Defaults to the configured value; tests
+   * shorten it to exercise the backstop without waiting out the real budget. */
+  readonly scanDeadlineMs?: number;
+  /** Backstop for a worker's init handshake, so a thread that dies or wedges
+   * before `ready` still settles its spawn. Tests shorten it. */
+  readonly workerInitTimeoutMs?: number;
+  /** Module the scan worker pool is spawned from. Defaults to the real
+   * scanner; a fault-injecting worker is substituted to prove the pool
+   * survives a worker dying mid-chunk. */
+  readonly scanWorkerUrl?: URL;
 }
 
 interface ScanPart {
@@ -146,6 +157,23 @@ interface PendingScan {
   readonly parts: ScanPart[];
   readonly resolve: (parts: ScanPart[]) => void;
   readonly reject: (cause: Error) => void;
+  timer: ReturnType<typeof setTimeout> | undefined;
+}
+
+/** One live worker thread plus the chunks it currently owns.
+ *
+ * `inFlight` is the whole point: a chunk handed to a worker that then dies is
+ * otherwise unaccounted for, and the scan waiting on it never completes. At
+ * most one chunk per scan id is outstanding on a worker (a chunk is dispatched
+ * only at scan start or on that worker's previous result), so the map is keyed
+ * by scan id. */
+interface WorkerSlot {
+  readonly worker: Worker;
+  readonly slotId: number;
+  /** Set when *we* take the worker out of service (shutdown, recycle). Death
+   * events for a retired worker are expected and must not trigger recovery. */
+  retired: boolean;
+  readonly inFlight: Map<number, ScanChunk>;
 }
 
 
@@ -180,7 +208,10 @@ interface MatrixState {
   projectKeyDict: string[];
   projectKeyCodeByName: Map<string, number>;
   rowIndex: Map<string, Map<number, number>>;
-  workers: Worker[];
+  slots: WorkerSlot[];
+  nextSlotId: number;
+  /** In-flight pool refill, shared so concurrent searches await one respawn. */
+  refill: Promise<void> | undefined;
   pendingScans: Map<number, PendingScan>;
   nextScanId: number;
 }
@@ -224,7 +255,17 @@ export const makeVectorMatrixLayer = (
       const model = profile.cacheNamespace;
       const dimensions = profile.dimensions;
       const rowBytes = dimensions * 2;
+      const scanDeadlineMs = options.scanDeadlineMs ?? vectorScanDeadlineMs();
+      const workerInitTimeoutMs = options.workerInitTimeoutMs ?? vectorWorkerInitTimeoutMs();
+      const scanWorkerUrl = options.scanWorkerUrl ?? new URL("./vectorScanWorker.ts", import.meta.url);
+      const targetWorkerCount = workerCountForMachine();
       const loadedSignal = yield* Deferred.make<void>();
+      const runtime = yield* Effect.runtime<never>();
+      /** Fire-and-forget diagnostics from worker-lifecycle callbacks, which are
+       * plain DOM event handlers with no fiber of their own. */
+      const logAside = (effect: Effect.Effect<void>): void => {
+        Runtime.runFork(runtime)(effect);
+      };
 
       const state: MatrixState = {
         sab: undefined,
@@ -253,7 +294,9 @@ export const makeVectorMatrixLayer = (
         projectKeyDict: [],
         projectKeyCodeByName: new Map(),
         rowIndex: new Map(),
-        workers: [],
+        slots: [],
+        nextSlotId: 1,
+        refill: undefined,
         pendingScans: new Map(),
         nextScanId: 1,
       };
@@ -473,107 +516,381 @@ export const makeVectorMatrixLayer = (
       // One chunk per message; a worker that finishes a chunk immediately
       // receives the scan's next queued chunk (work-stealing), so a core lost
       // to another process delays one chunk, not a whole static shard.
-      const dispatchChunk = (worker: Worker, id: number, pending: PendingScan): void => {
+      //
+      // A worker can also stop existing (thread crash, OOM kill, uncaught
+      // fault in the kernel). Every path that removes a chunk-holding worker
+      // therefore settles the scans that worker owed: post-init error/close
+      // handlers fail those scans immediately, and a per-scan deadline is the
+      // backstop for a worker that goes quiet without emitting either event.
+      // A scan never waits on a worker that no longer exists.
+      const dispatchChunk = (slot: WorkerSlot, id: number, pending: PendingScan): void => {
         const chunk = pending.queue.shift();
         if (chunk === undefined) return;
+        slot.inFlight.set(id, chunk);
         const query = pending.query.slice();
         const mask = pending.mask?.slice(chunk.rowStart, chunk.rowEnd);
         const transfer: Transferable[] = [query.buffer as ArrayBuffer];
         if (mask !== undefined) transfer.push(mask.buffer as ArrayBuffer);
-        worker.postMessage(
+        slot.worker.postMessage(
           { type: "scan", id, rowStart: chunk.rowStart, rowEnd: chunk.rowEnd, k: pending.k, query, mask: mask ?? null },
           transfer,
         );
       };
 
+      /** Settle a scan exactly once, releasing its deadline and dropping every
+       * worker's bookkeeping for it. Chunks still queued for it are abandoned
+       * with it — a settled scan never gets more work dispatched. */
+      const settleScan = (id: number, outcome: { readonly parts: ScanPart[] } | { readonly error: Error }): void => {
+        const pending = state.pendingScans.get(id);
+        if (pending === undefined) return;
+        state.pendingScans.delete(id);
+        if (pending.timer !== undefined) clearTimeout(pending.timer);
+        pending.queue.length = 0;
+        for (const slot of state.slots) slot.inFlight.delete(id);
+        if ("error" in outcome) pending.reject(outcome.error);
+        else pending.resolve(outcome.parts);
+      };
+
       const routeWorkerMessage = (
-        worker: Worker,
+        slot: WorkerSlot,
         message: { type: string; id?: number | null; rows?: Uint32Array; scores?: Float64Array; written?: number; skipped?: number; message?: string },
       ): void => {
         if (message.type === "result" && typeof message.id === "number") {
+          slot.inFlight.delete(message.id);
           const pending = state.pendingScans.get(message.id);
           if (pending === undefined) return;
           pending.parts.push({ rows: message.rows ?? new Uint32Array(0), scores: message.scores ?? new Float64Array(0) });
           pending.remaining -= 1;
           if (pending.remaining === 0) {
-            state.pendingScans.delete(message.id);
-            pending.resolve(pending.parts);
+            settleScan(message.id, { parts: pending.parts });
             return;
           }
-          dispatchChunk(worker, message.id, pending);
+          dispatchChunk(slot, message.id, pending);
           return;
         }
         if (message.type === "error") {
           const failure = new Error(message.message ?? "vector scan worker error");
           if (typeof message.id === "number") {
-            const scan = state.pendingScans.get(message.id);
-            if (scan !== undefined) {
-              state.pendingScans.delete(message.id);
-              scan.reject(failure);
-            }
+            slot.inFlight.delete(message.id);
+            settleScan(message.id, { error: failure });
             return;
           }
-          for (const [id, pending] of state.pendingScans) {
-            state.pendingScans.delete(id);
-            pending.reject(failure);
+          for (const id of [...state.pendingScans.keys()]) {
+            settleScan(id, { error: failure });
           }
         }
       };
 
-      const spawnWorkers = (sab: SharedArrayBuffer): Promise<void> => {
-        const count = workerCountForMachine();
-        const readiness: Promise<void>[] = [];
-        for (let index = 0; index < count; index += 1) {
-          const worker = new Worker(new URL("./vectorScanWorker.ts", import.meta.url));
-          state.workers.push(worker);
-          readiness.push(
-            new Promise<void>((resolve, reject) => {
-              const onFirstMessage = (event: MessageEvent) => {
-                const data = event.data as { type: string; native?: boolean; message?: string };
-                if (data.type === "ready") {
-                  worker.onmessage = (next: MessageEvent) => routeWorkerMessage(worker, next.data);
-                  resolve();
-                  return;
-                }
-                reject(new Error(data.message ?? "vector scan worker failed to initialize"));
-              };
-              worker.onmessage = onFirstMessage;
-              worker.onerror = (event: ErrorEvent) => reject(new Error(event.message));
-            }),
-          );
-          worker.postMessage({ type: "init", sab, dimensions, libraryPath: state.libraryPath });
+      /** Take a worker out of service on our own terms. Marking it retired
+       * before terminate() is what keeps the resulting close event from being
+       * read as a crash. */
+      const retireSlot = (slot: WorkerSlot): void => {
+        slot.retired = true;
+        const index = state.slots.indexOf(slot);
+        if (index !== -1) state.slots.splice(index, 1);
+        try {
+          slot.worker.terminate();
+        } catch {
+          // Already gone; termination is the goal, not the call succeeding.
         }
-        return Promise.all(readiness).then(() => undefined);
+      };
+
+      const spawnWorkerSlot = (sab: SharedArrayBuffer): Promise<WorkerSlot> =>
+        new Promise<WorkerSlot>((resolve, reject) => {
+          const worker = new Worker(scanWorkerUrl);
+          const slot: WorkerSlot = {
+            worker,
+            slotId: state.nextSlotId,
+            retired: false,
+            inFlight: new Map(),
+          };
+          state.nextSlotId += 1;
+          let ready = false;
+          let settled = false;
+          // The spawn promise must be TOTAL. A thread that dies during init
+          // emits `close` and no `error`, and one that wedges emits neither —
+          // either would leave this promise forever pending, and `refillPool`
+          // caches it, so the pool could never heal again and the next scan
+          // would await a dead promise past its own deadline.
+          let initTimer: ReturnType<typeof setTimeout> | undefined;
+          const failInit = (message: string) => {
+            if (settled) return;
+            settled = true;
+            ready = true;
+            slot.retired = true;
+            if (initTimer !== undefined) clearTimeout(initTimer);
+            try {
+              worker.terminate();
+            } catch {
+              // nothing to clean up
+            }
+            reject(new Error(message));
+          };
+          const succeedInit = () => {
+            if (settled) return;
+            settled = true;
+            ready = true;
+            if (initTimer !== undefined) clearTimeout(initTimer);
+            resolve(slot);
+          };
+          initTimer = setTimeout(
+            () => failInit(`vector scan worker did not initialize within ${workerInitTimeoutMs}ms`),
+            workerInitTimeoutMs,
+          );
+          worker.onmessage = (event: MessageEvent) => {
+            const data = event.data as { type: string; native?: boolean; message?: string };
+            if (!ready) {
+              if (data.type !== "ready") {
+                failInit(data.message ?? "vector scan worker failed to initialize");
+                return;
+              }
+              succeedInit();
+              return;
+            }
+            routeWorkerMessage(slot, data as Parameters<typeof routeWorkerMessage>[1]);
+          };
+          worker.onerror = (event: ErrorEvent) => {
+            if (!ready) {
+              failInit(event.message ?? "vector scan worker failed to initialize");
+              return;
+            }
+            handleWorkerDeath(slot, `error: ${event.message ?? "unknown"}`);
+          };
+          // A thread that exits without an error event still owes its chunks —
+          // and one that exits BEFORE `ready` owes this promise a rejection.
+          worker.addEventListener("close", () => {
+            if (!ready) {
+              failInit("vector scan worker exited during init");
+              return;
+            }
+            handleWorkerDeath(slot, "exit");
+          });
+          worker.postMessage({ type: "init", sab, dimensions, libraryPath: state.libraryPath });
+        });
+
+      /** Bring the pool back to strength. Concurrent callers share one refill
+       * so a burst of deaths does not spawn a burst of pools. Never rejects:
+       * the caller decides what an empty pool means, from `state.slots`. */
+      const refillPool = (): Promise<void> => {
+        if (state.closed || !state.enabled) return Promise.resolve();
+        const sab = state.sab;
+        if (sab === undefined) return Promise.resolve();
+        const missing = targetWorkerCount - state.slots.length;
+        if (missing <= 0) return Promise.resolve();
+        const inFlight = state.refill;
+        if (inFlight !== undefined) return inFlight;
+        const task = (async () => {
+          const settled = await Promise.allSettled(
+            Array.from({ length: missing }, () => spawnWorkerSlot(sab)),
+          );
+          const failures: string[] = [];
+          for (const outcome of settled) {
+            if (outcome.status === "rejected") {
+              failures.push(outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason));
+              continue;
+            }
+            if (state.closed || !state.enabled) {
+              retireSlot(outcome.value);
+              continue;
+            }
+            state.slots.push(outcome.value);
+          }
+          if (failures.length > 0) {
+            logAside(
+              Effect.logError("vector_matrix.worker_respawn_failed").pipe(
+                Effect.annotateLogs({
+                  event: "vector_matrix.worker_respawn_failed",
+                  at: nowIso(),
+                  model,
+                  failed: failures.length,
+                  detail: failures[0],
+                  workers: state.slots.length,
+                }),
+              ),
+            );
+          }
+        })().finally(() => {
+          state.refill = undefined;
+        });
+        state.refill = task;
+        return task;
+      };
+
+      /** Refill from a worker-death or deadline callback, which has no caller
+       * to return a promise to. `refillPool` routes its own spawn failures
+       * into a diagnostic, so the only thing left here is the defect channel:
+       * an unexpected rejection is logged rather than escaping as an unhandled
+       * rejection that would take the process down. */
+      const scheduleRefill = (): void => {
+        refillPool().catch((cause: unknown) => {
+          logAside(
+            Effect.logError("vector_matrix.worker_refill_defect").pipe(
+              Effect.annotateLogs({
+                event: "vector_matrix.worker_refill_defect",
+                at: nowIso(),
+                model,
+                detail: cause instanceof Error ? cause.message : String(cause),
+              }),
+            ),
+          );
+        });
+      };
+
+      /** A worker died on its own. Fail the scans it owed chunks for — the
+       * results it was carrying are gone, and a partial merge would silently
+       * return a wrong top-k — then rebuild the pool so the next query runs. */
+      function handleWorkerDeath(slot: WorkerSlot, reason: string): void {
+        if (slot.retired) return;
+        retireSlot(slot);
+        const orphaned = [...slot.inFlight.keys()];
+        slot.inFlight.clear();
+        logAside(
+          Effect.logError("vector_matrix.worker_died").pipe(
+            Effect.annotateLogs({
+              event: "vector_matrix.worker_died",
+              at: nowIso(),
+              model,
+              slotId: slot.slotId,
+              reason,
+              orphanedScans: orphaned.length,
+              workers: state.slots.length,
+            }),
+          ),
+        );
+        for (const id of orphaned) {
+          settleScan(id, {
+            error: new Error(`vector scan worker died mid-chunk (${reason})`),
+          });
+        }
+        scheduleRefill();
+      }
+
+      const spawnWorkers = async (sab: SharedArrayBuffer): Promise<void> => {
+        const settled = await Promise.allSettled(
+          Array.from({ length: targetWorkerCount }, () => spawnWorkerSlot(sab)),
+        );
+        // Adopt every thread that did come up BEFORE failing, so the load
+        // failure path's terminateWorkers() reclaims them instead of leaving
+        // orphaned threads behind a partially failed pool.
+        for (const outcome of settled) {
+          if (outcome.status === "fulfilled") state.slots.push(outcome.value);
+        }
+        const failure = settled.find((outcome) => outcome.status === "rejected");
+        if (failure !== undefined && failure.status === "rejected") {
+          throw failure.reason instanceof Error ? failure.reason : new Error(String(failure.reason));
+        }
       };
 
       const terminateWorkers = (): void => {
-        for (const worker of state.workers) worker.terminate();
-        state.workers = [];
-        for (const [id, pending] of state.pendingScans) {
-          state.pendingScans.delete(id);
-          pending.reject(new Error("vector matrix closed"));
+        for (const slot of [...state.slots]) retireSlot(slot);
+        state.slots = [];
+        for (const id of [...state.pendingScans.keys()]) {
+          settleScan(id, { error: new Error("vector matrix closed") });
         }
       };
 
-      const scanAll = (query: Uint16Array, rowCount: number, k: number, mask?: Uint8Array): Promise<ScanPart[]> =>
-        new Promise<ScanPart[]>((resolve, reject) => {
-          const queue: ScanChunk[] = [];
-          for (let rowStart = 0; rowStart < rowCount; rowStart += SCAN_CHUNK_ROWS) {
-            queue.push({ rowStart, rowEnd: Math.min(rowCount, rowStart + SCAN_CHUNK_ROWS) });
-          }
-          if (queue.length === 0) {
-            resolve([]);
-            return;
-          }
+      /** Wait for `task`, but never longer than `ms`. The caller then decides
+       * from observable state (`state.slots`) what the timeout means. */
+      const raceDeadline = async (task: Promise<void>, ms: number): Promise<void> => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            task,
+            new Promise<void>((settle) => {
+              timer = setTimeout(settle, ms);
+            }),
+          ]);
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
+      };
+
+      const scanAll = async (
+        query: Uint16Array,
+        rowCount: number,
+        k: number,
+        mask?: Uint8Array,
+      ): Promise<ScanPart[]> => {
+        const queue: ScanChunk[] = [];
+        for (let rowStart = 0; rowStart < rowCount; rowStart += SCAN_CHUNK_ROWS) {
+          queue.push({ rowStart, rowEnd: Math.min(rowCount, rowStart + SCAN_CHUNK_ROWS) });
+        }
+        if (queue.length === 0) return [];
+        if (state.slots.length < targetWorkerCount) {
+          // A pool with survivors serves the query now and heals behind it; an
+          // empty pool has nothing to dispatch to, so wait out the respawn
+          // rather than fail a query the matrix can still answer. The wait is
+          // bounded by the scan's own deadline: the per-scan timer is armed
+          // AFTER this point, so an unbounded wait here would escape it.
+          const healing = refillPool();
+          if (state.slots.length === 0) await raceDeadline(healing, scanDeadlineMs);
+        }
+        if (state.slots.length === 0) {
+          throw new Error("no live vector scan workers (respawn failed)");
+        }
+        return await new Promise<ScanPart[]>((resolve, reject) => {
           const id = state.nextScanId;
           state.nextScanId += 1;
-          const pending: PendingScan = { remaining: queue.length, queue, k, query, mask, parts: [], resolve, reject };
+          const pending: PendingScan = {
+            remaining: queue.length,
+            queue,
+            k,
+            query,
+            mask,
+            parts: [],
+            resolve,
+            reject,
+            timer: undefined,
+          };
+          // Backstop for a worker that neither answers nor reports its death.
+          // Recycle whoever still holds this scan's chunks: a worker past this
+          // deadline is wedged or gone, and keeping it would leak the next
+          // scan's chunks into the same hole.
+          pending.timer = setTimeout(() => {
+            if (!state.pendingScans.has(id)) return;
+            // Recycling a slot destroys the chunks it held for OTHER scans too.
+            // Those scans must fail here with the true cause, not sit waiting
+            // on a worker that no longer exists until their own deadline —
+            // "a scan never waits on a worker that no longer exists".
+            const collateral = new Set<number>();
+            for (const slot of [...state.slots]) {
+              if (!slot.inFlight.has(id)) continue;
+              for (const owed of slot.inFlight.keys()) collateral.add(owed);
+              slot.inFlight.clear();
+              retireSlot(slot);
+              logAside(
+                Effect.logError("vector_matrix.scan_deadline_exceeded").pipe(
+                  Effect.annotateLogs({
+                    event: "vector_matrix.scan_deadline_exceeded",
+                    at: nowIso(),
+                    model,
+                    slotId: slot.slotId,
+                    deadlineMs: scanDeadlineMs,
+                    collateralScans: collateral.size - (collateral.has(id) ? 1 : 0),
+                  }),
+                ),
+              );
+            }
+            collateral.delete(id);
+            for (const owed of collateral) {
+              settleScan(owed, {
+                error: new Error(
+                  `vector scan worker was recycled at another scan's ${scanDeadlineMs}ms deadline`,
+                ),
+              });
+            }
+            settleScan(id, {
+              error: new Error(`vector scan exceeded its ${scanDeadlineMs}ms deadline`),
+            });
+            scheduleRefill();
+          }, scanDeadlineMs);
           state.pendingScans.set(id, pending);
-          for (const worker of state.workers) {
+          for (const slot of [...state.slots]) {
             if (pending.queue.length === 0) break;
-            dispatchChunk(worker, id, pending);
+            dispatchChunk(slot, id, pending);
           }
         });
+      };
 
       // Compact validation holes left by pass 2: stable forward pass keeps the
       // (session_id, seq) row order for every surviving row. No-op (zero
@@ -782,7 +1099,7 @@ export const makeVectorMatrixLayer = (
             skippedRows: state.loadSkippedRows,
             loadMs: state.loadMs,
             kernel: state.kernel,
-            workers: state.workers.length,
+            workers: state.slots.length,
           }),
         );
       }).pipe(
@@ -912,7 +1229,7 @@ export const makeVectorMatrixLayer = (
           dimensions,
           rows: state.rowCount,
           kernel: state.kernel,
-          workerCount: state.workers.length,
+          workerCount: state.slots.length,
           loadedAt: state.loadedAt,
           loadMs: state.loadMs,
           loadSkippedRows: state.loadSkippedRows,

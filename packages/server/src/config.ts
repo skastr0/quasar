@@ -26,6 +26,18 @@ const envInt = (name: string, fallback: number): number => {
 export const sqliteBusyTimeoutMs = (): number =>
   envInt("QUASAR_SQLITE_BUSY_TIMEOUT_MS", 5_000);
 
+/** Backstop for one matrix scan. The p95 scan budget is 60ms; this is a
+ * liveness deadline for a wedged or silently dead worker, not a latency
+ * target — a scan that hits it fails typed rather than hanging forever. */
+export const vectorScanDeadlineMs = (): number =>
+  envInt("QUASAR_VECTOR_SCAN_DEADLINE_MS", 30_000);
+
+/** Backstop for one scan worker's init handshake. A thread that dies during
+ * init emits `close` and no `error`, and a wedged one emits neither, so the
+ * spawn is only total if something bounds the wait. */
+export const vectorWorkerInitTimeoutMs = (): number =>
+  envInt("QUASAR_VECTOR_WORKER_INIT_TIMEOUT_MS", 30_000);
+
 /** An ingest run writes its ledger row at start and again at its terminal
  * transition. A `running` row whose last write is older than this has no live
  * writer behind it (the whole five-provider estate ingests in minutes), so it
