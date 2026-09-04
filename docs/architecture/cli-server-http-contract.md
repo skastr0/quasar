@@ -95,7 +95,7 @@ Probes whether a source file has changed since it was last ingested.
     "probe": {
       "sessionId": "codex:01900000-0000-7000-8000-000000000001",
       "sourceFingerprint": "{\"size\":12345,\"mtimeMs\":1718000000000}",
-      "normalizationVersion": 12
+      "normalizationVersion": 13
     }
   }
   ```
@@ -136,7 +136,7 @@ Ingests one normalized session envelope. Supports query parameter `?force=true` 
         "sourceFingerprint": "{\"size\":12345,\"mtimeMs\":1718000000000}",
         "host": "mac-mini.local",
         "identitySchemeVersion": 1,
-        "normalizationVersion": 12,
+        "normalizationVersion": 13,
         "model": "gpt-5.6-sol",
         "modelProvider": "openai",
         "assignmentRole": "builder",

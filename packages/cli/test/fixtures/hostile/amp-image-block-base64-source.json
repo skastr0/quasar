@@ -1,0 +1,19 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "protocolMessageID": "amp-image-1",
+      "messageId": 1,
+      "content": [
+        {
+          "type": "image",
+          "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": "aVZCT1J3MEtHZ29BQUFBTlN1UUVSaw=="
+          }
+        }
+      ]
+    }
+  ]
+}

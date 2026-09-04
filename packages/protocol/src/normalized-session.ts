@@ -7,7 +7,7 @@ export const NORMALIZED_SESSION_PROTOCOL_VERSION =
  * Increment whenever unchanged provider source must be re-normalized because
  * the canonical projection changed.
  */
-export const NORMALIZATION_VERSION = 12;
+export const NORMALIZATION_VERSION = 13;
 
 const strictParseOptions = {
   errors: "all",
@@ -112,14 +112,52 @@ const ContentBlockShape = Schema.Struct({
   path: Schema.optional(Schema.String),
   uri: Schema.optional(Schema.String),
   mediaType: Schema.optional(Schema.String),
+  /**
+   * Explicit declaration that the provider named an image/file but supplied no
+   * retrievable source — the bytes were inline-only and are deliberately not
+   * stored. Additive: a block that carries `path` or `uri` never sets it, so
+   * every pre-existing payload stays valid unchanged.
+   */
+  sourceOmitted: Schema.optional(Schema.Literal(true)),
+  /** Length in bytes of the omitted (or referenced) source, when the provider stated it. */
+  sourceBytes: Schema.optional(NonNegativeInteger),
   value: Schema.optional(Schema.Unknown),
   metadata: Schema.optional(Schema.Unknown),
 });
+
+/**
+ * An image/file block must be attributable: it either locates its source
+ * (`path` / `uri`) or declares the source omitted. The two are mutually
+ * exclusive — a located block that also claims omission is soup.
+ */
+const mediaBlockSourceHolds = (
+  block: typeof ContentBlockShape.Type,
+  kind: "image" | "file",
+): true | string => {
+  const located =
+    typeof block.path === "string" || typeof block.uri === "string";
+  if (located) {
+    return block.sourceOmitted === undefined
+      ? true
+      : `content block kind=${kind} must not set sourceOmitted with path or uri`;
+  }
+  return block.sourceOmitted === true
+    ? true
+    : `content block kind=${kind} requires path, uri, or sourceOmitted`;
+};
 
 /** Kind must carry its payload field(s); cross-kind soup still fails closed. */
 const contentBlockKindPayloadHolds = (
   block: typeof ContentBlockShape.Type,
 ): true | string => {
+  if (block.kind !== "image" && block.kind !== "file") {
+    if (block.sourceOmitted !== undefined) {
+      return `content block kind=${block.kind} must not set sourceOmitted`;
+    }
+    if (block.sourceBytes !== undefined) {
+      return `content block kind=${block.kind} must not set sourceBytes`;
+    }
+  }
   switch (block.kind) {
     case "text":
       return typeof block.text === "string"
@@ -134,13 +172,9 @@ const contentBlockKindPayloadHolds = (
         ? true
         : "content block kind=thinking requires thinking";
     case "image":
-      return typeof block.path === "string" || typeof block.uri === "string"
-        ? true
-        : "content block kind=image requires path or uri";
+      return mediaBlockSourceHolds(block, "image");
     case "file":
-      return typeof block.path === "string" || typeof block.uri === "string"
-        ? true
-        : "content block kind=file requires path or uri";
+      return mediaBlockSourceHolds(block, "file");
     case "json":
       return block.value !== undefined
         ? true

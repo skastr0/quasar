@@ -103,7 +103,7 @@
       "machineId": "machine:test",
       "nativeProjectKey": "/fixture/quasar",
       "nativeSessionId": "ses_fixture061",
-      "normalizationVersion": 12,
+      "normalizationVersion": 13,
       "projectIdentity": {
         "confidence": "low",
         "displayName": "quasar",

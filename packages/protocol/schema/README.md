@@ -43,7 +43,7 @@ The contracts are exposed through the `@skastr0/quasar-protocol` package and int
 
 The canonical, provider-neutral representation of an ingested agent session. Captures complete conversational facts, multi-agent hierarchies, tool execution details, and resource utilization.
 
-- **Current Normalization Version**: `12` (`NORMALIZATION_VERSION`)
+- **Current Normalization Version**: `13` (`NORMALIZATION_VERSION`)
 - **Protocol Identifier**: `quasar.normalized-session/v1`
 
 #### Core Entities
@@ -55,8 +55,8 @@ The canonical, provider-neutral representation of an ingested agent session. Cap
   - `text`: Plain text payload
   - `markdown`: Formatted markdown text
   - `thinking`: Reasoning / chain-of-thought prose
-  - `image`: Image file path or URI with media type
-  - `file`: Referenced file attachment
+  - `image`: Image located by `path` or `uri` with media type — or, when the provider supplied only inline bytes, a block marked `sourceOmitted: true` carrying `mediaType` and `sourceBytes`. Exactly one of the two: a located block may never claim omission.
+  - `file`: Referenced file attachment, under the same locator-or-`sourceOmitted` rule
   - `json`: Structured JSON object
 - **`ToolCall`**: Structural record of a tool invocation (`toolName`, `input`, `output`, `status`, `startedAt`, `completedAt`).
 - **`SessionEdge`**: Relational directed graph edge between events or sessions (`next`, `parent`, `tool_result_for`, `forked_from`, `subagent_of`, `compacted_into`, `artifact_of`).

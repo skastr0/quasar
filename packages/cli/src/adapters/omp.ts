@@ -23,6 +23,8 @@ import {
   jsonBlock,
   logicalPathFor,
   logicalRootFor,
+  mediaContentBlock,
+  type NonMediaBlockPayload,
   projectSessionNativeValue,
   projectToolPayloadNativeValue,
   recordFrom,
@@ -155,7 +157,7 @@ const makeBlock = (
   sessionId: SessionId,
   eventId: string,
   blocks: ContentBlock[],
-  block: Omit<ContentBlock, "id" | "sequence">,
+  block: NonMediaBlockPayload,
 ) => {
   const sequence = blocks.length;
   blocks.push({
@@ -173,7 +175,10 @@ const addImageBlock = (
   extraMetadata?: Readonly<Record<string, unknown>>,
 ) => {
   const isBlob = BLOB_REF.test(image.data);
-  makeBlock(sessionId, eventId, blocks, {
+  const sequence = blocks.length;
+  blocks.push(mediaContentBlock({
+    id: contentBlockIdFor(sessionId, eventId, sequence),
+    sequence,
     kind: "image",
     mediaType: image.mimeType,
     ...(isBlob ? { uri: image.data } : {}),
@@ -183,7 +188,7 @@ const addImageBlock = (
       ...(image.detail !== undefined ? { detail: image.detail } : {}),
       ...extraMetadata,
     },
-  });
+  }));
 };
 
 const addUserContent = (
@@ -335,7 +340,10 @@ const projectMessage = (
     case "fileMention":
       for (const file of message.files) {
         text.push(file.content);
-        makeBlock(sessionId, eventId, contentBlocks, {
+        const fileSequence = contentBlocks.length;
+        contentBlocks.push(mediaContentBlock({
+          id: contentBlockIdFor(sessionId, eventId, fileSequence),
+          sequence: fileSequence,
           kind: "file",
           path: file.path,
           text: file.content,
@@ -344,7 +352,7 @@ const projectMessage = (
             ...(file.byteSize !== undefined ? { byteSize: file.byteSize } : {}),
             ...(file.skippedReason !== undefined ? { skippedReason: file.skippedReason } : {}),
           },
-        });
+        }));
         if (file.image !== undefined) addImageBlock(sessionId, eventId, contentBlocks, file.image, { path: file.path });
       }
       return { role: "system", kind: "message", contentText: compactText(text.join("\n")), contentBlocks };

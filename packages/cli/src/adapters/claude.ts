@@ -177,6 +177,40 @@ const claudeAssignmentFromRecords = (
 const contentArray = (message: Record<string, unknown> | undefined) =>
   Array.isArray(message?.content) ? (message.content as unknown[]) : [];
 
+/**
+ * An image/file block's locator, media type, and byte length live on
+ * `block.source` (the Anthropic shape: `{type:"url", url}` locates the source,
+ * `{type:"base64", media_type, data}` only declares its type and byte length)
+ * as often as on the block itself. The bytes are never projected — only the
+ * locator and the facts that make the resulting content block attributable. A
+ * dropped `url` would be persisted as `sourceOmitted`, which asserts the
+ * provider supplied no retrievable source.
+ */
+const claudeMediaSourceFacts = (
+  block: Record<string, unknown>,
+): { readonly url?: string; readonly media_type?: string; readonly sourceBytes?: number } => {
+  const source = recordFrom(block.source);
+  const nonEmpty = (value: unknown): string | undefined =>
+    typeof value === "string" && value.length > 0 ? value : undefined;
+  const url = nonEmpty(block.url) ?? nonEmpty(source?.url);
+  const mediaType =
+    typeof block.media_type === "string"
+      ? block.media_type
+      : typeof source?.media_type === "string"
+      ? source.media_type
+      : undefined;
+  const data = typeof source?.data === "string" ? source.data : undefined;
+  const sourceBytes =
+    source?.type === "base64" && data !== undefined
+      ? Buffer.byteLength(data, "base64")
+      : undefined;
+  return {
+    ...(url !== undefined ? { url } : {}),
+    ...(mediaType !== undefined ? { media_type: mediaType } : {}),
+    ...(sourceBytes !== undefined ? { sourceBytes } : {}),
+  };
+};
+
 const claudeStructuredContentProjection = (value: unknown): NativeValue | undefined => {
   if (typeof value === "string") return value;
   if (Array.isArray(value)) {
@@ -208,7 +242,7 @@ const claudeStructuredContentProjection = (value: unknown): NativeValue | undefi
         return [
           {
             type,
-            ...(typeof block.media_type === "string" ? { media_type: block.media_type } : {}),
+            ...claudeMediaSourceFacts(block),
           } as NativeValue,
         ];
       }
@@ -217,7 +251,7 @@ const claudeStructuredContentProjection = (value: unknown): NativeValue | undefi
           {
             type,
             ...(typeof block.file_path === "string" ? { file_path: block.file_path } : {}),
-            ...(typeof block.media_type === "string" ? { media_type: block.media_type } : {}),
+            ...claudeMediaSourceFacts(block),
           } as NativeValue,
         ];
       }
@@ -279,7 +313,7 @@ const claudeContentProjection = (
         return [
           {
             type,
-            ...(typeof block.media_type === "string" ? { media_type: block.media_type } : {}),
+            ...claudeMediaSourceFacts(block),
           } as NativeValue,
         ];
       }
@@ -288,7 +322,7 @@ const claudeContentProjection = (
           {
             type,
             ...(typeof block.file_path === "string" ? { file_path: block.file_path } : {}),
-            ...(typeof block.media_type === "string" ? { media_type: block.media_type } : {}),
+            ...claudeMediaSourceFacts(block),
           } as NativeValue,
         ];
       }

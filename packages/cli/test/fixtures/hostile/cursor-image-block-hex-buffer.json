@@ -1,0 +1,23 @@
+{
+  "role": "user",
+  "content": [
+    {
+      "type": "image",
+      "image": {
+        "__type": "Uint8Array",
+        "hex": "89504e470d0a1a0a"
+      },
+      "mimeType": "image/jpeg",
+      "providerOptions": {
+        "cursor": {
+          "imageDescription": "synthetic image description"
+        }
+      }
+    }
+  ],
+  "providerOptions": {
+    "cursor": {
+      "modelName": "fixture-model"
+    }
+  }
+}

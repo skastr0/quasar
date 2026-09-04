@@ -18,6 +18,7 @@ import {
   compactText,
   eventIdFor,
   homePath,
+  mediaContentBlock,
   projectToolPayloadNativeValue,
   projectSessionNativeValue,
   scopedId,
@@ -560,6 +561,34 @@ const nativeMessageIdentity = (message: AmpExport["messages"][number], messageIn
 const nonEmptyString = (value: unknown): string | undefined =>
   typeof value === "string" && value.length > 0 ? value : undefined;
 
+/**
+ * Amp image `source` is the Anthropic block shape: a `url` source locates the
+ * image, a `base64` source only declares its media type and byte length. The
+ * bytes are never stored, so only the locator and the provenance are read.
+ */
+const imageSourceFacts = (
+  source: unknown,
+): {
+  readonly uri?: string;
+  readonly mediaType?: string;
+  readonly sourceBytes?: number;
+} => {
+  if (source === null || typeof source !== "object" || Array.isArray(source)) return {};
+  const record = source as Record<string, unknown>;
+  const uri = nonEmptyString(record.url);
+  const mediaType = nonEmptyString(record.media_type) ?? nonEmptyString(record.mediaType);
+  const data = nonEmptyString(record.data);
+  const sourceBytes =
+    record.type === "base64" && data !== undefined
+      ? Buffer.byteLength(data, "base64")
+      : undefined;
+  return {
+    ...(uri !== undefined ? { uri } : {}),
+    ...(mediaType !== undefined ? { mediaType } : {}),
+    ...(sourceBytes !== undefined ? { sourceBytes } : {}),
+  };
+};
+
 const sourceMetadataFor = (
   message: AmpExport["messages"][number],
   blockFacts: Readonly<Record<string, unknown>> = {},
@@ -1042,12 +1071,7 @@ const buildAmpSession = (
           const nativeEventId = `${messageIdentity}:${blockIndex}`;
           const eventId = eventIdFor(sessionId, seq, nativeEventId);
           const imageTimestamp = role === "user" ? userTimestamp : undefined;
-          const source = imageDecision.value.source;
-          const uri =
-            source !== null && typeof source === "object" && !Array.isArray(source)
-            && typeof (source as { readonly url?: unknown }).url === "string"
-              ? (source as { readonly url: string }).url
-              : undefined;
+          const source = imageSourceFacts(imageDecision.value.source);
           events.push({
             id: eventId,
             nativeEventId,
@@ -1055,14 +1079,16 @@ const buildAmpSession = (
             ...(imageTimestamp !== undefined ? { timestamp: imageTimestamp } : {}),
             role,
             kind: "message",
-            contentBlocks: [{
+            contentBlocks: [mediaContentBlock({
               id: scopedId(sessionId, "content", `${messageIndex}:${blockIndex}`),
               sequence: 0,
               kind: "image",
-              ...(imageDecision.value.sourcePath !== undefined ? { path: imageDecision.value.sourcePath } : {}),
-              ...(uri !== undefined ? { uri } : {}),
+              path: imageDecision.value.sourcePath,
+              uri: source.uri,
+              mediaType: source.mediaType,
+              sourceBytes: source.sourceBytes,
               metadata: sourceRef,
-            }],
+            })],
             rawReference: { sourcePath: url, line, nativeType: "image" },
           });
           artifacts.push({

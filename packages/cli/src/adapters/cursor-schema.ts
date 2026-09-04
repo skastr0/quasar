@@ -123,6 +123,8 @@ export const CursorImageBlockSchema = Schema.Struct({
   image: Schema.optional(Schema.Unknown),
   uri: Schema.optional(Schema.String),
   mediaType: Schema.optional(Schema.String),
+  /** Measured on-disk spelling for an inline image block; `mediaType` is the AI-SDK spelling. */
+  mimeType: Schema.optional(Schema.String),
 });
 export type CursorImageBlock = typeof CursorImageBlockSchema.Type;
 
@@ -132,6 +134,8 @@ export const CursorFileBlockSchema = Schema.Struct({
   data: Schema.optional(Schema.Unknown),
   uri: Schema.optional(Schema.String),
   mediaType: Schema.optional(Schema.String),
+  /** Measured on-disk spelling for an inline file block; `mediaType` is the AI-SDK spelling. */
+  mimeType: Schema.optional(Schema.String),
 });
 export type CursorFileBlock = typeof CursorFileBlockSchema.Type;
 

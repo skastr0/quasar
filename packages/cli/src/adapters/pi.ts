@@ -22,6 +22,7 @@ import {
   homePath,
   jsonBlock,
   logicalPathFor,
+  mediaContentBlock,
   projectSessionNativeValue,
   projectToolPayloadNativeValue,
   scopedId,
@@ -159,16 +160,16 @@ const imageBlock = (
   eventId: string,
   sequence: number,
   image: { readonly data: string; readonly mimeType: string },
-): ContentBlock => ({
-  id: contentBlockIdFor(sessionId, eventId, sequence),
-  sequence,
-  kind: "image",
-  mediaType: image.mimeType,
-  metadata: {
-    embedded: true,
-    dataBytes: Buffer.byteLength(image.data, "base64"),
-  },
-});
+): ContentBlock =>
+  mediaContentBlock({
+    id: contentBlockIdFor(sessionId, eventId, sequence),
+    sequence,
+    kind: "image",
+    mediaType: image.mimeType,
+    // pi states the payload is base64; the bytes themselves are not stored.
+    sourceBytes: Buffer.byteLength(image.data, "base64"),
+    metadata: { embedded: true },
+  });
 
 const messageBlocks = (
   sessionId: SessionId,

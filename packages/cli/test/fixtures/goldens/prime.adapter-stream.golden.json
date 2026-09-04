@@ -90,7 +90,7 @@
       "machineId": "machine:test",
       "nativeProjectKey": "/fixture/quasar",
       "nativeSessionId": "prime-fixture-child",
-      "normalizationVersion": 12,
+      "normalizationVersion": 13,
       "projectIdentity": {
         "confidence": "low",
         "displayName": "quasar",
@@ -472,7 +472,7 @@
       "machineId": "machine:test",
       "nativeProjectKey": "/fixture/quasar",
       "nativeSessionId": "prime-fixture061",
-      "normalizationVersion": 12,
+      "normalizationVersion": 13,
       "projectIdentity": {
         "confidence": "high",
         "displayName": "quasar",

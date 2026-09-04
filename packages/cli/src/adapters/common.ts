@@ -500,6 +500,12 @@ export const stringValue = (value: unknown): string | undefined => {
   return decoded !== undefined && decoded.length > 0 ? decoded : undefined;
 };
 
+/** A provider-stated non-negative integer, or nothing. Never coerced. */
+export const integerValue = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isInteger(value) && value >= 0
+    ? value
+    : undefined;
+
 /**
  * Optional finite-number field peek after a record is in hand. Visible Schema
  * decode + finiteness gate; non-numbers and non-finite values yield undefined.
@@ -572,6 +578,67 @@ export const jsonBlock = (
   value,
 });
 
+const nonEmptyString = (value: string | undefined): string | undefined =>
+  value !== undefined && value.length > 0 ? value : undefined;
+
+const nonNegativeByteCount = (value: number | undefined): number | undefined =>
+  value !== undefined && Number.isInteger(value) && value >= 0 ? value : undefined;
+
+/**
+ * A block payload that is NOT an image or a file. Generic block helpers take
+ * this shape so a media block cannot be assembled anywhere but
+ * `mediaContentBlock` — the source-omitted marker is derivable only there.
+ */
+export type NonMediaBlockPayload =
+  & Omit<ContentBlock, "id" | "sequence" | "kind">
+  & { readonly kind: Exclude<ContentBlock["kind"], "image" | "file"> };
+
+export interface MediaContentBlockInput {
+  readonly id: string;
+  readonly sequence: number;
+  readonly kind: "image" | "file";
+  readonly path?: string | undefined;
+  readonly uri?: string | undefined;
+  readonly mediaType?: string | undefined;
+  /** Byte length of the source the provider named, when it is knowable. */
+  readonly sourceBytes?: number | undefined;
+  /** Inlined file text a provider mentioned alongside the locator. */
+  readonly text?: string | undefined;
+  readonly value?: unknown;
+  readonly metadata?: unknown;
+}
+
+/**
+ * The single constructor for every `kind: "image"` / `kind: "file"` content
+ * block in the CLI. A locator (`path` or `uri`) yields a normal block; no
+ * locator yields a source-omitted block carrying the explicit marker plus
+ * whatever provenance the provider stated. It is not possible to build a
+ * refinement-violating media block through it: the marker is derived from the
+ * locators, never supplied by the caller.
+ */
+export const mediaContentBlock = (
+  input: MediaContentBlockInput,
+): ContentBlock => {
+  const path = nonEmptyString(input.path);
+  const uri = nonEmptyString(input.uri);
+  const mediaType = nonEmptyString(input.mediaType);
+  const sourceBytes = nonNegativeByteCount(input.sourceBytes);
+  const located = path !== undefined || uri !== undefined;
+  return {
+    id: input.id,
+    sequence: input.sequence,
+    kind: input.kind,
+    ...(path !== undefined ? { path } : {}),
+    ...(uri !== undefined ? { uri } : {}),
+    ...(located ? {} : { sourceOmitted: true as const }),
+    ...(mediaType !== undefined ? { mediaType } : {}),
+    ...(sourceBytes !== undefined ? { sourceBytes } : {}),
+    ...(input.text !== undefined ? { text: input.text } : {}),
+    ...(input.value !== undefined ? { value: input.value } : {}),
+    ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+  };
+};
+
 export const contentBlocksFromNative = (
   sessionId: SessionId,
   eventId: string,
@@ -579,7 +646,7 @@ export const contentBlocksFromNative = (
 ): ContentBlock[] => {
   const projectedValue = projectSessionNativeValue(value);
   const blocks: ContentBlock[] = [];
-  const pushBlock = (block: Omit<ContentBlock, "id" | "sequence">) => {
+  const pushBlock = (block: NonMediaBlockPayload) => {
     const sequence = blocks.length;
     blocks.push({
       id: contentBlockIdFor(sessionId, eventId, sequence),
@@ -607,50 +674,76 @@ export const contentBlocksFromNative = (
   });
   const pushMediaOrFile = (record: Record<string, unknown>, type: string | undefined) => {
     const lowerType = type?.toLowerCase();
+    // `image_url`, `source`, and `file` are locator CONTAINERS as often as they
+    // are locator strings: OpenAI writes `image_url: { url }`, Anthropic writes
+    // `source: { type: "url", url }`, and both write `file: { path }`. The
+    // container form is what decides `kind` below, so failing to unwrap it
+    // would claim `sourceOmitted` over a locator the provider did supply.
+    const nested = {
+      imageUrl: recordFrom(record.image_url) ?? recordFrom(record.imageUrl),
+      source: recordFrom(record.source),
+      file: recordFrom(record.file),
+    };
     const path =
       stringValue(record.path) ??
       stringValue(record.file_path) ??
       stringValue(record.filePath) ??
-      stringValue(record.filename);
+      stringValue(record.filename) ??
+      stringValue(nested.file?.path) ??
+      stringValue(nested.file?.file_path) ??
+      stringValue(nested.file?.filePath) ??
+      stringValue(nested.file?.filename);
     const uri =
       stringValue(record.uri) ??
       stringValue(record.url) ??
       stringValue(record.image_url) ??
-      stringValue(record.imageUrl);
+      stringValue(record.imageUrl) ??
+      stringValue(nested.imageUrl?.url) ??
+      stringValue(nested.imageUrl?.uri) ??
+      stringValue(nested.source?.url) ??
+      stringValue(nested.source?.uri) ??
+      stringValue(nested.file?.url) ??
+      stringValue(nested.file?.uri);
     const mediaType =
       stringValue(record.mediaType) ??
       stringValue(record.media_type) ??
       stringValue(record.mimeType) ??
-      stringValue(record.mime_type);
-    if (
+      stringValue(record.mime_type) ??
+      stringValue(nested.source?.media_type) ??
+      stringValue(nested.source?.mediaType) ??
+      stringValue(nested.imageUrl?.media_type) ??
+      stringValue(nested.file?.media_type) ??
+      stringValue(nested.file?.mediaType);
+    // Provenance only when the provider stated a byte count. Never inferred
+    // from an opaque payload string.
+    const sourceBytes =
+      integerValue(record.sourceBytes) ??
+      integerValue(record.source_bytes) ??
+      integerValue(record.byteSize) ??
+      integerValue(record.byte_size) ??
+      integerValue(record.bytes);
+    const kind: "image" | "file" | undefined =
       lowerType?.includes("image") === true ||
       record.image !== undefined ||
       record.image_url !== undefined ||
       record.imageUrl !== undefined
-    ) {
-      pushBlock({
-        kind: "image",
-        ...(path !== undefined ? { path } : {}),
-        ...(uri !== undefined ? { uri } : {}),
-        ...(mediaType !== undefined ? { mediaType } : {}),
-        metadata: metadataFor(record, type),
-      });
-      return true;
-    }
-    if (
-      lowerType?.includes("file") === true ||
-      record.file !== undefined
-    ) {
-      pushBlock({
-        kind: "file",
-        ...(path !== undefined ? { path } : {}),
-        ...(uri !== undefined ? { uri } : {}),
-        ...(mediaType !== undefined ? { mediaType } : {}),
-        metadata: metadataFor(record, type),
-      });
-      return true;
-    }
-    return false;
+        ? "image"
+        : lowerType?.includes("file") === true || record.file !== undefined
+        ? "file"
+        : undefined;
+    if (kind === undefined) return false;
+    const sequence = blocks.length;
+    blocks.push(mediaContentBlock({
+      id: contentBlockIdFor(sessionId, eventId, sequence),
+      sequence,
+      kind,
+      path,
+      uri,
+      mediaType,
+      sourceBytes,
+      metadata: metadataFor(record, type),
+    }));
+    return true;
   };
   const providerMetadataOnly = (record: Record<string, unknown>) => {
     const hasLocator =

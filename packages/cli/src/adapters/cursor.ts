@@ -50,6 +50,7 @@ import {
   homePath,
   logicalPathFor,
   logicalRootFor,
+  mediaContentBlock,
   projectSessionNativeValue,
   projectToolPayloadNativeValue,
   scopedId,
@@ -855,34 +856,60 @@ const mapMessages = (
         const sequence = events.length;
         const stableKey = message.id ?? `${source.blobId}:${blockIndex}`;
         const id = eventIdFor(sessionId, sequence, stableKey);
-        pushEvent(source, blockIndex, classification.value.role, "message", undefined, [{
-          id: contentBlockIdFor(sessionId, id, 0),
-          sequence: 0,
-          kind: "image",
-          ...(block.uri === undefined ? {} : { uri: block.uri }),
-          ...(block.mediaType === undefined ? {} : { mediaType: block.mediaType }),
-          ...(block.image === undefined ? {} : { value: projectSessionNativeValue(block.image) }),
-        }], `${message.role}:image`);
+        pushEvent(source, blockIndex, classification.value.role, "message", undefined, [
+          mediaContentBlock({
+            id: contentBlockIdFor(sessionId, id, 0),
+            sequence: 0,
+            kind: "image",
+            uri: block.uri,
+            mediaType: block.mediaType ?? block.mimeType,
+            sourceBytes: opaqueBinaryBytes(block.image),
+            ...(block.image === undefined
+              ? {}
+              : { value: projectSessionNativeValue(block.image) }),
+          }),
+        ], `${message.role}:image`);
         continue;
       }
       if (block.type === "file") {
         const sequence = events.length;
         const stableKey = message.id ?? `${source.blobId}:${blockIndex}`;
         const id = eventIdFor(sessionId, sequence, stableKey);
-        pushEvent(source, blockIndex, classification.value.role, "message", block.filename, [{
-          id: contentBlockIdFor(sessionId, id, 0),
-          sequence: 0,
-          kind: "file",
-          ...(block.filename === undefined ? {} : { path: block.filename }),
-          ...(block.uri === undefined ? {} : { uri: block.uri }),
-          ...(block.mediaType === undefined ? {} : { mediaType: block.mediaType }),
-          ...(block.data === undefined ? {} : { value: projectSessionNativeValue(block.data) }),
-        }], `${message.role}:file`);
+        pushEvent(source, blockIndex, classification.value.role, "message", block.filename, [
+          mediaContentBlock({
+            id: contentBlockIdFor(sessionId, id, 0),
+            sequence: 0,
+            kind: "file",
+            path: block.filename,
+            uri: block.uri,
+            mediaType: block.mediaType ?? block.mimeType,
+            sourceBytes: opaqueBinaryBytes(block.data),
+            ...(block.data === undefined
+              ? {}
+              : { value: projectSessionNativeValue(block.data) }),
+          }),
+        ], `${message.role}:file`);
       }
     }
   }
 
   return { events, toolCalls: [...calls.values()], usageRecords };
+};
+
+/**
+ * `replaceBinaryMarkers` swaps an inline Cursor `Uint8Array` payload for an
+ * opaque marker that KEEPS the byte count. That count is the only provenance a
+ * source-omitted media block can carry, so it is read back out of the marker
+ * rather than thrown away with the bytes.
+ */
+const opaqueBinaryBytes = (value: unknown): number | undefined => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (record.__type !== "OpaqueBinary") return undefined;
+  const byteLength = record.byteLength;
+  return typeof byteLength === "number" && Number.isInteger(byteLength) && byteLength >= 0
+    ? byteLength
+    : undefined;
 };
 
 const toIso = (milliseconds: number | undefined) =>
