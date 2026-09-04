@@ -58,6 +58,11 @@ bun scripts/server-ops.mjs exec -- sh -lc 'du -sh /data/quasar/*'
 
 ## Deploy / Update Flow
 
+For the normalization v13 ingestion/search upgrade, use the
+[staged upgrade handoff](staged-upgrade-normalization-v13.md) instead of the generic
+flow below. It covers sender shutdown, backup verification, isolated rehearsal,
+server-first deployment, gradual client resumption, and rollback gates.
+
 1. Pull or checkout the desired code:
    ```bash
    git pull origin main
@@ -359,17 +364,15 @@ This writes `./quasar-truth-backup.tar` with:
 
 SQLite is the whole data plane, so this backup is complete: the FTS index is rebuilt by the store's `user_version` migration, and `message_vectors`, `session_enrichments`, and `ingest_runs` ride inside the same file.
 
-Restore is intentionally manual because it replaces the truth store:
+Restore is intentionally manual because it replaces the truth store. **Never
+start the server before populating and verifying the restored volume.** Pause all
+writers, stop the server, retain the existing volume, restore the verified snapshot
+into a new empty volume, then start the pinned recovery image against that volume.
+Do not delete the original volume or mix its WAL/SHM files with the snapshot.
 
-```bash
-bun run server:down
-docker volume rm quasar-server_quasar-data
-bun run server:up
-bun scripts/server-ops.mjs exec -- sh -lc 'rm -rf /data/quasar'
-docker compose --env-file platform/server/.env -f platform/server/compose.yaml cp ./quasar-truth-backup.tar server:/tmp/quasar-truth-backup.tar
-bun scripts/server-ops.mjs exec -- sh -lc 'mkdir -p /data/quasar && tar -xf /tmp/quasar-truth-backup.tar -C /data/quasar'
-bun run server:restart
-```
+See the [staged upgrade rollback procedure](staged-upgrade-normalization-v13.md#rollback--never-replace-files-under-a-running-server)
+for image pinning, isolated restore rehearsal, volume overrides, client manifest
+recovery, and the approval gate for losing post-backup writes.
 
 ---
 
@@ -382,4 +385,3 @@ bun run server:restart
 5. If jobs are leased forever after a crash, restart the server (`bun run server:restart`); stale worker leases are recovered automatically by the embedding worker.
 6. If search misses fresh sessions, re-run ingest from the source machine's CLI (`quasar ingest --provider all`); lexical search serves them immediately from the trigger-maintained FTS index.
 7. If semantic search returns 503 (`SemanticDisabled`), run `bun run server:materialize` to populate missing vectors in SQLite, then restart the server to load the resident f16 matrix into memory.
-
