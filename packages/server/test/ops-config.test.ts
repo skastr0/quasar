@@ -60,7 +60,7 @@ describe("server ops config", () => {
     expect(ops).toContain("materialize-embedding-vectors");
     expect(ops).toContain('if (command !== "materialize")');
     expect(ops).toContain("--require-provider");
-    expect(ops).toContain("materialization-closure-");
+    expect(ops).toContain("/tmp/quasar-materialize-");
     expect(ops).toContain("missing value for");
     expect(runbook).toContain("quasar daemon install --interval-seconds 60");
     expect(runbook).toContain("quasar daemon uninstall");
