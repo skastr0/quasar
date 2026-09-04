@@ -1,10 +1,11 @@
 import { Database } from "bun:sqlite";
 import { Context, Effect, Layer, Schema } from "effect";
 
+import { ingestRunRetentionMs, ingestRunStaleAfterMs } from "./config";
 import { makeEmbeddingProfile, type EmbeddingProfile } from "./embeddingProfiles";
-import type { QueueJobRow } from "./model";
+import { INGEST_RUN_REAPED_REASON, type QueueJobRow } from "./model";
 import { ensureParentDir, sqlitePath } from "./paths";
-import { LocalStore } from "./store";
+import { applyBusyTimeout, LocalStore, type LocalStoreService } from "./store";
 
 export class DurableQueueError extends Schema.TaggedError<DurableQueueError>()(
   "DurableQueueError",
@@ -296,7 +297,10 @@ export const makeDurableQueueLayer = (path = sqlitePath()): Layer.Layer<DurableQ
     Effect.acquireRelease(
       Effect.sync(() => {
         ensureParentDir(path);
-        const db = new Database(path, { create: true });
+        // Second connection against the same file as the truth store: arm the
+        // busy handler before the first statement so queue writes wait out a
+        // store write instead of surfacing a raw SQLITE_BUSY.
+        const db = applyBusyTimeout(new Database(path, { create: true }));
         queueMigrate(db);
         return db;
       }),
@@ -541,10 +545,91 @@ export const EmbeddingsLive = Layer.succeed(
   })(),
 );
 
+export interface IngestRunHygieneReport {
+  /** Run ids transitioned out of `running` because their liveness evidence
+   * aged past the staleness window. */
+  readonly reaped: readonly string[];
+  /** Terminal ledger rows deleted by the retention window. */
+  readonly pruned: number;
+}
+
+export interface IngestRunHygieneOptions {
+  readonly staleAfterMs?: number;
+  readonly retentionMs?: number;
+  readonly now?: string;
+}
+
+/**
+ * Bound the ingest-run ledger at startup.
+ *
+ * Two independent moves, in order. The reaper closes out `running` rows whose
+ * own last-write evidence has aged past the staleness window — a killed
+ * process leaves its row `running` forever, and `status` endpoints count that
+ * table. It keys on evidence, never on existence, so a run that is genuinely
+ * in flight (its writer refreshed `updated_at` within the window) is never
+ * touched. The prune then bounds the table by retention, and only ever deletes
+ * rows that already reached a terminal state — so an orphan is recorded as a
+ * reaped failure first, never silently deleted.
+ */
+export const runIngestRunHygiene = (
+  store: LocalStoreService,
+  options: IngestRunHygieneOptions = {},
+): Effect.Effect<IngestRunHygieneReport, never> =>
+  Effect.gen(function* () {
+    const now = options.now ?? nowIso();
+    const nowMs = Date.parse(now);
+    const staleAfterMs = options.staleAfterMs ?? ingestRunStaleAfterMs();
+    const retentionMs = options.retentionMs ?? ingestRunRetentionMs();
+    const reaped = yield* store.reapStaleIngestRuns({
+      staleBefore: new Date(nowMs - staleAfterMs).toISOString(),
+      now,
+    });
+    if (reaped.length > 0) {
+      yield* Effect.logWarning("ingest_runs.stale_reaped").pipe(
+        Effect.annotateLogs({
+          event: "ingest_runs.stale_reaped",
+          at: now,
+          reason: INGEST_RUN_REAPED_REASON,
+          reapedRuns: reaped.length,
+          staleAfterMs,
+          runIds: reaped.slice(0, 20),
+        }),
+      );
+    }
+    const pruned = yield* store.pruneIngestRuns({
+      before: new Date(nowMs - retentionMs).toISOString(),
+    });
+    if (pruned > 0) {
+      yield* Effect.logInfo("ingest_runs.pruned").pipe(
+        Effect.annotateLogs({
+          event: "ingest_runs.pruned",
+          at: now,
+          prunedRows: pruned,
+          retentionMs,
+        }),
+      );
+    }
+    return { reaped, pruned };
+  }).pipe(
+    // Ledger hygiene is maintenance, not a serving path: a SQLite failure here
+    // is diagnosed and the server still comes up.
+    Effect.catchAll((cause) =>
+      Effect.logError("ingest_runs.hygiene_failed").pipe(
+        Effect.annotateLogs({
+          event: "ingest_runs.hygiene_failed",
+          at: nowIso(),
+          detail: cause.message,
+        }),
+        Effect.as({ reaped: [] as readonly string[], pruned: 0 }),
+      ),
+    ),
+  );
+
 export const IngestCoordinatorLive = Layer.effect(
   IngestCoordinator,
   Effect.gen(function* () {
     const store = yield* LocalStore;
+    yield* runIngestRunHygiene(store);
     return IngestCoordinator.of({
       status: store.countIngestRuns("running").pipe(
         Effect.map((activeRuns) => ({ activeRuns })),

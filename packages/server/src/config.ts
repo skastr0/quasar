@@ -20,6 +20,23 @@ const envInt = (name: string, fallback: number): number => {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 };
 
+/** SQLite busy handler window. Two connections exist against the same file
+ * (the truth store and the durable queue), so a concurrent writer must wait
+ * for the write lock instead of surfacing a raw SQLITE_BUSY to the caller. */
+export const sqliteBusyTimeoutMs = (): number =>
+  envInt("QUASAR_SQLITE_BUSY_TIMEOUT_MS", 5_000);
+
+/** An ingest run writes its ledger row at start and again at its terminal
+ * transition. A `running` row whose last write is older than this has no live
+ * writer behind it (the whole five-provider estate ingests in minutes), so it
+ * is an orphan of a killed process, not a slow run. */
+export const ingestRunStaleAfterMs = (): number =>
+  envInt("QUASAR_INGEST_RUN_STALE_MS", 6 * 60 * 60 * 1_000);
+
+/** Retention window for terminal ingest-run ledger rows. */
+export const ingestRunRetentionMs = (): number =>
+  envInt("QUASAR_INGEST_RUN_RETENTION_DAYS", 30) * 24 * 60 * 60 * 1_000;
+
 export class LocalServerConfig extends Context.Tag("@quasar/LocalServerConfig")<
   LocalServerConfig,
   LocalServerConfigService

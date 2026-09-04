@@ -31,6 +31,8 @@ import type {
   ToolCallRow,
   UsageRecordRow,
 } from "./model";
+import { sqliteBusyTimeoutMs } from "./config";
+import { INGEST_RUN_REAPED_REASON } from "./model";
 import { ensureParentDir, sqlitePath } from "./paths";
 import { composeScopedFtsQuery, ftsProjectScopeToken, positiveInt } from "./fts5";
 import { decodeFloat16Vector, encodeFloat16Vector, VECTOR_BLOB_ENCODING } from "./vectorBlob";
@@ -325,6 +327,20 @@ export interface LocalStoreService {
     readonly offset?: number;
   }) => Effect.Effect<readonly IngestRunRow[], SqliteStoreError>;
   readonly countIngestRuns: (status?: IngestRunRow["status"]) => Effect.Effect<number, SqliteStoreError>;
+  /** Transition orphaned `running` ledger rows to a terminal state. Staleness
+   * is decided by the row's own last-write evidence (`updated_at`, falling back
+   * to `started_at` for rows written before that column existed), never by the
+   * mere existence of a `running` row — a live run keeps its evidence fresh. */
+  readonly reapStaleIngestRuns: (options: {
+    /** Rows whose last write is strictly older than this ISO instant. */
+    readonly staleBefore: string;
+    readonly now: string;
+  }) => Effect.Effect<readonly string[], SqliteStoreError>;
+  /** Retention prune of terminal ledger rows. `running` rows are never pruned:
+   * reap them first so an orphan is recorded, not silently deleted. */
+  readonly pruneIngestRuns: (options: {
+    readonly before: string;
+  }) => Effect.Effect<number, SqliteStoreError>;
   readonly stats: Effect.Effect<StoreStats, SqliteStoreError>;
   readonly upsertMessageVectors: (rows: readonly MessageVectorUpsert[]) => Effect.Effect<number, SqliteStoreError>;
   readonly listMessagesMissingVector: (options: {
@@ -1141,6 +1157,26 @@ const migrate = (db: Database): readonly StoreMigrationLog[] => {
   if (!sessionColumns.has("parent_session_id")) {
     db.exec("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT");
   }
+  // Idempotent column adds for the ingest-run ledger. `updated_at` is the only
+  // liveness evidence a run leaves behind (a run writes at start and again at
+  // its terminal transition), so the stale-run reaper keys on it; `reason`
+  // names a server-authored terminal transition. Empty-column adds, not data
+  // migrations: pre-existing rows read through COALESCE onto started_at.
+  const ingestRunColumns = new Set(
+    (db.query("PRAGMA table_info(ingest_runs)").all() as { name: string }[]).map(
+      (column) => column.name,
+    ),
+  );
+  if (!ingestRunColumns.has("updated_at")) {
+    db.exec("ALTER TABLE ingest_runs ADD COLUMN updated_at TEXT");
+  }
+  if (!ingestRunColumns.has("reason")) {
+    db.exec("ALTER TABLE ingest_runs ADD COLUMN reason TEXT");
+  }
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS ingest_runs_by_status_updated
+      ON ingest_runs(status, updated_at);
+  `);
   const messageColumns = new Set(
     (db.query("PRAGMA table_info(messages)").all() as { name: string }[]).map(
       (column) => column.name,
@@ -1242,6 +1278,12 @@ const migrate = (db: Database): readonly StoreMigrationLog[] => {
 const count = (db: Database, table: string): number =>
   (db.query(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count;
 
+/** Ledger projection shared by every read path. Nullable columns stay NULL on
+ * the wire exactly as `completed_at` always has — the pinned HTTP shape for a
+ * running row is `completedAt: null`, not an absent key. */
+const SELECT_INGEST_RUN =
+  "SELECT run_id AS runId, provider, status, started_at AS startedAt, completed_at AS completedAt, sessions_seen AS sessionsSeen, sessions_written AS sessionsWritten, sessions_skipped AS sessionsSkipped, sessions_failed AS sessionsFailed, updated_at AS updatedAt, reason FROM ingest_runs";
+
 const lexicalRankScore = (index: number): number =>
   1 / (index + 1);
 
@@ -1254,6 +1296,19 @@ export class LocalStore extends Context.Tag("@quasar/LocalStore")<
 >() {}
 
 /**
+ * Arm SQLite's busy handler on a freshly opened connection. Quasar runs more
+ * than one connection against the same file (the truth store and the durable
+ * queue), and WAL admits exactly one writer at a time: without this, the second
+ * writer surfaces a raw SQLITE_BUSY to the caller instead of waiting out a
+ * write that finishes in milliseconds. Must run before any statement — it is a
+ * property of the connection, not of a transaction.
+ */
+export const applyBusyTimeout = (db: Database, timeoutMs = sqliteBusyTimeoutMs()): Database => {
+  db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.trunc(timeoutMs))}`);
+  return db;
+};
+
+/**
  * Open an existing SQLite database for read-only use.
  * Prefer `immutable=1` (no -wal/-shm sidecars). Fall back to plain readonly when
  * the URI open fails — observed on some Linux/Bun combinations as SQLITE_CANTOPEN.
@@ -1261,11 +1316,13 @@ export class LocalStore extends Context.Tag("@quasar/LocalStore")<
 export const openReadonlySqlite = (path: string): Database => {
   const absolute = resolvePath(path);
   try {
-    return new Database(`${pathToFileURL(absolute).href}?immutable=1`, {
-      readonly: true,
-    });
+    return applyBusyTimeout(
+      new Database(`${pathToFileURL(absolute).href}?immutable=1`, {
+        readonly: true,
+      }),
+    );
   } catch {
-    return new Database(absolute, { readonly: true });
+    return applyBusyTimeout(new Database(absolute, { readonly: true }));
   }
 };
 
@@ -1282,7 +1339,7 @@ const makeLocalStoreLayerScoped = (
         }
         const db = readOnly
           ? openReadonlySqlite(path)
-          : new Database(path, { create: true });
+          : applyBusyTimeout(new Database(path, { create: true }));
         const migrationLogs = readOnly ? [] : migrate(db);
         return { db, migrationLogs };
       }),
@@ -1388,9 +1445,27 @@ const makeLocalStoreLayerScoped = (
            ON CONFLICT(session_id, id) DO UPDATE SET sequence = excluded.sequence, fact_hash = excluded.fact_hash, context_json = excluded.context_json`,
         );
         const upsertIngestRun = db.prepare(
-          `INSERT INTO ingest_runs(run_id, provider, status, started_at, completed_at, sessions_seen, sessions_written, sessions_skipped, sessions_failed)
-           VALUES ($runId, $provider, $status, $startedAt, $completedAt, $sessionsSeen, $sessionsWritten, $sessionsSkipped, $sessionsFailed)
-           ON CONFLICT(run_id) DO UPDATE SET provider = excluded.provider, status = excluded.status, started_at = excluded.started_at, completed_at = excluded.completed_at, sessions_seen = excluded.sessions_seen, sessions_written = excluded.sessions_written, sessions_skipped = excluded.sessions_skipped, sessions_failed = excluded.sessions_failed`,
+          `INSERT INTO ingest_runs(run_id, provider, status, started_at, completed_at, sessions_seen, sessions_written, sessions_skipped, sessions_failed, updated_at, reason)
+           VALUES ($runId, $provider, $status, $startedAt, $completedAt, $sessionsSeen, $sessionsWritten, $sessionsSkipped, $sessionsFailed, $updatedAt, $reason)
+           ON CONFLICT(run_id) DO UPDATE SET provider = excluded.provider, status = excluded.status, started_at = excluded.started_at, completed_at = excluded.completed_at, sessions_seen = excluded.sessions_seen, sessions_written = excluded.sessions_written, sessions_skipped = excluded.sessions_skipped, sessions_failed = excluded.sessions_failed, updated_at = excluded.updated_at, reason = excluded.reason`,
+        );
+        // Staleness reads through COALESCE so rows written before `updated_at`
+        // existed fall back to their start instant rather than to NULL (which
+        // no comparison would ever match, leaving them unreapable forever).
+        const selectStaleIngestRunIds = db.prepare(
+          `SELECT run_id AS runId FROM ingest_runs
+           WHERE status = 'running' AND COALESCE(updated_at, started_at) < ?
+           ORDER BY COALESCE(updated_at, started_at) ASC`,
+        );
+        const reapStaleIngestRunRows = db.prepare(
+          `UPDATE ingest_runs
+             SET status = 'failed', completed_at = $now, updated_at = $now, reason = $reason
+           WHERE status = 'running' AND COALESCE(updated_at, started_at) < $staleBefore`,
+        );
+        const pruneIngestRunRows = db.prepare(
+          `DELETE FROM ingest_runs
+           WHERE status <> 'running'
+             AND COALESCE(updated_at, completed_at, started_at) < ?`,
         );
         const selectMessageVectorCreated = db.prepare(
           "SELECT created_at AS createdAt FROM message_vectors WHERE model = ? AND session_id = ? AND seq = ?",
@@ -2789,12 +2864,19 @@ const makeLocalStoreLayerScoped = (
                 $sessionsWritten: run.sessionsWritten,
                 $sessionsSkipped: run.sessionsSkipped,
                 $sessionsFailed: run.sessionsFailed,
+                // Every write refreshes the liveness evidence the reaper reads.
+                // An explicit updatedAt exists so callers that replay a ledger
+                // row (tests, recovery tooling) can state the real instant.
+                $updatedAt: run.updatedAt ?? new Date().toISOString(),
+                // A client-driven write clears any server-authored reason: the
+                // run is no longer whatever the reaper decided it was.
+                $reason: run.reason ?? null,
               }),
             ),
           getIngestRun: (runId) =>
             trySqlite("getIngestRun", () =>
               db
-                .query("SELECT run_id AS runId, provider, status, started_at AS startedAt, completed_at AS completedAt, sessions_seen AS sessionsSeen, sessions_written AS sessionsWritten, sessions_skipped AS sessionsSkipped, sessions_failed AS sessionsFailed FROM ingest_runs WHERE run_id = ?")
+                .query(`${SELECT_INGEST_RUN} WHERE run_id = ?`)
                 .get(runId) as IngestRunRow | undefined,
             ),
           listIngestRuns: (options = {}) =>
@@ -2803,13 +2885,28 @@ const makeLocalStoreLayerScoped = (
               const offset = options.offset ?? 0;
               if (options.status !== undefined) {
                 return db
-                  .query("SELECT run_id AS runId, provider, status, started_at AS startedAt, completed_at AS completedAt, sessions_seen AS sessionsSeen, sessions_written AS sessionsWritten, sessions_skipped AS sessionsSkipped, sessions_failed AS sessionsFailed FROM ingest_runs WHERE status = ? ORDER BY started_at DESC LIMIT ? OFFSET ?")
+                  .query(`${SELECT_INGEST_RUN} WHERE status = ? ORDER BY started_at DESC LIMIT ? OFFSET ?`)
                   .all(options.status, limit, offset) as IngestRunRow[];
               }
               return db
-                .query("SELECT run_id AS runId, provider, status, started_at AS startedAt, completed_at AS completedAt, sessions_seen AS sessionsSeen, sessions_written AS sessionsWritten, sessions_skipped AS sessionsSkipped, sessions_failed AS sessionsFailed FROM ingest_runs ORDER BY started_at DESC LIMIT ? OFFSET ?")
+                .query(`${SELECT_INGEST_RUN} ORDER BY started_at DESC LIMIT ? OFFSET ?`)
                 .all(limit, offset) as IngestRunRow[];
             }),
+          reapStaleIngestRuns: ({ staleBefore, now }) =>
+            trySqlite("reapStaleIngestRuns", () =>
+              db.transaction(() => {
+                const stale = selectStaleIngestRunIds.all(staleBefore) as Array<{ runId: string }>;
+                if (stale.length === 0) return [] as readonly string[];
+                reapStaleIngestRunRows.run({
+                  $now: now,
+                  $reason: INGEST_RUN_REAPED_REASON,
+                  $staleBefore: staleBefore,
+                });
+                return stale.map((row) => row.runId) as readonly string[];
+              })(),
+            ),
+          pruneIngestRuns: ({ before }) =>
+            trySqlite("pruneIngestRuns", () => pruneIngestRunRows.run(before).changes),
           countIngestRuns: (status) =>
             trySqlite("countIngestRuns", () => {
               const row = status === undefined

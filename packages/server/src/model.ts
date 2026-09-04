@@ -39,7 +39,18 @@ export interface IngestRunRow {
   readonly sessionsWritten: number;
   readonly sessionsSkipped: number;
   readonly sessionsFailed: number;
+  /** Wall clock of the last write to this ledger row. Server-owned: never
+   * accepted over the ingest HTTP surface. It is the only liveness evidence a
+   * run leaves behind, so the stale-run reaper keys on it rather than on the
+   * mere existence of a `running` row. */
+  readonly updatedAt?: string;
+  /** Named cause of a server-authored terminal transition (currently only the
+   * stale-run reaper). Absent on runs a client drove to completion. */
+  readonly reason?: string;
 }
+
+/** The reaper's named reason, written into `ingest_runs.reason`. */
+export const INGEST_RUN_REAPED_REASON = "stale_running_reaped";
 
 export type QueueJobStatus = "pending" | "leased" | "completed" | "failed";
 
