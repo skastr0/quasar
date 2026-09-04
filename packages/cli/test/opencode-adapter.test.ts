@@ -1,8 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { Database } from "bun:sqlite";
 import { afterAll, describe, expect, test } from "bun:test";
 import { Schema } from "effect";
 
@@ -685,5 +686,137 @@ describe("work-item full data fidelity: declarative per-record-type dispatch", (
       expect(classifyOpenCodePart(garbage)._tag).toBe("drop");
       expect(classifyOpenCodeMessage(garbage)._tag).toBe("drop");
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WAL-aware incremental stat gate.
+//
+// The opencode.db file-level gate previously statted only the main db file.
+// Under WAL journal mode, a committed write can live entirely in the -wal
+// companion until an arbitrary later checkpoint, so a new session becomes
+// invisible to ingest while the main file's mtime/size are unchanged. The
+// gate must stat db + -wal + -shm and treat a change in ANY of them as a
+// change (mirrors the cursor/devin precedent).
+// ---------------------------------------------------------------------------
+describe("WAL-aware stat gate", () => {
+  const walRoot = mkdtempSync(join(tmpdir(), "quasar-opencode-wal-"));
+  const walDbPath = join(walRoot, "opencode.db");
+  const walPath = `${walDbPath}-wal`;
+  const shmPath = `${walDbPath}-shm`;
+
+  const walDatabase = new Database(walDbPath);
+  walDatabase.exec(
+    "create table session (id text primary key, title text, directory text, time_created integer, time_updated integer);",
+  );
+  walDatabase.exec(
+    "create table message (id text primary key, session_id text, time_created integer, data text);",
+  );
+  walDatabase.exec(
+    "create table part (id text primary key, message_id text, session_id text, time_created integer, data text);",
+  );
+  // Disable auto-checkpoint so committed writes stay in the -wal file for the
+  // life of this open connection, exactly reproducing the bug's precondition.
+  walDatabase.exec("pragma journal_mode = WAL; pragma wal_autocheckpoint = 0;");
+
+  afterAll(() => {
+    walDatabase.close();
+    rmSync(walRoot, { recursive: true, force: true });
+  });
+
+  const insertWalSession = (sessionId: string, timeUpdated: number, text: string) => {
+    walDatabase
+      .query(
+        "insert into session (id, title, directory, time_created, time_updated) values (?, ?, ?, ?, ?)",
+      )
+      .run(sessionId, `wal gate ${sessionId}`, "/tmp/wal-proj", timeUpdated, timeUpdated);
+    const messageId = `msg_${sessionId}`;
+    walDatabase
+      .query("insert into message (id, session_id, time_created, data) values (?, ?, ?, ?)")
+      .run(
+        messageId,
+        sessionId,
+        timeUpdated,
+        JSON.stringify({ role: "user", time: { created: timeUpdated } }),
+      );
+    walDatabase
+      .query(
+        "insert into part (id, message_id, session_id, time_created, data) values (?, ?, ?, ?, ?)",
+      )
+      .run(`prt_${sessionId}`, messageId, sessionId, timeUpdated, JSON.stringify({ type: "text", text }));
+  };
+
+  insertWalSession("ses_wal_first", 4_000_000_000, "first committed WAL state");
+
+  test("a write landing only in the -wal companion is detected as changed", async () => {
+    const first = await opencodeAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { opencode: walRoot },
+    });
+    expect(first.sessions.map((session) => session.nativeSessionId)).toEqual(["ses_wal_first"]);
+
+    const dbStatBefore = statSync(walDbPath);
+    const walStatBefore = statSync(walPath);
+
+    insertWalSession("ses_wal_second", 4_000_000_001, "second committed WAL state");
+
+    const dbStatAfter = statSync(walDbPath);
+    const walStatAfter = statSync(walPath);
+    // Sanity on the precondition: the main db file is byte-for-byte
+    // unchanged while the -wal companion has grown — this is the exact
+    // situation the old db-only gate could not see.
+    expect({ size: dbStatAfter.size, mtimeMs: dbStatAfter.mtimeMs }).toEqual({
+      size: dbStatBefore.size,
+      mtimeMs: dbStatBefore.mtimeMs,
+    });
+    expect({ size: walStatAfter.size, mtimeMs: walStatAfter.mtimeMs }).not.toEqual({
+      size: walStatBefore.size,
+      mtimeMs: walStatBefore.mtimeMs,
+    });
+
+    const probedPaths: string[] = [];
+    const second = await opencodeAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { opencode: walRoot },
+      shouldReadFile: (path, stat) => {
+        probedPaths.push(path);
+        if (path === walDbPath) {
+          return stat.size !== dbStatBefore.size || stat.mtimeMs !== dbStatBefore.mtimeMs;
+        }
+        if (path === walPath) {
+          return stat.size !== walStatBefore.size || stat.mtimeMs !== walStatBefore.mtimeMs;
+        }
+        return false;
+      },
+    });
+
+    expect(probedPaths).toEqual([walDbPath, walPath, shmPath]);
+    expect(second.sessions.map((session) => session.nativeSessionId).sort()).toEqual([
+      "ses_wal_first",
+      "ses_wal_second",
+    ]);
+  });
+
+  test("an unchanged db + -wal pair is detected as unchanged and skips the read", async () => {
+    const dbStat = statSync(walDbPath);
+    const walStat = statSync(walPath);
+
+    const probedPaths: string[] = [];
+    const result = await opencodeAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { opencode: walRoot },
+      shouldReadFile: (path, stat) => {
+        probedPaths.push(path);
+        if (path === walDbPath) return stat.size !== dbStat.size || stat.mtimeMs !== dbStat.mtimeMs;
+        if (path === walPath) return stat.size !== walStat.size || stat.mtimeMs !== walStat.mtimeMs;
+        return false;
+      },
+    });
+
+    expect(probedPaths).toEqual([walDbPath, walPath, shmPath]);
+    expect(result.sessions).toHaveLength(0);
   });
 });

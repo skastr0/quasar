@@ -913,12 +913,20 @@ async function* streamHermes(options: AdapterOptions): AsyncGenerator<AdapterStr
       logicalRoot !== undefined
         ? dbPath.replace(root, logicalRoot)
         : dbPath;
-    // Stat-level gate: skip unchanged DB files BEFORE copying and opening them.
-    // An unchanged state.db means no session in this profile has changed;
-    // skip the entire profile without opening the file.
+    // Stat-level gate: skip unchanged DB files (and their WAL/SHM
+    // companions) BEFORE copying and opening them. Under WAL journal mode,
+    // recent writes live in the -wal file until checkpoint, so the main
+    // state.db alone can look unchanged while new sessions are already
+    // durable there; stat every companion and let any one of them signal a
+    // change.
+    const dbSourceStats = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]
+      .filter(existsSync)
+      .map((path) => ({ path, stat: statSync(path) }));
     if (options.shouldReadFile !== undefined) {
-      const stat = statSync(dbPath);
-      if (!options.shouldReadFile(dbPath, stat)) continue;
+      const shouldRead = dbSourceStats
+        .map(({ path, stat }) => options.shouldReadFile?.(path, stat, dbPath) !== false)
+        .some(Boolean);
+      if (!shouldRead) continue;
     }
     let tempDb: ReturnType<typeof sqliteSnapshotForRead>;
     try {

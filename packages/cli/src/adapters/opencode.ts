@@ -1148,12 +1148,19 @@ async function* streamOpenCode(options: AdapterOptions): AsyncGenerator<AdapterS
     }
     return;
   }
-  // Stat-level gate: skip the DB entirely if the file has not changed since
-  // the last ingest. An unchanged DB means no session has changed; skip
-  // the copy and open without reading any content.
+  // Stat-level gate: skip the DB entirely if the file (and its WAL/SHM
+  // companions) have not changed since the last ingest. Under WAL journal
+  // mode, recent writes live in the -wal file until checkpoint, so the main
+  // db file alone can look unchanged while new sessions are already durable
+  // there; stat every companion and let any one of them signal a change.
+  const dbSourceStats = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]
+    .filter(existsSync)
+    .map((path) => ({ path, stat: statSync(path) }));
   if (options.shouldReadFile !== undefined) {
-    const stat = statSync(dbPath);
-    if (!options.shouldReadFile(dbPath, stat)) return;
+    const shouldRead = dbSourceStats
+      .map(({ path, stat }) => options.shouldReadFile?.(path, stat, dbPath) !== false)
+      .some(Boolean);
+    if (!shouldRead) return;
   }
   let tempDb: ReturnType<typeof sqliteSnapshotForRead>;
   try {

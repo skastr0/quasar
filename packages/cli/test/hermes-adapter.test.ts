@@ -1,8 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { Database } from "bun:sqlite";
 import { afterAll, describe, expect, test } from "bun:test";
 import { Schema } from "effect";
 import { projectQuasarTrajectory } from "@skastr0/quasar-protocol";
@@ -928,5 +929,111 @@ describe("Hermes corpus projection regressions", () => {
           .includes("hermes.session.no_transcript_events")
       ),
     ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WAL-aware incremental stat gate.
+//
+// The state.db file-level gate previously statted only the main db file.
+// Under WAL journal mode, a committed write can live entirely in the -wal
+// companion until an arbitrary later checkpoint, so a new session becomes
+// invisible to ingest while the main file's mtime/size are unchanged. The
+// gate must stat db + -wal + -shm and treat a change in ANY of them as a
+// change (mirrors the cursor/devin precedent).
+// ---------------------------------------------------------------------------
+describe("WAL-aware stat gate", () => {
+  const walRoot = join(testRoot, "wal-gate");
+  mkdirSync(walRoot, { recursive: true });
+  const walDbPath = join(walRoot, "state.db");
+  const walPath = `${walDbPath}-wal`;
+  const shmPath = `${walDbPath}-shm`;
+
+  const walDatabase = new Database(walDbPath);
+  walDatabase.exec(SESSION_SCHEMA);
+  // Disable auto-checkpoint so committed writes stay in the -wal file for the
+  // life of this open connection, exactly reproducing the bug's precondition.
+  walDatabase.exec("pragma journal_mode = WAL; pragma wal_autocheckpoint = 0;");
+
+  afterAll(() => {
+    walDatabase.close();
+  });
+
+  const WAL_FIRST_ID = "20990101_000000_fedcba98";
+  const WAL_SECOND_ID = "20990101_000000_fedcba99";
+
+  walDatabase.exec(insertSession(WAL_FIRST_ID, "WAL gate first session"));
+  walDatabase.exec(insertMessage("wal-first-msg", WAL_FIRST_ID));
+
+  test("a write landing only in the -wal companion is detected as changed", async () => {
+    const first = await hermesAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { hermes: walRoot },
+    });
+    expect(first.sessions.map((session) => session.nativeSessionId)).toEqual([WAL_FIRST_ID]);
+
+    const dbStatBefore = statSync(walDbPath);
+    const walStatBefore = statSync(walPath);
+
+    walDatabase.exec(insertSession(WAL_SECOND_ID, "WAL gate second session"));
+    walDatabase.exec(insertMessage("wal-second-msg", WAL_SECOND_ID));
+
+    const dbStatAfter = statSync(walDbPath);
+    const walStatAfter = statSync(walPath);
+    // Sanity on the precondition: the main db file is byte-for-byte
+    // unchanged while the -wal companion has grown — this is the exact
+    // situation the old db-only gate could not see.
+    expect({ size: dbStatAfter.size, mtimeMs: dbStatAfter.mtimeMs }).toEqual({
+      size: dbStatBefore.size,
+      mtimeMs: dbStatBefore.mtimeMs,
+    });
+    expect({ size: walStatAfter.size, mtimeMs: walStatAfter.mtimeMs }).not.toEqual({
+      size: walStatBefore.size,
+      mtimeMs: walStatBefore.mtimeMs,
+    });
+
+    const probedPaths: string[] = [];
+    const second = await hermesAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { hermes: walRoot },
+      shouldReadFile: (path, stat) => {
+        probedPaths.push(path);
+        if (path === walDbPath) {
+          return stat.size !== dbStatBefore.size || stat.mtimeMs !== dbStatBefore.mtimeMs;
+        }
+        if (path === walPath) {
+          return stat.size !== walStatBefore.size || stat.mtimeMs !== walStatBefore.mtimeMs;
+        }
+        return false;
+      },
+    });
+
+    expect(probedPaths).toEqual([walDbPath, walPath, shmPath]);
+    expect(second.sessions.map((session) => session.nativeSessionId).sort()).toEqual(
+      [WAL_FIRST_ID, WAL_SECOND_ID].sort(),
+    );
+  });
+
+  test("an unchanged db + -wal pair is detected as unchanged and skips the read", async () => {
+    const dbStat = statSync(walDbPath);
+    const walStat = statSync(walPath);
+
+    const probedPaths: string[] = [];
+    const result = await hermesAdapter.read({
+      machine: MACHINE,
+      now: NOW,
+      roots: { hermes: walRoot },
+      shouldReadFile: (path, stat) => {
+        probedPaths.push(path);
+        if (path === walDbPath) return stat.size !== dbStat.size || stat.mtimeMs !== dbStat.mtimeMs;
+        if (path === walPath) return stat.size !== walStat.size || stat.mtimeMs !== walStat.mtimeMs;
+        return false;
+      },
+    });
+
+    expect(probedPaths).toEqual([walDbPath, walPath, shmPath]);
+    expect(result.sessions).toHaveLength(0);
   });
 });
