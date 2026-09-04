@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -714,9 +714,15 @@ describe("work-item grok adapter end-to-end: signal kept, telemetry dropped, gar
         expect.objectContaining({ line: 3 }),
       ]);
 
-      // The unknown chat type surfaced a NAMED, fail-closed boundary diagnostic;
-      // ingest still produced the session (available diagnostic present too).
-      expect(result.diagnostics.some((d) => d.status === "error")).toBe(true);
+      // The unknown chat type surfaced a NAMED, fail-closed boundary diagnostic.
+      // It cost a RECORD, not the session, so it is a `warning` — and it names
+      // the chat file, so the ingest manifest can scope it to that one file.
+      const unknownDrop = result.diagnostics.find((d) => d.message.includes(GROK_UNKNOWN_TYPE));
+      expect(unknownDrop).toBeDefined();
+      expect(unknownDrop!.severity).toBe("warning");
+      expect((unknownDrop!.details as { readonly physicalPath?: string }).physicalPath)
+        .toBe(join(sessionDir, "chat_history.jsonl"));
+      expect(result.diagnostics.some((d) => d.status === "error")).toBe(false);
       expect(result.diagnostics.some((d) => d.status === "available")).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -1000,6 +1006,182 @@ describe("shouldReadFile stat-gate: unchanged chat_history.jsonl skipped without
       });
       expect(result.sessions).toHaveLength(1);
       expect(result.sessions[0]!.provider).toBe("grok");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Live ingest failure: unmodeled updates.jsonl sessionUpdate subtypes.
+//
+// `image_compressed`, `image_dropped`, and `workflow_updated` are emitted by the
+// running grok harness but were absent from UPDATE_TABLE, so every one of them
+// classified as `grok.record.unknown_type`. The adapter aggregates unknown-type
+// diagnostics into a `status: "error"` diagnostic ("Dropped N malformed/unknown
+// grok record(s)"), which ingest promotes to a whole-session failure — a session
+// with legitimate product turns was lost because of image and workflow telemetry.
+//
+// The fixtures are the provider-native records measured off the real corpus.
+// ---------------------------------------------------------------------------
+describe("grok unmodeled sessionUpdate subtypes: named drop, session survives", () => {
+  const hostileLines = (name: string): unknown[] =>
+    readFileSync(join(import.meta.dir, "fixtures", "hostile", name), "utf8")
+      .split("\n")
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line) as unknown);
+
+  const CLASS_3 = [
+    ["grok-update-image-compressed.jsonl", "grok.drop.image_compression_telemetry"],
+    ["grok-update-image-dropped.jsonl", "grok.drop.image_dropped_telemetry"],
+    ["grok-update-workflow-updated.jsonl", "grok.drop.workflow_progress_telemetry"],
+  ] as const;
+
+  test("each unmodeled subtype decodes and drops with its NAMED reason, pushing no diagnostic", () => {
+    for (const [fixture, expectedReason] of CLASS_3) {
+      const records = hostileLines(fixture);
+      expect(records.length).toBeGreaterThan(0);
+      for (const record of records) {
+        const diagnostics: DecodeDiagnostic[] = [];
+        const decision = classifyGrokUpdate(record, diagnostics);
+        // A named drop, never an unknown-type or decode failure.
+        expect(isSignal(decision)).toBe(false);
+        expect((decision as { readonly reason: string }).reason).toBe(expectedReason);
+        // A modeled drop is not a failure: nothing reaches the diagnostics sink,
+        // so nothing can be promoted to a session-killing error diagnostic.
+        expect(diagnostics).toEqual([]);
+      }
+    }
+  });
+
+  test("a session whose updates.jsonl is entirely these subtypes still ingests, with ZERO error diagnostics", async () => {
+    const SESSION_UUID = "01900000-0000-7000-8000-000000000061";
+    const PROJECT_KEY = encodeURIComponent("/synthetic/grok-unmodeled-updates");
+    const root = mkdtempSync(join(tmpdir(), "quasar-grok-unmodeled-"));
+    try {
+      const sessionDir = join(root, "sessions", PROJECT_KEY, SESSION_UUID);
+      mkdirSync(sessionDir, { recursive: true });
+      writeJsonLines(join(sessionDir, "chat_history.jsonl"), [
+        { type: "user", content: "synthetic user prompt" },
+        { type: "assistant", content: "synthetic assistant reply" },
+      ]);
+      writeJsonLines(join(sessionDir, "updates.jsonl"), [
+        ...CLASS_3.flatMap(([fixture]) => hostileLines(fixture)),
+        // One real signal record proves the sidecar is still being projected.
+        {
+          method: "session/update",
+          params: {
+            sessionId: SESSION_UUID,
+            update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "synthetic chunk" } },
+          },
+        },
+      ]);
+
+      const result = await grokAdapter.read({ machine: MACHINE, now: NOW, roots: { grok: root } });
+      expect(result.sessions).toHaveLength(1);
+      const session = result.sessions[0]!;
+
+      // The storm diagnostic is gone: no error diagnostic, so ingest cannot
+      // promote this session to a failure.
+      expect(result.diagnostics.filter((d) => d.status === "error")).toEqual([]);
+      expect(
+        result.diagnostics.some((d) => d.message.includes("malformed/unknown grok record")),
+      ).toBe(false);
+      expect(result.diagnostics.some((d) => d.status === "available")).toBe(true);
+
+      // Telemetry contributed no events; the product turns and the signal
+      // update survived, and nothing fell through as `unknown`.
+      expect(session.events.some((e) => e.kind === "unknown")).toBe(false);
+      expect(
+        session.events.some((e) => JSON.stringify(e.rawReference ?? {}).includes("updates.jsonl")),
+      ).toBe(true);
+      const updateEventCount = session.events.filter((e) =>
+        JSON.stringify(e.rawReference ?? {}).includes("updates.jsonl"),
+      ).length;
+      expect(updateEventCount).toBe(1);
+
+      // `workflow_updated` carries a `name` + `status`, which grokToolName would
+      // read as a tool. The named drop happens first, so no phantom tool call
+      // and no workflow-derived content leak into the session.
+      expect(session.toolCalls).toHaveLength(0);
+      expect(JSON.stringify(session.events)).not.toContain("synthetic workflow");
+
+      // The whole session still maps through NormalizedSessionV1.
+      const mapped = mapSession(session, "fp-grok-unmodeled-updates");
+      expect(mapped.messages.length).toBeGreaterThan(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A record grok has not been taught yet is a RECORD-level drop. Modelling three
+// known subtypes (above) does not cover the next one the harness ships, so the
+// classification itself has to be right: the session was already produced, so
+// the diagnostic is a `warning` attributed to the chat file it came from — not
+// an unattributable `error` that voids the whole grok walk's manifest.
+// ---------------------------------------------------------------------------
+describe("grok record-level drops are attributable warnings, never whole-walk errors", () => {
+  test("an unmodeled chat record names its file and leaves the session ingesting", async () => {
+    const SESSION_UUID = "01900000-0000-7000-8000-000000000062";
+    const root = mkdtempSync(join(tmpdir(), "quasar-grok-unmodeled-record-"));
+    try {
+      const sessionDir = join(root, "sessions", encodeURIComponent("/synthetic/grok-drop"), SESSION_UUID);
+      mkdirSync(sessionDir, { recursive: true });
+      const chatPath = join(sessionDir, "chat_history.jsonl");
+      writeJsonLines(chatPath, [
+        { type: "user", content: "synthetic user prompt" },
+        { type: "a_record_type_grok_has_not_shipped_yet" },
+      ]);
+
+      const result = await grokAdapter.read({ machine: MACHINE, now: NOW, roots: { grok: root } });
+      expect(result.sessions).toHaveLength(1);
+
+      // Nothing at `error` severity: the session ingests, so the drop cannot be
+      // promoted to a session failure.
+      const errors = result.diagnostics.filter(
+        (d) => (d.severity ?? (d.status === "error" ? "error" : "info")) === "error",
+      );
+      expect(errors).toEqual([]);
+
+      // The drop is named, and it names the physical file it came from — which
+      // is what lets the ingest manifest poison exactly that file and no more.
+      const drop = result.diagnostics.find((d) => d.message.includes(GROK_UNKNOWN_TYPE));
+      expect(drop).toBeDefined();
+      expect(drop!.severity).toBe("warning");
+      expect((drop!.details as { readonly physicalPath?: string }).physicalPath).toBe(chatPath);
+      expect((drop!.details as { readonly diagnostic?: string }).diagnostic).toBe(GROK_UNKNOWN_TYPE);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a corrupt subagent manifest is a warning, so a file that cannot repair itself cannot fail every tick", async () => {
+    const root = mkdtempSync(join(tmpdir(), "quasar-grok-bad-manifest-json-"));
+    try {
+      const sessionsRoot = join(root, "sessions", encodeURIComponent("/synthetic/grok-lineage"));
+      const parentDir = join(sessionsRoot, "01900000-0000-7000-8000-000000000063");
+      mkdirSync(join(parentDir, "subagents", "01900000-0000-7000-8000-000000000064"), { recursive: true });
+      writeJsonLines(join(parentDir, "chat_history.jsonl"), [
+        { type: "user", content: "synthetic parent prompt" },
+      ]);
+      writeFileSync(
+        join(parentDir, "subagents", "01900000-0000-7000-8000-000000000064", "meta.json"),
+        "{ not json at all",
+        "utf8",
+      );
+
+      const result = await grokAdapter.read({ machine: MACHINE, now: NOW, roots: { grok: root } });
+      expect(result.sessions).toHaveLength(1);
+      const lineageDrop = result.diagnostics.find((d) => d.message.includes("subagent manifest dropped"));
+      expect(lineageDrop).toBeDefined();
+      expect(lineageDrop!.severity).toBe("warning");
+      expect(
+        result.diagnostics.filter(
+          (d) => (d.severity ?? (d.status === "error" ? "error" : "info")) === "error",
+        ),
+      ).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

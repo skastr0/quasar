@@ -710,7 +710,7 @@ async function* streamDevin(options: AdapterDiscoverOptions): AsyncGenerator<Ada
   ].flatMap((path) => existsSync(path) ? [{ path, stat: statSync(path) }] : []);
   if (options.shouldReadFile !== undefined) {
     const shouldRead = sourceStats
-      .map(({ path, stat }) => options.shouldReadFile?.(path, stat) !== false)
+      .map(({ path, stat }) => options.shouldReadFile?.(path, stat, physicalDbPath) !== false)
       .some(Boolean);
     if (!shouldRead) return;
   }

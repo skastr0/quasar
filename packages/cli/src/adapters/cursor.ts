@@ -904,7 +904,7 @@ const parseCandidate = async (
   const files = fingerprintFiles(candidate);
   if (options.shouldReadFile !== undefined) {
     const changed = files
-      .map(({ path, stats }) => options.shouldReadFile?.(path, stats) !== false)
+      .map(({ path, stats }) => options.shouldReadFile?.(path, stats, candidate.dbPath) !== false)
       .includes(true);
     if (!changed) return { diagnostics: [] };
   }

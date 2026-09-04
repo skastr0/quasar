@@ -32,13 +32,14 @@ import type { SessionEventKind } from "../core/schemas";
  *                            mcp_oauth_discovery_timeout, mcp_health_check,
  *                            goal_classifier_fail_open, mcp_transport_decode_error,
  *                            interjected)
- *   updates.jsonl      : 19 sessionUpdate subtypes (tool_call, tool_call_update,
+ *   updates.jsonl      : 22 sessionUpdate subtypes (tool_call, tool_call_update,
  *                            available_commands_update, agent_thought_chunk,
  *                            agent_message_chunk, user_message_chunk, retry_state,
  *                            task_backgrounded, task_completed, subagent_spawned,
  *                            subagent_finished, auto_compact_started/_completed,
  *                            compaction_checkpoint, plan, current_mode_update,
- *                            turn_completed, session_recap, hook_execution)
+ *                            turn_completed, session_recap, hook_execution,
+ *                            image_compressed, image_dropped, workflow_updated)
  *   hunk_records.jsonl : 3  (added, updated, removed)
  *   summary.json       : 1
  *   subagents/.../meta.json : 1 (lineage manifest)
@@ -361,7 +362,7 @@ export const GrokEvtMcpOauthDiscoveryTimeout = Schema.Struct({
 export type GrokEvtMcpOauthDiscoveryTimeout = typeof GrokEvtMcpOauthDiscoveryTimeout.Type;
 
 // ===========================================================================
-// 4. updates.jsonl — ACP session/update stream (8 sessionUpdate subtypes)
+// 4. updates.jsonl — ACP session/update stream (22 sessionUpdate subtypes)
 // ===========================================================================
 
 /** Envelope: `{method, params:{sessionId, update:{sessionUpdate, ...}}}`. */
@@ -522,6 +523,93 @@ export const GrokUpdSubagentSpawned = updateEnvelope("subagent_spawned", {
   model: Schema.optional(Schema.String),
   effective_context_source: Schema.optional(Schema.Unknown),
 });
+/**
+ * `{sessionUpdate:"image_compressed"}` — per-image compression telemetry: byte
+ * counts and pixel dimensions before/after, plus the harness's notice string.
+ * Measured over the full local corpus (73 records): `images[]` and `message`
+ * are present on every record and every `images[]` entry carries all seven
+ * numeric fields. Image machinery, never conversation — a NAMED drop.
+ */
+export const GrokUpdImageCompressed = updateEnvelope("image_compressed", {
+  images: Schema.Array(
+    Schema.Struct({
+      index: Schema.Number,
+      original_bytes: Schema.Number,
+      original_height: Schema.Number,
+      original_width: Schema.Number,
+      compressed_bytes: Schema.Number,
+      compressed_height: Schema.Number,
+      compressed_width: Schema.Number,
+    }),
+  ),
+  message: Schema.String,
+});
+
+/**
+ * `{sessionUpdate:"image_dropped"}` — notes naming images the harness discarded
+ * before the model call. Measured (1 record): `notes[]` of strings. Image
+ * machinery, never conversation — a NAMED drop.
+ */
+export const GrokUpdImageDropped = updateEnvelope("image_dropped", {
+  notes: Schema.Array(Schema.String),
+});
+
+/**
+ * `{sessionUpdate:"workflow_updated"}` — a FULL workflow-run state snapshot,
+ * re-emitted on every revision of the same `run_id`. It is the updates.jsonl
+ * analogue of `phase_changed` on events.jsonl: repeated progress state, not a
+ * discrete conversation event (contrast `subagent_spawned`/`subagent_finished`,
+ * which are one-shot lifecycle facts and are kept). Dropped with a NAMED reason.
+ *
+ * Measured over the full local corpus (63 records): `run_id`, `revision`,
+ * `name`, `objective`, `status`, `last_event`, `last_event_timestamp`,
+ * `phases[]` are present on every record, and every `phases[]` entry carries
+ * `title` + `state`. Everything else varies (`current_phase` 57/63,
+ * `last_event_detail` 51/63, `agents[]` 51/63, `result_summary` 5/63,
+ * `pause_message` 2/63) and is modeled optional. Enum-valued fields
+ * (`status`, `last_event`, `phases[].state`, `agents[].state`) stay `String`:
+ * a new member is provider evolution, not a contract breach.
+ */
+export const GrokUpdWorkflowUpdated = updateEnvelope("workflow_updated", {
+  run_id: Schema.String,
+  revision: Schema.Number,
+  name: Schema.String,
+  objective: Schema.String,
+  status: Schema.String,
+  last_event: Schema.String,
+  last_event_timestamp: Schema.String,
+  phases: Schema.Array(
+    Schema.Struct({
+      title: Schema.String,
+      state: Schema.String,
+    }),
+  ),
+  current_phase: Schema.optional(Schema.String),
+  last_event_detail: Schema.optional(Schema.String),
+  agents: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        agent_id: Schema.String,
+        label: Schema.String,
+        phase: Schema.String,
+        state: Schema.String,
+        duration_ms: Schema.Number,
+        tokens_used: Schema.Number,
+      }),
+    ),
+  ),
+  result_summary: Schema.optional(Schema.String),
+  pause_message: Schema.optional(Schema.String),
+  active_agents: Schema.optional(Schema.Number),
+  agent_budget: Schema.optional(Schema.Number),
+  agent_usage_incomplete: Schema.optional(Schema.Boolean),
+  agents_remaining: Schema.optional(Schema.Number),
+  agents_reserved: Schema.optional(Schema.Number),
+  agents_used: Schema.optional(Schema.Number),
+  elapsed_ms: Schema.optional(Schema.Number),
+  foreground: Schema.optional(Schema.Boolean),
+});
+
 export const GrokUpdSubagentFinished = updateEnvelope("subagent_finished", {
   subagent_id: Schema.optional(Schema.String),
   child_session_id: Schema.optional(Schema.String),
@@ -715,6 +803,12 @@ const UPDATE_TABLE: Record<string, ChatEntry> = {
   // Drop: command palette + mode toggle are editor UI state, not conversation.
   available_commands_update: { schema: GrokUpdAvailableCommands, dropReason: "command_palette_ui" },
   current_mode_update: { schema: GrokUpdCurrentMode, dropReason: "ui_mode_toggle" },
+  // Drop: image machinery (compression ratios, discard notes) is never product text.
+  image_compressed: { schema: GrokUpdImageCompressed, dropReason: "image_compression_telemetry" },
+  image_dropped: { schema: GrokUpdImageDropped, dropReason: "image_dropped_telemetry" },
+  // Drop: a re-emitted workflow state snapshot is progress telemetry, the
+  // updates.jsonl analogue of the dropped `phase_changed` event.
+  workflow_updated: { schema: GrokUpdWorkflowUpdated, dropReason: "workflow_progress_telemetry" },
 };
 
 /** hunk_records.jsonl declarative dispatch keyed by `eventType`. */

@@ -36,8 +36,15 @@ export interface AdapterDiscoverOptions {
    * false to skip the file entirely — no content read, no fingerprint probe.
    * Used by the ingest manifest to suppress reads for files whose mtime+size
    * match the last successful ingest record.
+   *
+   * `owner` names the physical file the sessions read from `path` will be
+   * attributed to — the db file for a SQLite adapter that also stats its
+   * `-wal`/`-shm`/sidecar companions. It defaults to `path` (one file, one
+   * owner). Sessions are poisoned by owner, so a companion staged without one
+   * would outlive the failure of the session it belongs to and suppress the
+   * re-read that session needs.
    */
-  readonly shouldReadFile?: (path: string, stat: import("node:fs").Stats) => boolean;
+  readonly shouldReadFile?: (path: string, stat: import("node:fs").Stats, owner?: string) => boolean;
 }
 
 export interface AdapterReadResult {

@@ -12,6 +12,10 @@ export const summarizeIngestReports = (reports: readonly IngestReport[]) => ({
     jobsEnqueued: report.jobsEnqueued,
     searchDocuments: report.searchDocuments,
     failures: report.failures,
+    // Non-error diagnostics are the point: a record drop that never reaches the
+    // report is a silent drop, and silence is a bug.
+    diagnostics: report.diagnostics,
+    diagnosticCounts: report.diagnosticCounts,
     durationMs: report.durationMs,
   })),
 });

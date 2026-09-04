@@ -11,6 +11,7 @@ import type {
   ToolCall,
   UsageRecord,
 } from "../core/schemas";
+import { truncateDiagnosticMessage } from "../core/schemas";
 import {
   buildSession,
   collectFiles,
@@ -843,16 +844,35 @@ async function* streamClaude(options: AdapterOptions) {
     // Surface every NAMED decode diagnostic from a malformed/unmodeled record
     // in this file. Each is attributable (diagnostic name + parse failure) so a
     // provider contract breach is visible at the boundary, never silent.
+    //
+    // Every entry in `diagnostics` is RECORD-level by construction: it comes
+    // from a per-line JSON parse (`claude.line.invalid_json`), an empty file, or
+    // one `classifyClaudeRecord` verdict. The record is dropped; the SESSION was
+    // already yielded above and ingests normally, so the severity is `warning`,
+    // not `error`. A session-level claude failure cannot reach here — it
+    // surfaces in the ingest engine as a map/write failure against this session.
+    //
+    // Hardcoding `status: "error"` here is what failed all ~1250 claude sessions
+    // on every tick: the ingest engine promoted each record drop to a session
+    // failure, and the failed-session count then blocked manifest persistence
+    // for the whole provider walk.
     for (const diagnostic of diagnostics) {
       yield {
         type: "diagnostic" as const,
         diagnostic: {
           adapterId: claudeAdapter.id,
           provider: "claude" as const,
-          status: "error" as const,
+          status: "unsupported" as const,
+          severity: "warning" as const,
           parserConfidence: "observed" as const,
           rootPath: logicalProjectsRoot,
-          message: `${diagnostic.name} for ${sourcePath}: ${diagnostic.message}`,
+          // Presentation cap only: a TreeFormatter parse failure renders the
+          // offending record inline, so an uncapped message ships a serialized
+          // session into every report and log line.
+          message: truncateDiagnosticMessage(
+            `${diagnostic.name} for ${sourcePath}: ${diagnostic.message}`,
+          ),
+          details: { diagnostic: diagnostic.name, sourcePath, physicalPath: path },
         },
       };
     }

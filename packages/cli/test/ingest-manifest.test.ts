@@ -170,6 +170,63 @@ const sharedDbAdapterFor = (
   },
 });
 
+/**
+ * Shared-DB adapter that stats a companion GROUP (db + -wal + -shm), the shape
+ * every SQLite-backed adapter uses. Sessions are attributed to the db file
+ * alone, so the companions only ever reach the manifest through the owner.
+ */
+const companionDbAdapterFor = (
+  sessions: readonly NormalizedSession[],
+  dbPath: string,
+  opened: string[],
+): SessionAdapter => ({
+  id: "manifest-companion-db-fixture",
+  provider: "claude",
+  displayName: "Manifest Companion DB Fixture Adapter",
+  stable: true,
+  defaultRoot: () => undefined,
+  read: async () => ({ sourceRoots: [], sessions: [...sessions], diagnostics: [] }),
+  stream: async function* (opts: AdapterDiscoverOptions) {
+    const companions = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`].flatMap((path) => {
+      try {
+        return [{ path, stat: statSync(path) }];
+      } catch {
+        return [];
+      }
+    });
+    if (opts.shouldReadFile !== undefined) {
+      const shouldRead = companions
+        .map(({ path, stat }) => opts.shouldReadFile?.(path, stat, dbPath) !== false)
+        .some(Boolean);
+      if (!shouldRead) return;
+    }
+    opened.push(dbPath);
+    for (const s of sessions) {
+      const fingerprint = { tag: `session:${s.id}:${s.updatedAt}` };
+      if (
+        (await opts.shouldParseSession?.({
+          sessionId: s.id,
+          sourceFingerprint: JSON.stringify(fingerprint),
+        })) === false
+      ) {
+        continue;
+      }
+      yield {
+        type: "session" as const,
+        session: s,
+        sourceUnit: {
+          provider: "claude" as const,
+          adapterId: "manifest-companion-db-fixture",
+          rootPath: "/history",
+          sourcePath: dbPath,
+          physicalPath: dbPath,
+        },
+        fingerprint,
+      };
+    }
+  },
+});
+
 /** Minimal HTTP server that reports configured fingerprint state and accepts writes. */
 const startServer = (
   token: string,
@@ -178,6 +235,8 @@ const startServer = (
     readonly requests?: { probes: number; writes: number };
     readonly writeStatus?: number;
     readonly writeStatusAt?: (writeNumber: number) => number | undefined;
+    /** Runs inside the /ingest/session handler — simulates a live writer. */
+    readonly onWrite?: () => void;
   } = {},
 ) => {
   let writes = 0;
@@ -199,6 +258,7 @@ const startServer = (
       if (pathname === "/ingest/session") {
         writes += 1;
         if (options.requests !== undefined) options.requests.writes += 1;
+        options.onWrite?.();
         const writeStatus = options.writeStatusAt?.(writes) ?? options.writeStatus;
         if (writeStatus !== undefined) {
           return Response.json(
@@ -524,6 +584,108 @@ describe("ingest manifest", () => {
       expect(second[0]?.sessionsFailed).toBe(0);
       expect(requests).toEqual({ probes: 4, writes: 4 });
       expect(loadManifest(manifestFilePath)[physicalPath]?.normalizationVersion).toBe(NORMALIZATION_VERSION);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a failed session poisons its WAL companion, so the next tick still re-reads the DB", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "quasar-manifest-test-"));
+    const manifestFilePath = join(dir, "ingest-manifest.json");
+    const dbPath = join(dir, "companion.db");
+    const walPath = `${dbPath}-wal`;
+    writeFileSync(dbPath, "sqlite", "utf8");
+    writeFileSync(walPath, "wal", "utf8");
+
+    const sessions = [session("manifest-companion-a", dbPath)];
+    let failWrites = false;
+    const server = startServer("tok", { writeStatusAt: () => (failWrites ? 400 : undefined) });
+
+    try {
+      // Run 1 — healthy. Both the db and its WAL companion enter the manifest.
+      adaptersByProvider.set("claude", companionDbAdapterFor(sessions, dbPath, []));
+      const first = await ingestRemote(
+        { provider: "claude", ingestToken: "tok", manifestPath: manifestFilePath },
+        `http://127.0.0.1:${server.port}`,
+      );
+      expect(first[0]?.sessionsWritten).toBe(1);
+      expect(loadManifest(manifestFilePath)[dbPath]).toBeDefined();
+      expect(loadManifest(manifestFilePath)[walPath]).toBeDefined();
+
+      // A WAL-only write: the db file itself is untouched, exactly as SQLite
+      // leaves it between checkpoints.
+      writeFileSync(walPath, "wal-with-new-session-bytes", "utf8");
+      const walStatAfterWrite = statSync(walPath);
+
+      // Run 2 — the server rejects the write. The db is poisoned, and the WAL
+      // companion it owns must be poisoned with it.
+      failWrites = true;
+      const openedSecond: string[] = [];
+      adaptersByProvider.set("claude", companionDbAdapterFor(sessions, dbPath, openedSecond));
+      const second = await ingestRemote(
+        { provider: "claude", ingestToken: "tok", manifestPath: manifestFilePath },
+        `http://127.0.0.1:${server.port}`,
+      );
+      expect(openedSecond).toEqual([dbPath]);
+      expect(second[0]?.sessionsFailed).toBe(1);
+      expect(loadManifest(manifestFilePath)[walPath]?.size).not.toBe(walStatAfterWrite.size);
+
+      // Run 3 — server healthy, nothing changed on disk. The failed session
+      // must be retried.
+      failWrites = false;
+      const openedThird: string[] = [];
+      adaptersByProvider.set("claude", companionDbAdapterFor(sessions, dbPath, openedThird));
+      const third = await ingestRemote(
+        { provider: "claude", ingestToken: "tok", manifestPath: manifestFilePath },
+        `http://127.0.0.1:${server.port}`,
+      );
+      expect(openedThird).toEqual([dbPath]);
+      expect(third[0]?.sessionsWritten).toBe(1);
+      expect(third[0]?.sessionsFailed).toBe(0);
+      expect(loadManifest(manifestFilePath)[walPath]?.size).toBe(walStatAfterWrite.size);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("turns appended during the server round-trip are not recorded as ingested", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "quasar-manifest-test-"));
+    const manifestFilePath = join(dir, "ingest-manifest.json");
+    const physicalPath = join(dir, "live-session.jsonl");
+    writeFileSync(physicalPath, '{"id":"live-session"}\n', "utf8");
+    const sizeAtRead = statSync(physicalPath).size;
+
+    const s = session("manifest-live-append", physicalPath);
+    let appended = false;
+    const server = startServer("tok", {
+      onWrite: () => {
+        if (appended) return;
+        appended = true;
+        // A live agent appends a turn AFTER the adapter read the file and
+        // BEFORE the ingest engine records the file's stat.
+        writeFileSync(physicalPath, '{"id":"live-session"}\n{"turn":"the last turn"}\n', "utf8");
+      },
+    });
+
+    try {
+      const opened1: string[] = [];
+      adaptersByProvider.set("claude", adapterFor([{ session: s, physicalPath }], opened1));
+      const first = await ingestRemote(
+        { provider: "claude", ingestToken: "tok", manifestPath: manifestFilePath },
+        `http://127.0.0.1:${server.port}`,
+      );
+      expect(first[0]?.sessionsWritten).toBe(1);
+      // The manifest must claim only what was actually ingested.
+      expect(loadManifest(manifestFilePath)[physicalPath]?.size).toBe(sizeAtRead);
+
+      // The appended turn is still on disk, so the next tick must re-read it.
+      const opened2: string[] = [];
+      adaptersByProvider.set("claude", adapterFor([{ session: s, physicalPath }], opened2));
+      await ingestRemote(
+        { provider: "claude", ingestToken: "tok", manifestPath: manifestFilePath },
+        `http://127.0.0.1:${server.port}`,
+      );
+      expect(opened2).toEqual([physicalPath]);
     } finally {
       server.stop(true);
     }

@@ -21,6 +21,12 @@ const report = (sessionsFailed: number): IngestReport => ({
   failures: sessionsFailed === 0
     ? []
     : [{ sessionId: "session-a", diagnostic: "remote_write_failed", error: "socket closed" }],
+  diagnostics: sessionsFailed === 0
+    ? [{ name: "codex.record.dropped", severity: "warning", count: 7, sample: "codex.record.dropped for a.jsonl" }]
+    : [{ name: "remote_write_failed", severity: "error", count: 1, sample: "socket closed" }],
+  diagnosticCounts: sessionsFailed === 0
+    ? { info: 0, warning: 7, error: 0 }
+    : { info: 0, warning: 0, error: 1 },
   durationMs: 10,
 });
 
@@ -39,5 +45,24 @@ describe("ingest report helpers", () => {
     expect(ingestReportPayload([report(0)], true)).toMatchObject({
       reports: [{ provider: "codex", sessionsFailed: 0 }],
     });
+  });
+
+  test("surfaces non-error diagnostics in the summary payload of a green run", () => {
+    const summary = ingestReportPayload([report(0)], true) as {
+      readonly reports: readonly {
+        readonly diagnostics: readonly {
+          readonly name: string;
+          readonly severity: string;
+          readonly count: number;
+          readonly sample: string;
+        }[];
+        readonly diagnosticCounts: Readonly<Record<string, number>>;
+      }[];
+    };
+
+    expect(summary.reports[0]?.diagnostics).toEqual([
+      { name: "codex.record.dropped", severity: "warning", count: 7, sample: "codex.record.dropped for a.jsonl" },
+    ]);
+    expect(summary.reports[0]?.diagnosticCounts).toEqual({ info: 0, warning: 7, error: 0 });
   });
 });

@@ -1,0 +1,1 @@
+{"timestamp":1780272000002,"method":"session/update","params":{"sessionId":"01900000-0000-7000-8000-000000000061","update":{"sessionUpdate":"image_dropped","notes":["synthetic image dropped note"]},"_meta":{"agentTimestampMs":1780272000002,"eventId":"synthetic-event-000000000000000000004"}}}

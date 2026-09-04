@@ -35,7 +35,7 @@ import {
   type NativeValue,
   usageIdFor,
 } from "./common";
-import type { SessionEventKind, SessionRole } from "../core/schemas";
+import { truncateDiagnosticMessage, type SessionEventKind, type SessionRole } from "../core/schemas";
 import {
   classifyGrokChat,
   classifyGrokEvent,
@@ -1023,10 +1023,17 @@ async function* streamGrok(options: AdapterOptions): AsyncGenerator<AdapterStrea
       diagnostic: {
         adapterId: grokAdapter.id,
         provider: "grok",
-        status: "error",
+        status: "unsupported",
+        // A corrupt subagent manifest costs one lineage EDGE, never a session:
+        // both the parent and the child still ingest (fail-closed, no edge).
+        // Grading it `error` failed every grok session on every tick forever,
+        // because a file on disk does not repair itself.
+        severity: "warning",
         parserConfidence: "observed",
-        message: `Grok subagent manifest dropped (${diagnostic.name}).`,
-        details: { error: diagnostic.message },
+        message: truncateDiagnosticMessage(
+          `Grok subagent manifest dropped (${diagnostic.name}): ${diagnostic.message}`,
+        ),
+        details: { diagnostic: diagnostic.name, error: diagnostic.message },
         rootPath: sessionsRoot,
       },
     };
@@ -1082,17 +1089,33 @@ async function* streamGrok(options: AdapterOptions): AsyncGenerator<AdapterStrea
         d.name === GROK_UNKNOWN_TYPE ||
         (d.name.startsWith("grok.") && !d.name.startsWith("grok.drop.")),
     );
-    if (hardFailures.length > 0) {
+    // Severity, not status: the SESSION was already yielded above and ingests
+    // normally, so a dropped record is a `warning`. Grading it `error` failed
+    // the session AND — with no path on the diagnostic — left the whole grok
+    // walk unattributable, so nothing persisted and every grok session was
+    // re-parsed and re-posted on every tick, forever.
+    for (const failure of hardFailures) {
       yield {
         type: "diagnostic",
         diagnostic: {
           adapterId: grokAdapter.id,
           provider: "grok",
-          status: "error",
+          status: "unsupported",
+          severity: "warning",
           parserConfidence: "observed",
           rootPath: sessionsRoot,
-          message: `Dropped ${hardFailures.length} malformed/unknown grok record(s) in ${basename(sessionDir)} (fail-closed; ingest continued).`,
-          details: { sessionDir, diagnostics: hardFailures },
+          // Presentation cap only: a decode failure renders the offending
+          // record inline, so an uncapped message ships a serialized session
+          // into every report and log line.
+          message: truncateDiagnosticMessage(
+            `${failure.name} in ${basename(sessionDir)} (fail-closed; ingest continued): ${failure.message}`,
+          ),
+          details: {
+            diagnostic: failure.name,
+            sessionDir,
+            sourcePath: session.sourcePath,
+            physicalPath: chatPath,
+          },
         },
       };
     }

@@ -3,7 +3,8 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 import { loadMachineIdentity } from "./core/machine";
-import type { AdapterDiagnostic, Provider } from "./core/schemas";
+import type { AdapterDiagnostic, DiagnosticSeverity, Provider } from "./core/schemas";
+import { diagnosticSeverity, truncateDiagnosticMessage } from "./core/schemas";
 
 import { sourceFingerprintFor } from "./adapters/common";
 import { adaptersByProvider, stableAdapters } from "./adapters/registry";
@@ -135,6 +136,23 @@ export interface SessionIngestOutcome {
   };
 }
 
+/**
+ * One named adapter diagnostic, aggregated over the walk.
+ *
+ * Aggregated rather than listed per occurrence on purpose: a single claude walk
+ * drops thousands of unmodeled attachment records, and one report row each would
+ * rebuild the log bomb by count instead of by size. One row per
+ * (name, severity) with a count and a single capped sample keeps the report
+ * bounded by the number of DISTINCT diagnostics, which is a handful.
+ */
+export interface IngestDiagnosticSummary {
+  readonly name: string;
+  readonly severity: DiagnosticSeverity;
+  readonly count: number;
+  /** First occurrence's message, capped at DIAGNOSTIC_MESSAGE_MAX_BYTES. */
+  readonly sample: string;
+}
+
 export interface IngestReport {
   readonly provider: string;
   readonly sessionsSeen: number;
@@ -147,6 +165,9 @@ export interface IngestReport {
   readonly searchDocuments: SearchDocumentPolicyStats;
   readonly outcomes: readonly SessionIngestOutcome[];
   readonly failures: readonly { readonly sessionId: string; readonly diagnostic: string; readonly error: string }[];
+  /** Every diagnostic the walk produced, at EVERY severity. Silence is a bug. */
+  readonly diagnostics: readonly IngestDiagnosticSummary[];
+  readonly diagnosticCounts: Readonly<Record<DiagnosticSeverity, number>>;
   readonly durationMs: number;
 }
 
@@ -176,6 +197,23 @@ const diagnosticCode = (diagnostic: AdapterDiagnostic): string => {
     if (typeof code === "string" && code.length > 0) return code;
   }
   return "adapter_diagnostic";
+};
+/**
+ * The PHYSICAL file a diagnostic is about, when the adapter said so. This is the
+ * manifest's key, so it is what decides whether a failure may block one file's
+ * manifest entry or must block the whole provider walk. `undefined` means the
+ * adapter did not attribute the diagnostic to a file and nothing may be
+ * persisted on its behalf.
+ */
+const diagnosticPhysicalPath = (diagnostic: AdapterDiagnostic): string | undefined => {
+  const details = diagnostic.details;
+  if (details !== null && typeof details === "object") {
+    const physicalPath = (details as { readonly physicalPath?: unknown }).physicalPath;
+    if (typeof physicalPath === "string" && physicalPath.length > 0) return physicalPath;
+    const sourcePath = (details as { readonly sourcePath?: unknown }).sourcePath;
+    if (typeof sourcePath === "string" && sourcePath.length > 0) return sourcePath;
+  }
+  return undefined;
 };
 const remoteWriteAttempts = 3;
 const remoteWriteRetryDelayMs = 250;
@@ -364,6 +402,13 @@ const ingestProviderRemote = async (
         searchDocuments: { total: 0, semanticEligible: 0, ignored: 0 },
         outcomes: [],
         failures: [{ sessionId: provider, diagnostic: "provider_stream_unavailable", error: `Provider ${provider} does not expose a stream` }],
+        diagnostics: [{
+          name: "provider_stream_unavailable",
+          severity: "error",
+          count: 1,
+          sample: `Provider ${provider} does not expose a stream`,
+        }],
+        diagnosticCounts: { info: 0, warning: 0, error: 1 },
         durationMs: Date.now() - startedAt,
       },
       manifestUpdates: {},
@@ -374,6 +419,34 @@ const ingestProviderRemote = async (
   let sessionsWritten = 0;
   let sessionsSkipped = 0;
   const failedSessionTargets = new Set<string>();
+  /**
+   * Physical files whose manifest entry must NOT persist because a session
+   * sourced from them failed. Per-file rather than per-session because the
+   * manifest's stat gate is per-file: a shared-DB adapter yields many sessions
+   * from one file, and persisting that file's stat while one of its sessions
+   * failed would suppress the re-read that session needs.
+   */
+  const poisonedPaths = new Set<string>();
+  /**
+   * An error diagnostic the adapter did not attribute to a physical file (a
+   * whole-root failure, say). Nothing about the walk can be trusted as complete,
+   * so no manifest entry persists — the pre-severity behaviour, now reached only
+   * by genuinely unattributable failures.
+   */
+  let unattributableFailure = false;
+  const diagnosticTally = new Map<string, IngestDiagnosticSummary>();
+  const diagnosticCounts: Record<DiagnosticSeverity, number> = { info: 0, warning: 0, error: 0 };
+  const tallyDiagnostic = (name: string, severity: DiagnosticSeverity, sample: string): void => {
+    diagnosticCounts[severity] += 1;
+    const key = `${severity}\x00${name}`;
+    const existing = diagnosticTally.get(key);
+    diagnosticTally.set(
+      key,
+      existing === undefined
+        ? { name, severity, count: 1, sample }
+        : { ...existing, count: existing.count + 1 },
+    );
+  };
   let messagesWritten = 0;
   let toolCallsWritten = 0;
   let jobsEnqueued = 0;
@@ -384,6 +457,15 @@ const ingestProviderRemote = async (
   const failures: { sessionId: string; diagnostic: string; error: string }[] = [];
   const manifestUpdates: IngestManifest = {};
   const manifestCandidates = new Map<string, ManifestEntry>();
+  /**
+   * Staged path -> the physical file whose sessions it belongs to. A SQLite
+   * adapter stats a group (`db`, `db-wal`, `db-shm`, sidecars) but attributes
+   * every session to the `db` alone, so poisoning by exact path would leave the
+   * companions persisted at their new stat and the whole group would look
+   * unchanged on the next tick — the failed session would never be retried.
+   * Defaults to the path itself for one-file-per-session adapters.
+   */
+  const candidateOwners = new Map<string, string>();
 
   const shouldParseSession = options.force === true
     ? undefined
@@ -413,7 +495,7 @@ const ingestProviderRemote = async (
    */
   const shouldReadFile = options.force === true
     ? undefined
-    : (path: string, stat: import("node:fs").Stats): boolean => {
+    : (path: string, stat: import("node:fs").Stats, owner?: string): boolean => {
         const entry = manifest[path];
         const shouldRead = entry === undefined
           || entry.normalizationVersion !== NORMALIZATION_VERSION
@@ -425,9 +507,34 @@ const ingestProviderRemote = async (
             size: stat.size,
             normalizationVersion: NORMALIZATION_VERSION,
           });
+          candidateOwners.set(path, owner ?? path);
         }
         return shouldRead;
       };
+
+  /**
+   * The stat the INGESTED CONTENT belongs to, for a path `shouldReadFile` did
+   * not already stage one for (`--force` skips that gate entirely). Taken
+   * BEFORE the server round-trip and memoized per file: statting after the
+   * write would record bytes a live agent appended during the round-trip as
+   * already ingested, and those turns would never be read again.
+   */
+  const contentStats = new Map<string, ManifestEntry | undefined>();
+  const contentStatFor = (path: string): ManifestEntry | undefined => {
+    if (manifestCandidates.has(path)) return undefined;
+    const memoized = contentStats.get(path);
+    if (memoized !== undefined || contentStats.has(path)) return memoized;
+    let entry: ManifestEntry | undefined;
+    try {
+      const stat = statSync(path);
+      entry = { mtimeMs: stat.mtimeMs, size: stat.size, normalizationVersion: NORMALIZATION_VERSION };
+    } catch {
+      // non-fatal: a remote source (an exported thread URL) has no local stat.
+      entry = undefined;
+    }
+    contentStats.set(path, entry);
+    return entry;
+  };
 
   const stream = adapter.stream({
     machine: loadMachineIdentity(),
@@ -440,37 +547,46 @@ const ingestProviderRemote = async (
 
   for await (const item of stream) {
     if (item.type === "diagnostic") {
-      if (item.diagnostic.status === "error") {
+      // Severity, not status, decides what a diagnostic costs. A record-level
+      // drop is named, counted, and surfaced — and its session still succeeds.
+      const severity = diagnosticSeverity(item.diagnostic);
+      const code = diagnosticCode(item.diagnostic);
+      const message = truncateDiagnosticMessage(item.diagnostic.message);
+      tallyDiagnostic(code, severity, message);
+      if (severity === "error") {
         const target = diagnosticTarget(item.diagnostic, provider);
         failedSessionTargets.add(target);
-        failures.push({
-          sessionId: target,
-          diagnostic: diagnosticCode(item.diagnostic),
-          error: item.diagnostic.message,
-        });
+        failures.push({ sessionId: target, diagnostic: code, error: message });
+        const physicalPath = diagnosticPhysicalPath(item.diagnostic);
+        if (physicalPath === undefined) unattributableFailure = true;
+        else poisonedPaths.add(physicalPath);
       }
       continue;
     }
     if (item.type !== "session") continue;
     sessionsSeen += 1;
+    const itemPhysicalPath = item.sourceUnit?.physicalPath ?? item.session.sourcePath;
+    const failSession = (sessionId: string, diagnostic: string, detail: string): void => {
+      const capped = truncateDiagnosticMessage(detail);
+      failedSessionTargets.add(sessionId);
+      poisonedPaths.add(itemPhysicalPath);
+      failures.push({ sessionId, diagnostic, error: capped });
+      tallyDiagnostic(diagnostic, "error", capped);
+      outcomes.push({ sessionId, status: "failed", diagnostic, detail: capped, messagesWritten: 0, toolCallsWritten: 0, jobsEnqueued: 0 });
+    };
+    const contentStat = options.limit === undefined ? contentStatFor(itemPhysicalPath) : undefined;
     let sourceFingerprint: string;
     try {
       sourceFingerprint = fingerprintForItem(item);
     } catch (error) {
-      const detail = errorMessage(error);
-      failedSessionTargets.add(item.session.id);
-      failures.push({ sessionId: item.session.id, diagnostic: "source_fingerprint_failed", error: detail });
-      outcomes.push({ sessionId: item.session.id, status: "failed", diagnostic: "source_fingerprint_failed", detail, messagesWritten: 0, toolCallsWritten: 0, jobsEnqueued: 0 });
+      failSession(item.session.id, "source_fingerprint_failed", errorMessage(error));
       continue;
     }
     let mapped: MappedSession;
     try {
       mapped = mapSession(item.session, sourceFingerprint);
     } catch (error) {
-      const detail = errorMessage(error);
-      failedSessionTargets.add(item.session.id);
-      failures.push({ sessionId: item.session.id, diagnostic: "map_session_failed", error: detail });
-      outcomes.push({ sessionId: item.session.id, status: "failed", diagnostic: "map_session_failed", detail, messagesWritten: 0, toolCallsWritten: 0, jobsEnqueued: 0 });
+      failSession(item.session.id, "map_session_failed", errorMessage(error));
       continue;
     }
     try {
@@ -485,42 +601,51 @@ const ingestProviderRemote = async (
         searchDocumentsTotal += searchDocuments.total;
         semanticEligible += searchDocuments.semanticEligible;
         ignored += searchDocuments.ignored;
-        // Stage the physical source stat. The provider walk may still fail on
-        // another session sharing this file, so nothing is persisted yet.
-        if (options.limit === undefined) {
-          const physicalPath = item.sourceUnit?.physicalPath ?? item.session.sourcePath;
-          try {
-            const fileStat = statSync(physicalPath);
-            manifestCandidates.set(physicalPath, {
-              mtimeMs: fileStat.mtimeMs,
-              size: fileStat.size,
-              normalizationVersion: NORMALIZATION_VERSION,
-            });
-          } catch {
-            // non-fatal: best-effort manifest update
-          }
+        // Stage the physical source stat. Another session sharing this file may
+        // still fail, which poisons the path, so nothing is persisted yet.
+        if (options.limit === undefined && contentStat !== undefined) {
+          manifestCandidates.set(itemPhysicalPath, contentStat);
+          candidateOwners.set(itemPhysicalPath, itemPhysicalPath);
         }
       } else if (outcome.status === "skipped") {
         sessionsSkipped += 1;
       } else {
         failedSessionTargets.add(outcome.sessionId);
+        poisonedPaths.add(itemPhysicalPath);
+        tallyDiagnostic(outcome.diagnostic ?? "session_write_rejected", "error", truncateDiagnosticMessage(outcome.detail ?? ""));
       }
     } catch (error) {
-      const detail = errorMessage(error);
-      failedSessionTargets.add(mapped.session.sessionId);
-      failures.push({ sessionId: mapped.session.sessionId, diagnostic: "remote_write_failed", error: detail });
-      outcomes.push({ sessionId: mapped.session.sessionId, status: "failed", diagnostic: "remote_write_failed", detail, messagesWritten: 0, toolCallsWritten: 0, jobsEnqueued: 0 });
+      failSession(mapped.session.sessionId, "remote_write_failed", errorMessage(error));
     }
   }
 
-  // A full successful provider walk proves every staged source either matched
-  // the server's current normalization fingerprint or was posted successfully.
-  // This also converges shared-DB adapters whose per-session probe fingerprints
-  // intentionally differ from the DB file stat. Limited walks cannot prove that
-  // unseen sessions are current, and failed walks must retry every sibling
-  // session, so neither persists file-level manifest state.
-  if (options.limit === undefined && failedSessionTargets.size === 0) {
+  // PER-SESSION manifest persistence. A staged source persists unless a session
+  // sourced from that same physical file failed: one bad session no longer
+  // forces its ~1250 healthy siblings to be re-parsed every tick.
+  //
+  // Crash convergence is preserved, and is strictly stronger than the old
+  // all-or-nothing gate:
+  //   - A path is STAGED at stat time (`shouldReadFile`), before any read, but
+  //     it only PERSISTS if no session owning it failed. The server returning
+  //     `ok` means it already left its two-phase apply — the `applying:`
+  //     sentinel fingerprint has been replaced by the real one. A crash during
+  //     apply leaves the sentinel in place, `postMappedSession` never returns
+  //     `ok`, the owning path is poisoned, and the next tick re-parses it.
+  //   - Poisoning is by OWNER, not by exact path, because a SQLite adapter
+  //     stats a companion group (`db`, `db-wal`, `db-shm`, sidecars) while
+  //     attributing every session to the `db`. Persisting a companion whose
+  //     owner failed would make the whole group look unchanged next tick.
+  //   - The manifest itself is written once, atomically (tmp + rename), after
+  //     the whole run. A crash before that loses staged entries, which only
+  //     costs a re-parse the server's fingerprint probe then skips.
+  //   - A failure the adapter could not attribute to a file poisons everything,
+  //     because an unattributable failure cannot prove any file complete.
+  // Limited walks still persist nothing: they cannot prove that unseen sessions
+  // inside a shared source are current.
+  if (options.limit === undefined && !unattributableFailure) {
     for (const [path, entry] of manifestCandidates) {
+      if (poisonedPaths.has(path)) continue;
+      if (poisonedPaths.has(candidateOwners.get(path) ?? path)) continue;
       manifestUpdates[path] = entry;
     }
   }
@@ -538,6 +663,8 @@ const ingestProviderRemote = async (
       searchDocuments: { total: searchDocumentsTotal, semanticEligible, ignored },
       outcomes,
       failures,
+      diagnostics: [...diagnosticTally.values()],
+      diagnosticCounts: { ...diagnosticCounts },
       durationMs: Date.now() - startedAt,
     },
     manifestUpdates,
