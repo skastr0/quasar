@@ -16,3 +16,5 @@ workflows/
 docs/proofs/
 
 .native/
+
+.amp/portals/*

@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+bun_version="$(sed -n 's/.*"packageManager": *"bun@\([^"]*\)".*/\1/p' package.json)"
+if [[ -z "$bun_version" ]]; then
+  printf '[setup] error: package.json must declare packageManager as bun@<version>\n' >&2
+  exit 1
+fi
+
+export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
+bun_bin="$BUN_INSTALL/bin/bun"
+toolchain_started=$SECONDS
+if [[ ! -x "$bun_bin" ]] || [[ "$("$bun_bin" --version)" != "$bun_version" ]]; then
+  printf '[setup] Installing Bun %s\n' "$bun_version"
+  curl -fsSL https://bun.sh/install | bash -s -- "bun-v${bun_version}"
+else
+  printf '[setup] Bun %s is already installed\n' "$bun_version"
+fi
+
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$bun_bin" "$HOME/.local/bin/bun"
+ln -sfn "$BUN_INSTALL/bin/bunx" "$HOME/.local/bin/bunx"
+export PATH="$HOME/.local/bin:$PATH"
+printf '[setup] Bun toolchain ready in %ss\n' "$((SECONDS - toolchain_started))"
+
+packages=()
+command -v sqlite3 >/dev/null 2>&1 || packages+=(sqlite3)
+if (( ${#packages[@]} > 0 )); then
+  printf '[setup] Installing system packages: %s\n' "${packages[*]}"
+  sudo apt-get update
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
+else
+  printf '[setup] System packages already installed\n'
+fi
+
+profile_marker="# Quasar orb toolchain"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >> "$HOME/.bash_profile" <<'EOF'
+
+# Quasar orb toolchain
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) export PATH="$HOME/.local/bin:$PATH" ;;
+esac
+EOF
+fi
+
+dependencies_started=$SECONDS
+printf '[setup] Installing workspace dependencies\n'
+bun install --frozen-lockfile --cpu='*' --os='*'
+printf '[setup] Workspace dependencies ready in %ss\n' "$((SECONDS - dependencies_started))"
+
+# Clients only. This checkout is not the Mac mini service; authentication
+# belongs in resume so it never lands in a shared snapshot.
+printf '[setup] Preparing Tailscale client\n'
+sudo install -d /etc/systemd/system/tailscaled.service.d
+sudo tee /etc/systemd/system/tailscaled.service.d/amp-orb.conf >/dev/null <<'EOF'
+[Service]
+Environment=TS_ASSUME_NETWORK_UP_FOR_TEST=true
+EOF
+if ! command -v tailscale >/dev/null 2>&1; then
+  curl -fsSL https://tailscale.com/install.sh | sh
+fi
+sudo systemctl daemon-reload
+# Do not restart an active daemon when setup runs again on a warm orb.
+sudo systemctl enable --now tailscaled
+
+# Published CLI talks to the remote service. Workspace tooling stays
+# `bun run` / `quasar-dev`; never install into this repository.
+quasar_version=0.5.3
+quasar_package="$HOME/.local/lib/node_modules/@skastr0/quasar-cli/package.json"
+if [[ ! -x "$HOME/.local/bin/quasar" ]] ||
+   [[ "$(node -p 'try { require(process.argv[1]).version } catch { "" }' "$quasar_package" 2>/dev/null || true)" != "$quasar_version" ]]; then
+  printf '[setup] Installing published @skastr0/quasar-cli@%s\n' "$quasar_version"
+  npm install --global --prefix "$HOME/.local" "@skastr0/quasar-cli@$quasar_version"
+else
+  printf '[setup] Published @skastr0/quasar-cli@%s already installed\n' "$quasar_version"
+fi
+
+printf '[setup] Complete\n'
