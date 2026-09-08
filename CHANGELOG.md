@@ -8,6 +8,8 @@ formats may still change.
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-09-08
+
 ### Changed
 
 - Amp ingest is opt-in: `ingest --provider all` skips the remote `amp` adapter
