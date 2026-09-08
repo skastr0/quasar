@@ -232,6 +232,9 @@ quasar ingest --provider claude --limit 50 --force
 # Install the macOS background launchd sync daemon (runs every 60s)
 quasar daemon install --server https://<quasar-host> --ingest-token <token> --interval-seconds 60
 
+# Same, on the one machine that should also poll Amp threads (remote; throttled)
+quasar daemon install --server https://<quasar-host> --ingest-token <token> --interval-seconds 60 --amp
+
 # Inspect daemon health, lock state, and logs
 quasar daemon status
 

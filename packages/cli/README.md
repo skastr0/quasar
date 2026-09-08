@@ -145,7 +145,7 @@ Controls the background remote-ingest daemon via macOS `launchd`. The daemon reg
 
 ```bash
 # Install and bootstrap the LaunchAgent plist
-quasar daemon install --server https://<quasar-host> --ingest-token <token> [--interval-seconds <n>] [--binary <path>]
+quasar daemon install --server https://<quasar-host> --ingest-token <token> [--interval-seconds <n>] [--binary <path>] [--amp]
 
 # Check daemon running state, loaded plist, and lock file status
 quasar daemon status
@@ -158,6 +158,15 @@ quasar daemon run
 ```
 
 - `--interval-seconds <n>`: Synchronization interval in seconds (minimum: `10`, default: `15` or `60`).
+- `--amp`: Also poll Amp threads from this machine. Off by default because Amp
+  threads live only on Amp's servers, so every list and export is a remote
+  call; enable it on exactly one machine. When enabled, the daemon walks the
+  full thread list every 15 minutes, fetches the 25 newest threads every 5
+  minutes in between, and re-exports a thread that is still being written at
+  most every 30 minutes (a settled thread exports once). The only local state
+  is `amp-poll-state.json` beside the ingest manifest: two timestamps. An
+  explicit `quasar ingest --provider amp` ignores the throttle and lists in
+  full right away.
 - `--binary <path>`: Absolute path to the Quasar binary to execute (defaults to current runtime binary).
 
 ---
@@ -614,6 +623,7 @@ cat materialize-receipt.json | jq '.data.closure'
 | `QUASAR_DAEMON_BINARY` | Path to executable used for background daemon ticks | System binary |
 | `QUASAR_DAEMON_INTERVAL_SECONDS` | Daemon execution frequency in seconds | `15` |
 | `QUASAR_DAEMON_STALE_LOCK_SECONDS` | Duration before broken daemon locks are reclaimed | `3600` (1 hour) |
+| `QUASAR_AMP_INGEST` | `on` includes Amp in `ingest --provider all`; written by `daemon install --amp` | unset (off) |
 | `QUASAR_CODEX_ROOT` | Codex history directory override | `~/.codex` |
 | `QUASAR_CLAUDE_ROOT` | Claude Code history directory override | `~/.claude` |
 | `QUASAR_OPENCODE_ROOT` | OpenCode history directory override | `~/.local/share/opencode` |

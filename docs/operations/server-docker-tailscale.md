@@ -323,6 +323,20 @@ quasar daemon install \
   --interval-seconds 60
 ```
 
+Amp threads are not on disk; the `amp` adapter shells out to `amp threads list`
+and `amp threads export`, both remote calls. `--provider all` therefore skips
+Amp unless the daemon was installed with `--amp`. Enable it on one machine only
+(the Mac mini), never on every laptop:
+
+```bash
+quasar daemon install --interval-seconds 60 --amp
+quasar daemon status   # "ampIngest": true
+```
+
+With `--amp` the daemon lists the full thread set every 15 minutes, the 25
+newest every 5 minutes, and re-exports a thread still being written at most
+every 30 minutes. Reinstalling without `--amp` turns it off.
+
 Uninstall:
 
 ```bash
