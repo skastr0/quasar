@@ -161,12 +161,11 @@ quasar daemon run
 - `--amp`: Also poll Amp threads from this machine. Off by default because Amp
   threads live only on Amp's servers, so every list and export is a remote
   call; enable it on exactly one machine. When enabled, the daemon walks the
-  full thread list every 15 minutes, fetches the 25 newest threads every 5
-  minutes in between, and re-exports a thread that is still being written at
-  most every 30 minutes (a settled thread exports once). The only local state
-  is `amp-poll-state.json` beside the ingest manifest: two timestamps. An
-  explicit `quasar ingest --provider amp` ignores the throttle and lists in
-  full right away.
+  full thread list once every 20 minutes and exports only threads whose
+  fingerprint changed. Nothing is skipped, only delayed by at most one
+  interval. The only local state is `amp-poll-state.json` beside the ingest
+  manifest: one timestamp. An explicit `quasar ingest --provider amp` ignores
+  the throttle and lists right away.
 - `--binary <path>`: Absolute path to the Quasar binary to execute (defaults to current runtime binary).
 
 ---

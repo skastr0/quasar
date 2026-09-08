@@ -333,9 +333,9 @@ quasar daemon install --interval-seconds 60 --amp
 quasar daemon status   # "ampIngest": true
 ```
 
-With `--amp` the daemon lists the full thread set every 15 minutes, the 25
-newest every 5 minutes, and re-exports a thread still being written at most
-every 30 minutes. Reinstalling without `--amp` turns it off.
+With `--amp` the daemon lists the full thread set once every 20 minutes and
+exports only threads whose fingerprint changed. Reinstalling without `--amp`
+turns it off.
 
 Uninstall:
 

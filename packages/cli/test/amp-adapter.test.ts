@@ -224,54 +224,32 @@ const pollDiagnosticName = (diagnostic: { readonly details?: unknown }): string 
   (diagnostic.details as { diagnostic?: string } | undefined)?.diagnostic;
 
 describe("amp poll policy", () => {
-  test("defaults: full list every 15 min, head list every 5 min, hot threads settle 10 min and re-export at most every 30 min", () => {
-    expect(AMP_POLL_POLICY).toEqual({
-      fullListEveryMs: 15 * 60_000,
-      headListEveryMs: 5 * 60_000,
-      headListLimit: 25,
-      settleMs: 10 * 60_000,
-      hotReexportEveryMs: 30 * 60_000,
-    });
+  test("default: one full list every 20 minutes, nothing else", () => {
+    expect(AMP_POLL_POLICY).toEqual({ listEveryMs: 20 * 60_000 });
   });
 
-  test("decideAmpPoll: first tick is a full walk, then head lists, then a full walk again", () => {
+  test("decideAmpPoll: first tick lists, ticks inside the window defer, the window then reopens", () => {
     const first = decideAmpPoll({}, NOW);
-    expect(first.list).toEqual({ kind: "full" });
-    const afterFull = (first as { state: AmpPollState }).state;
-    expect(afterFull).toEqual({ lastFullListAt: NOW, lastHeadListAt: NOW });
+    expect(first).toEqual({ list: true, state: { lastListAt: NOW } });
 
-    const oneMinute = decideAmpPoll(afterFull, minutesAfter(NOW, 1));
-    expect(oneMinute.list).toBeUndefined();
-    expect((oneMinute as { nextListAt: string }).nextListAt).toBe(minutesAfter(NOW, 5));
+    const inside = decideAmpPoll({ lastListAt: NOW }, minutesAfter(NOW, 19));
+    expect(inside).toEqual({ list: false, nextListAt: minutesAfter(NOW, 20) });
 
-    const fiveMinutes = decideAmpPoll(afterFull, minutesAfter(NOW, 5));
-    expect(fiveMinutes.list).toEqual({ kind: "head", limit: 25 });
-    const afterHead = (fiveMinutes as { state: AmpPollState }).state;
-    expect(afterHead).toEqual({ lastFullListAt: NOW, lastHeadListAt: minutesAfter(NOW, 5) });
+    const reopened = decideAmpPoll({ lastListAt: NOW }, minutesAfter(NOW, 20));
+    expect(reopened).toEqual({ list: true, state: { lastListAt: minutesAfter(NOW, 20) } });
 
-    const sevenMinutes = decideAmpPoll(afterHead, minutesAfter(NOW, 7));
-    expect(sevenMinutes.list).toBeUndefined();
-
-    const fifteenMinutes = decideAmpPoll(afterHead, minutesAfter(NOW, 15));
-    expect(fifteenMinutes.list).toEqual({ kind: "full" });
+    expect(decideAmpPoll({ lastListAt: "garbage" }, NOW).list).toBe(true);
   });
 
   test("deferred tick makes zero amp calls beyond the version probe", async () => {
     const calls: string[][] = [];
-    const runner: AmpRunner = (args) => {
-      calls.push([...args]);
-      return fixtureRunner()(args);
-    };
     const saved: AmpPollState[] = [];
     const result = await readAmp({
       machine: MACHINE_A,
       now: minutesAfter(NOW, 1),
-      ampRunner: runner,
+      ampRunner: (args) => { calls.push([...args]); return fixtureRunner()(args); },
       ampSleep: async () => {},
-      ampPoll: {
-        state: { lastFullListAt: NOW, lastHeadListAt: NOW },
-        onState: (state) => { saved.push(state); },
-      },
+      ampPoll: { state: { lastListAt: NOW }, onState: (state) => { saved.push(state); } },
     });
     expect(calls).toEqual([["--version"]]);
     expect(saved).toEqual([]);
@@ -279,34 +257,7 @@ describe("amp poll policy", () => {
     expect(result.diagnostics.map((diagnostic) => pollDiagnosticName(diagnostic))).toContain("amp.poll.deferred");
   });
 
-  test("head tick is one small list call and persists the head timestamp", async () => {
-    const calls: string[][] = [];
-    const runner: AmpRunner = (args) => {
-      calls.push([...args]);
-      return fixtureRunner()(args);
-    };
-    const saved: AmpPollState[] = [];
-    const now = minutesAfter(NOW, 5);
-    const result = await readAmp({
-      machine: MACHINE_A,
-      now,
-      ampRunner: runner,
-      ampSleep: async () => {},
-      ampPoll: {
-        state: { lastFullListAt: NOW, lastHeadListAt: NOW },
-        onState: (state) => { saved.push(state); },
-      },
-    });
-    const lists = calls.filter((args) => args[1] === "list");
-    expect(lists).toEqual([[
-      "threads", "list", "--json", "--include-archived", "--limit", "25", "--offset", "0",
-    ]]);
-    expect(saved).toEqual([{ lastFullListAt: NOW, lastHeadListAt: now }]);
-    expect(result.sessions.map((session) => session.nativeSessionId)).toEqual([THREAD_A, THREAD_B]);
-    expect(result.diagnostics.map((diagnostic) => pollDiagnosticName(diagnostic))).not.toContain("amp.list.page_cap_reached");
-  });
-
-  test("full tick persists both timestamps only after the list succeeded", async () => {
+  test("listing tick walks the full archived-inclusive list and persists the timestamp only after the list succeeded", async () => {
     const saved: AmpPollState[] = [];
     const failing: AmpRunner = (args) =>
       args[1] === "list" ? { ok: false, reason: "command_failed", detail: "auth" } : fixtureRunner()(args);
@@ -319,17 +270,35 @@ describe("amp poll policy", () => {
     });
     expect(saved).toEqual([]);
 
-    await readAmp({
+    const calls: string[][] = [];
+    const result = await readAmp({
       machine: MACHINE_A,
       now: NOW,
-      ampRunner: fixtureRunner(),
+      ampRunner: (args) => { calls.push([...args]); return fixtureRunner()(args); },
       ampSleep: async () => {},
       ampPoll: { state: {}, onState: (state) => { saved.push(state); } },
     });
-    expect(saved).toEqual([{ lastFullListAt: NOW, lastHeadListAt: NOW }]);
+    expect(saved).toEqual([{ lastListAt: NOW }]);
+    expect(calls.filter((args) => args[1] === "list")[0]).toEqual([
+      "threads", "list", "--json", "--include-archived", "--limit", String(AMP_LIST_PAGE_SIZE), "--offset", "0",
+    ]);
+    expect(result.sessions.map((session) => session.nativeSessionId)).toEqual([THREAD_A, THREAD_B]);
   });
 
-  test("absent ampPoll (explicit --provider amp) always walks the full list", async () => {
+  test("a changed thread within the window is exported on the next listing tick, never dropped", async () => {
+    const exported: string[] = [];
+    const runner: AmpRunner = (args) => {
+      if (args[1] === "export") exported.push(args[2]!);
+      return fixtureRunner()(args);
+    };
+    const options = { machine: MACHINE_A, ampRunner: runner, ampSleep: async () => {} };
+    await readAmp({ ...options, now: minutesAfter(NOW, 5), ampPoll: { state: { lastListAt: NOW }, onState: () => {} } });
+    expect(exported).toEqual([]);
+    await readAmp({ ...options, now: minutesAfter(NOW, 20), ampPoll: { state: { lastListAt: NOW }, onState: () => {} } });
+    expect(exported).toEqual([THREAD_A, THREAD_B, THREAD_OLD]);
+  });
+
+  test("absent ampPoll (explicit --provider amp) always lists now", async () => {
     const calls: string[][] = [];
     await readAmp({
       machine: MACHINE_A,
@@ -337,59 +306,7 @@ describe("amp poll policy", () => {
       ampRunner: (args) => { calls.push([...args]); return fixtureRunner()(args); },
       ampSleep: async () => {},
     });
-    expect(calls.filter((args) => args[1] === "list")[0]?.[5]).toBe(String(AMP_LIST_PAGE_SIZE));
-  });
-});
-
-describe("amp hot-thread settle", () => {
-  /** THREAD_A updated 2 minutes before `now`: hot. THREAD_B and THREAD_OLD settled. */
-  const now = minutesAfter(listPage[0]!.updated, 2);
-
-  const exportsFor = async (lastIngestedAt: AmpStreamOptions["lastIngestedAt"]) => {
-    const exported: string[] = [];
-    await readAmp({
-      machine: MACHINE_A,
-      now,
-      ampRunner: (args) => {
-        if (args[1] === "export") exported.push(args[2]!);
-        return fixtureRunner()(args);
-      },
-      ampSleep: async () => {},
-      lastIngestedAt,
-    });
-    return exported;
-  };
-
-  test("a hot thread the store has never seen exports immediately", async () => {
-    expect(await exportsFor(() => undefined)).toEqual([THREAD_A, THREAD_B, THREAD_OLD]);
-  });
-
-  test("a hot thread ingested within hotReexportEveryMs is held; settled threads still export", async () => {
-    const storedFiveMinutesAgo = minutesAfter(now, -5);
-    const exported = await exportsFor((sessionId) =>
-      sessionId === sessionIdFor("amp", AmpSessionId(THREAD_A)) ? storedFiveMinutesAgo : undefined);
-    expect(exported).toEqual([THREAD_B, THREAD_OLD]);
-  });
-
-  test("a hot thread whose stored copy is older than hotReexportEveryMs exports again", async () => {
-    const storedFortyMinutesAgo = minutesAfter(now, -40);
-    const exported = await exportsFor(() => storedFortyMinutesAgo);
-    expect(exported).toEqual([THREAD_A, THREAD_B, THREAD_OLD]);
-  });
-
-  test("held threads are counted in a named diagnostic and never probed", async () => {
-    const probes: string[] = [];
-    const result = await readAmp({
-      machine: MACHINE_A,
-      now,
-      ampRunner: fixtureRunner(),
-      ampSleep: async () => {},
-      lastIngestedAt: () => minutesAfter(now, -1),
-      shouldParseSession: (probe) => { probes.push(probe.sessionId); return true; },
-    });
-    expect(probes).not.toContain(sessionIdFor("amp", AmpSessionId(THREAD_A)));
-    const held = result.diagnostics.find((diagnostic) => pollDiagnosticName(diagnostic) === "amp.threads.hot_deferred");
-    expect(held?.message).toContain("Deferred 1 Amp thread(s)");
+    expect(calls.filter((args) => args[1] === "list")).toHaveLength(1);
   });
 });
 
