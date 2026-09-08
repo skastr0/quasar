@@ -8,14 +8,23 @@ import { Schema } from "effect";
 import {
   AMP_LIST_PAGE_SIZE,
   AMP_LIST_PAGE_STRIDE,
+  AMP_POLL_POLICY,
   ampAdapter,
+  decideAmpPoll,
+  type AmpPollState,
   type AmpRunner,
   type AmpStreamOptions,
 } from "../src/adapters/amp";
 import { stableJsonHash } from "../src/core/hash";
 import { AmpExportSchema, AmpThreadListEntrySchema } from "../src/adapters/amp-schema";
 import { sessionIdFor } from "../src/adapters/common";
-import { adaptersByProvider, stableAdapters } from "../src/adapters/registry";
+import {
+  adaptersByProvider,
+  defaultIngestProviders,
+  localAdapters,
+  remoteAdapters,
+  stableAdapters,
+} from "../src/adapters/registry";
 import { AmpSessionId } from "../src/core/identity";
 import { mapSession } from "../src/map";
 
@@ -185,12 +194,202 @@ const read = (machine: typeof MACHINE_A, options: Partial<AmpStreamOptions> = {}
 // ---------------------------------------------------------------------------
 
 describe("amp registry", () => {
-  test("amp is stable and included in the all-provider set", () => {
+  test("amp is a stable remote adapter, addressable by provider", () => {
     expect(adaptersByProvider.get("amp")).toBe(ampAdapter);
     expect(stableAdapters.map((adapter) => adapter.provider)).toContain("amp");
+    expect(remoteAdapters.map((adapter) => adapter.provider)).toEqual(["amp"]);
+    expect(localAdapters.map((adapter) => adapter.provider)).not.toContain("amp");
     expect(ampAdapter.stable).toBe(true);
     expect(ampAdapter.provider).toBe("amp");
     expect(ampAdapter.id).toBe("amp-threads-cli");
+  });
+
+  test("`--provider all` polls Amp's servers only when QUASAR_AMP_INGEST is on", () => {
+    expect(defaultIngestProviders({})).not.toContain("amp");
+    expect(defaultIngestProviders({ QUASAR_AMP_INGEST: "off" })).not.toContain("amp");
+    expect(defaultIngestProviders({ QUASAR_AMP_INGEST: "on" })).toContain("amp");
+    expect(defaultIngestProviders({ QUASAR_AMP_INGEST: "1" })).toContain("amp");
+    expect(defaultIngestProviders({})).toEqual(localAdapters.map((adapter) => adapter.provider));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Poll throttle — as few remote calls as possible
+// ---------------------------------------------------------------------------
+
+const minutesAfter = (iso: string, minutes: number) =>
+  new Date(Date.parse(iso) + minutes * 60_000).toISOString();
+
+const pollDiagnosticName = (diagnostic: { readonly details?: unknown }): string | undefined =>
+  (diagnostic.details as { diagnostic?: string } | undefined)?.diagnostic;
+
+describe("amp poll policy", () => {
+  test("defaults: full list every 15 min, head list every 5 min, hot threads settle 10 min and re-export at most every 30 min", () => {
+    expect(AMP_POLL_POLICY).toEqual({
+      fullListEveryMs: 15 * 60_000,
+      headListEveryMs: 5 * 60_000,
+      headListLimit: 25,
+      settleMs: 10 * 60_000,
+      hotReexportEveryMs: 30 * 60_000,
+    });
+  });
+
+  test("decideAmpPoll: first tick is a full walk, then head lists, then a full walk again", () => {
+    const first = decideAmpPoll({}, NOW);
+    expect(first.list).toEqual({ kind: "full" });
+    const afterFull = (first as { state: AmpPollState }).state;
+    expect(afterFull).toEqual({ lastFullListAt: NOW, lastHeadListAt: NOW });
+
+    const oneMinute = decideAmpPoll(afterFull, minutesAfter(NOW, 1));
+    expect(oneMinute.list).toBeUndefined();
+    expect((oneMinute as { nextListAt: string }).nextListAt).toBe(minutesAfter(NOW, 5));
+
+    const fiveMinutes = decideAmpPoll(afterFull, minutesAfter(NOW, 5));
+    expect(fiveMinutes.list).toEqual({ kind: "head", limit: 25 });
+    const afterHead = (fiveMinutes as { state: AmpPollState }).state;
+    expect(afterHead).toEqual({ lastFullListAt: NOW, lastHeadListAt: minutesAfter(NOW, 5) });
+
+    const sevenMinutes = decideAmpPoll(afterHead, minutesAfter(NOW, 7));
+    expect(sevenMinutes.list).toBeUndefined();
+
+    const fifteenMinutes = decideAmpPoll(afterHead, minutesAfter(NOW, 15));
+    expect(fifteenMinutes.list).toEqual({ kind: "full" });
+  });
+
+  test("deferred tick makes zero amp calls beyond the version probe", async () => {
+    const calls: string[][] = [];
+    const runner: AmpRunner = (args) => {
+      calls.push([...args]);
+      return fixtureRunner()(args);
+    };
+    const saved: AmpPollState[] = [];
+    const result = await readAmp({
+      machine: MACHINE_A,
+      now: minutesAfter(NOW, 1),
+      ampRunner: runner,
+      ampSleep: async () => {},
+      ampPoll: {
+        state: { lastFullListAt: NOW, lastHeadListAt: NOW },
+        onState: (state) => { saved.push(state); },
+      },
+    });
+    expect(calls).toEqual([["--version"]]);
+    expect(saved).toEqual([]);
+    expect(result.sessions).toHaveLength(0);
+    expect(result.diagnostics.map((diagnostic) => pollDiagnosticName(diagnostic))).toContain("amp.poll.deferred");
+  });
+
+  test("head tick is one small list call and persists the head timestamp", async () => {
+    const calls: string[][] = [];
+    const runner: AmpRunner = (args) => {
+      calls.push([...args]);
+      return fixtureRunner()(args);
+    };
+    const saved: AmpPollState[] = [];
+    const now = minutesAfter(NOW, 5);
+    const result = await readAmp({
+      machine: MACHINE_A,
+      now,
+      ampRunner: runner,
+      ampSleep: async () => {},
+      ampPoll: {
+        state: { lastFullListAt: NOW, lastHeadListAt: NOW },
+        onState: (state) => { saved.push(state); },
+      },
+    });
+    const lists = calls.filter((args) => args[1] === "list");
+    expect(lists).toEqual([[
+      "threads", "list", "--json", "--include-archived", "--limit", "25", "--offset", "0",
+    ]]);
+    expect(saved).toEqual([{ lastFullListAt: NOW, lastHeadListAt: now }]);
+    expect(result.sessions.map((session) => session.nativeSessionId)).toEqual([THREAD_A, THREAD_B]);
+    expect(result.diagnostics.map((diagnostic) => pollDiagnosticName(diagnostic))).not.toContain("amp.list.page_cap_reached");
+  });
+
+  test("full tick persists both timestamps only after the list succeeded", async () => {
+    const saved: AmpPollState[] = [];
+    const failing: AmpRunner = (args) =>
+      args[1] === "list" ? { ok: false, reason: "command_failed", detail: "auth" } : fixtureRunner()(args);
+    await readAmp({
+      machine: MACHINE_A,
+      now: NOW,
+      ampRunner: failing,
+      ampSleep: async () => {},
+      ampPoll: { state: {}, onState: (state) => { saved.push(state); } },
+    });
+    expect(saved).toEqual([]);
+
+    await readAmp({
+      machine: MACHINE_A,
+      now: NOW,
+      ampRunner: fixtureRunner(),
+      ampSleep: async () => {},
+      ampPoll: { state: {}, onState: (state) => { saved.push(state); } },
+    });
+    expect(saved).toEqual([{ lastFullListAt: NOW, lastHeadListAt: NOW }]);
+  });
+
+  test("absent ampPoll (explicit --provider amp) always walks the full list", async () => {
+    const calls: string[][] = [];
+    await readAmp({
+      machine: MACHINE_A,
+      now: NOW,
+      ampRunner: (args) => { calls.push([...args]); return fixtureRunner()(args); },
+      ampSleep: async () => {},
+    });
+    expect(calls.filter((args) => args[1] === "list")[0]?.[5]).toBe(String(AMP_LIST_PAGE_SIZE));
+  });
+});
+
+describe("amp hot-thread settle", () => {
+  /** THREAD_A updated 2 minutes before `now`: hot. THREAD_B and THREAD_OLD settled. */
+  const now = minutesAfter(listPage[0]!.updated, 2);
+
+  const exportsFor = async (lastIngestedAt: AmpStreamOptions["lastIngestedAt"]) => {
+    const exported: string[] = [];
+    await readAmp({
+      machine: MACHINE_A,
+      now,
+      ampRunner: (args) => {
+        if (args[1] === "export") exported.push(args[2]!);
+        return fixtureRunner()(args);
+      },
+      ampSleep: async () => {},
+      lastIngestedAt,
+    });
+    return exported;
+  };
+
+  test("a hot thread the store has never seen exports immediately", async () => {
+    expect(await exportsFor(() => undefined)).toEqual([THREAD_A, THREAD_B, THREAD_OLD]);
+  });
+
+  test("a hot thread ingested within hotReexportEveryMs is held; settled threads still export", async () => {
+    const storedFiveMinutesAgo = minutesAfter(now, -5);
+    const exported = await exportsFor((sessionId) =>
+      sessionId === sessionIdFor("amp", AmpSessionId(THREAD_A)) ? storedFiveMinutesAgo : undefined);
+    expect(exported).toEqual([THREAD_B, THREAD_OLD]);
+  });
+
+  test("a hot thread whose stored copy is older than hotReexportEveryMs exports again", async () => {
+    const storedFortyMinutesAgo = minutesAfter(now, -40);
+    const exported = await exportsFor(() => storedFortyMinutesAgo);
+    expect(exported).toEqual([THREAD_A, THREAD_B, THREAD_OLD]);
+  });
+
+  test("held threads are counted in a named diagnostic and never probed", async () => {
+    const probes: string[] = [];
+    const result = await readAmp({
+      machine: MACHINE_A,
+      now,
+      ampRunner: fixtureRunner(),
+      ampSleep: async () => {},
+      lastIngestedAt: () => minutesAfter(now, -1),
+      shouldParseSession: (probe) => { probes.push(probe.sessionId); return true; },
+    });
+    expect(probes).not.toContain(sessionIdFor("amp", AmpSessionId(THREAD_A)));
+    const held = result.diagnostics.find((diagnostic) => pollDiagnosticName(diagnostic) === "amp.threads.hot_deferred");
+    expect(held?.message).toContain("Deferred 1 Amp thread(s)");
   });
 });
 

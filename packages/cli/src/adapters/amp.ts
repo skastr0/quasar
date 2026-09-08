@@ -65,6 +65,78 @@ const LIST_PAGE_SIZE = AMP_LIST_PAGE_SIZE;
  * Exported so tests can assert the production default without re-deriving it.
  */
 const DEFAULT_EXPORT_SPACING_MS = 3_000;
+const MINUTE_MS = 60_000;
+
+/**
+ * Daemon poll policy against Amp's servers. Amp threads live only on the
+ * server (no local copy exists on this machine), so every list and export is a
+ * remote call and the policy exists to make as few of them as possible:
+ *
+ * - a full archived-inclusive list walk at most every `fullListEveryMs`;
+ * - a small head list (`headListLimit` newest by `updated`) at most every
+ *   `headListEveryMs` in between, to catch threads that just finished;
+ * - a thread updated within `settleMs` is "hot": it is exported once when
+ *   first seen, then re-exported at most every `hotReexportEveryMs` while it
+ *   keeps changing, and once more after it settles.
+ */
+export type AmpPollPolicy = {
+  readonly fullListEveryMs: number;
+  readonly headListEveryMs: number;
+  readonly headListLimit: number;
+  readonly settleMs: number;
+  readonly hotReexportEveryMs: number;
+};
+
+export const AMP_POLL_POLICY: AmpPollPolicy = {
+  fullListEveryMs: 15 * MINUTE_MS,
+  headListEveryMs: 5 * MINUTE_MS,
+  headListLimit: 25,
+  settleMs: 10 * MINUTE_MS,
+  hotReexportEveryMs: 30 * MINUTE_MS,
+};
+
+/** The only state a poll keeps between daemon ticks: when each list last ran. */
+export type AmpPollState = {
+  readonly lastFullListAt?: string;
+  readonly lastHeadListAt?: string;
+};
+
+export type AmpListMode = { readonly kind: "full" } | { readonly kind: "head"; readonly limit: number };
+
+export type AmpPollDecision =
+  | { readonly list: AmpListMode; readonly state: AmpPollState }
+  | { readonly list: undefined; readonly nextListAt: string };
+
+const elapsedMs = (now: number, at: string | undefined): number => {
+  if (at === undefined) return Number.POSITIVE_INFINITY;
+  const parsed = Date.parse(at);
+  return Number.isFinite(parsed) ? now - parsed : Number.POSITIVE_INFINITY;
+};
+
+/** Pure: which list (if any) this tick may run, and the state to persist if it does. */
+export const decideAmpPoll = (
+  state: AmpPollState,
+  nowIso: string,
+  policy: AmpPollPolicy = AMP_POLL_POLICY,
+): AmpPollDecision => {
+  const now = Date.parse(nowIso);
+  const sinceFull = elapsedMs(now, state.lastFullListAt);
+  if (sinceFull >= policy.fullListEveryMs) {
+    return { list: { kind: "full" }, state: { lastFullListAt: nowIso, lastHeadListAt: nowIso } };
+  }
+  const sinceHead = elapsedMs(now, state.lastHeadListAt);
+  if (sinceHead >= policy.headListEveryMs) {
+    return {
+      list: { kind: "head", limit: policy.headListLimit },
+      state: { ...state, lastHeadListAt: nowIso },
+    };
+  }
+  const nextListAt = new Date(
+    Math.min(now + policy.fullListEveryMs - sinceFull, now + policy.headListEveryMs - sinceHead),
+  ).toISOString();
+  return { list: undefined, nextListAt };
+};
+
 const MAX_EXPORT_ATTEMPTS = 5;
 const MAX_LIST_ATTEMPTS = 3;
 const BASE_BACKOFF_MS = 1_000;
@@ -95,11 +167,28 @@ export type AmpStreamOptions = AdapterDiscoverOptions & {
   /** Spacing between sequential exports. Defaults to 3s. */
   readonly exportSpacingMs?: number;
   /**
-   * Override for list pagination page cap (production default:
-   * {@link AMP_MAX_LIST_PAGES}). Tests use a small value so a truncated walk is
-   * cheap to assert; not a product knob.
+   * Override for list pagination page cap. Tests use a small value so a
+   * truncated walk is cheap to assert; not a product knob.
    */
   readonly maxListPages?: number;
+  /**
+   * Daemon poll throttle. Absent (explicit `ingest --provider amp`, tests)
+   * means one full list walk now. Present, the stream consults
+   * {@link decideAmpPoll} against `options.now`, runs at most one list call,
+   * and hands the state to persist back through `onState` once that call
+   * succeeded.
+   */
+  readonly ampPoll?: {
+    readonly state: AmpPollState;
+    readonly policy?: Partial<AmpPollPolicy>;
+    readonly onState: (state: AmpPollState) => void | Promise<void>;
+  };
+  /**
+   * When the store last ingested a thread (its stored `updated`), used only
+   * to throttle re-exports of a thread that is still being written. Absent
+   * means every changed thread exports.
+   */
+  readonly lastIngestedAt?: (sessionId: SessionId) => string | undefined | Promise<string | undefined>;
 };
 
 const resolveAmpBinary = (): string | undefined => {
@@ -252,6 +341,7 @@ const enumerateThreads = async (
   runner: AmpRunner,
   diagnostics: DecodeDiagnostic[],
   maxListPages: number | undefined,
+  mode: AmpListMode = { kind: "full" },
 ): Promise<EnumerateThreadsResult> => {
   const collected: AmpThreadListEntry[] = [];
   let pagesFetched = 0;
@@ -259,8 +349,12 @@ const enumerateThreads = async (
   let sawShortPage = false;
   let previousPageLastIdentity: string | undefined;
 
+  // A head list is one page of the newest threads: one call, no walk.
+  const pageSize = mode.kind === "head" ? mode.limit : LIST_PAGE_SIZE;
+  const pageCap = mode.kind === "head" ? 1 : maxListPages;
+
   const fullPageSignatures = new Set<string>();
-  for (let page = 0; maxListPages === undefined || page < maxListPages; page += 1) {
+  for (let page = 0; pageCap === undefined || page < pageCap; page += 1) {
     const offset = page * AMP_LIST_PAGE_STRIDE;
     let parsed: unknown;
     let listSucceeded = false;
@@ -271,7 +365,7 @@ const enumerateThreads = async (
         "--json",
         "--include-archived",
         "--limit",
-        String(LIST_PAGE_SIZE),
+        String(pageSize),
         "--offset",
         String(offset),
       ]);
@@ -308,7 +402,7 @@ const enumerateThreads = async (
         pagesFetched,
       };
     }
-    if (rawEntries.length === LIST_PAGE_SIZE) {
+    if (mode.kind === "full" && rawEntries.length === LIST_PAGE_SIZE) {
       const signature = stableJsonHash(rawEntries);
       if (fullPageSignatures.has(signature)) {
         diagnostics.push({ name: "amp.list.repeated_page", message: "Amp returned a repeated full list page; pagination offset is not advancing." });
@@ -353,7 +447,7 @@ const enumerateThreads = async (
     collected.push(...pageEntries);
     pagesFetched += 1;
 
-    if (rawEntries.length < LIST_PAGE_SIZE) {
+    if (mode.kind === "head" || rawEntries.length < LIST_PAGE_SIZE) {
       sawShortPage = true;
       break;
     }
@@ -362,7 +456,7 @@ const enumerateThreads = async (
   // Cap hit = walked maxListPages full pages without a short terminal page.
   // Distinguishable from a complete walk so callers can surface
   // truncation (no silent partial corpus).
-  const pageCapReached = maxListPages !== undefined && !sawShortPage && pagesFetched >= maxListPages;
+  const pageCapReached = pageCap !== undefined && !sawShortPage && pagesFetched >= pageCap;
 
   const byId = new Map<string, AmpThreadListEntry>();
   for (const thread of collected) byId.set(thread.id, thread);
@@ -1214,6 +1308,23 @@ async function* streamAmp(options: AmpStreamOptions): AsyncGenerator<AdapterStre
     sourceRoot: sourceRoot("amp", ampAdapter.id, SOURCE_ROOT, options.machine, options.now),
   };
 
+  const policy: AmpPollPolicy = { ...AMP_POLL_POLICY, ...options.ampPoll?.policy };
+  const decision: AmpPollDecision = options.ampPoll === undefined
+    ? { list: { kind: "full" }, state: {} }
+    : decideAmpPoll(options.ampPoll.state, options.now, policy);
+  if (decision.list === undefined) {
+    yield {
+      type: "diagnostic",
+      diagnostic: adapterDiagnostic(
+        SOURCE_ROOT,
+        "amp.poll.deferred",
+        `Amp poll deferred; next list call no earlier than ${decision.nextListAt}.`,
+        "no_data_found",
+      ),
+    };
+    return;
+  }
+
   const listDiagnostics: DecodeDiagnostic[] = [];
   const maxListPages = options.maxListPages;
   const {
@@ -1221,7 +1332,12 @@ async function* streamAmp(options: AmpStreamOptions): AsyncGenerator<AdapterStre
     listFailed,
     pageCapReached,
     pagesFetched,
-  } = await enumerateThreads(runner, listDiagnostics, maxListPages);
+  } = await enumerateThreads(runner, listDiagnostics, maxListPages, decision.list);
+  if (!listFailed && options.ampPoll !== undefined) {
+    // The list call happened; the throttle window starts now even if a later
+    // export fails. The fingerprint gate makes the retry cheap.
+    await options.ampPoll.onState(decision.state);
+  }
   for (const diagnostic of listDiagnostics) {
     yield { type: "diagnostic", diagnostic: schemaDiagnostic(SOURCE_ROOT, diagnostic) };
   }
@@ -1265,11 +1381,29 @@ async function* streamAmp(options: AmpStreamOptions): AsyncGenerator<AdapterStre
 
   let emitted = 0;
   let exportCount = 0;
+  let hotDeferred = 0;
+  const nowMs = Date.parse(options.now);
 
   for (const thread of selectedThreads) {
     const fingerprint = fingerprintForThread(thread);
     const fingerprintKey = JSON.stringify(fingerprint);
     const sessionId = sessionIdFor("amp", AmpSessionId(thread.id));
+
+    // A thread updated within settleMs is still being written. Exporting it
+    // now buys a partial transcript that the next change invalidates, so hold
+    // it unless the store has nothing for it or its copy is older than
+    // hotReexportEveryMs. A settled thread always goes through the gate.
+    if (options.lastIngestedAt !== undefined) {
+      const updatedMs = parseUpdatedMs(thread.updated);
+      const hot = updatedMs !== undefined && Number.isFinite(nowMs) && nowMs - updatedMs < policy.settleMs;
+      if (hot) {
+        const stored = await options.lastIngestedAt(sessionId);
+        if (stored !== undefined && elapsedMs(nowMs, stored) < policy.hotReexportEveryMs) {
+          hotDeferred += 1;
+          continue;
+        }
+      }
+    }
 
     if (
       options.shouldParseSession !== undefined
@@ -1368,12 +1502,23 @@ async function* streamAmp(options: AmpStreamOptions): AsyncGenerator<AdapterStre
     emitted += 1;
   }
 
+  if (hotDeferred > 0) {
+    yield {
+      type: "diagnostic",
+      diagnostic: adapterDiagnostic(
+        SOURCE_ROOT,
+        "amp.threads.hot_deferred",
+        `Deferred ${hotDeferred} Amp thread(s) still being written; re-export waits for settle or ${policy.hotReexportEveryMs / MINUTE_MS} min.`,
+        "no_data_found",
+      ),
+    };
+  }
   yield {
     type: "diagnostic",
     diagnostic: adapterDiagnostic(
       SOURCE_ROOT,
       "amp.threads.available",
-      `Discovered ${emitted} Amp thread(s).`,
+      `Discovered ${emitted} Amp thread(s) via ${decision.list.kind} list (${exportCount} export call(s)).`,
       emitted > 0 ? "available" : "no_data_found",
     ),
   };
