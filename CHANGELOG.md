@@ -8,6 +8,17 @@ formats may still change.
 
 ## [Unreleased]
 
+### Changed
+
+- Amp ingest is opt-in: `ingest --provider all` skips the remote `amp` adapter
+  unless `QUASAR_AMP_INGEST=on`, which `quasar daemon install --amp` writes
+  into the LaunchAgent. `daemon status` reports `ampIngest`.
+- The daemon polls Amp's servers on a throttle instead of every tick: a full
+  thread list every 15 minutes, the 25 newest threads every 5 minutes in
+  between, and a thread still being written re-exports at most every 30
+  minutes. State is two timestamps in `amp-poll-state.json` beside the ingest
+  manifest. `ingest --provider amp` still lists in full immediately.
+
 ## [0.5.3] - 2026-08-11
 
 ### Added
