@@ -9,7 +9,7 @@ import type { QuerySpec } from "@skastr0/quasar-protocol";
 import { parseCliArguments } from "./argv";
 import { configuredIngestToken, configuredServerUrl, defaultClientConfigPath } from "./client-config";
 import { Provider } from "./core/schemas";
-import { daemonIngestProcess } from "./daemon-process";
+import { daemonIngestProcess, daemonPlist, plistEnablesAmpIngest } from "./daemon-process";
 import { ingestFailureError, ingestReportPayload } from "./ingest-report";
 import { ingestRemote } from "./ingest";
 import { fail, ok, writeJson } from "./json";
@@ -102,6 +102,7 @@ const valueOptionNames = new Set([
   "-q",
 ]);
 const booleanOptionNames = new Set([
+  "--amp",
   "--detail",
   "--exclude-reasoning",
   "--exclude-tool-results",
@@ -364,13 +365,6 @@ const daemonPaths = () => {
 
 const launchDomain = () => `gui/${typeof process.getuid === "function" ? process.getuid() : spawnText("id", ["-u"])}`;
 
-const xml = (value: string) => value
-  .replaceAll("&", "&amp;")
-  .replaceAll("<", "&lt;")
-  .replaceAll(">", "&gt;")
-  .replaceAll('"', "&quot;")
-  .replaceAll("'", "&apos;");
-
 const daemonBinary = () => arg("--binary") ?? process.env.QUASAR_DAEMON_BINARY ?? process.execPath;
 
 const daemonInterval = () => {
@@ -384,48 +378,6 @@ const daemonInterval = () => {
 
 const daemonToken = () => arg("--ingest-token") ?? configuredIngestToken();
 
-const daemonPlist = (options: { readonly binary: string; readonly serverUrl: string; readonly ingestToken: string; readonly intervalSeconds: number }) => {
-  const paths = daemonPaths();
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${daemonLabel}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>${xml(options.binary)}</string>
-    <string>daemon</string>
-    <string>run</string>
-  </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>HOME</key>
-    <string>${xml(homedir())}</string>
-    <key>PATH</key>
-    <string>${xml(`${dirname(options.binary)}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`)}</string>
-    <key>QUASAR_DAEMON_BINARY</key>
-    <string>${xml(options.binary)}</string>
-    <key>QUASAR_SERVER_URL</key>
-    <string>${xml(options.serverUrl)}</string>
-    <key>QUASAR_INGEST_TOKEN</key>
-    <string>${xml(options.ingestToken)}</string>
-    <key>QUASAR_DAEMON_HOME</key>
-    <string>${xml(paths.home)}</string>
-  </dict>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>StartInterval</key>
-  <integer>${options.intervalSeconds}</integer>
-  <key>StandardOutPath</key>
-  <string>${xml(paths.stdout)}</string>
-  <key>StandardErrorPath</key>
-  <string>${xml(paths.stderr)}</string>
-</dict>
-</plist>
-`;
-};
-
 const installDaemon = () => {
   if (platform() !== "darwin") throw new Error("daemon install is only supported on macOS launchd");
   const serverUrl = server();
@@ -434,15 +386,20 @@ const installDaemon = () => {
   if (ingestToken === undefined) throw new Error("--ingest-token or QUASAR_INGEST_TOKEN is required");
   const binary = resolve(daemonBinary());
   const intervalSeconds = daemonInterval();
+  const ampIngest = flag("--amp");
   const paths = daemonPaths();
   mkdirSync(dirname(paths.plist), { recursive: true });
   mkdirSync(paths.logs, { recursive: true, mode: 0o700 });
-  writeFileSync(paths.plist, daemonPlist({ binary, serverUrl, ingestToken, intervalSeconds }), { encoding: "utf8", mode: 0o600 });
+  writeFileSync(
+    paths.plist,
+    daemonPlist({ label: daemonLabel, binary, serverUrl, ingestToken, intervalSeconds, home: paths.home, stdout: paths.stdout, stderr: paths.stderr, ampIngest }),
+    { encoding: "utf8", mode: 0o600 },
+  );
   spawnSync("launchctl", ["bootout", launchDomain(), paths.plist], { stdio: "ignore" });
   runLaunchctl(["bootstrap", launchDomain(), paths.plist]);
   runLaunchctl(["enable", `${launchDomain()}/${daemonLabel}`]);
   runLaunchctl(["kickstart", "-k", `${launchDomain()}/${daemonLabel}`]);
-  return { label: daemonLabel, plist: paths.plist, intervalSeconds, serverUrl, lock: paths.lock, logs: { stdout: paths.stdout, stderr: paths.stderr } };
+  return { label: daemonLabel, plist: paths.plist, intervalSeconds, serverUrl, ampIngest, lock: paths.lock, logs: { stdout: paths.stdout, stderr: paths.stderr } };
 };
 
 const uninstallDaemon = () => {
@@ -459,10 +416,12 @@ const daemonStatus = () => {
   // launchctl print dumps the daemon's EnvironmentVariables block, which holds
   // QUASAR_INGEST_TOKEN. Never surface that raw output; derive only run-state.
   const running = loaded ? /\bstate\s*=\s*running\b/.test(result?.stdout ?? "") : false;
+  const installed = existsSync(paths.plist);
   return {
     label: daemonLabel,
     plist: paths.plist,
-    installed: existsSync(paths.plist),
+    installed,
+    ampIngest: installed && plistEnablesAmpIngest(readFileSync(paths.plist, "utf8")),
     loaded,
     running,
     lock: { path: paths.lock, held: existsSync(paths.lock) },
@@ -1217,7 +1176,7 @@ if (!rejectUnsupportedOptions(command)) {
   case "help": {
     const commands = [
       "ingest --provider all|codex|claude|opencode|grok|kimi|hermes|antigravity|omp|pi|prime|cursor|devin|amp [--server url] [--limit n] [--force] [--summary]",
-      "daemon install --server https://<quasar-service-tailnet-hostname> --ingest-token <token> [--interval-seconds 60]",
+      "daemon install --server https://<quasar-service-tailnet-hostname> --ingest-token <token> [--interval-seconds 60] [--amp]",
       "daemon status",
       "daemon uninstall",
       "projects [--limit n] [--offset n]",

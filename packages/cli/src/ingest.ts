@@ -6,9 +6,11 @@ import { loadMachineIdentity } from "./core/machine";
 import type { AdapterDiagnostic, DiagnosticSeverity, Provider } from "./core/schemas";
 import { diagnosticSeverity, truncateDiagnosticMessage } from "./core/schemas";
 
+import type { AmpPollState, AmpStreamOptions } from "./adapters/amp";
 import { sourceFingerprintFor } from "./adapters/common";
-import { adaptersByProvider, stableAdapters } from "./adapters/registry";
+import { adaptersByProvider, defaultIngestProviders } from "./adapters/registry";
 import type { SessionParseProbe } from "./adapters/types";
+import type { SessionId } from "./core/identity";
 import { mapSession } from "./map";
 import type { MappedSession, MessageRole } from "./model";
 import { NORMALIZATION_VERSION } from "./normalization-version";
@@ -26,8 +28,73 @@ export interface ManifestEntry {
 /** path -> { mtimeMs, size } recorded after a successful postMappedSession */
 export type IngestManifest = Record<string, ManifestEntry>;
 
+const daemonHomePath = (): string =>
+  resolve(process.env.QUASAR_DAEMON_HOME ?? join(homedir(), ".config", "quasar"));
+
 const manifestPath = (override?: string): string =>
-  override ?? resolve(process.env.QUASAR_DAEMON_HOME ?? join(homedir(), ".config", "quasar"), "ingest-manifest.json");
+  override ?? resolve(daemonHomePath(), "ingest-manifest.json");
+
+// ---------------------------------------------------------------------------
+// Amp poll state — two timestamps beside the manifest. Not thread data: losing
+// it costs one extra list call, nothing else.
+// ---------------------------------------------------------------------------
+
+export const ampPollStatePath = (manifestOverride?: string): string =>
+  join(dirname(manifestPath(manifestOverride)), "amp-poll-state.json");
+
+export const loadAmpPollState = (path: string): AmpPollState => {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    const iso = (value: unknown) => (typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : undefined);
+    const lastFullListAt = iso(parsed.lastFullListAt);
+    const lastHeadListAt = iso(parsed.lastHeadListAt);
+    return {
+      ...(lastFullListAt !== undefined ? { lastFullListAt } : {}),
+      ...(lastHeadListAt !== undefined ? { lastHeadListAt } : {}),
+    };
+  } catch {
+    return {};
+  }
+};
+
+export const saveAmpPollState = (state: AmpPollState, path: string): void => {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const tmp = `${path}.tmp-${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(state, null, 2), { encoding: "utf8", mode: 0o600 });
+  renameSync(tmp, path);
+};
+
+/**
+ * Stored `updated` per recent Amp session, from one server list call. Read
+ * lazily: the daemon only needs it when a changed thread is still hot.
+ */
+const recentAmpSessionUpdatedAt = (
+  serverUrl: string,
+  options: { readonly timeoutMs?: number },
+): ((sessionId: SessionId) => Promise<string | undefined>) => {
+  let loaded: Promise<Map<string, string>> | undefined;
+  const load = async (): Promise<Map<string, string>> => {
+    const url = new URL("/sessions", serverUrl.endsWith("/") ? serverUrl : `${serverUrl}/`);
+    url.searchParams.set("provider", "amp");
+    url.searchParams.set("limit", "200");
+    const byId = new Map<string, string>();
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(options.timeoutMs ?? defaultHttpTimeoutMs) });
+      const body = await response.json() as { data?: { rows?: readonly { sessionId?: unknown; endedAt?: unknown }[] } };
+      for (const row of body.data?.rows ?? []) {
+        if (typeof row.sessionId === "string" && typeof row.endedAt === "string") byId.set(row.sessionId, row.endedAt);
+      }
+    } catch {
+      // Unreachable server: treat every thread as never ingested, which means
+      // export — the write will fail on its own and be retried next tick.
+    }
+    return byId;
+  };
+  return async (sessionId) => {
+    loaded ??= load();
+    return (await loaded).get(sessionId);
+  };
+};
 
 export const loadManifest = (path?: string): IngestManifest => {
   const file = manifestPath(path);
@@ -536,6 +603,19 @@ const ingestProviderRemote = async (
     return entry;
   };
 
+  // Amp is remote-only: under the daemon's `--provider all` it polls on the
+  // adapter's throttle and holds hot threads; an explicit `--provider amp`
+  // lists in full right now.
+  const ampOptions: Partial<AmpStreamOptions> = provider === "amp" && options.provider === "all"
+    ? {
+        ampPoll: {
+          state: loadAmpPollState(ampPollStatePath(options.manifestPath)),
+          onState: (state) => saveAmpPollState(state, ampPollStatePath(options.manifestPath)),
+        },
+        lastIngestedAt: recentAmpSessionUpdatedAt(serverUrl, options),
+      }
+    : {};
+
   const stream = adapter.stream({
     machine: loadMachineIdentity(),
     now: new Date().toISOString(),
@@ -543,6 +623,7 @@ const ingestProviderRemote = async (
     limit: options.limit,
     shouldParseSession,
     shouldReadFile,
+    ...ampOptions,
   });
 
   for await (const item of stream) {
@@ -677,7 +758,7 @@ export const ingestRemote = async (
 ): Promise<readonly IngestReport[]> => {
   const providers =
     options.provider === "all"
-      ? stableAdapters.map((adapter) => adapter.provider)
+      ? defaultIngestProviders()
       : [options.provider];
 
   // Load manifest once; --force skips the stat gate but still persists updates
