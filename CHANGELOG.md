@@ -8,6 +8,12 @@ formats may still change.
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-09-09
+
+Built from 0.5.3 plus the Amp changes below; normalization version stays 12.
+0.5.4 shipped normalization 13 ahead of the staged server upgrade and must not
+be installed against a version-12 server.
+
 ### Changed
 
 - Amp ingest is opt-in: `ingest --provider all` skips the remote `amp` adapter
