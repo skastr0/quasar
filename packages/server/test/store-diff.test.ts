@@ -449,6 +449,38 @@ describe("upsertSession row-level diff", () => {
     expect(ftsCount(path)).toBe(20);
   });
 
+  test("an event that moves to a different seq converges instead of tripping messages_by_event", async () => {
+    // Measured on the Mac mini (2026-09-08): 1553 codex sessions failed every
+    // cycle with "UNIQUE constraint failed: messages.session_id,
+    // messages.event_id" once a turn was inserted upstream and every later
+    // event shifted one seq down.
+    const path = sqlitePath();
+    const rows = initialMessages(3);
+    const shifted: MessageRow[] = [
+      message(1, "prepended turn", { eventId: "event-0", contentHash: "hash-prepended" }),
+      ...rows.map((row) => ({ ...row, seq: row.seq + 1 })),
+    ];
+    const second = await withStore(path, (store) =>
+      Effect.gen(function* () {
+        yield* store.upsertSession(session(rows));
+        return yield* store.upsertSession(session(shifted, [], { sourceFingerprint: "fp-2" }));
+      }));
+    expect(second.messagesInserted).toBe(1);
+    expect(second.messagesUpdated).toBe(3);
+    expect(messagesCount(path)).toBe(4);
+    const db = new Database(path, { readonly: true });
+    try {
+      expect(
+        db.query("SELECT seq, event_id AS eventId FROM messages WHERE session_id = ? ORDER BY seq").all(SESSION_ID),
+      ).toEqual([
+        { seq: 1, eventId: "event-0" }, { seq: 2, eventId: "event-1" }, { seq: 3, eventId: "event-2" }, { seq: 4, eventId: "event-3" },
+      ]);
+    } finally {
+      db.close();
+    }
+    expect(ftsCount(path)).toBe(4);
+  });
+
   test("truncation deletes vanished rows from messages, FTS, and vectors", async () => {
     const path = sqlitePath();
     const rows = initialMessages(30);

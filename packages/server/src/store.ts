@@ -1594,6 +1594,16 @@ const makeLocalStoreLayerScoped = (
           "SELECT source_fingerprint AS sourceFingerprint FROM sessions WHERE session_id = ?",
         );
         const deleteMessageRow = db.prepare("DELETE FROM messages WHERE session_id = ? AND seq = ?");
+        /**
+         * A re-sent session can move an event to a different seq (a turn
+         * inserted or dropped upstream shifts everything after it). The row
+         * still holding that event id at its old seq must go before the new
+         * seq is written, or `messages_by_event` rejects the insert. The old
+         * seq is itself rewritten or deleted later in the same plan.
+         */
+        const deleteMessageByEvent = db.prepare(
+          "DELETE FROM messages WHERE session_id = ? AND event_id = ? AND seq <> ?",
+        );
         const deleteToolCallRow = db.prepare("DELETE FROM tool_calls WHERE id = ?");
         const upsertToolCall = db.prepare(
           `INSERT INTO tool_calls(id, session_id, event_id, seq, tool_name, status, input_text, output_text, input_hash, output_hash, started_at, completed_at, project_key, provider, execution_context_id, model, model_provider, reasoning_effort)
@@ -1884,6 +1894,9 @@ const makeLocalStoreLayerScoped = (
         const applyMessageUpsertChunk = db.transaction((rows: readonly MessageRow[]) => {
           for (const message of rows) {
             deleteMessageRow.run(message.sessionId, message.seq);
+            if (message.eventId !== null && message.eventId !== undefined) {
+              deleteMessageByEvent.run(message.sessionId, message.eventId, message.seq);
+            }
             insertMessage.run({
               $sessionId: message.sessionId,
               $eventId: message.eventId,
