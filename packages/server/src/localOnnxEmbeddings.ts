@@ -1,7 +1,9 @@
 import { env, pipeline } from "@huggingface/transformers";
+import { Effect } from "effect";
 
 import type { EmbeddingProfile } from "./embeddingProfiles";
 import type { Embedder } from "./embeddings";
+import { recordEmbeddingProviderRequest } from "./metrics";
 
 type FeatureExtractionOutput = {
   readonly dims?: readonly number[];
@@ -97,16 +99,44 @@ export const makeLocalOnnxEmbedder = (
     return extractorPromise;
   };
 
+  const embedValues = async (values: readonly string[]): Promise<readonly (readonly number[])[]> => {
+    if (values.length === 0) return [];
+    const extractor = await load();
+    const output = await extractor([...values], { pooling: "mean", normalize: true });
+    const vectors = vectorsFromOutput(output, values.length);
+    if (vectors.length !== values.length) {
+      throw new Error(`local ONNX embedder returned ${vectors.length} vectors for ${values.length} inputs`);
+    }
+    return vectors.map((vector) => fitDimensions(profile, vector));
+  };
+
   return {
-    embedMany: async (values) => {
-      if (values.length === 0) return [];
-      const extractor = await load();
-      const output = await extractor([...values], { pooling: "mean", normalize: true });
-      const vectors = vectorsFromOutput(output, values.length);
-      if (vectors.length !== values.length) {
-        throw new Error(`local ONNX embedder returned ${vectors.length} vectors for ${values.length} inputs`);
-      }
-      return vectors.map((vector) => fitDimensions(profile, vector));
-    },
+    embedMany: embedValues,
+    embedManyEffect: (values) =>
+      Effect.gen(function* () {
+        const startedAtMs = performance.now();
+        const result = yield* Effect.tryPromise({
+          try: () => embedValues(values),
+          catch: (cause) => cause,
+        }).pipe(
+          Effect.tap(() => Effect.annotateCurrentSpan({ "embedding.outcome": "ok" })),
+          Effect.tapError(() => Effect.annotateCurrentSpan({ "embedding.outcome": "error" })),
+          Effect.withSpan("embedding.provider.request", {
+            attributes: {
+              "embedding.provider": "local",
+              "embedding.model": profile.model,
+              "embedding.profile": profile.cacheNamespace,
+              "embedding.batch.size": values.length,
+            },
+          }),
+          Effect.either,
+        );
+        yield* recordEmbeddingProviderRequest({
+          provider: "local",
+          durationMs: performance.now() - startedAtMs,
+        });
+        if (result._tag === "Left") return yield* Effect.fail(result.left);
+        return result.right;
+      }),
   };
 };

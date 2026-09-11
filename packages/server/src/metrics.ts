@@ -155,6 +155,28 @@ export const syntheticMalformedBodyCounter = Metric.counter(
   { description: "Synthetic embedder truncated/malformed response bodies" },
 );
 
+/**
+ * Document-embedding worker job outcomes, one occurrence per job decision:
+ * embedded | retried | failed | cache_hit | cache_miss | skipped.
+ */
+export const embeddingWorkerOutcomeFrequency = Metric.frequency(
+  "quasar.embedding.worker.outcomes",
+  { description: "Document embedding worker job outcomes by result" },
+);
+
+/** One sample per embedding provider request (synthetic HTTP / local ONNX). */
+export const embeddingProviderRequestTimer = Metric.timerWithBoundaries(
+  "quasar.embedding.provider.request",
+  [10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000],
+  "Embedding provider request duration (ms histogram)",
+);
+
+/** Stale embedding leases returned to pending by the worker recovery pass. */
+export const embeddingStaleLeasesRecoveredCounter = Metric.counter(
+  "quasar.embedding.worker.stale_leases_recovered",
+  { description: "Stale embedding job leases recovered to pending" },
+);
+
 // --- Healthy envelope (stated, pollable) ------------------------------------
 
 export const HEALTHY_ENVELOPE = {
@@ -373,6 +395,30 @@ export const recordAppendDropped = (): Effect.Effect<void> =>
 
 export const recordSyntheticMalformedBody = (): Effect.Effect<void> =>
   Metric.increment(syntheticMalformedBodyCounter);
+
+export type EmbeddingWorkerOutcome =
+  | "embedded"
+  | "retried"
+  | "failed"
+  | "cache_hit"
+  | "cache_miss"
+  | "skipped";
+
+export const recordEmbeddingWorkerOutcome = (
+  outcome: EmbeddingWorkerOutcome,
+): Effect.Effect<void> => Metric.update(embeddingWorkerOutcomeFrequency, outcome);
+
+export const recordEmbeddingProviderRequest = (options: {
+  readonly provider: string;
+  readonly durationMs: number;
+}): Effect.Effect<void> =>
+  Metric.update(
+    Metric.tagged(embeddingProviderRequestTimer, "provider", options.provider),
+    millis(options.durationMs),
+  );
+
+export const recordEmbeddingStaleLeasesRecovered = (count: number): Effect.Effect<void> =>
+  Metric.incrementBy(embeddingStaleLeasesRecoveredCounter, Math.max(0, Math.trunc(count)));
 
 export const publishQueueGauges = (stats: {
   readonly pending: number;

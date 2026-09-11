@@ -3,13 +3,14 @@ import { Effect, Layer, Ref, Schedule, Schema } from "effect";
 import { createHash } from "node:crypto";
 
 import { embeddingProfileFromEnv, embeddingProviderFromEnv, queryEmbeddingProviderFromEnv, type EmbeddingProfile } from "./embeddingProfiles";
+import { recordEmbeddingStaleLeasesRecovered, recordEmbeddingWorkerOutcome } from "./metrics";
 import type { MessageRow, QueueJobRow } from "./model";
 import { ensureParentDir, sqlitePath } from "./paths";
 import { isSemanticSearchDocument } from "./searchPolicy";
 import { DurableQueue, Embeddings, type EmbeddingCacheRow, type EmbeddingReadinessStatus } from "./services";
 import { LocalStore } from "./store";
 import { makeLocalOnnxEmbedder } from "./localOnnxEmbeddings";
-import { makeSyntheticEmbedder, SyntheticEmbeddingError } from "./syntheticEmbeddings";
+import { isAbortLikeError, makeSyntheticEmbedder, SYNTHETIC_TIMEOUT_OPERATION, SyntheticEmbeddingError } from "./syntheticEmbeddings";
 import {
   decodeFloat32Vector,
   EMBEDDING_CACHE_VECTOR_ENCODING,
@@ -235,12 +236,14 @@ const assertVectorDimensions = (operation: string, profile: EmbeddingProfile, ve
         }),
       );
 
-const isEmbedMessagePayload = (payload: unknown): payload is {
+export interface EmbedMessagePayload {
   readonly sessionId: string;
   readonly seq: number;
   readonly contentHash: string;
   readonly embeddingProfile: string;
-} =>
+}
+
+const isEmbedMessagePayload = (payload: unknown): payload is EmbedMessagePayload =>
   typeof payload === "object" &&
   payload !== null &&
   typeof (payload as { sessionId?: unknown }).sessionId === "string" &&
@@ -295,13 +298,72 @@ const averageVectors = (vectors: readonly (readonly number[])[]): readonly numbe
 const isRetryableEmbeddingError = (message: string): boolean =>
   /quota|rate.?limit|too many requests|resource exhausted|429/i.test(message);
 
-const isRetryableEmbeddingCause = (cause: unknown): boolean => {
+/** Durable-worker retry statuses, exactly as before this observability change. */
+const RETRYABLE_EMBEDDING_STATUSES = new Set([429, 500, 502, 503, 504]);
+
+/**
+ * One structured classification for document-embedding failures:
+ * Synthetic timeout/abort vs HTTP/decode/provider/payload errors. The
+ * `retryable` flag preserves the historical queue-delay semantics exactly
+ * (status-based for typed Synthetic errors, message-based otherwise) while
+ * giving logs, spans and metrics a typed errorKind to attribute.
+ */
+export type EmbeddingFailureKind = "timeout" | "http" | "decode" | "provider" | "payload" | "unknown";
+
+export interface EmbeddingFailure {
+  readonly kind: EmbeddingFailureKind;
+  readonly message: string;
+  readonly retryable: boolean;
+  readonly operation?: string;
+  readonly status?: number;
+  readonly cause?: unknown;
+}
+
+export const classifyEmbeddingFailure = (cause: unknown): EmbeddingFailure => {
   if (cause instanceof SyntheticEmbeddingError) {
-    return cause.status === 429 || cause.status === 500 || cause.status === 502 || cause.status === 503 || cause.status === 504;
+    const kind: EmbeddingFailureKind =
+      cause.operation === SYNTHETIC_TIMEOUT_OPERATION
+        ? "timeout"
+        : cause.operation === "synthetic.embeddings.decode"
+          ? "decode"
+          : cause.status !== undefined
+            ? "http"
+            : "provider";
+    return {
+      kind,
+      message: cause.message,
+      // Exact historical durable-worker retry list; in-client retries are
+      // unchanged and remain the wider 429/5xx rule in syntheticEmbeddings.
+      retryable: RETRYABLE_EMBEDDING_STATUSES.has(cause.status ?? -1),
+      operation: cause.operation,
+      ...(cause.status === undefined ? {} : { status: cause.status }),
+      cause,
+    };
   }
   const message = cause instanceof Error ? cause.message : String(cause);
-  return isRetryableEmbeddingError(message);
+  if (isAbortLikeError(cause)) {
+    return {
+      kind: "timeout",
+      message: `embedding provider request aborted (timeout or cancellation): ${message}`,
+      retryable: false,
+      cause,
+    };
+  }
+  return {
+    kind: cause instanceof Error ? "provider" : "unknown",
+    message,
+    retryable: isRetryableEmbeddingError(message),
+    cause,
+  };
 };
+
+const providerFailure = (message: string): EmbeddingFailure => ({
+  kind: "provider",
+  message,
+  retryable: false,
+});
+
+const isRetryableEmbeddingCause = (cause: unknown): boolean => classifyEmbeddingFailure(cause).retryable;
 
 const prefixed = (prefix: string | undefined, text: string): string =>
   prefix === undefined || prefix.length === 0 ? text : `${prefix}${text}`;
@@ -347,6 +409,8 @@ const probeEmbeddingAvailability = (
 
 export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer.Layer<Embeddings, never, LocalStore | DurableQueue> => {
   const profile = options.profile ?? embeddingProfileFromEnv();
+  // Safe span/metric attribute: production provider or the test injection seam.
+  const documentProvider = options.embedder === undefined ? embeddingProviderFromEnv() : "injected";
   const embedder = options.embedder ?? liveEmbedderForProfile(profile);
   const path = options.sqlite ?? sqlitePath();
 
@@ -592,10 +656,28 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
               }).pipe(Effect.withSpan("search.embedText")),
             getCached,
             putCached,
-            processBatch: ({ workerId, limit, leaseMs, now = nowIso() }) =>
+            processBatch: (options) =>
               Effect.gen(function* () {
-                yield* queue.recoverStaleLeases(now);
+                const { workerId, limit, leaseMs, now = nowIso() } = options;
+                const staleLeasesRecovered = yield* queue.recoverStaleLeases(now);
+                if (staleLeasesRecovered > 0) {
+                  yield* recordEmbeddingStaleLeasesRecovered(staleLeasesRecovered);
+                  yield* Effect.logWarning("embedding.worker.stale_leases_recovered").pipe(
+                    Effect.annotateLogs({
+                      event: "embedding.worker.stale_leases_recovered",
+                      at: now,
+                      workerId,
+                      profile: profile.cacheNamespace,
+                      provider: documentProvider,
+                      recovered: staleLeasesRecovered,
+                    }),
+                  );
+                }
                 const jobs = yield* queue.leaseBatch({ workerId, kind: "embed-message", limit, leaseMs, now });
+                yield* Effect.annotateCurrentSpan({
+                  "embedding.batch.size": jobs.length,
+                  "embedding.attempts": jobs.reduce((max, job) => Math.max(max, job.attempts), 0),
+                });
                 let cacheHits = 0;
                 let cacheMisses = 0;
                 let embedded = 0;
@@ -603,42 +685,122 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                 let retried = 0;
                 let failed = 0;
                 let sqliteVectorsUpserted = 0;
-                const misses: Array<{ job: QueueJobRow; message: MessageRow }> = [];
+                type EmbeddingMiss = {
+                  readonly job: QueueJobRow;
+                  readonly message: MessageRow;
+                  readonly payload: EmbedMessagePayload;
+                };
+                const misses: EmbeddingMiss[] = [];
                 const cachedSqliteRows: Array<ReturnType<typeof toSqliteVectorRow>> = [];
                 const cachedJobIds: string[] = [];
-                const retryOrFail = (job: QueueJobRow, error: string, retryable: boolean) =>
-                  job.attempts >= job.maxAttempts
-                    ? queue.fail(job.jobId, error, now).pipe(Effect.as("failed" as const))
-                    : queue.retry(job.jobId, {
-                        error,
-                        delayMs: retryDelayMs(job.attempts, retryable),
-                        now,
-                      }).pipe(Effect.as("retried" as const));
+
+                const jobLogFields = (
+                  job: QueueJobRow,
+                  failure: EmbeddingFailure,
+                  durationMs: number,
+                  payload?: Pick<EmbedMessagePayload, "sessionId" | "seq" | "contentHash">,
+                ): Record<string, unknown> => ({
+                  at: now,
+                  jobId: job.jobId,
+                  ...(payload === undefined
+                    ? {}
+                    : { sessionId: payload.sessionId, seq: payload.seq, contentHash: payload.contentHash }),
+                  profile: profile.cacheNamespace,
+                  provider: documentProvider,
+                  attempt: job.attempts,
+                  maxAttempts: job.maxAttempts,
+                  durationMs,
+                  retryable: failure.retryable,
+                  errorKind: failure.kind,
+                  ...(failure.operation === undefined ? {} : { errorOperation: failure.operation }),
+                  ...(failure.status === undefined ? {} : { errorStatus: failure.status }),
+                  errorMessage: failure.message,
+                });
+
+                const logJobFailure = (
+                  job: QueueJobRow,
+                  failure: EmbeddingFailure,
+                  durationMs: number,
+                  payload?: Pick<EmbedMessagePayload, "sessionId" | "seq" | "contentHash">,
+                ) =>
+                  Effect.logError("embedding.job.failed").pipe(
+                    Effect.annotateLogs({
+                      event: "embedding.job.failed",
+                      ...jobLogFields(job, failure, durationMs, payload),
+                      delayMs: 0,
+                    }),
+                  );
+
+                const retryOrFail = (
+                  job: QueueJobRow,
+                  payload: EmbedMessagePayload,
+                  failure: EmbeddingFailure,
+                  durationMs: number,
+                ) => {
+                  if (job.attempts >= job.maxAttempts) {
+                    return queue.fail(job.jobId, failure.message, now).pipe(
+                      Effect.tap(() => recordEmbeddingWorkerOutcome("failed")),
+                      Effect.tap(() => logJobFailure(job, failure, durationMs, payload)),
+                      Effect.as("failed" as const),
+                    );
+                  }
+                  const delayMs = retryDelayMs(job.attempts, failure.retryable);
+                  return queue.retry(job.jobId, { error: failure.message, delayMs, now }).pipe(
+                    Effect.tap(() => recordEmbeddingWorkerOutcome("retried")),
+                    Effect.tap(() =>
+                      Effect.logWarning("embedding.job.retry").pipe(
+                        Effect.annotateLogs({
+                          event: "embedding.job.retry",
+                          ...jobLogFields(job, failure, durationMs, payload),
+                          delayMs,
+                        }),
+                      ),
+                    ),
+                    Effect.as("retried" as const),
+                  );
+                };
 
                 for (const job of jobs) {
                   if (job.kind !== "embed-message" || !isEmbedMessagePayload(job.payload)) {
-                    yield* queue.fail(job.jobId, "invalid embed-message payload", now);
+                    const failure: EmbeddingFailure = {
+                      kind: "payload",
+                      message: "invalid embed-message payload",
+                      retryable: false,
+                    };
+                    yield* queue.fail(job.jobId, failure.message, now);
                     failed += 1;
+                    yield* recordEmbeddingWorkerOutcome("failed");
+                    yield* logJobFailure(job, failure, 0);
                     continue;
                   }
-                  if (job.payload.embeddingProfile !== profile.cacheNamespace) {
-                    yield* queue.fail(job.jobId, `embed-message profile mismatch: job=${job.payload.embeddingProfile} active=${profile.cacheNamespace}`, now);
+                  const payload = job.payload;
+                  if (payload.embeddingProfile !== profile.cacheNamespace) {
+                    const failure: EmbeddingFailure = {
+                      kind: "payload",
+                      message: `embed-message profile mismatch: job=${payload.embeddingProfile} active=${profile.cacheNamespace}`,
+                      retryable: false,
+                    };
+                    yield* queue.fail(job.jobId, failure.message, now);
                     failed += 1;
+                    yield* recordEmbeddingWorkerOutcome("failed");
+                    yield* logJobFailure(job, failure, 0, payload);
                     continue;
                   }
                   const message = yield* store.getMessage({
-                    sessionId: job.payload.sessionId,
-                    seq: job.payload.seq,
-                    contentHash: job.payload.contentHash,
+                    sessionId: payload.sessionId,
+                    seq: payload.seq,
+                    contentHash: payload.contentHash,
                   });
                   if (message == null) {
                     yield* queue.ack(job.jobId, now);
                     skipped += 1;
+                    yield* recordEmbeddingWorkerOutcome("skipped");
                     continue;
                   }
                   if (!isSemanticSearchDocument(message)) {
                     yield* queue.ack(job.jobId, now);
                     skipped += 1;
+                    yield* recordEmbeddingWorkerOutcome("skipped");
                     continue;
                   }
                   const cached = yield* getCached(documentCacheHash(message));
@@ -646,10 +808,12 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                     cachedSqliteRows.push(toSqliteVectorRow(message, cached.vector, now));
                     cachedJobIds.push(job.jobId);
                     cacheHits += 1;
+                    yield* recordEmbeddingWorkerOutcome("cache_hit");
                     continue;
                   }
                   cacheMisses += 1;
-                  misses.push({ job, message });
+                  yield* recordEmbeddingWorkerOutcome("cache_miss");
+                  misses.push({ job, message, payload });
                 }
 
                 if (cachedSqliteRows.length > 0) {
@@ -660,7 +824,6 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                 }
 
                 if (misses.length > 0) {
-                  type EmbeddingMiss = { readonly job: QueueJobRow; readonly message: MessageRow };
                   type ChunkReport = { readonly embedded: number; readonly retried: number; readonly failed: number };
                   const emptyChunkReport: ChunkReport = { embedded: 0, retried: 0, failed: 0 };
                   const mergeChunkReport = (total: ChunkReport, report: ChunkReport): ChunkReport => ({
@@ -670,6 +833,7 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                   });
                   const processMissChunk: (chunk: readonly EmbeddingMiss[]) => Effect.Effect<ChunkReport, unknown> = (chunk) =>
                     Effect.gen(function* () {
+                      const chunkStartedAt = performance.now();
                       let chunkEmbedded = 0;
                       let chunkRetried = 0;
                       let chunkFailed = 0;
@@ -689,8 +853,8 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                       ).pipe(Effect.either);
 
                       if (result._tag === "Left") {
-                        const retryable = isRetryableEmbeddingCause(result.left);
-                        if (retryable && chunk.length > 1) {
+                        const failure = classifyEmbeddingFailure(result.left);
+                        if (failure.retryable && chunk.length > 1) {
                           const splitAt = Math.ceil(chunk.length / 2);
                           const splitReports = yield* Effect.forEach(
                             [chunk.slice(0, splitAt), chunk.slice(splitAt)].filter((split) => split.length > 0),
@@ -699,9 +863,8 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                           );
                           return splitReports.reduce(mergeChunkReport, emptyChunkReport);
                         }
-                        const error = result.left instanceof Error ? result.left.message : String(result.left);
-                        for (const { job } of chunk) {
-                          const outcome = yield* retryOrFail(job, error, retryable);
+                        for (const { job, payload } of chunk) {
+                          const outcome = yield* retryOrFail(job, payload, failure, elapsedSince(chunkStartedAt));
                           if (outcome === "failed") {
                             chunkFailed += 1;
                           } else {
@@ -718,7 +881,12 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                         const vector = result.right[index];
                         if (miss === undefined) continue;
                         if (vector === undefined) {
-                          const outcome = yield* retryOrFail(miss.job, "embedder returned fewer vectors than requested", false);
+                          const outcome = yield* retryOrFail(
+                            miss.job,
+                            miss.payload,
+                            providerFailure("embedder returned fewer vectors than requested"),
+                            elapsedSince(chunkStartedAt),
+                          );
                           if (outcome === "failed") chunkFailed += 1;
                           else chunkRetried += 1;
                           continue;
@@ -739,9 +907,30 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                       for (const jobId of ackJobIds) {
                         yield* queue.ack(jobId, now);
                         chunkEmbedded += 1;
+                        yield* recordEmbeddingWorkerOutcome("embedded");
                       }
                       return { embedded: chunkEmbedded, retried: chunkRetried, failed: chunkFailed };
-                    });
+                    }).pipe(
+                      Effect.tap((report) =>
+                        Effect.annotateCurrentSpan({
+                          "embedding.chunk.embedded": report.embedded,
+                          "embedding.chunk.retried": report.retried,
+                          "embedding.chunk.failed": report.failed,
+                          "embedding.outcome": report.failed > 0 ? "failed" : report.retried > 0 ? "retried" : "ok",
+                        }),
+                      ),
+                      Effect.tapError((cause) =>
+                        Effect.annotateCurrentSpan({ "embedding.outcome": classifyEmbeddingFailure(cause).kind }),
+                      ),
+                      Effect.withSpan("embedding.worker.chunk", {
+                        attributes: {
+                          "embedding.profile": profile.cacheNamespace,
+                          "embedding.provider": documentProvider,
+                          "embedding.chunk.size": chunk.length,
+                          "embedding.attempts": chunk.reduce((max, miss) => Math.max(max, miss.job.attempts), 0),
+                        },
+                      }),
+                    );
 
                   const chunkReports = yield* Effect.forEach(
                     chunksOf(misses, positiveIntEnv("QUASAR_EMBEDDING_API_BATCH_SIZE", DEFAULT_EMBEDDING_API_BATCH_SIZE)),
@@ -756,7 +945,31 @@ export const makeEmbeddingsLayer = (options: EmbeddingsLayerOptions = {}): Layer
                 }
 
                 return { leased: jobs.length, cacheHits, cacheMisses, embedded, skipped, retried, failed, sqliteVectorsUpserted };
-              }),
+              }).pipe(
+                Effect.tap((report) =>
+                  Effect.annotateCurrentSpan({
+                    "embedding.embedded": report.embedded,
+                    "embedding.retried": report.retried,
+                    "embedding.failed": report.failed,
+                    "embedding.cache_hits": report.cacheHits,
+                    "embedding.cache_misses": report.cacheMisses,
+                    "embedding.skipped": report.skipped,
+                    "embedding.outcome": report.failed > 0 ? "failed" : report.retried > 0 ? "retried" : "ok",
+                  }),
+                ),
+                Effect.tapError((cause) =>
+                  Effect.annotateCurrentSpan({ "embedding.outcome": classifyEmbeddingFailure(cause).kind }),
+                ),
+                Effect.withSpan("embedding.worker.batch", {
+                  attributes: {
+                    "embedding.profile": profile.cacheNamespace,
+                    "embedding.provider": documentProvider,
+                    "embedding.worker": options.workerId,
+                    "embedding.batch.limit": options.limit,
+                    "embedding.lease_ms": options.leaseMs,
+                  },
+                }),
+              ),
             materializeCachedVectors: ({ limit = 1_000, now = nowIso() } = {}) =>
               Effect.gen(function* () {
                 const messages = yield* store.listMessagesMissingVector({ model: profile.cacheNamespace, limit });

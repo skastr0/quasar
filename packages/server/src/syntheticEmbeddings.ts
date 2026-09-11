@@ -1,5 +1,5 @@
 import { Effect, Logger, Schema } from "effect";
-import { recordSyntheticMalformedBody } from "./metrics";
+import { recordEmbeddingProviderRequest, recordSyntheticMalformedBody } from "./metrics";
 
 import type { EmbeddingProfile } from "./embeddingProfiles";
 import type { Embedder } from "./embeddings";
@@ -11,6 +11,14 @@ const DEFAULT_SYNTHETIC_BASE_URL = "https://api.synthetic.new/openai/v1";
 // ~6% transient flake (truncated/malformed body, timeout, 5xx).
 const DEFAULT_SYNTHETIC_REQUEST_TIMEOUT_MS = 3_000;
 const SYNTHETIC_REQUEST_ATTEMPTS = 2;
+
+/** Operation tag for the typed timeout/abort classification. */
+export const SYNTHETIC_TIMEOUT_OPERATION = "synthetic.embeddings.timeout";
+
+/** Abort/timeout shape shared by the adapter wrap and the worker classifier. */
+export const isAbortLikeError = (cause: unknown): boolean =>
+  cause instanceof Error
+  && (cause.name === "AbortError" || cause.name === "TimeoutError" || /abort/i.test(cause.message));
 
 export class SyntheticEmbeddingError extends Schema.TaggedError<SyntheticEmbeddingError>()(
   "SyntheticEmbeddingError",
@@ -101,6 +109,7 @@ const validateResponseIndexes = (data: readonly SyntheticEmbeddingData[], expect
  * 429/5xx are worth one in-client retry; auth/4xx contract errors are not. */
 const isRetryableSyntheticFailure = (cause: unknown): boolean => {
   if (cause instanceof SyntheticEmbeddingError) {
+    if (cause.operation === SYNTHETIC_TIMEOUT_OPERATION) return true;
     if (cause.operation === "synthetic.embeddings.decode") return true;
     return cause.status === 429 || (cause.status !== undefined && cause.status >= 500);
   }
@@ -112,20 +121,35 @@ const embedManyOnce = async (
   options: SyntheticEmbeddingClientOptions,
   values: readonly string[],
   apiKey: string,
+  timeoutMs: number,
 ): Promise<readonly (readonly number[])[]> => {
   const baseUrl = options.baseUrl ?? process.env.SYNTHETIC_OPENAI_BASE_URL?.trim() ?? DEFAULT_SYNTHETIC_BASE_URL;
-  const response = await fetchWithTimeout(options.fetch ?? fetch, `${baseUrl.replace(/\/$/, "")}/embeddings`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${apiKey}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: profile.model,
-      input: [...values],
-      dimensions: profile.dimensions,
-    }),
-  }, syntheticRequestTimeoutMs());
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(options.fetch ?? fetch, `${baseUrl.replace(/\/$/, "")}/embeddings`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: profile.model,
+        input: [...values],
+        dimensions: profile.dimensions,
+      }),
+    }, timeoutMs);
+  } catch (cause) {
+    // Typed classification: an aborted fetch is the internal request timeout,
+    // never a bare DOMException "The operation was aborted." downstream.
+    if (isAbortLikeError(cause)) {
+      throw new SyntheticEmbeddingError({
+        operation: SYNTHETIC_TIMEOUT_OPERATION,
+        message: `Synthetic embeddings request exceeded ${timeoutMs}ms timeout`,
+        cause,
+      });
+    }
+    throw cause;
+  }
 
   let body: unknown;
   try {
@@ -185,12 +209,32 @@ export const makeSyntheticEmbedder = (
           message: "SYNTHETIC_API_KEY is required for Synthetic embeddings",
         }));
       }
+      const timeoutMs = syntheticRequestTimeoutMs();
       let lastFailure: unknown;
       for (let attempt = 1; attempt <= SYNTHETIC_REQUEST_ATTEMPTS; attempt += 1) {
+        const startedAtMs = performance.now();
         const result = yield* Effect.tryPromise({
-          try: () => embedManyOnce(profile, options, values, apiKey),
+          try: () => embedManyOnce(profile, options, values, apiKey, timeoutMs),
           catch: (cause) => cause,
-        }).pipe(Effect.either);
+        }).pipe(
+          Effect.tap(() => Effect.annotateCurrentSpan({ "embedding.outcome": "ok" })),
+          Effect.tapError(() => Effect.annotateCurrentSpan({ "embedding.outcome": "error" })),
+          Effect.withSpan("embedding.provider.request", {
+            attributes: {
+              "embedding.provider": "synthetic",
+              "embedding.model": profile.model,
+              "embedding.profile": profile.cacheNamespace,
+              "embedding.batch.size": values.length,
+              "embedding.attempt": attempt,
+              "embedding.timeout_ms": timeoutMs,
+            },
+          }),
+          Effect.either,
+        );
+        yield* recordEmbeddingProviderRequest({
+          provider: "synthetic",
+          durationMs: performance.now() - startedAtMs,
+        });
         if (result._tag === "Right") return result.right;
         const cause = result.left;
         lastFailure = cause;

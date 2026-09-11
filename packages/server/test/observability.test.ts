@@ -112,6 +112,8 @@ describe("observability spans", () => {
       "vectorMatrix.ts": readServerSrc("vectorMatrix.ts"),
       "ingest.ts": readServerSrc("ingest.ts"),
       "store.ts": readServerSrc("store.ts"),
+      "syntheticEmbeddings.ts": readServerSrc("syntheticEmbeddings.ts"),
+      "localOnnxEmbeddings.ts": readServerSrc("localOnnxEmbeddings.ts"),
     } as const;
 
     const byFile = Object.fromEntries(
@@ -123,6 +125,11 @@ describe("observability spans", () => {
     ]));
     // Child legs on the services they instrument.
     expect(byFile["embeddings.ts"]).toContain("search.embedText");
+    expect(byFile["embeddings.ts"]).toEqual(expect.arrayContaining([
+      "embedding.worker.batch", "embedding.worker.chunk",
+    ]));
+    expect(byFile["syntheticEmbeddings.ts"]).toContain("embedding.provider.request");
+    expect(byFile["localOnnxEmbeddings.ts"]).toContain("embedding.provider.request");
     expect(byFile["vectorMatrix.ts"]).toContain("search.matrixScan");
     expect(byFile["ingest.ts"]).toContain("ingest.session");
     expect(byFile["store.ts"]).toEqual(
@@ -134,7 +141,12 @@ describe("observability spans", () => {
     // Contract lock: stage-level only — never invent per-row names.
     for (const name of unique) {
       expect(name.includes("row")).toBe(false);
-      expect(name === "query" || name.startsWith("search.") || name.startsWith("ingest.")).toBe(true);
+      expect(
+        name === "query"
+        || name.startsWith("search.")
+        || name.startsWith("ingest.")
+        || name.startsWith("embedding."),
+      ).toBe(true);
     }
 
     // Required stable set (each must appear at least once in product wiring).
@@ -148,6 +160,9 @@ describe("observability spans", () => {
       "ingest.session",
       "ingest.diffApply",
       "ingest.chunk",
+      "embedding.worker.batch",
+      "embedding.worker.chunk",
+      "embedding.provider.request",
     ] as const;
     for (const name of required) {
       expect(allNames).toContain(name);
