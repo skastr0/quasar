@@ -4,10 +4,11 @@ export const NORMALIZED_SESSION_PROTOCOL_VERSION =
   "quasar.normalized-session/v1" as const;
 
 /**
- * Increment whenever unchanged provider source must be re-normalized because
- * the canonical projection changed.
+ * A change invalidates every client's source cache and requests corpus replay.
+ * Additive fixes and retries of failed sessions do not require a bump. Change
+ * this only when an explicitly approved corpus-wide re-normalization is needed.
  */
-export const NORMALIZATION_VERSION = 13;
+export const NORMALIZATION_VERSION = 12;
 
 const strictParseOptions = {
   errors: "all",
