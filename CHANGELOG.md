@@ -8,6 +8,17 @@ formats may still change.
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-09-11
+
+### Fixed
+
+- Retain normalization 12 while accepting source-omitted image and file blocks;
+  failed sessions can recover without invalidating every unchanged source.
+- Remove displaced message identities before insertion and notify the resident
+  vector index across write chunks, fixing Codex sequence-change retries.
+- Include failed-source retry isolation, Hermes/OpenCode WAL change detection,
+  SQLite writer contention handling, and scan-worker recovery from main.
+
 ## [0.5.4] - 2026-09-08
 
 ### Changed
