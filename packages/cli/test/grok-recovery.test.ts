@@ -5,17 +5,22 @@ import { join } from "node:path";
 
 import { afterAll, describe, expect, test } from "bun:test";
 
-import { grokAdapter } from "../src/adapters/grok";
+import { grokAdapter, projectGrokLiveEpoch } from "../src/adapters/grok";
+import { mergeGrokEpochMappedSessions } from "../src/adapters/grok-epoch-merge";
 import {
   GROK_RECOVERY_ARCHIVE_INCOMPLETE,
   GROK_RECOVERY_COMPACTION_UNRESOLVED,
+  classifyGrokEpochMessages,
   countExcessMessageOccurrences,
+  planGrokEpochMerge,
   planGrokHistoryRecovery,
+  planGrokLiveEpoch,
   verifyRecoveredTexts,
   verifyToolCallRetention,
   type GrokArchiveHistory,
   type GrokChatSource,
 } from "../src/adapters/grok-recovery";
+import { messageContentHash, NORMALIZED_SESSION_PROTOCOL_VERSION } from "@skastr0/quasar-protocol";
 import {
   grokEntryStructuralKey,
   grokSyntheticInstructionKind,
@@ -235,6 +240,14 @@ describe("planGrokHistoryRecovery", () => {
     ).toContain(grokEntryStructuralKey(continuation("LIVE SUMMARY")));
   });
 
+  test("live-epoch planning ignores incomplete archives and never blocks", () => {
+    const plan = planGrokLiveEpoch(liveSources);
+    expect(plan.block).toBeUndefined();
+    expect(plan.recovered).toBe(false);
+    expect(plan.sources).toBe(liveSources);
+    expect(plan.diagnostics).toEqual([]);
+  });
+
   test("missing checkpoint archives block replacement on decoded update metadata", () => {
     const checkpoint = history(
       [system, userInfo("2026-08-14"), contextReminder("live"), userTurn("final ask")].map(
@@ -368,6 +381,178 @@ describe("duplicate and tool-call retention checks", () => {
   });
 });
 
+describe("planGrokEpochMerge", () => {
+  test("keeps the stored prefix and appends the current suffix at a monotone junction", () => {
+    const storedMessages = [
+      { eventId: "old-a", seq: 1, text: "old only" },
+      { eventId: "shared-1", seq: 2, text: "shared turn" },
+    ];
+    const currentMessages = [
+      { eventId: "live-shared", seq: 0, text: "shared turn" },
+      { eventId: "live-new", seq: 1, text: "new only" },
+    ];
+    const classification = classifyGrokEpochMessages(
+      storedMessages.map((row) => row.text),
+      currentMessages.map((row) => row.text),
+    );
+    expect(classification.oldOnlyIndexes).toEqual([0]);
+    expect(classification.sharedStoredIndexes).toEqual([1]);
+    expect(classification.newOnlyIndexes).toEqual([1]);
+    expect(classification.sharedIsStoredSuffix).toBe(true);
+    expect(classification.sharedIsCurrentPrefix).toBe(true);
+    const plan = planGrokEpochMerge({
+      storedMessages,
+      storedTools: [{ id: "tool-old", eventId: "old-a", seq: 1, toolName: "read", inputText: "a", outputText: "b" }],
+      currentMessages,
+      currentTools: [
+        { id: "tool-old", eventId: "live-shared", seq: 0, toolName: "read", inputText: "a", outputText: "b" },
+        { id: "tool-new", eventId: "live-new", seq: 1, toolName: "grep", inputText: "q", outputText: "r" },
+      ],
+    });
+    expect(plan.safe).toBe(true);
+    expect(plan.oldOnly).toBe(1);
+    expect(plan.shared).toBe(1);
+    expect(plan.newOnly).toBe(1);
+    expect(plan.unionMessages).toBe(3);
+    expect(plan.appendCurrentMessageIndexes).toEqual([1]);
+    expect(plan.appendCurrentToolIds).toEqual(["tool-new"]);
+    expect(plan.currentToolIdsAlreadyStored).toBe(1);
+  });
+
+  test("a shared bootstrap hole is still a safe monotone merge", () => {
+    const plan = planGrokEpochMerge({
+      storedMessages: [
+        { eventId: "old-0", seq: 0, text: "old header" },
+        { eventId: "old-1", seq: 1, text: "shared bootstrap" },
+        { eventId: "old-2", seq: 2, text: "old tail" },
+      ],
+      storedTools: [],
+      currentMessages: [
+        { eventId: "new-0", seq: 0, text: "continuation header" },
+        { eventId: "new-1", seq: 1, text: "shared bootstrap" },
+        { eventId: "new-2", seq: 2, text: "new work" },
+      ],
+      currentTools: [],
+    });
+    expect(plan.safe).toBe(true);
+    expect(plan.shared).toBe(1);
+    expect(plan.newOnly).toBe(2);
+    expect(plan.classification.sharedStoredIndexes).toEqual([1]);
+    expect(plan.classification.sharedCurrentIndexes).toEqual([1]);
+    expect(plan.classification.sharedIsCurrentPrefix).toBe(false);
+    expect(plan.appendCurrentMessageIndexes).toEqual([0, 2]);
+  });
+
+  test("blocks a same-id tool whose payload changed", () => {
+    const plan = planGrokEpochMerge({
+      storedMessages: [{ eventId: "s", seq: 1, text: "shared" }],
+      storedTools: [{ id: "tool-old", eventId: "s", seq: 1, toolName: "read", inputText: "a", outputText: "b" }],
+      currentMessages: [
+        { eventId: "c0", seq: 0, text: "shared" },
+        { eventId: "c1", seq: 1, text: "newer" },
+      ],
+      currentTools: [{ id: "tool-old", eventId: "c0", seq: 0, toolName: "read", inputText: "CHANGED", outputText: "b" }],
+    });
+    expect(plan.safe).toBe(false);
+    expect(plan.blockers.some((blocker) => blocker.startsWith("tool_payload_conflict:"))).toBe(true);
+  });
+
+  test("merged mapped session preserves stored identities and appends the new turn", () => {
+    const hashOf = (eventId: string, seq: number, role: "user" | "assistant", text: string) =>
+      messageContentHash({ sessionId: "grok:merge", eventId, seq, role, text });
+    const event = (
+      id: string,
+      seq: number,
+      role: "user" | "assistant",
+      text: string,
+    ) => ({
+      id,
+      sessionId: "grok:merge",
+      sequence: seq,
+      timestamp: "2026-08-14T00:00:00.000Z",
+      machineId: "machine:test",
+      provider: "grok" as const,
+      agentName: "grok-build",
+      projectIdentityKey: "proj",
+      role,
+      kind: "message" as const,
+      contentText: text,
+      contentBlocks: [],
+      rawReference: { sourcePath: "/tmp/chat_history.jsonl", line: seq + 1 },
+    });
+    const message = (
+      eventId: string,
+      seq: number,
+      role: "user" | "assistant",
+      text: string,
+    ) => ({
+      sessionId: "grok:merge",
+      eventId,
+      seq,
+      role,
+      text,
+      projectKey: "proj",
+      contentHash: hashOf(eventId, seq, role, text),
+    });
+    const stored = {
+      protocolVersion: NORMALIZED_SESSION_PROTOCOL_VERSION,
+      project: { projectKey: "proj", displayName: "proj" },
+      session: {
+        sessionId: "grok:merge",
+        projectKey: "proj",
+        provider: "grok",
+        agentName: "grok-build",
+        sourcePath: "/tmp/old",
+        sourceFingerprint: "stored",
+        host: "test",
+        identitySchemeVersion: 1,
+        normalizationVersion: 12,
+        messageCount: 2,
+        toolCallCount: 0,
+      },
+      messages: [message("old-only", 0, "user", "old only"), message("shared-old", 1, "assistant", "shared turn")],
+      toolCalls: [],
+      events: [event("old-only", 0, "user", "old only"), event("shared-old", 1, "assistant", "shared turn")],
+      usageRecords: [],
+      sessionEdges: [],
+      artifacts: [],
+      executionContexts: [],
+    };
+    const current = {
+      protocolVersion: NORMALIZED_SESSION_PROTOCOL_VERSION,
+      project: { projectKey: "proj", displayName: "proj" },
+      session: {
+        sessionId: "grok:merge",
+        projectKey: "proj",
+        provider: "grok",
+        agentName: "grok-build",
+        sourcePath: "/tmp/live",
+        sourceFingerprint: "live",
+        host: "test",
+        identitySchemeVersion: 1,
+        normalizationVersion: 12,
+        messageCount: 2,
+        toolCallCount: 0,
+      },
+      messages: [message("shared-live", 0, "assistant", "shared turn"), message("new-only", 1, "user", "new only")],
+      toolCalls: [],
+      events: [event("shared-live", 0, "assistant", "shared turn"), event("new-only", 1, "user", "new only")],
+      usageRecords: [],
+      sessionEdges: [],
+      artifacts: [],
+      executionContexts: [],
+    };
+    const merged = mergeGrokEpochMappedSessions(stored as never, current as never);
+    expect(merged.plan.safe).toBe(true);
+    expect(merged.session?.messages.map((row) => row.text)).toEqual(["old only", "shared turn", "new only"]);
+    expect(merged.session?.messages[0]?.eventId).toBe("old-only");
+    expect(merged.session?.messages[0]?.contentHash).toBe(stored.messages[0]!.contentHash);
+    expect(merged.session?.messages[1]?.eventId).toBe("shared-old");
+    expect(merged.session?.messages[2]?.eventId).toBe("new-only");
+    expect(merged.session?.messages[2]?.seq).toBeGreaterThan(1);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Adapter integration: recovery, provenance, fingerprint, fail-closed hold
 // ---------------------------------------------------------------------------
@@ -451,6 +636,13 @@ describe("grok adapter archive recovery", () => {
     expect(failure.severity).toBe("error");
     expect(detailsOf(failure).physicalPath).toBe(fixture.chatPath);
     expect(failure.message).toContain("left unchanged");
+
+    const live = projectGrokLiveEpoch(fixture.sessionDir, { machine: MACHINE, now: NOW });
+    expect(live.session).toBeDefined();
+    expect(live.recoveryBlock).toBeUndefined();
+    const liveMapped = mapSession(live.session!, "live-epoch");
+    expect(liveMapped.messages.some((message) => message.text.includes("new answer"))).toBe(true);
+    expect(liveMapped.messages.some((message) => message.text.includes("first ask"))).toBe(false);
   });
 
   test("archive inputs join the fingerprint and the stat read gate", async () => {

@@ -56,6 +56,7 @@ import {
 import {
   grokArchiveInputPaths,
   planGrokHistoryRecovery,
+  planGrokLiveEpoch,
   readGrokArchiveHistories,
   type GrokChatSource,
 } from "./grok-recovery";
@@ -508,6 +509,7 @@ const buildGrokSessionFromChatPath = (
   sessionsRoot: string,
   lineageMap: GrokLineageMap,
   options: AdapterOptions,
+  recoveryMode: "default" | "live-epoch" = "default",
 ): GrokSessionBuild => {
   // Per-session named decode/drop diagnostics . A malformed record or an
   // unknown record type is accumulated here and surfaced as a session-level
@@ -651,9 +653,11 @@ const buildGrokSessionFromChatPath = (
       ? count + 1
       : count;
   }, 0);
-  const recovery = planGrokHistoryRecovery(currentChatSources, archiveHistories, {
-    compactionCheckpointUpdates,
-  });
+  const recovery = recoveryMode === "live-epoch"
+    ? planGrokLiveEpoch(currentChatSources)
+    : planGrokHistoryRecovery(currentChatSources, archiveHistories, {
+      compactionCheckpointUpdates,
+    });
   for (const diagnostic of recovery.diagnostics) decodeDiagnostics.push(diagnostic);
   if (recovery.block !== undefined) {
     // Fail the session closed instead of projecting a shorter replacement over
@@ -949,7 +953,7 @@ const buildGrokSessionFromChatPath = (
     sessionEdges,
     executionContexts,
     usageRecords,
-    artifacts: existsSync(hunkPath)
+    artifacts: recoveryMode !== "live-epoch" && existsSync(hunkPath)
       ? grokArtifacts(sessionId, sessionDir, hunkPath, decodeDiagnostics)
       : [],
   });
@@ -1135,6 +1139,27 @@ async function* streamGrok(options: AdapterOptions): AsyncGenerator<AdapterStrea
     },
   };
 }
+
+/**
+ * Project one Grok session directory as the live chat epoch only.
+ * Archives stay unused and the replacement hold is not raised. Hunks are
+ * ignored so a store-prefix merge does not re-import that flood; live chat,
+ * events, and updates stay readable so post-compaction recap messages remain.
+ */
+export const projectGrokLiveEpoch = (
+  sessionDir: string,
+  options: AdapterOptions,
+): GrokSessionBuild => {
+  const chatPath = join(sessionDir, "chat_history.jsonl");
+  const sessionsRoot = dirname(dirname(sessionDir));
+  return buildGrokSessionFromChatPath(
+    chatPath,
+    sessionsRoot,
+    new Map(),
+    options,
+    "live-epoch",
+  );
+};
 
 export const grokAdapter: SessionAdapter = {
   id: "grok-session-folder",

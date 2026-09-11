@@ -317,6 +317,21 @@ const collectContextSources = (
 };
 
 /**
+ * Project the live chat as the post-compaction epoch only. Archives are
+ * ignored and no replacement block is raised. Used by the store-prefix merge
+ * path so a held session can still expose source-only newer turns without
+ * overwriting the canonical pre-compaction rows.
+ */
+export const planGrokLiveEpoch = (
+  current: readonly GrokChatSource[],
+): GrokRecoveryPlan => ({
+  sources: current,
+  contextSources: [],
+  recovered: false,
+  diagnostics: [],
+});
+
+/**
  * Plan the chat entries the projection must consume. Returns the live chat
  * unchanged unless a longer archive history anchors at the compaction junction.
  *
@@ -616,5 +631,196 @@ export const verifyToolCallRetention = (
     byteMismatches,
     hashMismatches,
     chronologyViolations,
+  };
+};
+
+export type GrokEpochMessageRef = {
+  readonly eventId: string;
+  readonly seq: number;
+  readonly text: string;
+};
+
+export type GrokEpochToolRef = {
+  readonly id: string;
+  readonly eventId: string;
+  readonly seq: number;
+  readonly toolName: string;
+  readonly status?: string | null;
+  readonly inputText: string;
+  readonly outputText: string;
+};
+
+export type GrokEpochClassification = {
+  readonly storedClass: ReadonlyArray<"old_only" | "shared">;
+  readonly currentClass: ReadonlyArray<"shared" | "new_only">;
+  readonly oldOnlyIndexes: readonly number[];
+  readonly sharedStoredIndexes: readonly number[];
+  readonly sharedCurrentIndexes: readonly number[];
+  readonly newOnlyIndexes: readonly number[];
+  readonly sharedIsStoredSuffix: boolean;
+  readonly sharedIsCurrentPrefix: boolean;
+  readonly newOnlyContiguousAfterShared: boolean;
+};
+
+/**
+ * Injective stored→current alignment over whitespace-normalized message text.
+ * Shared matches consume later current occurrences in order; leftover current
+ * rows are the post-compaction suffix.
+ */
+export const classifyGrokEpochMessages = (
+  storedTexts: readonly string[],
+  currentTexts: readonly string[],
+): GrokEpochClassification => {
+  const storedNorm = storedTexts.map(normalizeForVerification);
+  const currentNorm = currentTexts.map(normalizeForVerification);
+  const usedCurrent = new Set<number>();
+  const storedClass: Array<"old_only" | "shared"> = [];
+  let cursor = 0;
+  for (const text of storedNorm) {
+    let found = -1;
+    if (text.length > 0) {
+      for (let index = cursor; index < currentNorm.length; index += 1) {
+        if (usedCurrent.has(index)) continue;
+        if (currentNorm[index] === text) {
+          found = index;
+          break;
+        }
+      }
+    }
+    if (found === -1) storedClass.push("old_only");
+    else {
+      storedClass.push("shared");
+      usedCurrent.add(found);
+      cursor = found + 1;
+    }
+  }
+  const currentClass = currentNorm.map((_, index) => (usedCurrent.has(index) ? "shared" as const : "new_only" as const));
+  const oldOnlyIndexes = storedClass.flatMap((kind, index) => kind === "old_only" ? [index] : []);
+  const sharedStoredIndexes = storedClass.flatMap((kind, index) => kind === "shared" ? [index] : []);
+  const sharedCurrentIndexes = currentClass.flatMap((kind, index) => kind === "shared" ? [index] : []);
+  const newOnlyIndexes = currentClass.flatMap((kind, index) => kind === "new_only" ? [index] : []);
+  const sharedIsStoredSuffix = sharedStoredIndexes.length > 0
+    && sharedStoredIndexes[0] === storedTexts.length - sharedStoredIndexes.length
+    && sharedStoredIndexes.every((index, offset) => index === sharedStoredIndexes[0]! + offset);
+  const sharedIsCurrentPrefix = sharedCurrentIndexes.length > 0
+    && sharedCurrentIndexes[0] === 0
+    && sharedCurrentIndexes.every((index, offset) => index === offset);
+  const newOnlyContiguousAfterShared = newOnlyIndexes.length === 0
+    || (
+      (sharedCurrentIndexes.length === 0 && newOnlyIndexes[0] === 0
+        && newOnlyIndexes.every((index, offset) => index === offset))
+      || (sharedCurrentIndexes.length > 0
+        && newOnlyIndexes[0] === sharedCurrentIndexes[sharedCurrentIndexes.length - 1]! + 1
+        && newOnlyIndexes.every((index, offset) => index === newOnlyIndexes[0]! + offset))
+    );
+  return {
+    storedClass,
+    currentClass,
+    oldOnlyIndexes,
+    sharedStoredIndexes,
+    sharedCurrentIndexes,
+    newOnlyIndexes,
+    sharedIsStoredSuffix,
+    sharedIsCurrentPrefix,
+    newOnlyContiguousAfterShared,
+  };
+};
+
+export type GrokEpochMergePlan = {
+  readonly safe: boolean;
+  readonly blockers: readonly string[];
+  readonly classification: GrokEpochClassification;
+  readonly oldOnly: number;
+  readonly shared: number;
+  readonly newOnly: number;
+  readonly unionMessages: number;
+  readonly rebaseFromSeq: number;
+  readonly appendCurrentMessageIndexes: readonly number[];
+  readonly appendCurrentToolIds: readonly string[];
+  readonly currentToolIdsAlreadyStored: number;
+  readonly collidingNewEventIds: number;
+};
+
+/**
+ * Store-prefix + live-suffix merge plan. Canonical stored rows stay verbatim.
+ * Source-only current messages are appended in current order after max stored
+ * seq. New tools may attach only to those appended turns. Same tool id with a
+ * different payload is a blocker; seq overlap is expected and not a blocker.
+ */
+export const planGrokEpochMerge = (input: {
+  readonly storedMessages: readonly GrokEpochMessageRef[];
+  readonly storedTools: readonly GrokEpochToolRef[];
+  readonly currentMessages: readonly GrokEpochMessageRef[];
+  readonly currentTools: readonly GrokEpochToolRef[];
+  readonly storedEventIds?: readonly string[];
+  readonly storedMaxSeq?: number;
+}): GrokEpochMergePlan => {
+  const classification = classifyGrokEpochMessages(
+    input.storedMessages.map((row) => row.text),
+    input.currentMessages.map((row) => row.text),
+  );
+  const storedEventIds = new Set(
+    input.storedEventIds ?? [
+      ...input.storedMessages.map((row) => row.eventId),
+      ...input.storedTools.map((row) => row.eventId),
+    ],
+  );
+  const storedToolById = new Map(input.storedTools.map((tool) => [tool.id, tool]));
+  const sharedCurrentEventIds = new Set(
+    classification.sharedCurrentIndexes.map((index) => input.currentMessages[index]!.eventId),
+  );
+  const appendCurrentToolIds: string[] = [];
+  const blockers: string[] = [];
+  let currentToolIdsAlreadyStored = 0;
+  for (const tool of input.currentTools) {
+    const stored = storedToolById.get(tool.id);
+    if (stored !== undefined) {
+      currentToolIdsAlreadyStored += 1;
+      if (stored.inputText !== tool.inputText || stored.outputText !== tool.outputText) {
+        blockers.push(`tool_payload_conflict:${tool.id}`);
+      }
+      continue;
+    }
+    if (sharedCurrentEventIds.has(tool.eventId)) {
+      blockers.push(`new_tool_on_shared_message:${tool.id}`);
+      continue;
+    }
+    appendCurrentToolIds.push(tool.id);
+  }
+  const newMessages = classification.newOnlyIndexes.map((index) => input.currentMessages[index]!);
+  const collidingNewEventIds = newMessages.filter((row) => storedEventIds.has(row.eventId)).length;
+  const storedSeqs = input.storedMessages.map((row) => row.seq);
+  const storedSeqMonotone = storedSeqs.every((seq, index) => index === 0 || seq > storedSeqs[index - 1]!);
+  const unionTexts = [
+    ...input.storedMessages.map((row) => row.text),
+    ...newMessages.map((row) => row.text),
+  ];
+  const storedRetained = verifyRecoveredTexts(
+    input.storedMessages.map((row) => row.text),
+    unionTexts,
+  );
+  const excess = countExcessMessageOccurrences(
+    input.storedMessages.map((row) => row.text),
+    unionTexts,
+  );
+  if (input.currentMessages.length === 0) blockers.push("current_projection_empty");
+  if (!storedSeqMonotone) blockers.push("stored_message_seq_not_monotone");
+  if (storedRetained.unresolved.length > 0) blockers.push("union_drops_stored_texts");
+  if (excess > 0) blockers.push(`union_excess_stored_texts:${excess}`);
+  const rebaseFromSeq = input.storedMaxSeq
+    ?? Math.max(0, ...input.storedMessages.map((row) => row.seq), ...input.storedTools.map((row) => row.seq));
+  return {
+    safe: blockers.length === 0,
+    blockers,
+    classification,
+    oldOnly: classification.oldOnlyIndexes.length,
+    shared: classification.sharedStoredIndexes.length,
+    newOnly: classification.newOnlyIndexes.length,
+    unionMessages: input.storedMessages.length + newMessages.length,
+    rebaseFromSeq,
+    appendCurrentMessageIndexes: classification.newOnlyIndexes,
+    appendCurrentToolIds,
+    currentToolIdsAlreadyStored,
+    collidingNewEventIds,
   };
 };
