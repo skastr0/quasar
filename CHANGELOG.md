@@ -8,6 +8,13 @@ formats may still change.
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-09-11
+
+### Fixed
+
+- Preserve Codex sole-carrier `item_completed` tool product (command,
+  extension, MCP, patch, and web completions) without a normalization bump.
+
 ## [0.5.6] - 2026-09-11
 
 ### Fixed
