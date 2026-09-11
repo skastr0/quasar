@@ -1,5 +1,6 @@
 import { existsSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { Brand } from "effect";
 
 import {
@@ -24,6 +25,7 @@ import {
   CodexTurnContextSchema,
   classifyCodexRecord,
   type CodexClassification,
+  type CodexCompletedToolItem,
   type CodexSessionMeta,
 } from "./codex-schema";
 import { type DecodeDiagnostic, decodeOrDrop, isSignal } from "./harness-schema";
@@ -57,7 +59,10 @@ type AdapterOptions = Parameters<SessionAdapter["read"]>[0];
 type CodexToolCallDraft = Omit<
   ToolCall,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
->;
+> & {
+  readonly completedItem?: Pick<ToolCall, "input" | "output">;
+  readonly callEventId?: string;
+};
 type CodexUsageDraft = Omit<
   UsageRecord,
   "sessionId" | "machineId" | "provider" | "agentName" | "projectIdentityKey"
@@ -479,6 +484,52 @@ const codexToolOutput = (payloadType: string, payload: CodexRecord): unknown => 
   }
 };
 
+const completedToolProjection = (item: CodexCompletedToolItem) => {
+  switch (item.type) {
+    case "McpToolCall":
+      return { toolName: `mcp__${item.server}__${item.tool}`, input: item.arguments, output: item.result ?? item.error };
+    case "FileChange":
+      return { toolName: "apply_patch", input: item.changes, output: { stdout: item.stdout, stderr: item.stderr } };
+    case "WebSearch":
+      return { toolName: "web_search", input: { query: item.query, action: item.action }, output: item.results };
+    case "CommandExecution":
+      return {
+        toolName: item.type,
+        input: { command: item.command, cwd: item.cwd, parsed_cmd: item.parsed_cmd, source: item.source },
+        output: {
+          process_id: item.process_id,
+          aggregated_output: item.aggregated_output,
+          stdout: item.stdout,
+          stderr: item.stderr,
+          formatted_output: item.formatted_output,
+          exit_code: item.exit_code,
+          duration: item.duration,
+        },
+      };
+    case "Extension":
+      switch (item.kind) {
+        case "web.search":
+          return { toolName: item.kind, input: { query: item.query, action: item.action }, output: item.results };
+        case "image_gen.generation":
+          return {
+            toolName: item.kind,
+            input: { revisedPrompt: item.revisedPrompt, transparentBackground: item.transparentBackground },
+            output: { result: item.result, failure: item.failure, savedPath: item.savedPath },
+          };
+        case "clock.sleep":
+          return { toolName: item.kind, output: { durationMs: item.durationMs } };
+      }
+  }
+};
+
+// Tool events intentionally contain no payload copy. Keep differing native
+// carriers in the one ToolCall, rather than letting arrival order erase facts.
+const mergeToolCarriers = (response: ToolCall["input"], itemCompleted: ToolCall["input"]): ToolCall["input"] => {
+  if (response === undefined) return itemCompleted;
+  if (itemCompleted === undefined || isDeepStrictEqual(response, itemCompleted)) return response;
+  return { response, itemCompleted };
+};
+
 const upsertCodexToolCall = (
   toolCallsById: Map<string, CodexToolCallDraft>,
   sessionId: SessionId,
@@ -493,29 +544,19 @@ const upsertCodexToolCall = (
   if (payloadType === "item_completed") {
     // Only the schema-decoded, measured tool variants reach this projection.
     // item.id is the native call ID (WebSearch uses the response item's id).
-    const item = payloadRecordFrom(payload.item);
+    const item = payload.item as CodexCompletedToolItem;
     const existing = toolCallsById.get(id);
-    const toolName = item.type === "McpToolCall"
-      ? `mcp__${item.server}__${item.tool}`
-      : item.type === "FileChange" ? "apply_patch" : "web_search";
-    const input = item.type === "McpToolCall"
-      ? item.arguments
-      : item.type === "FileChange" ? item.changes : { query: item.query, action: item.action };
-    const output = item.type === "McpToolCall"
-      ? item.result ?? item.error
-      : item.type === "FileChange"
-        ? { stdout: item.stdout, stderr: item.stderr }
-        : item.results;
+    const projection = completedToolProjection(item);
     toolCallsById.set(id, {
       ...existing,
       id,
-      eventId: existing?.eventId ?? eventId,
-      toolName: existing?.toolName ?? toolName,
-      status: typeof item.status === "string" ? item.status : "completed",
-      input: existing?.input ?? projectToolPayloadNativeValue(input),
-      ...(existing?.output !== undefined
-        ? { output: existing.output }
-        : output !== undefined ? { output: projectToolPayloadNativeValue(output) } : {}),
+      eventId: existing?.callEventId ?? eventId,
+      toolName: existing?.callEventId !== undefined ? existing.toolName : projection.toolName,
+      status: "status" in item ? item.status : "completed",
+      completedItem: {
+        input: "input" in projection ? projectToolPayloadNativeValue(projection.input) : undefined,
+        output: projectToolPayloadNativeValue(projection.output),
+      },
       ...(timestamp !== undefined ? { completedAt: timestamp } : {}),
     });
     return id;
@@ -545,9 +586,10 @@ const upsertCodexToolCall = (
     toolCallsById.set(id, {
       ...existing,
       id,
-      eventId: existing?.startedAt !== undefined ? existing.eventId : eventId,
+      eventId: existing?.callEventId ?? eventId,
+      callEventId: existing?.callEventId ?? eventId,
       toolName,
-      status: existing?.completedAt !== undefined ? existing.status : payloadStatus,
+      status: existing?.completedItem !== undefined || existing?.completedAt !== undefined ? existing.status : payloadStatus,
       ...(input !== undefined ? { input } : {}),
       ...(existing?.output !== undefined ? { output: existing.output } : {}),
       ...(timestamp !== undefined ? { startedAt: timestamp } : {}),
@@ -571,10 +613,11 @@ const upsertCodexToolCall = (
     const existing = toolCallsById.get(id);
     const output = codexToolOutput(payloadType, payload);
     toolCallsById.set(id, {
+      ...existing,
       id,
       eventId: existing?.eventId ?? eventId,
       toolName: existing?.toolName ?? codexToolName(payloadType, payload),
-      status: "completed",
+      status: existing?.completedItem !== undefined ? existing.status : "completed",
       ...(existing?.input !== undefined ? { input: existing.input } : {}),
       ...(output !== undefined ? { output } : {}),
       ...(existing?.startedAt !== undefined ? { startedAt: existing.startedAt } : {}),
@@ -1133,8 +1176,14 @@ async function* streamCodexSessionFromFile(
       projectPath,
       events: slice.events,
       toolCalls: [...slice.toolCallIds].flatMap((id) => {
-        const toolCall = toolCallsById.get(id);
-        return toolCall === undefined ? [] : [toolCall];
+        const draft = toolCallsById.get(id);
+        if (draft === undefined) return [];
+        const { completedItem, callEventId: _callEventId, ...toolCall } = draft;
+        return [{
+          ...toolCall,
+          input: mergeToolCarriers(toolCall.input, completedItem?.input),
+          output: mergeToolCarriers(toolCall.output, completedItem?.output),
+        }];
       }),
       usageRecords: slice.usageRecords,
       executionContexts: slice.executionContexts,

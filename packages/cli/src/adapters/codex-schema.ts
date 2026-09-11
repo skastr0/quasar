@@ -441,8 +441,8 @@ const CodexContextCompactedPayloadSchema = Schema.Struct({
   type: Schema.Literal("context_compacted"),
 });
 
-// Measured in the 59 recovery-source sessions: these three item variants carry
-// tool product, including MCP errors absent from every response_item record.
+// Measured recovery sources include sole-carrier command output, search results,
+// generated-image facts and MCP errors absent from every response_item record.
 // Tool-native arguments/results remain opaque product, not provider machinery.
 const CodexCompletedToolItemSchema = Schema.Union(
   Schema.Struct({
@@ -470,7 +470,50 @@ const CodexCompletedToolItemSchema = Schema.Union(
     action: Schema.Record({ key: Schema.String, value: Schema.Unknown }),
     results: Schema.optional(Schema.Array(Schema.Unknown)),
   }),
+  Schema.Struct({
+    type: Schema.Literal("CommandExecution"),
+    id: Schema.NonEmptyString,
+    process_id: Schema.String,
+    command: Schema.Array(Schema.String),
+    cwd: Schema.String,
+    parsed_cmd: Schema.Array(Schema.Unknown),
+    source: Schema.String,
+    status: Schema.String,
+    exit_code: Schema.Number,
+    duration: Schema.Struct({ secs: Schema.Number, nanos: Schema.Number }),
+    aggregated_output: Schema.optional(Schema.String),
+    stdout: Schema.optional(Schema.String),
+    stderr: Schema.optional(Schema.String),
+    formatted_output: Schema.optional(Schema.String),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("Extension"),
+    kind: Schema.Literal("web.search"),
+    id: Schema.NonEmptyString,
+    query: Schema.String,
+    action: Schema.Record({ key: Schema.String, value: Schema.Unknown }),
+    results: Schema.Array(Schema.Unknown),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("Extension"),
+    kind: Schema.Literal("image_gen.generation"),
+    id: Schema.NonEmptyString,
+    status: Schema.String,
+    revisedPrompt: Schema.String,
+    result: Schema.String,
+    transparentBackground: Schema.NullOr(Schema.Boolean),
+    failure: Schema.Null,
+    savedPath: Schema.String,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("Extension"),
+    kind: Schema.Literal("clock.sleep"),
+    id: Schema.NonEmptyString,
+    durationMs: Schema.Number,
+  }),
 );
+
+export type CodexCompletedToolItem = typeof CodexCompletedToolItemSchema.Type;
 
 const CodexItemCompletedPayloadSchema = Schema.Struct({
   type: Schema.Literal("item_completed"),
@@ -986,7 +1029,8 @@ export const classifyCodexRecord = (
   if (discriminator === "event_msg.item_completed") {
     const payload = decoded.right as typeof CodexItemCompletedPayloadSchema.Type;
     const itemType = (payload.item as { type?: unknown } | undefined)?.type;
-    if (itemType === "McpToolCall" || itemType === "FileChange" || itemType === "WebSearch") {
+    if (itemType === "McpToolCall" || itemType === "FileChange" || itemType === "WebSearch"
+      || itemType === "CommandExecution" || itemType === "Extension") {
       const item = Schema.decodeUnknownEither(CodexCompletedToolItemSchema)(payload.item);
       if (item._tag === "Left") {
         const message = ParseResult.TreeFormatter.formatErrorSync(item.left);

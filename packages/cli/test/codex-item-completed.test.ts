@@ -62,7 +62,10 @@ test.each([false, true])("mirrored MCP results merge by native ID in either reco
   const session = await read(itemFirst ? [item, call, result] : [call, result, item]);
   expect(session.toolCalls).toHaveLength(1);
   const tool = session.toolCalls[0]!;
-  expect(tool.output).toBe("fabricated canonical output");
+  expect(tool.output).toEqual({
+    response: "fabricated canonical output",
+    itemCompleted: { content: [{ type: "text", text: "fabricated success" }] },
+  });
   expect(tool.status).toBe("completed");
   const callEvent = session.events.find(event => event.kind === "tool_call")!;
   expect(tool.eventId).toBe(callEvent.id);
@@ -96,7 +99,129 @@ test("completed patch and web items retain product; web mirrors use response ite
   ]);
   expect(session.toolCalls).toHaveLength(2);
   expect(session.toolCalls[0]).toMatchObject({ toolName: "apply_patch", input: changes, output: { stderr: "fabricated patch error" }, status: "failed" });
-  expect(session.toolCalls[1]).toMatchObject({ toolName: "web_search", input: action, output: results });
+  expect(session.toolCalls[1]).toMatchObject({
+    toolName: "web_search",
+    input: { response: action, itemCompleted: { query: "fabricated query", action } },
+    output: results,
+  });
+});
+
+const commandInput = {
+  command: ["sh", "-c", "printf 'fabricated output'"], cwd: "/qsr/fab/proj",
+  parsed_cmd: [{ type: "unknown", cmd: "fabricated command" }], source: "unified_exec",
+};
+const commandOutput = {
+  process_id: "qsr-fab-process", aggregated_output: "fabricated aggregate\n",
+  stdout: "fabricated stdout\n", stderr: "fabricated stderr\n",
+  formatted_output: "fabricated formatted\n", exit_code: 7, duration: { secs: 2, nanos: 350 },
+};
+const completedCases: readonly {
+  name: string; item: Record<string, unknown>; input?: unknown; output: unknown;
+}[] = [
+  {
+    name: "CommandExecution",
+    item: { type: "CommandExecution", id: "qsr-fab-command", status: "failed", ...commandInput, ...commandOutput },
+    input: commandInput, output: commandOutput,
+  },
+  {
+    name: "web.search",
+    item: {
+      type: "Extension", kind: "web.search", id: "qsr-fab-extension-web", query: "fabricated search",
+      action: { type: "search", queries: ["fabricated search", "fabricated alternate"] },
+      results: [{ title: "fabricated page", snippet: "fabricated result" }],
+    },
+    input: { query: "fabricated search", action: { type: "search", queries: ["fabricated search", "fabricated alternate"] } },
+    output: [{ title: "fabricated page", snippet: "fabricated result" }],
+  },
+  {
+    name: "image_gen.generation",
+    item: {
+      type: "Extension", kind: "image_gen.generation", id: "qsr-fab-extension-image", status: "completed",
+      revisedPrompt: "fabricated revised prompt", transparentBackground: false,
+      result: "fabricated image result", failure: null, savedPath: "/qsr/fab/image.png",
+    },
+    input: { revisedPrompt: "fabricated revised prompt", transparentBackground: false },
+    output: { result: "fabricated image result", failure: null, savedPath: "/qsr/fab/image.png" },
+  },
+  {
+    name: "clock.sleep",
+    item: { type: "Extension", kind: "clock.sleep", id: "qsr-fab-extension-sleep", durationMs: 0 },
+    output: { durationMs: 0 },
+  },
+];
+
+for (const { name, item, input, output } of completedCases) {
+  test(`${name} keeps sole-carrier fields without fabricated inputs or duplicate tool IDs`, async () => {
+    const session = await read([completed(item), completed(item)]);
+    expect(session.toolCalls).toHaveLength(1);
+    expect(session.toolCalls[0]).toMatchObject({ toolName: name, output });
+    expect(session.toolCalls[0]?.input).toEqual(input);
+    const toolEvents = session.events.filter(event => event.kind === "tool_result");
+    expect(toolEvents).toHaveLength(2);
+    expect(toolEvents.every(event => event.contentText === undefined && event.contentBlocks.length === 0)).toBe(true);
+  });
+
+  test.each([false, true])(`${name} merges equal mirrored values without wrapping (item first=%s)`, async (itemFirst) => {
+    const nativeInput = input ?? { requested_ms: 11 };
+    const call = response({ type: "function_call", call_id: item.id, name: "qsr_fab_actual_tool_name", arguments: JSON.stringify(nativeInput) });
+    const result = response({ type: "function_call_output", call_id: item.id, output });
+    const session = await read(itemFirst ? [completed(item), call, result] : [call, result, completed(item)]);
+    expect(session.toolCalls).toHaveLength(1);
+    const tool = session.toolCalls[0]!;
+    expect(tool).toMatchObject({ toolName: "qsr_fab_actual_tool_name", input: nativeInput, output });
+    const callEvent = session.events.find(event => event.kind === "tool_call")!;
+    const itemEvent = session.events.find(event => event.rawReference?.nativeType === "event_msg.item_completed")!;
+    expect(tool.eventId).toBe(callEvent.id);
+    expect(session.sessionEdges).toContainEqual(expect.objectContaining({ fromEventId: callEvent.id, toEventId: itemEvent.id }));
+  });
+
+  test.each([false, true])(`${name} retains conflicting response and completion product (item first=%s)`, async (itemFirst) => {
+    const responseInput = { request: "fabricated different input" };
+    const responseOutput = "fabricated successful response";
+    const call = response({ type: "function_call", call_id: item.id, name: "qsr_fab_actual_tool_name", arguments: JSON.stringify(responseInput) });
+    const result = response({ type: "function_call_output", call_id: item.id, output: responseOutput });
+    const session = await read(itemFirst ? [completed(item), call, result] : [call, result, completed(item)]);
+    expect(session.toolCalls).toHaveLength(1);
+    expect(session.toolCalls[0]).toMatchObject({
+      toolName: "qsr_fab_actual_tool_name",
+      input: input === undefined ? responseInput : { response: responseInput, itemCompleted: input },
+      output: { response: responseOutput, itemCompleted: output },
+      status: item.status ?? "completed",
+    });
+  });
+
+  test.each([false, true])(`${name} result-only mirrors retain the native name (item first=%s)`, async (itemFirst) => {
+    const result = response({ type: "function_call_output", call_id: item.id, output });
+    const records = itemFirst ? [completed(item), result] : [result, completed(item)];
+    const session = await read(records.map(({ timestamp: _timestamp, ...record }) => record));
+    expect(session.toolCalls).toHaveLength(1);
+    expect(session.toolCalls[0]).toMatchObject({ toolName: name, output, status: item.status ?? "completed" });
+    expect(session.toolCalls[0]?.input).toEqual(input);
+  });
+}
+
+test.each([false, true])("successful response cannot erase completed MCP failure details without timestamps (item first=%s)", async (itemFirst) => {
+  const id = "qsr-fab-conflicting-status";
+  const item = completed(mcp(id, { status: "failed", error: { message: "fabricated failure detail" } }));
+  const call = response({ type: "function_call", call_id: id, name: "qsr_fab_actual_mcp_name", arguments: '{"query":"fabricated query"}' });
+  const result = response({ type: "function_call_output", call_id: id, output: { success: "fabricated response" } });
+  const records = itemFirst ? [item, call, result] : [call, result, item];
+  const session = await read(records.map(({ timestamp: _timestamp, ...record }) => record));
+  expect(session.toolCalls).toHaveLength(1);
+  expect(session.toolCalls[0]).toMatchObject({
+    status: "failed", toolName: "qsr_fab_actual_mcp_name", input: { query: "fabricated query" },
+    output: { response: { success: "fabricated response" }, itemCompleted: { message: "fabricated failure detail" } },
+  });
+});
+
+test("identical carrier objects deduplicate independently of JSON property order", async () => {
+  const id = "qsr-fab-key-order";
+  const session = await read([
+    completed(mcp(id, { result: { beta: 2, alpha: 1 } })),
+    response({ type: "function_call_output", call_id: id, output: { alpha: 1, beta: 2 } }),
+  ]);
+  expect(session.toolCalls).toHaveLength(1);
+  expect(session.toolCalls[0]?.output).toEqual({ alpha: 1, beta: 2 });
 });
 
 test("bookkeeping stays dropped and malformed known tool items fail closed", () => {
@@ -106,4 +231,18 @@ test("bookkeeping stays dropped and malformed known tool items fail closed", () 
   const diagnostics: { name: string; message: string }[] = [];
   expect(classifyCodexRecord(completed({ type: "McpToolCall", id: 42 }), diagnostics)._tag).toBe("drop");
   expect(diagnostics[0]?.name).toBe("codex.event_msg.item_completed.decode_failed");
+});
+
+test("new completion variants reject malformed measured fields and unmodeled extensions", () => {
+  for (const item of [
+    { ...completedCases[0]!.item, command: "not an argv array" },
+    { ...completedCases[1]!.item, results: {} },
+    { ...completedCases[2]!.item, transparentBackground: "false" },
+    { ...completedCases[3]!.item, durationMs: "0" },
+    { type: "Extension", kind: "qsr_fab_unmodeled", id: "qsr-fab-unknown" },
+  ]) {
+    const diagnostics: { name: string; message: string }[] = [];
+    expect(classifyCodexRecord(completed(item), diagnostics)._tag).toBe("drop");
+    expect(diagnostics[0]?.name).toBe("codex.event_msg.item_completed.decode_failed");
+  }
 });
