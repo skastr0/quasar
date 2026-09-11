@@ -83,6 +83,8 @@ const createStore = (
     readonly sessionId?: string;
     readonly metadataSessionId?: string;
     readonly malformedRoot?: boolean;
+    /** Root blob with no active or archive message references (empty session). */
+    readonly emptyRoot?: boolean;
     readonly includeTranscript?: boolean;
   } = {},
 ): StoreFixture => {
@@ -179,7 +181,9 @@ const createStore = (
   const archive = addBlob(archiveBytes);
   const rootBytes = options.malformedRoot === true
     ? Buffer.from([0x0a, 0x20, 0xff])
-    : Buffer.concat([
+    : options.emptyRoot === true
+      ? Buffer.alloc(0)
+      : Buffer.concat([
         fieldBytes(1, summaryReplacement.ref),
         fieldBytes(1, system.ref),
         fieldBytes(1, assistant.ref),
@@ -443,5 +447,21 @@ describe("Cursor Agent-KV adapter", () => {
     const classification = classifyCursorMessage({ role: "future-role", content: "payload" });
     expect(isSignal(classification)).toBe(false);
     if (!isSignal(classification)) expect(classification.reason).toContain("cursor.message.invalid_role");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Empty non-product classification: root blob without message references
+// ---------------------------------------------------------------------------
+describe("empty root classification", () => {
+  test("a root blob with no active or archive refs skips with a named warning", async () => {
+    const fixture = createStore("empty-root", { emptyRoot: true });
+    const result = await readRoot(fixture.root);
+    expect(result.sessions).toHaveLength(0);
+    const empty = result.diagnostics.find((diagnostic) =>
+      diagnosticName(diagnostic.details) === "cursor.session.empty");
+    expect(empty).toBeDefined();
+    expect(empty!.severity).toBe("warning");
+    expect(empty!.status).toBe("unsupported");
   });
 });

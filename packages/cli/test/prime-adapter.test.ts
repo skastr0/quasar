@@ -579,3 +579,47 @@ describe("Prime Agent adapter", () => {
     expect(names).not.toContain("prime.header.not_first_valid_record");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Non-session artifact classification before header validation
+// ---------------------------------------------------------------------------
+describe("non-session artifact classification", () => {
+  test("test-corpus/benchmark/semantic-edge artifacts skip before any header probe", async () => {
+    const root = join(ROOT, "non-session-artifacts");
+    mkdirSync(join(root, "sessions"), { recursive: true });
+    for (const directory of ["test-corpus", "benchmark", "semantic-edge"]) {
+      mkdirSync(join(root, "session-artifacts", directory), { recursive: true });
+    }
+    writeFileSync(join(root, "sessions", "canonical.jsonl"), jsonl([
+      header("prime-canonical-session"),
+      {
+        type: "message",
+        id: "entry-user",
+        parentId: null,
+        timestamp: SESSION_TIME,
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "canonical turn", textSignature: "fabricated-signature" }],
+          timestamp: 1_752_400_000_000,
+        },
+      },
+    ]));
+    // Malformed REAL session: stays in sessions/ and must still fail closed.
+    writeFileSync(join(root, "sessions", "malformed.jsonl"), jsonl([{ fixture: "not-a-prime-header" }]));
+    writeFileSync(join(root, "session-artifacts", "test-corpus", "case-1.jsonl"), jsonl([{ corpus: "case" }]));
+    writeFileSync(join(root, "session-artifacts", "benchmark", "bench-1.jsonl"), jsonl([{ benchmark: true }]));
+    writeFileSync(join(root, "session-artifacts", "semantic-edge", "edge-1.jsonl"), jsonl([{ edge: true }]));
+
+    const result = await primeAdapter.read({ machine: MACHINE, now: NOW, roots: { prime: root } });
+    expect(result.sessions).toHaveLength(1);
+    const excluded = result.diagnostics.filter((diagnostic) =>
+      diagnosticName(diagnostic) === "prime.discovery.non_session_artifact");
+    expect(excluded).toHaveLength(3);
+    expect(excluded.every((diagnostic) => diagnostic.severity === "warning" && diagnostic.status === "unsupported")).toBe(true);
+    const headerFailures = result.diagnostics.filter((diagnostic) =>
+      diagnosticName(diagnostic)?.startsWith("prime.header."));
+    expect(headerFailures).toHaveLength(1);
+    expect(headerFailures[0]!.status).toBe("error");
+    expect(String((headerFailures[0]!.details as { readonly sourcePath?: string }).sourcePath)).toContain("malformed.jsonl");
+  });
+});

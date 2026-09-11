@@ -159,10 +159,12 @@ const cursorDiagnostic = (
   message: string,
   status: AdapterDiagnostic["status"] = "unsupported",
   details: Readonly<Record<string, unknown>> = {},
+  severity?: "warning" | "info",
 ): AdapterDiagnostic => ({
   adapterId: ADAPTER_ID,
   provider: "cursor",
   status,
+  ...(severity !== undefined ? { severity } : {}),
   parserConfidence: "observed",
   rootPath,
   message,
@@ -1061,6 +1063,29 @@ const parseCandidate = async (
       rootReferences = decodeCursorRoot(rootBytes);
     } catch (error) {
       throw new CursorFormatError("cursor.root_blob.decode_failed", errorText(error));
+    }
+    // A root blob with no active or archive message references carries no
+    // conversation (an empty root). Classify it here: named warning, no
+    // session, no mapSession failure. Roots WITH references but broken
+    // hydration still fail below as malformed real sessions.
+    if (
+      rootReferences.activeMessageRefs.length === 0
+      && rootReferences.legacyArchiveRef === undefined
+      && rootReferences.archiveRefs.length === 0
+    ) {
+      return {
+        diagnostics: [
+          ...decodeDiagnostics.map((entry) => cursorDiagnostic(logicalDbPath, entry.name, entry.message)),
+          cursorDiagnostic(
+            logicalDbPath,
+            "cursor.session.empty",
+            `Cursor session ${nativeSessionId} root blob has no active or archive message references; skipped.`,
+            "unsupported",
+            { diagnostic: "cursor.session.empty", sourcePath: logicalDbPath, physicalPath: candidate.dbPath },
+            "warning",
+          ),
+        ],
+      };
     }
     const hydration = hydrateMessages(rootReferences, blobs, decodeDiagnostics);
     if (!hydration.complete) {

@@ -1283,3 +1283,33 @@ describe("work-item subagent_of session lineage", () => {
     rmSync(parentMain, { recursive: true, force: true });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Empty non-product classification: bridge bookkeeping-only files
+// ---------------------------------------------------------------------------
+describe("empty non-product classification", () => {
+  const root = join(testRoot, "empty-product");
+  const projectDir = join(root, "projects", "-Users-me-bookkeeping");
+  mkdirSync(projectDir, { recursive: true });
+  const bookkeepingId = "bbbbbbbb-0001-0001-0001-000000000001";
+  const productId = "cccccccc-0001-0001-0001-000000000002";
+  writeFileSync(
+    join(projectDir, `${bookkeepingId}.jsonl`),
+    [
+      line({ sessionId: bookkeepingId, type: "deferred_tools_delta" }),
+      line({ sessionId: bookkeepingId, type: "date_change" }),
+    ].join("\n"),
+  );
+  writeFileSync(join(projectDir, `${productId}.jsonl`), mainSessionRecords(productId));
+
+  test("bookkeeping-only files skip with a named warning while real sessions parse", async () => {
+    const result = await claudeAdapter.read({ machine: MACHINE, now: NOW, roots: { claude: root } });
+    expect(result.sessions).toHaveLength(1);
+    const empty = result.diagnostics.find((diagnostic) =>
+      (diagnostic.details as { readonly diagnostic?: string } | undefined)?.diagnostic === "claude.session.empty");
+    expect(empty).toBeDefined();
+    expect(empty!.severity).toBe("warning");
+    expect(empty!.status).toBe("unsupported");
+    expect(result.diagnostics.some((diagnostic) => diagnostic.status === "error")).toBe(false);
+  });
+});

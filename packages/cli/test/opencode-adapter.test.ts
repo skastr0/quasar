@@ -820,3 +820,30 @@ describe("WAL-aware stat gate", () => {
     expect(result.sessions).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Empty non-product classification: zero message+part rows
+// ---------------------------------------------------------------------------
+describe("empty session classification", () => {
+  test("a session row with zero message+part rows skips with a named warning", async () => {
+    const emptyRoot = mkdtempSync(join(tmpdir(), "quasar-opencode-empty-"));
+    const emptyDb = join(emptyRoot, "opencode.db");
+    execFileSync("sqlite3", [emptyDb, `
+      create table session (id text primary key, title text, directory text, time_created integer, time_updated integer);
+      create table message (id text primary key, session_id text, time_created integer, data text);
+      create table part (id text primary key, message_id text, session_id text, time_created integer, data text);
+      insert into session values ('ses_empty0001', 'empty session', '/tmp/proj', 1, 2);
+    `]);
+    try {
+      const result = await opencodeAdapter.read({ machine: MACHINE, now: NOW, roots: { opencode: emptyRoot } });
+      expect(result.sessions).toHaveLength(0);
+      const empty = result.diagnostics.find((diagnostic) =>
+        (diagnostic.details as { readonly diagnostic?: string } | undefined)?.diagnostic === "opencode.session.empty");
+      expect(empty).toBeDefined();
+      expect(empty!.severity).toBe("warning");
+      expect(empty!.status).toBe("unsupported");
+    } finally {
+      rmSync(emptyRoot, { recursive: true, force: true });
+    }
+  });
+});

@@ -852,29 +852,41 @@ async function* streamClaude(options: AdapterOptions) {
       logicalProjectsRoot,
       options,
     );
-    // Change-detection gate keyed on the canonical session id (now derived
-    // from the file's polymorphic native id) plus the source fingerprint, so an
-    // unchanged session is skipped without re-emitting.
-    if (options.shouldParseSession !== undefined) {
-      const stat = statSync(path);
-      const probe = {
-        sessionId: session.id,
-        sourceFingerprint: sourceFingerprintFor(stat),
-      };
-      if ((await options.shouldParseSession(probe)) === false) continue;
+    // Empty non-product sources (bridge bookkeeping-only files, or files with
+    // no parseable records) are classified here: a named warning and no
+    // session, so they never reach mapSession as a zero-event failure.
+    const productless = session.events.length === 0 && session.toolCalls.length === 0;
+    if (productless) {
+      diagnostics.push({
+        name: "claude.session.empty",
+        message: `claude.session.empty for ${sourcePath}: no product turns after classification (bookkeeping-only bridge session).`,
+      });
     }
-    sessionCount += 1;
-    yield {
-      type: "session" as const,
-      session,
-      sourceUnit: {
-        provider: "claude" as const,
-        adapterId: claudeAdapter.id,
-        rootPath: logicalProjectsRoot,
-        sourcePath,
-        physicalPath: path,
-      },
-    };
+    if (!productless) {
+      // Change-detection gate keyed on the canonical session id (now derived
+      // from the file's polymorphic native id) plus the source fingerprint, so an
+      // unchanged session is skipped without re-emitting.
+      if (options.shouldParseSession !== undefined) {
+        const stat = statSync(path);
+        const probe = {
+          sessionId: session.id,
+          sourceFingerprint: sourceFingerprintFor(stat),
+        };
+        if ((await options.shouldParseSession(probe)) === false) continue;
+      }
+      sessionCount += 1;
+      yield {
+        type: "session" as const,
+        session,
+        sourceUnit: {
+          provider: "claude" as const,
+          adapterId: claudeAdapter.id,
+          rootPath: logicalProjectsRoot,
+          sourcePath,
+          physicalPath: path,
+        },
+      };
+    }
     // Surface every NAMED decode diagnostic from a malformed/unmodeled record
     // in this file. Each is attributable (diagnostic name + parse failure) so a
     // provider contract breach is visible at the boundary, never silent.

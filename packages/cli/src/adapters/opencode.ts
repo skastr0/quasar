@@ -1030,9 +1030,27 @@ const yieldBuiltOpenCodeSession = function* (
     yield { type: "diagnostic", diagnostic };
   }
   const hasProduct = openCodeSessionHasRecoverableProduct(built.session);
-  // Drop only when oversized machinery was the whole story — empty but
-  // non-garbage sessions keep today's admission shape.
-  if (!hasProduct && built.prunedGarbageDiagnostics.length > 0) {
+  // Empty non-product sources (a session row with zero message+part rows, or
+  // parts pruned to nothing) are classified here: a named warning and no
+  // session, so a zero-event projection never fails mapSession later.
+  if (!hasProduct) {
+    yield {
+      type: "diagnostic",
+      diagnostic: {
+        adapterId: opencodeAdapter.id,
+        provider: "opencode",
+        status: "unsupported",
+        severity: "warning",
+        parserConfidence: "observed",
+        rootPath: args.root,
+        message: `opencode.session.empty for ${built.session.sourcePath}: no message or part rows; skipped.`,
+        details: {
+          diagnostic: "opencode.session.empty",
+          sourcePath: built.session.sourcePath,
+          physicalPath: args.dbPath,
+        },
+      },
+    };
     return false;
   }
   yield {

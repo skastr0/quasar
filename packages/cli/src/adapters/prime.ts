@@ -6,7 +6,7 @@ import {
   statSync,
   type Stats,
 } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { PrimeSessionId, type SessionId } from "../core/identity";
 import type {
@@ -98,12 +98,14 @@ const diagnosticItem = (
   name: string,
   message: string,
   status: "error" | "unsupported" = "unsupported",
+  severity?: "warning" | "info",
 ): AdapterStreamItem => ({
   type: "diagnostic",
   diagnostic: {
     adapterId: primeAdapter.id,
     provider: "prime",
     status,
+    ...(severity !== undefined ? { severity } : {}),
     parserConfidence: "documented",
     rootPath,
     message,
@@ -843,8 +845,26 @@ const normalizeFile = (
 const isPrimeSessionFile = (path: string): boolean =>
   path.endsWith(".jsonl") && basename(path) !== "rlm-subagents.jsonl";
 
-const collectSessionFiles = (agentRoot: string): { path: string; stats: Stats }[] => {
+/**
+ * Directories under `session-artifacts` that hold Prime's own test/benchmark
+ * data rather than session transcripts. Measured on the MacBook: 57
+ * test-corpus, 3 benchmark and 6 semantic-edge JSONL artifacts were discovered
+ * as if they were sessions and failed header validation. They are classified
+ * here, at discovery, before any identity/header probe.
+ */
+const PRIME_NON_SESSION_ARTIFACT_DIRS = new Set(["test-corpus", "benchmark", "semantic-edge"]);
+
+const isPrimeNonSessionArtifact = (artifactsDir: string, path: string): boolean =>
+  relative(artifactsDir, path).split(sep).some((part) => PRIME_NON_SESSION_ARTIFACT_DIRS.has(part));
+
+type PrimeSessionFiles = {
+  readonly files: Array<{ path: string; stats: Stats }>;
+  readonly nonSessionArtifacts: Array<{ path: string; stats: Stats }>;
+};
+
+const collectSessionFiles = (agentRoot: string): PrimeSessionFiles => {
   const files: { path: string; stats: Stats }[] = [];
+  const nonSessionArtifacts: { path: string; stats: Stats }[] = [];
   const sessionsDir = join(agentRoot, "sessions");
   if (existsSync(sessionsDir)) {
     for (const entry of readdirSync(sessionsDir).sort()) {
@@ -860,10 +880,11 @@ const collectSessionFiles = (agentRoot: string): { path: string; stats: Stats }[
   const artifactsDir = join(agentRoot, "session-artifacts");
   if (existsSync(artifactsDir)) {
     for (const file of walkFilesWithStats(artifactsDir, isPrimeSessionFile)) {
-      files.push(file);
+      if (isPrimeNonSessionArtifact(artifactsDir, file.path)) nonSessionArtifacts.push(file);
+      else files.push(file);
     }
   }
-  return files;
+  return { files, nonSessionArtifacts };
 };
 
 async function* streamPrime(options: AdapterDiscoverOptions): AsyncGenerator<AdapterStreamItem> {
@@ -886,7 +907,22 @@ async function* streamPrime(options: AdapterDiscoverOptions): AsyncGenerator<Ada
   // parent by FILE PATH, so this map must cover the entire root even when the
   // parent falls outside the skip/limit window or fails the parse gate.
   const allFiles = collectSessionFiles(physicalRoot);
-  allFiles.sort((left, right) => left.path.localeCompare(right.path));
+  const files = allFiles.files;
+  files.sort((left, right) => left.path.localeCompare(right.path));
+  // Non-session artifacts (Prime's own test-corpus/benchmark/semantic-edge
+  // JSONL) are classified before any identity/header validation: a named
+  // warning, no session, and no provider failure.
+  for (const artifact of allFiles.nonSessionArtifacts) {
+    const sourcePath = logicalPathFor(artifact.path, physicalRoot, logicalRoot);
+    yield diagnosticItem(
+      logicalRoot,
+      sourcePath,
+      "prime.discovery.non_session_artifact",
+      `Prime non-session artifact skipped before header validation: ${sourcePath}`,
+      "unsupported",
+      "warning",
+    );
+  }
   const nativeIdByPath = new Map<string, string>();
   const probes = new Map<string, PrimeFileProbe>();
   const pendingDiagnostics: AdapterStreamItem[] = [];
@@ -899,7 +935,7 @@ async function* streamPrime(options: AdapterDiscoverOptions): AsyncGenerator<Ada
 
   let matched = 0;
   let selected = 0;
-  for (const file of allFiles) {
+  for (const file of files) {
     const windowed = matched >= skip && selected < limit;
     if (matched >= skip) selected += 1;
     matched += 1;
