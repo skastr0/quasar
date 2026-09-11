@@ -724,6 +724,52 @@ export const GrokSummary = Schema.Struct({
 export type GrokSummary = typeof GrokSummary.Type;
 
 // ===========================================================================
+// 7. Compaction/recap archive inputs — historical conversation snapshots
+// ===========================================================================
+//
+// Grok rewrites `chat_history.jsonl` at compaction, so the pre-compaction
+// `chat_history` snapshots in `compaction_requests/` and `recap_requests/`
+// (plus the post-compaction `compacted_history` in `compaction_checkpoints/`)
+// are the only recovery source for product turns the live file has dropped.
+// Envelopes are decoded fail-closed; individual chat entries keep the same
+// per-record shapes as `chat_history.jsonl` and flow through the shared chat
+// classifier when projected.
+
+/** `compaction_requests/<id>.json` — the pre-compaction conversation snapshot. */
+export const GrokArchiveCompactionRequest = Schema.Struct({
+  request_id: Schema.NonEmptyString,
+  created_at: Schema.NonEmptyString,
+  trigger: Schema.optional(Schema.String),
+  prompt_variant: Schema.optional(Schema.String),
+  model: Schema.optional(Schema.String),
+  schema_version: Schema.optional(Schema.Union(Schema.Number, Schema.String)),
+  chat_history: Schema.Array(Schema.Unknown),
+});
+export type GrokArchiveCompactionRequest = typeof GrokArchiveCompactionRequest.Type;
+
+/** `recap_requests/<id>.json` — the conversation snapshot at recap-request time. */
+export const GrokArchiveRecapRequest = Schema.Struct({
+  request_id: Schema.NonEmptyString,
+  created_at: Schema.NonEmptyString,
+  trigger: Schema.optional(Schema.String),
+  schema_version: Schema.optional(Schema.Union(Schema.Number, Schema.String)),
+  chat_history: Schema.Array(Schema.Unknown),
+  summary: Schema.optional(Schema.String),
+});
+export type GrokArchiveRecapRequest = typeof GrokArchiveRecapRequest.Type;
+
+/** `compaction_checkpoints/<checkpoint_id>.json` — post-compaction bootstrap. */
+export const GrokArchiveCompactionCheckpoint = Schema.Struct({
+  checkpoint_id: Schema.NonEmptyString,
+  created_at: Schema.NonEmptyString,
+  prompt_index_at_compaction: Schema.optional(Schema.Number),
+  schema_version: Schema.optional(Schema.Union(Schema.Number, Schema.String)),
+  compacted_history: Schema.Array(Schema.Unknown),
+  original_user_info: Schema.optional(Schema.String),
+});
+export type GrokArchiveCompactionCheckpoint = typeof GrokArchiveCompactionCheckpoint.Type;
+
+// ===========================================================================
 // Declarative signal/drop dispatch tables
 // ===========================================================================
 
@@ -944,4 +990,43 @@ export const decodeGrokSubagentManifest = (
     ...(diagnostics !== undefined ? { diagnostics } : {}),
   });
   return isSignal(decision) ? (decision.value as GrokSubagentManifest) : undefined;
+};
+
+/** Decode one compaction-request archive file fail-closed. */
+export const decodeGrokArchiveCompactionRequest = (
+  record: unknown,
+  diagnostics?: DecodeDiagnostic[],
+): GrokArchiveCompactionRequest | undefined => {
+  const decision = decodeOrDrop(GrokArchiveCompactionRequest, record, {
+    kind: "summary",
+    diagnosticName: GROK_DECODE_FAILED,
+    ...(diagnostics !== undefined ? { diagnostics } : {}),
+  });
+  return isSignal(decision) ? (decision.value as GrokArchiveCompactionRequest) : undefined;
+};
+
+/** Decode one recap-request archive file fail-closed. */
+export const decodeGrokArchiveRecapRequest = (
+  record: unknown,
+  diagnostics?: DecodeDiagnostic[],
+): GrokArchiveRecapRequest | undefined => {
+  const decision = decodeOrDrop(GrokArchiveRecapRequest, record, {
+    kind: "summary",
+    diagnosticName: GROK_DECODE_FAILED,
+    ...(diagnostics !== undefined ? { diagnostics } : {}),
+  });
+  return isSignal(decision) ? (decision.value as GrokArchiveRecapRequest) : undefined;
+};
+
+/** Decode one compaction-checkpoint archive file fail-closed. */
+export const decodeGrokArchiveCompactionCheckpoint = (
+  record: unknown,
+  diagnostics?: DecodeDiagnostic[],
+): GrokArchiveCompactionCheckpoint | undefined => {
+  const decision = decodeOrDrop(GrokArchiveCompactionCheckpoint, record, {
+    kind: "lifecycle",
+    diagnosticName: GROK_DECODE_FAILED,
+    ...(diagnostics !== undefined ? { diagnostics } : {}),
+  });
+  return isSignal(decision) ? (decision.value as GrokArchiveCompactionCheckpoint) : undefined;
 };

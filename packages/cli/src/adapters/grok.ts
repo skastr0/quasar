@@ -7,6 +7,7 @@ import type {
   AgentAssignment,
   Artifact,
   ExecutionContextRecord,
+  NormalizedSession,
   SessionEdge,
   SessionEvent,
   ToolCall,
@@ -47,7 +48,22 @@ import {
   GROK_UNKNOWN_TYPE,
   type GrokUpdTurnCompletedRecord,
 } from "./grok-schema";
+import {
+  extractGrokProse,
+  grokReasoningText,
+  grokStandaloneReasoningText,
+} from "./grok-text";
+import {
+  grokArchiveInputPaths,
+  planGrokHistoryRecovery,
+  readGrokArchiveHistories,
+  type GrokChatSource,
+} from "./grok-recovery";
 import { isSignal, type DecodeDiagnostic, type SignalDecision } from "./harness-schema";
+
+// Test and downstream surface: chat-entry prose extraction is shared with the
+// archive recovery path so both derive text identically.
+export { extractGrokProse } from "./grok-text";
 
 /**
  * Local, DECLARATIVE role mapping . The adapter no longer borrows the
@@ -165,6 +181,14 @@ const grokSessionFingerprint = (sessionDir: string) => {
   for (const fileName of ["chat_history.jsonl", "events.jsonl", "updates.jsonl"]) {
     const path = join(sessionDir, fileName);
     if (!existsSync(path)) continue;
+    const stat = statSync(path);
+    size += stat.size;
+    mtimeMs = Math.max(mtimeMs, stat.mtimeMs);
+  }
+  // Recovery reads the compaction/recap archive inputs, so they are part of the
+  // session fingerprint: an archive change without a chat_history change must
+  // invalidate the stored fingerprint instead of being skipped.
+  for (const path of grokArchiveInputPaths(sessionDir)) {
     const stat = statSync(path);
     size += stat.size;
     mtimeMs = Math.max(mtimeMs, stat.mtimeMs);
@@ -399,139 +423,6 @@ const grokArtifacts = (
     ];
   });
 
-/**
- * Strip a leading/trailing `<user_query>...</user_query>` or
- * `<user_info>...</user_info>` wrapper if the ENTIRE text is the wrapper.
- * Only removes the wrapper tags; the inner content is kept verbatim.
- * Both wrappers are harness-injected; `<user_info>` carries env/OS context
- * (mutually exclusive with `<user_query>` in any given record).
- */
-const stripUserQueryWrapper = (text: string): string => {
-  const trimmed = text.trim();
-  for (const [openTag, closeTag] of [
-    ["<user_query>", "</user_query>"],
-    ["<user_info>", "</user_info>"],
-  ] as const) {
-    if (trimmed.startsWith(openTag) && trimmed.endsWith(closeTag)) {
-      return trimmed.slice(openTag.length, trimmed.length - closeTag.length).trim();
-    }
-  }
-  return text;
-};
-
-/**
- * Extract the leaf text from a grok content value.
- * - string: use directly (strip user_query wrapper)
- * - array: join `.text` from items with `.text` field (e.g. [{type:"text",text:"..."}])
- * - object with `.text`: extract the text field (e.g. {type:"text",text:"..."})
- * - other: return undefined (caller handles as NativeValue)
- */
-const extractGrokContentLeaf = (content: unknown): string | undefined => {
-  if (typeof content === "string") {
-    return stripUserQueryWrapper(content);
-  }
-  if (Array.isArray(content)) {
-    const parts: string[] = [];
-    for (const item of content) {
-      if (item === null || typeof item !== "object") continue;
-      const itemRecord = item as Record<string, unknown>;
-      // Accept {type:"text", text:"..."} or any {text:"..."} block
-      if (typeof itemRecord.text === "string") {
-        parts.push(itemRecord.text);
-      }
-    }
-    const joined = parts.join("").trim();
-    return joined.length > 0 ? stripUserQueryWrapper(joined) : undefined;
-  }
-  if (content !== null && typeof content === "object") {
-    const rec = content as Record<string, unknown>;
-    if (typeof rec.text === "string") return stripUserQueryWrapper(rec.text);
-  }
-  return undefined;
-};
-
-/**
- * Peel the known per-harness grok envelope down to the leaf message value.
- *
- * Record shapes:
- *   - chat_history: record.content (string | [{type:"text",text:"..."}])
- *   - updates: record.params.update.content (string | [{text:"..."}])
- *   - fallback: record.text, record.message, record.delta
- *
- * The leaf is returned VERBATIM — no prose-vs-json classification, no
- * reformatting. Agent-generated JSON inside a text block is legitimate
- * searchable content and is preserved as-is.
- */
-export const extractGrokProse = (record: Record<string, unknown>): string | undefined => {
-  // 1. Direct content field (chat_history user/assistant/tool_result/system)
-  if (record.content !== undefined) {
-    const leaf = extractGrokContentLeaf(record.content);
-    if (leaf !== undefined) return leaf;
-  }
-  // 2. updates.jsonl: params.update.content
-  const params = recordFrom(record.params);
-  const update = recordFrom(params?.update);
-  if (update?.content !== undefined) {
-    const leaf = extractGrokContentLeaf(update.content);
-    if (leaf !== undefined) return leaf;
-  }
-  // 3. Direct text / message / delta fallbacks
-  if (typeof record.text === "string") return stripUserQueryWrapper(record.text);
-  if (typeof record.message === "string") return stripUserQueryWrapper(record.message);
-  if (typeof record.delta === "string") return stripUserQueryWrapper(record.delta);
-  return undefined;
-};
-
-/**
- * Extract plaintext reasoning text from a STANDALONE `{type:"reasoning"}` record.
- * The dominant shape: `record.summary` is an array of `{type?, text}` items.
- * Fallback: top-level `record.text` field.
- * This is distinct from the EMBEDDED path (record.reasoning inside an assistant
- * record) handled by `grokReasoningText`.
- */
-const grokStandaloneReasoningText = (record: Record<string, unknown>): string | undefined => {
-  // Primary: summary[*].text joined
-  if (Array.isArray(record.summary)) {
-    const parts: string[] = [];
-    for (const item of record.summary) {
-      if (item !== null && typeof item === "object") {
-        const t = (item as Record<string, unknown>).text;
-        if (typeof t === "string") parts.push(t);
-      }
-    }
-    const joined = parts.join("").trim();
-    if (joined.length > 0) return joined;
-  }
-  // Fallback: top-level text field
-  if (typeof record.text === "string" && record.text.length > 0) return record.text;
-  return undefined;
-};
-
-/** Extract plaintext reasoning text from an assistant record's `reasoning` field. */
-const grokReasoningText = (record: Record<string, unknown>): string | undefined => {
-  const reasoningField = record.reasoning;
-  if (reasoningField === undefined || reasoningField === null) return undefined;
-  const reasoningRecord =
-    typeof reasoningField === "string"
-      ? recordFrom(parseJsonString(reasoningField))
-      : recordFrom(reasoningField);
-  if (reasoningRecord === undefined) return undefined;
-  // Try reasoning.summary[*].text first (encrypted reasoning block with plaintext summary)
-  if (Array.isArray(reasoningRecord.summary)) {
-    const summaryParts: string[] = [];
-    for (const item of reasoningRecord.summary) {
-      if (item !== null && typeof item === "object") {
-        const s = (item as Record<string, unknown>).text;
-        if (typeof s === "string") summaryParts.push(s);
-      }
-    }
-    const summaryText = summaryParts.join("").trim();
-    if (summaryText.length > 0) return summaryText;
-  }
-  // Fallback: reasoning.text
-  return stringValue(reasoningRecord.text);
-};
-
 /** Collect tool calls from the `tool_calls` array on an assistant event.
  *  Returns the first collected tool id for the event's `toolCallId` link. */
 const collectAssistantToolCalls = (
@@ -600,12 +491,24 @@ const mergeToolResult = (
   return merged.id;
 };
 
+type GrokSessionBuild =
+  | {
+      readonly session: NormalizedSession;
+      readonly decodeDiagnostics: DecodeDiagnostic[];
+      readonly recoveryBlock?: undefined;
+    }
+  | {
+      readonly session: undefined;
+      readonly decodeDiagnostics: DecodeDiagnostic[];
+      readonly recoveryBlock: { readonly code: string; readonly message: string };
+    };
+
 const buildGrokSessionFromChatPath = (
   chatPath: string,
   sessionsRoot: string,
   lineageMap: GrokLineageMap,
   options: AdapterOptions,
-) => {
+): GrokSessionBuild => {
   // Per-session named decode/drop diagnostics . A malformed record or an
   // unknown record type is accumulated here and surfaced as a session-level
   // boundary diagnostic; ingest of the rest of the session continues.
@@ -724,7 +627,49 @@ const buildGrokSessionFromChatPath = (
   const updatePath = join(sessionDir, "updates.jsonl");
   const eventPath = join(sessionDir, "events.jsonl");
 
-  const chatEvents = chatLines.flatMap(({ value, lineNumber }, index) => {
+  // Historical archive recovery: after a Grok compaction the live chat is a
+  // compacted view, and the pre-compaction authored turns exist only in the
+  // request/checkpoint archive files. The plan either returns the live chat
+  // unchanged or the maximal anchored pre-compaction history plus the new
+  // epoch tail, never a speculative merge.
+  const archiveHistories = readGrokArchiveHistories(sessionDir, decodeDiagnostics);
+  const currentChatSources: GrokChatSource[] = chatLines.map(({ value, lineNumber }) => ({
+    value,
+    sourcePath: chatPath,
+    line: lineNumber,
+    nativeType: "chat_history",
+    createdAt: "",
+    archive: false,
+  }));
+  // Decoded compaction boundary count from the live update stream. This is
+  // session metadata, not a message-count heuristic: it proves whether the
+  // retained checkpoint archives cover every compaction the session performed.
+  const compactionCheckpointUpdates = updateLines.reduce((count, { value }) => {
+    const record = recordFrom(value);
+    const update = recordFrom(recordFrom(record?.params)?.update);
+    return update !== undefined && stringValue(update.sessionUpdate) === "compaction_checkpoint"
+      ? count + 1
+      : count;
+  }, 0);
+  const recovery = planGrokHistoryRecovery(currentChatSources, archiveHistories, {
+    compactionCheckpointUpdates,
+  });
+  for (const diagnostic of recovery.diagnostics) decodeDiagnostics.push(diagnostic);
+  if (recovery.block !== undefined) {
+    // Fail the session closed instead of projecting a shorter replacement over
+    // a stored canonical that current source metadata proves is unrecoverable
+    // from the available archive inputs.
+    return {
+      session: undefined,
+      decodeDiagnostics,
+      recoveryBlock: recovery.block,
+    };
+  }
+  const chatSources = recovery.sources;
+
+  const chatEvents = chatSources.flatMap((source, index) => {
+    const value = source.value;
+    const lineNumber = source.line;
     const record =
       typeof value === "object" && value !== null
         ? (value as Record<string, unknown>)
@@ -751,7 +696,7 @@ const buildGrokSessionFromChatPath = (
           role: "thinking" as const,
           kind: "reasoning" as const,
           contentText: reasoningText,
-          rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: "reasoning" },
+          rawReference: { sourcePath: source.sourcePath, line: lineNumber, nativeType: "reasoning" },
         });
       }
       const toolCallId =
@@ -761,7 +706,10 @@ const buildGrokSessionFromChatPath = (
       const messageModel = stringValue(record.model_id);
       if (messageModel !== undefined) {
         executionContexts.push({
-          id: scopedId(sessionId, "execution-context", "chat", nativeEventId ?? lineNumber),
+          // Recovered archive entries and live chat entries can share a line
+          // number, so the context seed must be the unique per-position event id
+          // when the record has no native id.
+          id: scopedId(sessionId, "execution-context", "chat", nativeEventId ?? eventId),
           sequence: index,
           scope: "turn",
           ...(grokTime(record) !== undefined ? { timestamp: grokTime(record) } : {}),
@@ -779,7 +727,7 @@ const buildGrokSessionFromChatPath = (
         contentText: extractGrokProse(record) ?? compactText(content),
         contentSource: content,
         ...(toolCallId !== undefined ? { toolCallId } : {}),
-        rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: type },
+        rawReference: { sourcePath: source.sourcePath, line: lineNumber, nativeType: type },
       });
     } else if (type === "tool_result") {
       const toolCallId =
@@ -800,7 +748,7 @@ const buildGrokSessionFromChatPath = (
             }
           : {}),
         ...(toolCallId !== undefined ? { toolCallId } : {}),
-        rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: type },
+        rawReference: { sourcePath: source.sourcePath, line: lineNumber, nativeType: type },
       });
     } else if (type === "reasoning") {
       // Standalone {type:"reasoning"} — the DOMINANT shape (~86% of grok reasoning).
@@ -816,7 +764,7 @@ const buildGrokSessionFromChatPath = (
         role: "thinking" as const,
         kind: "reasoning" as const,
         ...(contentText !== undefined ? { contentText } : {}),
-        rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: "reasoning" },
+        rawReference: { sourcePath: source.sourcePath, line: lineNumber, nativeType: "reasoning" },
       });
     } else {
       // user / system / backend_tool_call: kind comes from the classifier.
@@ -837,11 +785,31 @@ const buildGrokSessionFromChatPath = (
             }
           : {}),
         ...(toolCallId !== undefined ? { toolCallId } : {}),
-        rawReference: { sourcePath: chatPath, line: lineNumber, nativeType: type },
+        rawReference: { sourcePath: source.sourcePath, line: lineNumber, nativeType: type },
       });
     }
     return result;
   });
+
+  // Provider context preserved with provenance: one event per distinct
+  // compaction continuation summary. Role `system` keeps it out of the
+  // authored message projection while the prose stays in the event store.
+  const contextEvents: GrokEventDraft[] = recovery.contextSources.map((source, index) => {
+    const record = recordFrom(source.value) ?? {};
+    const eventId = eventIdFor(sessionId, chatSources.length + index, `context:${index}`);
+    const text = extractGrokProse(record);
+    return {
+      id: eventId,
+      sequence: chatSources.length + index,
+      timestamp: grokTime(record),
+      role: "system" as const,
+      kind: "summary" as const,
+      ...(text !== undefined ? { contentText: text } : {}),
+      contentSource: projectSessionNativeValue(record),
+      rawReference: { sourcePath: source.sourcePath, line: source.line, nativeType: "compaction_bootstrap" },
+    } satisfies GrokEventDraft;
+  });
+  const chatEventOffset = chatSources.length + contextEvents.length;
 
   const sidecarEvents = eventLines.flatMap(({ value, lineNumber }, index) => {
     const record =
@@ -861,7 +829,7 @@ const buildGrokSessionFromChatPath = (
           : nativeEventId ?? eventId;
       executionContexts.push({
         id: scopedId(sessionId, "execution-context", "turn-started", lineNumber),
-        sequence: chatLines.length + index,
+        sequence: chatEventOffset + index,
         scope: "turn",
         ...(grokTime(record) !== undefined ? { timestamp: grokTime(record) } : {}),
         turnId: turnNumber,
@@ -879,7 +847,7 @@ const buildGrokSessionFromChatPath = (
       {
         id: eventId,
         nativeEventId,
-        sequence: chatLines.length + index,
+        sequence: chatEventOffset + index,
         timestamp: grokTime(record),
         role: type === "interjected" ? ("system" as const) : ("unknown" as const),
         kind: classified.kind,
@@ -943,7 +911,7 @@ const buildGrokSessionFromChatPath = (
     return [
       {
         id: eventId,
-        sequence: chatLines.length + eventLines.length + index,
+        sequence: chatEventOffset + eventLines.length + index,
         timestamp: grokTime(record),
         role: subtype === "session_recap" ? ("assistant" as const) : ("system" as const),
         kind: classified.kind,
@@ -962,7 +930,7 @@ const buildGrokSessionFromChatPath = (
     ];
   });
 
-  const events = [...chatEvents, ...sidecarEvents, ...updateEvents];
+  const events = [...chatEvents, ...contextEvents, ...sidecarEvents, ...updateEvents];
   const session = buildSession({
     provider: "grok",
     agentName,
@@ -1040,17 +1008,21 @@ async function* streamGrok(options: AdapterOptions): AsyncGenerator<AdapterStrea
   }
   let sessionCount = 0;
   for (const chatPath of files) {
-    // Stat-level gate on the canonical chat file BEFORE touching any sidecar
-    // files. An unchanged chat_history.jsonl means the session's primary content
-    // has not changed; the whole session is skipped.
+    const sessionDir = dirname(chatPath);
+    // Stat-level gate over the canonical chat file AND every archive input the
+    // adapter consults. An added/removed compaction request or checkpoint must
+    // invalidate the prior ingest even when chat_history.jsonl is unchanged.
     if (options.shouldReadFile !== undefined) {
-      const stat = statSync(chatPath);
-      if (!options.shouldReadFile(chatPath, stat)) continue;
+      let shouldRead = false;
+      for (const path of [chatPath, ...grokArchiveInputPaths(sessionDir)]) {
+        if (!existsSync(path)) continue;
+        if (options.shouldReadFile(path, statSync(path))) shouldRead = true;
+      }
+      if (!shouldRead) continue;
     }
     // Cheap pre-parse gate over the full session surface: chat is canonical,
     // while events/updates are optional sidecars whose late creation must
     // invalidate the prior ingest.
-    const sessionDir = dirname(chatPath);
     const fingerprint = grokSessionFingerprint(sessionDir);
     if (options.shouldParseSession !== undefined) {
       const probe = {
@@ -1059,12 +1031,43 @@ async function* streamGrok(options: AdapterOptions): AsyncGenerator<AdapterStrea
       };
       if ((await options.shouldParseSession(probe)) === false) continue;
     }
-    const { session, decodeDiagnostics } = buildGrokSessionFromChatPath(
+    const built = buildGrokSessionFromChatPath(
       chatPath,
       sessionsRoot,
       lineageMap,
       options,
     );
+    if (built.recoveryBlock !== undefined) {
+      // Durable hold: source metadata proves the stored session cannot be
+      // faithfully replaced from available archive inputs. Emit an attributable
+      // ERROR (not a warning) and yield no session, so the ingest fails closed
+      // and the stored canonical is never overwritten on a normal cycle.
+      const nativeSessionId = basename(sessionDir);
+      yield {
+        type: "diagnostic",
+        diagnostic: {
+          adapterId: grokAdapter.id,
+          provider: "grok",
+          status: "unsupported",
+          severity: "error",
+          parserConfidence: "observed",
+          rootPath: sessionsRoot,
+          message: truncateDiagnosticMessage(
+            `${built.recoveryBlock.code} for grok session ${nativeSessionId} `
+            + `(fail-closed; stored session left unchanged): ${built.recoveryBlock.message}`,
+          ),
+          details: {
+            diagnostic: built.recoveryBlock.code,
+            sessionId: sessionIdFor("grok", GrokSessionId(nativeSessionId)),
+            sessionDir,
+            sourcePath: chatPath,
+            physicalPath: chatPath,
+          },
+        },
+      };
+      continue;
+    }
+    const { session, decodeDiagnostics } = built;
     yield {
       type: "session",
       session,
