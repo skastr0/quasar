@@ -8,12 +8,33 @@ formats may still change.
 
 ## [Unreleased]
 
+## [0.5.8] - 2026-09-11
+
 ### Changed
 
 - Temporary `QUASAR_GROK_INGEST=off` hold, written by
   `daemon install --hold-grok`, keeps Grok out of `ingest --provider all`
   after restart. Explicit `ingest --provider grok` is unchanged. `daemon status`
   reports `grokIngest`.
+
+### Fixed
+
+- Grok compaction no longer replaces a richer stored session with a shorter
+  live projection: pre-compaction product text is recovered from retained
+  archive surfaces (`compaction_requests`, `recap_requests`,
+  `compaction_checkpoints`) and stored canonical epochs are unioned with newer
+  source turns. Provably incomplete or unanchored compaction history fails
+  closed with named diagnostics.
+- Accept Amp thread-list `--offset` as an exclusive skip without requiring
+  last-row overlap, fixing walks past 500 that aborted with a fake
+  enumeration-URL session.
+- Classify measured empty non-product sources at discovery/parse time with
+  named warnings (`claude.session.empty`, `opencode.session.empty`,
+  `cursor.session.empty`, `prime.discovery.non_session_artifact`) and yield
+  no session, so provider runs complete without `sessionsFailed` or a failed
+  cycle exit. Prime non-session artifacts match the exact measured structures
+  (`tests/pty-e2e/corpus/**`, `tests/scale-bench/**`, `semantic-edges.jsonl`),
+  so near-miss and canonical files still fail closed on malformed headers.
 
 ## [0.5.7] - 2026-09-11
 
