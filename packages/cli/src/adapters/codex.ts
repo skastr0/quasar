@@ -407,7 +407,11 @@ const codexRoleFrom = (
 const callIdFromPayload = (payload: CodexRecord) =>
   typeof payload.call_id === "string" && payload.call_id.length > 0
     ? payload.call_id
-    : undefined;
+    : payload.type === "item_completed"
+      ? firstStringValue(recordFrom(payload.item)?.id)
+      : payload.type === "web_search_call"
+        ? firstStringValue(payload.id)
+        : undefined;
 
 const toolCallIdFor = (sessionId: SessionId, callId: string) =>
   scopedId(sessionId, "tool", callId);
@@ -486,6 +490,36 @@ const upsertCodexToolCall = (
   const callId = callIdFromPayload(payload);
   if (callId === undefined) return undefined;
   const id = toolCallIdFor(sessionId, callId);
+  if (payloadType === "item_completed") {
+    // Only the schema-decoded, measured tool variants reach this projection.
+    // item.id is the native call ID (WebSearch uses the response item's id).
+    const item = payloadRecordFrom(payload.item);
+    const existing = toolCallsById.get(id);
+    const toolName = item.type === "McpToolCall"
+      ? `mcp__${item.server}__${item.tool}`
+      : item.type === "FileChange" ? "apply_patch" : "web_search";
+    const input = item.type === "McpToolCall"
+      ? item.arguments
+      : item.type === "FileChange" ? item.changes : { query: item.query, action: item.action };
+    const output = item.type === "McpToolCall"
+      ? item.result ?? item.error
+      : item.type === "FileChange"
+        ? { stdout: item.stdout, stderr: item.stderr }
+        : item.results;
+    toolCallsById.set(id, {
+      ...existing,
+      id,
+      eventId: existing?.eventId ?? eventId,
+      toolName: existing?.toolName ?? toolName,
+      status: typeof item.status === "string" ? item.status : "completed",
+      input: existing?.input ?? projectToolPayloadNativeValue(input),
+      ...(existing?.output !== undefined
+        ? { output: existing.output }
+        : output !== undefined ? { output: projectToolPayloadNativeValue(output) } : {}),
+      ...(timestamp !== undefined ? { completedAt: timestamp } : {}),
+    });
+    return id;
+  }
   // custom_tool_call (apply_patch and friends) shares the function_call shape
   // but carries its payload in `input` (raw text) instead of `arguments` (JSON).
   // local_shell_call carries its payload in `action` (exec command record) and
@@ -511,9 +545,9 @@ const upsertCodexToolCall = (
     toolCallsById.set(id, {
       ...existing,
       id,
-      eventId: existing?.eventId ?? eventId,
+      eventId: existing?.startedAt !== undefined ? existing.eventId : eventId,
       toolName,
-      status: existing?.status === "completed" ? "completed" : payloadStatus,
+      status: existing?.completedAt !== undefined ? existing.status : payloadStatus,
       ...(input !== undefined ? { input } : {}),
       ...(existing?.output !== undefined ? { output: existing.output } : {}),
       ...(timestamp !== undefined ? { startedAt: timestamp } : {}),
@@ -1072,6 +1106,7 @@ async function* streamCodexSessionFromFile(
   const sessionId = sessionIdFor("codex", nativeSessionId);
   const toolCallsById = new Map<string, CodexToolCallDraft>();
   const toolCallEventByToolId = new Map<string, string>();
+  const completedItemEventByToolId = new Map<string, string>();
   let projectPath: string | undefined;
   let gitRemote: string | undefined;
   // Subagent lineage + agent identity, sourced fail-closed from the decoded
@@ -1205,7 +1240,9 @@ async function* streamCodexSessionFromFile(
     // sees the same shape as a wrapped response_item payload.
     const envelopePayload = record.payload;
     const contentSubject =
-      envelopePayload !== undefined ? envelopePayload : classification.value;
+      recordFrom(envelopePayload)?.type === "item_completed"
+        ? classification.value
+        : envelopePayload !== undefined ? envelopePayload : classification.value;
     const payloadRecord = payloadRecordFrom(contentSubject);
     const payloadType = payloadTypeFrom(payloadRecord);
     const content =
@@ -1230,8 +1267,20 @@ async function* streamCodexSessionFromFile(
     );
     if (toolCallId !== undefined) {
       slice.toolCallIds.add(toolCallId);
-      if (kind === "tool_call") toolCallEventByToolId.set(toolCallId, eventId);
+      if (kind === "tool_call") {
+        toolCallEventByToolId.set(toolCallId, eventId);
+        const completedEventId = completedItemEventByToolId.get(toolCallId);
+        if (completedEventId !== undefined) {
+          slice.sessionEdges.push({
+            id: edgeIdFor(sessionId, "tool_result_for", eventId, completedEventId),
+            kind: "tool_result_for",
+            fromEventId: eventId,
+            toEventId: completedEventId,
+          });
+        }
+      }
       if (kind === "tool_result") {
+        if (payloadType === "item_completed") completedItemEventByToolId.set(toolCallId, eventId);
         const callEventId = toolCallEventByToolId.get(toolCallId);
         if (callEventId !== undefined) {
           slice.sessionEdges.push({

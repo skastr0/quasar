@@ -85,7 +85,7 @@ import type { SessionEventKind } from "../core/schemas";
  *  - patch_apply_end     -> drop  codex.event_msg.patch_apply_end.provider_bookkeeping
  *  - thread_goal_updated -> drop  codex.event_msg.thread_goal_updated.provider_bookkeeping
  *  - thread_name_updated -> drop  codex.event_msg.thread_name_updated.provider_bookkeeping
- *  - item_completed      -> drop  codex.event_msg.item_completed.provider_bookkeeping
+ *  - item_completed      -> tool_result for measured tool items; other echoes drop
  *  - context_compacted   -> drop  codex.event_msg.context_compacted.provider_bookkeeping
  *  - web_search_end      -> drop  codex.event_msg.web_search_end.provider_bookkeeping
  *                          (bookkeeping echo of response_item.web_search_call)
@@ -440,6 +440,37 @@ const CodexThreadGoalUpdatedPayloadSchema = Schema.Struct({
 const CodexContextCompactedPayloadSchema = Schema.Struct({
   type: Schema.Literal("context_compacted"),
 });
+
+// Measured in the 59 recovery-source sessions: these three item variants carry
+// tool product, including MCP errors absent from every response_item record.
+// Tool-native arguments/results remain opaque product, not provider machinery.
+const CodexCompletedToolItemSchema = Schema.Union(
+  Schema.Struct({
+    type: Schema.Literal("McpToolCall"),
+    id: Schema.NonEmptyString,
+    server: Schema.String,
+    tool: Schema.String,
+    arguments: Schema.Record({ key: Schema.String, value: Schema.Unknown }),
+    status: Schema.String,
+    result: Schema.optional(Schema.Record({ key: Schema.String, value: Schema.Unknown })),
+    error: Schema.optional(Schema.Struct({ message: Schema.String })),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("FileChange"),
+    id: Schema.NonEmptyString,
+    changes: Schema.Record({ key: Schema.String, value: Schema.Unknown }),
+    status: Schema.String,
+    stdout: Schema.optional(Schema.String),
+    stderr: Schema.optional(Schema.String),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("WebSearch"),
+    id: Schema.NonEmptyString,
+    query: Schema.String,
+    action: Schema.Record({ key: Schema.String, value: Schema.Unknown }),
+    results: Schema.optional(Schema.Array(Schema.Unknown)),
+  }),
+);
 
 const CodexItemCompletedPayloadSchema = Schema.Struct({
   type: Schema.Literal("item_completed"),
@@ -951,6 +982,19 @@ export const classifyCodexRecord = (
     const message = ParseResult.TreeFormatter.formatErrorSync(decoded.left);
     diagnostics?.push({ name: entry.decodeFailedName, message });
     return drop(`${entry.decodeFailedName}: ${message}`);
+  }
+  if (discriminator === "event_msg.item_completed") {
+    const payload = decoded.right as typeof CodexItemCompletedPayloadSchema.Type;
+    const itemType = (payload.item as { type?: unknown } | undefined)?.type;
+    if (itemType === "McpToolCall" || itemType === "FileChange" || itemType === "WebSearch") {
+      const item = Schema.decodeUnknownEither(CodexCompletedToolItemSchema)(payload.item);
+      if (item._tag === "Left") {
+        const message = ParseResult.TreeFormatter.formatErrorSync(item.left);
+        diagnostics?.push({ name: entry.decodeFailedName, message });
+        return drop(`${entry.decodeFailedName}: ${message}`);
+      }
+      return signalKind("tool_result")({ ...payload, item: item.right });
+    }
   }
   return entry.verdict(decoded.right);
 };
