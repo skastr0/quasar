@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { dirname } from "node:path";
 
-import { AMP_INGEST_ENV } from "./adapters/registry";
+import { AMP_INGEST_ENV, GROK_INGEST_ENV } from "./adapters/registry";
 
 export const daemonIngestProcess = (
   serverUrl: string,
@@ -33,6 +33,11 @@ export type DaemonPlistOptions = {
   readonly stderr: string;
   /** Poll Amp's servers from this machine. Off unless the installer said `--amp`. */
   readonly ampIngest: boolean;
+  /**
+   * Hold Grok out of `--provider all` after restart. Off unless the installer
+   * said `--hold-grok`. Explicit `ingest --provider grok` is unchanged.
+   */
+  readonly holdGrok: boolean;
 };
 
 /** launchd plist for the ingest tick. Amp opt-in travels as an environment switch. */
@@ -63,7 +68,9 @@ export const daemonPlist = (options: DaemonPlistOptions) => `<?xml version="1.0"
     <key>QUASAR_DAEMON_HOME</key>
     <string>${xml(options.home)}</string>${options.ampIngest ? `
     <key>${AMP_INGEST_ENV}</key>
-    <string>on</string>` : ""}
+    <string>on</string>` : ""}${options.holdGrok ? `
+    <key>${GROK_INGEST_ENV}</key>
+    <string>off</string>` : ""}
   </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -80,3 +87,7 @@ export const daemonPlist = (options: DaemonPlistOptions) => `<?xml version="1.0"
 /** Whether an installed plist enables Amp ingest. */
 export const plistEnablesAmpIngest = (plist: string): boolean =>
   new RegExp(`<key>${AMP_INGEST_ENV}</key>\\s*<string>on</string>`).test(plist);
+
+/** Whether an installed plist holds Grok out of `--provider all`. */
+export const plistHoldsGrok = (plist: string): boolean =>
+  new RegExp(`<key>${GROK_INGEST_ENV}</key>\\s*<string>off</string>`).test(plist);

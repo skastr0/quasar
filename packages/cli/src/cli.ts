@@ -9,7 +9,7 @@ import type { QuerySpec } from "@skastr0/quasar-protocol";
 import { parseCliArguments } from "./argv";
 import { configuredIngestToken, configuredServerUrl, defaultClientConfigPath } from "./client-config";
 import { Provider } from "./core/schemas";
-import { daemonIngestProcess, daemonPlist, plistEnablesAmpIngest } from "./daemon-process";
+import { daemonIngestProcess, daemonPlist, plistEnablesAmpIngest, plistHoldsGrok } from "./daemon-process";
 import { ingestFailureError, ingestReportPayload } from "./ingest-report";
 import { ingestRemote } from "./ingest";
 import { fail, ok, writeJson } from "./json";
@@ -103,6 +103,7 @@ const valueOptionNames = new Set([
 ]);
 const booleanOptionNames = new Set([
   "--amp",
+  "--hold-grok",
   "--detail",
   "--exclude-reasoning",
   "--exclude-tool-results",
@@ -387,19 +388,20 @@ const installDaemon = () => {
   const binary = resolve(daemonBinary());
   const intervalSeconds = daemonInterval();
   const ampIngest = flag("--amp");
+  const holdGrok = flag("--hold-grok");
   const paths = daemonPaths();
   mkdirSync(dirname(paths.plist), { recursive: true });
   mkdirSync(paths.logs, { recursive: true, mode: 0o700 });
   writeFileSync(
     paths.plist,
-    daemonPlist({ label: daemonLabel, binary, serverUrl, ingestToken, intervalSeconds, home: paths.home, stdout: paths.stdout, stderr: paths.stderr, ampIngest }),
+    daemonPlist({ label: daemonLabel, binary, serverUrl, ingestToken, intervalSeconds, home: paths.home, stdout: paths.stdout, stderr: paths.stderr, ampIngest, holdGrok }),
     { encoding: "utf8", mode: 0o600 },
   );
   spawnSync("launchctl", ["bootout", launchDomain(), paths.plist], { stdio: "ignore" });
   runLaunchctl(["bootstrap", launchDomain(), paths.plist]);
   runLaunchctl(["enable", `${launchDomain()}/${daemonLabel}`]);
   runLaunchctl(["kickstart", "-k", `${launchDomain()}/${daemonLabel}`]);
-  return { label: daemonLabel, plist: paths.plist, intervalSeconds, serverUrl, ampIngest, lock: paths.lock, logs: { stdout: paths.stdout, stderr: paths.stderr } };
+  return { label: daemonLabel, plist: paths.plist, intervalSeconds, serverUrl, ampIngest, holdGrok, lock: paths.lock, logs: { stdout: paths.stdout, stderr: paths.stderr } };
 };
 
 const uninstallDaemon = () => {
@@ -422,6 +424,7 @@ const daemonStatus = () => {
     plist: paths.plist,
     installed,
     ampIngest: installed && plistEnablesAmpIngest(readFileSync(paths.plist, "utf8")),
+    grokIngest: !installed || !plistHoldsGrok(readFileSync(paths.plist, "utf8")),
     loaded,
     running,
     lock: { path: paths.lock, held: existsSync(paths.lock) },
@@ -1176,7 +1179,7 @@ if (!rejectUnsupportedOptions(command)) {
   case "help": {
     const commands = [
       "ingest --provider all|codex|claude|opencode|grok|kimi|hermes|antigravity|omp|pi|prime|cursor|devin|amp [--server url] [--limit n] [--force] [--summary]",
-      "daemon install --server https://<quasar-service-tailnet-hostname> --ingest-token <token> [--interval-seconds 60] [--amp]",
+      "daemon install --server https://<quasar-service-tailnet-hostname> --ingest-token <token> [--interval-seconds 60] [--amp] [--hold-grok]",
       "daemon status",
       "daemon uninstall",
       "projects [--limit n] [--offset n]",

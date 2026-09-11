@@ -145,7 +145,7 @@ Controls the background remote-ingest daemon via macOS `launchd`. The daemon reg
 
 ```bash
 # Install and bootstrap the LaunchAgent plist
-quasar daemon install --server https://<quasar-host> --ingest-token <token> [--interval-seconds <n>] [--binary <path>] [--amp]
+quasar daemon install --server https://<quasar-host> --ingest-token <token> [--interval-seconds <n>] [--binary <path>] [--amp] [--hold-grok]
 
 # Check daemon running state, loaded plist, and lock file status
 quasar daemon status
@@ -166,6 +166,10 @@ quasar daemon run
   interval. The only local state is `amp-poll-state.json` beside the ingest
   manifest: one timestamp. An explicit `quasar ingest --provider amp` ignores
   the throttle and lists right away.
+- `--hold-grok`: Write `QUASAR_GROK_INGEST=off` into the LaunchAgent so
+  `ingest --provider all` skips Grok after restart. Temporary until Grok
+  replacements are safe. Explicit `quasar ingest --provider grok` is unchanged.
+  `daemon status` reports `grokIngest`.
 - `--binary <path>`: Absolute path to the Quasar binary to execute (defaults to current runtime binary).
 
 ---
@@ -623,6 +627,7 @@ cat materialize-receipt.json | jq '.data.closure'
 | `QUASAR_DAEMON_INTERVAL_SECONDS` | Daemon execution frequency in seconds | `15` |
 | `QUASAR_DAEMON_STALE_LOCK_SECONDS` | Duration before broken daemon locks are reclaimed | `3600` (1 hour) |
 | `QUASAR_AMP_INGEST` | `on` includes Amp in `ingest --provider all`; written by `daemon install --amp` | unset (off) |
+| `QUASAR_GROK_INGEST` | `off` holds Grok out of `ingest --provider all`; written by `daemon install --hold-grok`. Explicit `ingest --provider grok` is unchanged. Temporary until Grok replacements are safe. | unset (on) |
 | `QUASAR_CODEX_ROOT` | Codex history directory override | `~/.codex` |
 | `QUASAR_CLAUDE_ROOT` | Claude Code history directory override | `~/.claude` |
 | `QUASAR_OPENCODE_ROOT` | OpenCode history directory override | `~/.local/share/opencode` |

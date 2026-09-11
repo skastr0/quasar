@@ -8,6 +8,13 @@ formats may still change.
 
 ## [Unreleased]
 
+### Changed
+
+- Temporary `QUASAR_GROK_INGEST=off` hold, written by
+  `daemon install --hold-grok`, keeps Grok out of `ingest --provider all`
+  after restart. Explicit `ingest --provider grok` is unchanged. `daemon status`
+  reports `grokIngest`.
+
 ## [0.5.7] - 2026-09-11
 
 ### Fixed

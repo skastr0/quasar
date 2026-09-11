@@ -210,6 +210,10 @@ describe("amp registry", () => {
     expect(defaultIngestProviders({ QUASAR_AMP_INGEST: "on" })).toContain("amp");
     expect(defaultIngestProviders({ QUASAR_AMP_INGEST: "1" })).toContain("amp");
     expect(defaultIngestProviders({})).toEqual(localAdapters.map((adapter) => adapter.provider));
+    expect(defaultIngestProviders({})).toContain("grok");
+    expect(defaultIngestProviders({ QUASAR_GROK_INGEST: "off" })).not.toContain("grok");
+    expect(defaultIngestProviders({ QUASAR_GROK_INGEST: "off" })).toContain("codex");
+    expect(defaultIngestProviders({ QUASAR_GROK_INGEST: "on" })).toContain("grok");
   });
 });
 

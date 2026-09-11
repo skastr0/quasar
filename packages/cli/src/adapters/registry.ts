@@ -13,7 +13,8 @@ import { primeAdapter } from "./prime";
 import { opencodeAdapter } from "./opencode";
 
 /**
- * Adapters that read local files. Always included in `ingest --provider all`.
+ * Adapters that read local files. Included in `ingest --provider all`, except
+ * Grok when `QUASAR_GROK_INGEST` is off.
  */
 export const localAdapters = [
   codexAdapter,
@@ -43,14 +44,28 @@ export const stableAdapters = [...localAdapters, ...remoteAdapters] as const;
 /** Environment switch the daemon installer writes when Amp ingest is enabled. */
 export const AMP_INGEST_ENV = "QUASAR_AMP_INGEST";
 
+/**
+ * Temporary hold for Grok on `ingest --provider all`. Explicit `ingest
+ * --provider grok` is unchanged. Default remains on so existing clients keep
+ * Grok in `all` unless the daemon (or an operator) writes `off`.
+ */
+export const GROK_INGEST_ENV = "QUASAR_GROK_INGEST";
+
 export const ampIngestEnabled = (env: NodeJS.ProcessEnv = process.env): boolean => {
   const value = env[AMP_INGEST_ENV]?.trim().toLowerCase();
   return value === "on" || value === "1" || value === "true";
 };
 
+export const grokIngestEnabled = (env: NodeJS.ProcessEnv = process.env): boolean => {
+  const value = env[GROK_INGEST_ENV]?.trim().toLowerCase();
+  return value !== "off" && value !== "0" && value !== "false";
+};
+
 /** Providers `ingest --provider all` runs on this machine. */
 export const defaultIngestProviders = (env: NodeJS.ProcessEnv = process.env) => [
-  ...localAdapters.map((adapter) => adapter.provider),
+  ...localAdapters
+    .map((adapter) => adapter.provider)
+    .filter((provider) => provider !== "grok" || grokIngestEnabled(env)),
   ...(ampIngestEnabled(env) ? remoteAdapters.map((adapter) => adapter.provider) : []),
 ];
 
