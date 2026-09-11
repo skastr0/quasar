@@ -481,6 +481,30 @@ describe("upsertSession row-level diff", () => {
     expect(ftsCount(path)).toBe(4);
   });
 
+  test("moving events across write chunks notifies every removed vector", async () => {
+    const path = sqlitePath();
+    const rows = initialMessages(130);
+    const reordered = [...rows].reverse().map((row, index) => ({ ...row, seq: index + 1 }));
+    const deleted: number[] = [];
+    await withStore(path, (store) => Effect.gen(function* () {
+      yield* store.upsertSession(session(rows));
+      yield* store.upsertMessageVectors(rows.map(vectorRow));
+      store.registerMessageVectorMutationListener((event) => Effect.sync(() => {
+        deleted.push(...event.deletes.map((row) => row.seq));
+      }));
+      yield* store.upsertSession(session(reordered, [], { sourceFingerprint: "fp-reordered" }));
+      expect(yield* store.listMessageVectorsBySession({ sessionId: SESSION_ID, model: "test-model" })).toEqual([]);
+    }));
+    expect(deleted.sort((a, b) => a - b)).toEqual(Array.from({ length: 130 }, (_, i) => i + 1));
+    const db = new Database(path, { readonly: true });
+    try {
+      expect(db.query("SELECT event_id FROM messages WHERE session_id = ? ORDER BY seq").all(SESSION_ID))
+        .toEqual(Array.from({ length: 130 }, (_, i) => ({ event_id: `event-${130 - i}` })));
+    } finally {
+      db.close();
+    }
+  });
+
   test("truncation deletes vanished rows from messages, FTS, and vectors", async () => {
     const path = sqlitePath();
     const rows = initialMessages(30);

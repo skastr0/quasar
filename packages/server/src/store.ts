@@ -1594,16 +1594,6 @@ const makeLocalStoreLayerScoped = (
           "SELECT source_fingerprint AS sourceFingerprint FROM sessions WHERE session_id = ?",
         );
         const deleteMessageRow = db.prepare("DELETE FROM messages WHERE session_id = ? AND seq = ?");
-        /**
-         * A re-sent session can move an event to a different seq (a turn
-         * inserted or dropped upstream shifts everything after it). The row
-         * still holding that event id at its old seq must go before the new
-         * seq is written, or `messages_by_event` rejects the insert. The old
-         * seq is itself rewritten or deleted later in the same plan.
-         */
-        const deleteMessageByEvent = db.prepare(
-          "DELETE FROM messages WHERE session_id = ? AND event_id = ? AND seq <> ?",
-        );
         const deleteToolCallRow = db.prepare("DELETE FROM tool_calls WHERE id = ?");
         const upsertToolCall = db.prepare(
           `INSERT INTO tool_calls(id, session_id, event_id, seq, tool_name, status, input_text, output_text, input_hash, output_hash, started_at, completed_at, project_key, provider, execution_context_id, model, model_provider, reasoning_effort)
@@ -1674,6 +1664,7 @@ const makeLocalStoreLayerScoped = (
           readonly requiresDownstreamReplay: boolean;
           readonly messageUpserts: readonly MessageRow[];
           readonly messageDeleteSeqs: readonly number[];
+          readonly messagePreDeleteSeqs: readonly number[];
           readonly messagesInserted: number;
           readonly messagesUpdated: number;
           readonly messagesUnchanged: number;
@@ -1730,6 +1721,14 @@ const makeLocalStoreLayerScoped = (
           const messageDeleteSeqs = existingMessages
             .filter((row) => !incomingSeqs.has(row.seq))
             .map((row) => row.seq);
+          const incomingEventSeqs = new Map(mapped.messages.map((row) => [row.eventId, row.seq]));
+          // Remove displaced event identities before inserting ANY chunk. This
+          // avoids the unique-event conflict and observes their vectors before
+          // the delete trigger removes them, including moves across chunks.
+          const messagePreDeleteSeqs = existingMessages.filter((row) => {
+            const nextSeq = row.eventId === null ? undefined : incomingEventSeqs.get(row.eventId);
+            return !incomingSeqs.has(row.seq) || (nextSeq !== undefined && nextSeq !== row.seq);
+          }).map((row) => row.seq);
 
           const existingToolCalls = selectToolCallDiffRows.all(mapped.session.sessionId) as Array<{
             id: string; eventId: string | null; seq: number; toolName: string; status: string | null;
@@ -1806,7 +1805,7 @@ const makeLocalStoreLayerScoped = (
 
           return {
             requiresDownstreamReplay,
-            messageUpserts, messageDeleteSeqs, messagesInserted, messagesUpdated, messagesUnchanged,
+            messageUpserts, messageDeleteSeqs, messagePreDeleteSeqs, messagesInserted, messagesUpdated, messagesUnchanged,
             toolCallUpserts, toolCallDeleteIds, toolCallsInserted, toolCallsUpdated, toolCallsUnchanged,
             events, usageRecords, sessionEdges, artifacts, executionContexts,
           };
@@ -1894,9 +1893,6 @@ const makeLocalStoreLayerScoped = (
         const applyMessageUpsertChunk = db.transaction((rows: readonly MessageRow[]) => {
           for (const message of rows) {
             deleteMessageRow.run(message.sessionId, message.seq);
-            if (message.eventId !== null && message.eventId !== undefined) {
-              deleteMessageByEvent.run(message.sessionId, message.eventId, message.seq);
-            }
             insertMessage.run({
               $sessionId: message.sessionId,
               $eventId: message.eventId,
@@ -1966,7 +1962,7 @@ const makeLocalStoreLayerScoped = (
             yield* trySqlite("upsertSession.head", () => applySessionHead(mapped, plan)).pipe(
               Effect.withSpan("ingest.diffHead"),
             );
-            for (const chunk of chunked(plan.messageDeleteSeqs)) {
+            for (const chunk of chunked(plan.messagePreDeleteSeqs)) {
               const keys = chunk.map((seq) => ({ sessionId: mapped.session.sessionId, seq }));
               const vectorDeletes = yield* trySqlite(
                 "upsertSession.selectVectorDeletes",
