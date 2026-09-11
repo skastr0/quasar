@@ -584,12 +584,21 @@ describe("Prime Agent adapter", () => {
 // Non-session artifact classification before header validation
 // ---------------------------------------------------------------------------
 describe("non-session artifact classification", () => {
-  test("test-corpus/benchmark/semantic-edge artifacts skip before any header probe", async () => {
+  test("exact MacBook artifact paths skip while near-miss malformed sessions still fail", async () => {
     const root = join(ROOT, "non-session-artifacts");
+    const artifacts = join(root, "session-artifacts");
     mkdirSync(join(root, "sessions"), { recursive: true });
-    for (const directory of ["test-corpus", "benchmark", "semantic-edge"]) {
-      mkdirSync(join(root, "session-artifacts", directory), { recursive: true });
-    }
+    const artifactOwner = join(artifacts, "019ffa35-5c65-7468-ba12-c7d59cd16b06");
+    const nearMissOwner = join(artifacts, "01a00c7d-544b-7578-9e3a-2ba3c68dc770");
+    mkdirSync(join(artifactOwner, "tests", "pty-e2e", "corpus", "nested"), { recursive: true });
+    mkdirSync(join(artifactOwner, "tests", "scale-bench"), { recursive: true });
+    mkdirSync(join(artifactOwner, "notes"), { recursive: true });
+    mkdirSync(join(artifactOwner, "sub-abc12345"), { recursive: true });
+    mkdirSync(join(nearMissOwner, "tests", "pty-e2e", "corpus-near-miss"), { recursive: true });
+    mkdirSync(join(nearMissOwner, "tests", "scale-benchmarks"), { recursive: true });
+    mkdirSync(join(nearMissOwner, "notes"), { recursive: true });
+
+    // Canonical session and canonical subagent artifact still parse.
     writeFileSync(join(root, "sessions", "canonical.jsonl"), jsonl([
       header("prime-canonical-session"),
       {
@@ -604,22 +613,51 @@ describe("non-session artifact classification", () => {
         },
       },
     ]));
-    // Malformed REAL session: stays in sessions/ and must still fail closed.
-    writeFileSync(join(root, "sessions", "malformed.jsonl"), jsonl([{ fixture: "not-a-prime-header" }]));
-    writeFileSync(join(root, "session-artifacts", "test-corpus", "case-1.jsonl"), jsonl([{ corpus: "case" }]));
-    writeFileSync(join(root, "session-artifacts", "benchmark", "bench-1.jsonl"), jsonl([{ benchmark: true }]));
-    writeFileSync(join(root, "session-artifacts", "semantic-edge", "edge-1.jsonl"), jsonl([{ edge: true }]));
+    writeFileSync(join(artifactOwner, "sub-abc12345", "019ffc9a-919b-705c-bac4-f80123f29b4b.jsonl"), jsonl([
+      header("prime-canonical-child"),
+      {
+        type: "message",
+        id: "entry-child",
+        parentId: null,
+        timestamp: SESSION_TIME,
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "canonical child turn", textSignature: "fabricated-signature" }],
+          timestamp: 1_752_400_000_000,
+        },
+      },
+    ]));
+
+    // Exact MacBook artifact paths: tests/pty-e2e/corpus (57), tests/scale-bench
+    // (3), and basename semantic-edges.jsonl (11). All are JSONL with no header.
+    writeFileSync(join(artifactOwner, "tests", "pty-e2e", "corpus", "case-1.jsonl"), jsonl([{ corpus: "case" }]));
+    writeFileSync(join(artifactOwner, "tests", "pty-e2e", "corpus", "nested", "case-2.jsonl"), jsonl([{ corpus: "case-2" }]));
+    writeFileSync(join(artifactOwner, "tests", "scale-bench", "bench-1.jsonl"), jsonl([{ benchmark: true }]));
+    writeFileSync(join(artifactOwner, "notes", "semantic-edges.jsonl"), jsonl([{ edge: true }]));
+
+    // Near-miss MALFORMED canonical sessions: close names that are not the
+    // excluded structures must still fail header validation with an error.
+    writeFileSync(join(nearMissOwner, "tests", "pty-e2e", "corpus-near-miss", "case.jsonl"), jsonl([{ fixture: "not-a-prime-header" }]));
+    writeFileSync(join(nearMissOwner, "tests", "scale-benchmarks", "bench.jsonl"), jsonl([{ fixture: "not-a-prime-header" }]));
+    writeFileSync(join(nearMissOwner, "notes", "semantic-edge.jsonl"), jsonl([{ fixture: "not-a-prime-header" }]));
+    // The same basename OUTSIDE the owned artifact subtree is never ignored.
+    writeFileSync(join(root, "sessions", "semantic-edges.jsonl"), jsonl([{ fixture: "not-a-prime-header" }]));
 
     const result = await primeAdapter.read({ machine: MACHINE, now: NOW, roots: { prime: root } });
-    expect(result.sessions).toHaveLength(1);
+    expect(result.sessions).toHaveLength(2);
     const excluded = result.diagnostics.filter((diagnostic) =>
       diagnosticName(diagnostic) === "prime.discovery.non_session_artifact");
-    expect(excluded).toHaveLength(3);
+    expect(excluded).toHaveLength(4);
     expect(excluded.every((diagnostic) => diagnostic.severity === "warning" && diagnostic.status === "unsupported")).toBe(true);
     const headerFailures = result.diagnostics.filter((diagnostic) =>
       diagnosticName(diagnostic)?.startsWith("prime.header."));
-    expect(headerFailures).toHaveLength(1);
-    expect(headerFailures[0]!.status).toBe("error");
-    expect(String((headerFailures[0]!.details as { readonly sourcePath?: string }).sourcePath)).toContain("malformed.jsonl");
+    expect(headerFailures).toHaveLength(4);
+    expect(headerFailures.every((diagnostic) => diagnostic.status === "error")).toBe(true);
+    const failedPaths = headerFailures.map((diagnostic) =>
+      String((diagnostic.details as { readonly sourcePath?: string }).sourcePath));
+    expect(failedPaths.some((path) => path.includes("corpus-near-miss"))).toBe(true);
+    expect(failedPaths.some((path) => path.includes("scale-benchmarks"))).toBe(true);
+    expect(failedPaths.some((path) => path.endsWith("semantic-edge.jsonl"))).toBe(true);
+    expect(failedPaths.some((path) => path.endsWith("sessions/semantic-edges.jsonl"))).toBe(true);
   });
 });

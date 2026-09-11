@@ -846,16 +846,42 @@ const isPrimeSessionFile = (path: string): boolean =>
   path.endsWith(".jsonl") && basename(path) !== "rlm-subagents.jsonl";
 
 /**
- * Directories under `session-artifacts` that hold Prime's own test/benchmark
- * data rather than session transcripts. Measured on the MacBook: 57
- * test-corpus, 3 benchmark and 6 semantic-edge JSONL artifacts were discovered
- * as if they were sessions and failed header validation. They are classified
- * here, at discovery, before any identity/header probe.
+ * Prime's own test/benchmark data that lives under `session-artifacts` and is
+ * NOT a session transcript. Measured on the MacBook (exact paths):
+ *   57  <artifact>/tests/pty-e2e/corpus/**.jsonl
+ *    3  <artifact>/tests/scale-bench/**.jsonl
+ *   11  <artifact>/**.jsonl with basename `semantic-edges.jsonl`
+ * Matching is structural and scoped strictly beneath the owned
+ * `session-artifacts` subtree; a `tests`/`bench`/`semantic` name anywhere else
+ * (including `sessions/`) is never ignored.
  */
-const PRIME_NON_SESSION_ARTIFACT_DIRS = new Set(["test-corpus", "benchmark", "semantic-edge"]);
+const PRIME_NON_SESSION_PATH_SEQUENCES = [
+  ["tests", "pty-e2e", "corpus"],
+  ["tests", "scale-bench"],
+] as const;
 
-const isPrimeNonSessionArtifact = (artifactsDir: string, path: string): boolean =>
-  relative(artifactsDir, path).split(sep).some((part) => PRIME_NON_SESSION_ARTIFACT_DIRS.has(part));
+const PRIME_NON_SESSION_BASENAMES = new Set(["semantic-edges.jsonl"]);
+
+const containsPathSequence = (parts: readonly string[], sequence: readonly string[]): boolean => {
+  if (parts.length < sequence.length) return false;
+  for (let start = 0; start + sequence.length <= parts.length; start += 1) {
+    let matches = true;
+    for (let offset = 0; offset < sequence.length; offset += 1) {
+      if (parts[start + offset] !== sequence[offset]) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return true;
+  }
+  return false;
+};
+
+const isPrimeNonSessionArtifact = (artifactsDir: string, path: string): boolean => {
+  if (PRIME_NON_SESSION_BASENAMES.has(basename(path))) return true;
+  const parts = relative(artifactsDir, path).split(sep);
+  return PRIME_NON_SESSION_PATH_SEQUENCES.some((sequence) => containsPathSequence(parts, sequence));
+};
 
 type PrimeSessionFiles = {
   readonly files: Array<{ path: string; stats: Stats }>;
