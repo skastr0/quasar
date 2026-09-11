@@ -613,7 +613,7 @@ describe("grok adapter archive recovery", () => {
     );
   });
 
-  test("incomplete compaction archives fail the session closed with an attributable error", async () => {
+  test("incomplete compaction archives yield the live epoch flagged for store-aware preservation", async () => {
     const fixture = buildFixture("blocked", {
       chat: [system, userInfo("2026-08-14"), contextReminder("live"), userTurn("final ask"), continuation("LIVE SUMMARY"), skillsReminder, assistantTurn("new answer")],
       checkpoints: [
@@ -627,22 +627,57 @@ describe("grok adapter archive recovery", () => {
     });
 
     const result = await grokAdapter.read({ machine: MACHINE, now: NOW, roots: { grok: fixture.root } });
-    expect(result.sessions).toHaveLength(0);
+    // The canonical path can no longer prove a source-derived union, so it
+    // yields the live epoch for the store-aware preservation merge instead of
+    // writing a shorter replacement.
+    expect(result.sessions).toHaveLength(1);
     const detailsOf = (diagnostic: { readonly details?: unknown }) =>
       (diagnostic.details ?? {}) as { readonly diagnostic?: string; readonly physicalPath?: string };
-    const failure = result.diagnostics.find(
+    const warning = result.diagnostics.find(
       (diagnostic) => detailsOf(diagnostic).diagnostic === GROK_RECOVERY_ARCHIVE_INCOMPLETE,
     )!;
-    expect(failure.severity).toBe("error");
-    expect(detailsOf(failure).physicalPath).toBe(fixture.chatPath);
-    expect(failure.message).toContain("left unchanged");
+    expect(warning.severity).toBe("warning");
+    expect(detailsOf(warning).physicalPath).toBe(fixture.chatPath);
+    const mapped = mapSession(result.sessions[0]!, "blocked");
+    expect(mapped.messages.some((message) => message.text.includes("new answer"))).toBe(true);
+    expect(mapped.messages.some((message) => message.text.includes("first ask"))).toBe(false);
+
+    let flagged = false;
+    let yielded = false;
+    for await (const item of grokAdapter.stream!({ machine: MACHINE, now: NOW, roots: { grok: fixture.root } })) {
+      if (item.type !== "session") continue;
+      yielded = true;
+      flagged = item.preserveStoredPrefix === true;
+    }
+    expect(yielded).toBe(true);
+    expect(flagged).toBe(true);
 
     const live = projectGrokLiveEpoch(fixture.sessionDir, { machine: MACHINE, now: NOW });
     expect(live.session).toBeDefined();
-    expect(live.recoveryBlock).toBeUndefined();
-    const liveMapped = mapSession(live.session!, "live-epoch");
-    expect(liveMapped.messages.some((message) => message.text.includes("new answer"))).toBe(true);
-    expect(liveMapped.messages.some((message) => message.text.includes("first ask"))).toBe(false);
+    expect(live.preserveStoredPrefix).toBe(true);
+  });
+
+  test("a no-archive compaction continuation is flagged for preservation", async () => {
+    const fixture = buildFixture("no-archive-continuation", {
+      chat: [system, userInfo("2026-08-14"), contextReminder("live"), userTurn("first ask"), continuation("LIVE SUMMARY"), skillsReminder, assistantTurn("new answer")],
+      updates: [recapUpdate("recap prose")],
+    });
+    let flagged = false;
+    for await (const item of grokAdapter.stream!({ machine: MACHINE, now: NOW, roots: { grok: fixture.root } })) {
+      if (item.type === "session") flagged = item.preserveStoredPrefix === true;
+    }
+    expect(flagged).toBe(true);
+  });
+
+  test("a normal non-continued session is not flagged for preservation", async () => {
+    const fixture = buildFixture("plain", {
+      chat: [system, userInfo("2026-08-14"), contextReminder("live"), userTurn("hello"), assistantTurn("hi")],
+    });
+    let flagged: boolean | undefined;
+    for await (const item of grokAdapter.stream!({ machine: MACHINE, now: NOW, roots: { grok: fixture.root } })) {
+      if (item.type === "session") flagged = item.preserveStoredPrefix;
+    }
+    expect(flagged).toBeUndefined();
   });
 
   test("archive inputs join the fingerprint and the stat read gate", async () => {

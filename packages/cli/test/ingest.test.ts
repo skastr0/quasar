@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { adaptersByProvider } from "../src/adapters/registry";
 import type { SessionAdapter } from "../src/adapters/types";
 import { ingestRemote, postFingerprintProbe, postIngestRun, postMappedSession } from "../src/ingest";
+import { mapSession } from "../src/map";
 
 const realClaudeAdapter = adaptersByProvider.get("claude");
 afterEach(() => {
@@ -526,6 +527,150 @@ describe("ingestRemote", () => {
         session: { sessionId: "timeout-session", projectKey: "timeout-project", provider: "claude", agentName: "claude", sourcePath: "/tmp/timeout", sourceFingerprint: "timeout", host: "timeout-host", identitySchemeVersion: 1, normalizationVersion: 1, messageCount: 0, toolCallCount: 0 },
         messages: [], toolCalls: [], events: [], usageRecords: [], sessionEdges: [], artifacts: [], executionContexts: [],
       }, options)).rejects.toThrow();
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
+describe("grok preservation hook", () => {
+  test("--force still runs the store-aware preservation and fails closed on an identity mismatch", async () => {
+    const currentSession = session("preserve-current");
+    const storedMapped = mapSession(session("preserve-other"), "stored-fingerprint");
+    // The canonical store returns explicit SQL nulls for absent optional
+    // columns; the fetched session must still pass the strict decode.
+    const storedMessages = storedMapped.messages.map((message, index) =>
+      index === 0
+        ? ({ ...message, ts: null, modelProvider: null, reasoningEffort: null } as unknown as typeof message)
+        : message,
+    );
+    const page = <T>(rows: readonly T[]) => ({ rows, limit: 1000, offset: 0, total: rows.length, hasMore: false });
+    const detail = {
+      session: storedMapped.session,
+      messages: page(storedMessages),
+      toolCalls: page(storedMapped.toolCalls),
+      events: page(storedMapped.events),
+      usageRecords: page(storedMapped.usageRecords),
+      sessionEdges: page(storedMapped.sessionEdges),
+      artifacts: page(storedMapped.artifacts),
+      executionContexts: page(storedMapped.executionContexts),
+    };
+    let sessionWrites = 0;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: async (request) => {
+        const path = new URL(request.url).pathname;
+        if (path === "/ingest/run") return Response.json({ ok: true, data: {} });
+        if (path === "/session-detail") return Response.json({ ok: true, command: "session-detail", data: detail });
+        if (path === "/projects") {
+          return Response.json({ ok: true, command: "projects", data: { rows: [storedMapped.project] } });
+        }
+        if (path === "/ingest/session") {
+          sessionWrites += 1;
+          return Response.json({
+            ok: true,
+            command: "ingest",
+            data: {
+              outcome: {
+                sessionId: currentSession.id,
+                status: "ok",
+                messagesWritten: 0,
+                toolCallsWritten: 0,
+                jobsEnqueued: 0,
+              },
+            },
+          });
+        }
+        return new Response(null, { status: 404 });
+      },
+    });
+    adaptersByProvider.set("claude", {
+      id: "fixture-preserve",
+      provider: "claude",
+      displayName: "Fixture Preserve",
+      stable: true,
+      defaultRoot: () => undefined,
+      read: async () => ({ sourceRoots: [], sessions: [], diagnostics: [] }),
+      stream: async function* () {
+        yield {
+          type: "session" as const,
+          session: currentSession,
+          fingerprint: fingerprintForSession(currentSession),
+          preserveStoredPrefix: true,
+        };
+      },
+    });
+    try {
+      const reports = await ingestRemote(
+        { provider: "claude", ingestToken: "token-a", force: true },
+        `http://127.0.0.1:${server.port}`,
+      );
+      // The forced walk skipped the fingerprint probe but not the union proof:
+      // the mismatched stored identity failed the session before any write.
+      expect(sessionWrites).toBe(0);
+      expect(reports[0]?.sessionsFailed).toBe(1);
+      expect(reports[0]?.failures[0]?.diagnostic).toBe("grok.preserve.identity_mismatch");
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
+describe("grok preservation read surface", () => {
+  test("a bare 404 on the stored-session read fails closed instead of replacing", async () => {
+    const currentSession = session("preserve-bare-404");
+    let sessionWrites = 0;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: async (request) => {
+        const path = new URL(request.url).pathname;
+        if (path === "/ingest/run") return Response.json({ ok: true, data: {} });
+        if (path === "/session-detail") return new Response(null, { status: 404 });
+        if (path === "/ingest/session") {
+          sessionWrites += 1;
+          return Response.json({
+            ok: true,
+            command: "ingest",
+            data: {
+              outcome: {
+                sessionId: currentSession.id,
+                status: "ok",
+                messagesWritten: 0,
+                toolCallsWritten: 0,
+                jobsEnqueued: 0,
+              },
+            },
+          });
+        }
+        return new Response(null, { status: 404 });
+      },
+    });
+    adaptersByProvider.set("claude", {
+      id: "fixture-preserve-bare",
+      provider: "claude",
+      displayName: "Fixture Preserve Bare",
+      stable: true,
+      defaultRoot: () => undefined,
+      read: async () => ({ sourceRoots: [], sessions: [], diagnostics: [] }),
+      stream: async function* () {
+        yield {
+          type: "session" as const,
+          session: currentSession,
+          fingerprint: fingerprintForSession(currentSession),
+          preserveStoredPrefix: true,
+        };
+      },
+    });
+    try {
+      const reports = await ingestRemote(
+        { provider: "claude", ingestToken: "token-a", force: true },
+        `http://127.0.0.1:${server.port}`,
+      );
+      expect(sessionWrites).toBe(0);
+      expect(reports[0]?.sessionsFailed).toBe(1);
+      expect(reports[0]?.failures[0]?.diagnostic).toBe("grok.preserve.fetch_failed");
     } finally {
       server.stop(true);
     }

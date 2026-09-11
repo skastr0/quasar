@@ -60,6 +60,13 @@ export type AdapterStreamItem =
       readonly session: NormalizedSession;
       readonly sourceUnit?: SourceUnit;
       readonly fingerprint?: UnitFingerprint;
+      /**
+       * The projection is a compacted/continuation view whose stored canonical
+       * prefix the ingest boundary must preserve: the store-aware preservation
+       * merge runs (or the session fails closed) before the write. Set only by
+       * adapters whose provider rewrites its own history in place.
+       */
+      readonly preserveStoredPrefix?: boolean;
     }
   | { readonly type: "diagnostic"; readonly diagnostic: AdapterDiagnostic };
 

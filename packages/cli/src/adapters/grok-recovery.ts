@@ -664,8 +664,12 @@ export type GrokEpochClassification = {
 
 /**
  * Injective stored→current alignment over whitespace-normalized message text.
- * Shared matches consume later current occurrences in order; leftover current
- * rows are the post-compaction suffix.
+ * Each stored occurrence consumes the first still-unused current occurrence
+ * with identical text. Matching is COUNT-based, not positional: a stored
+ * history that is itself the union of earlier epochs (canonical rows followed
+ * by previously appended rows) must not drag a cursor past live occurrences,
+ * and identical turns at different positions must stay distinct. Leftover
+ * current rows are the post-compaction suffix.
  */
 export const classifyGrokEpochMessages = (
   storedTexts: readonly string[],
@@ -675,11 +679,10 @@ export const classifyGrokEpochMessages = (
   const currentNorm = currentTexts.map(normalizeForVerification);
   const usedCurrent = new Set<number>();
   const storedClass: Array<"old_only" | "shared"> = [];
-  let cursor = 0;
   for (const text of storedNorm) {
     let found = -1;
     if (text.length > 0) {
-      for (let index = cursor; index < currentNorm.length; index += 1) {
+      for (let index = 0; index < currentNorm.length; index += 1) {
         if (usedCurrent.has(index)) continue;
         if (currentNorm[index] === text) {
           found = index;
@@ -691,7 +694,6 @@ export const classifyGrokEpochMessages = (
     else {
       storedClass.push("shared");
       usedCurrent.add(found);
-      cursor = found + 1;
     }
   }
   const currentClass = currentNorm.map((_, index) => (usedCurrent.has(index) ? "shared" as const : "new_only" as const));
@@ -791,6 +793,15 @@ export const planGrokEpochMerge = (input: {
   const collidingNewEventIds = newMessages.filter((row) => storedEventIds.has(row.eventId)).length;
   const storedSeqs = input.storedMessages.map((row) => row.seq);
   const storedSeqMonotone = storedSeqs.every((seq, index) => index === 0 || seq > storedSeqs[index - 1]!);
+  const textCounts = (texts: readonly string[]) => {
+    const counts = new Map<string, number>();
+    for (const text of texts) {
+      const normalized = normalizeForVerification(text);
+      if (normalized.length === 0) continue;
+      counts.set(normalized, (counts.get(normalized) ?? 0) + 1);
+    }
+    return counts;
+  };
   const unionTexts = [
     ...input.storedMessages.map((row) => row.text),
     ...newMessages.map((row) => row.text),
@@ -799,14 +810,24 @@ export const planGrokEpochMerge = (input: {
     input.storedMessages.map((row) => row.text),
     unionTexts,
   );
-  const excess = countExcessMessageOccurrences(
-    input.storedMessages.map((row) => row.text),
-    unionTexts,
-  );
+  const currentTexts = input.currentMessages.map((row) => row.text);
+  const storedCounts = textCounts(input.storedMessages.map((row) => row.text));
+  const currentCounts = textCounts(currentTexts);
+  const unionCounts = textCounts(unionTexts);
+  // The count-based alignment keeps exactly max(stored, current) occurrences of
+  // every text: no stored occurrence lost, no live occurrence lost, and no
+  // occurrence invented. Any drift means alignment was not lossless.
+  let multiplicityMismatch = false;
+  for (const [text, count] of unionCounts) {
+    if (count !== Math.max(storedCounts.get(text) ?? 0, currentCounts.get(text) ?? 0)) {
+      multiplicityMismatch = true;
+      break;
+    }
+  }
   if (input.currentMessages.length === 0) blockers.push("current_projection_empty");
   if (!storedSeqMonotone) blockers.push("stored_message_seq_not_monotone");
   if (storedRetained.unresolved.length > 0) blockers.push("union_drops_stored_texts");
-  if (excess > 0) blockers.push(`union_excess_stored_texts:${excess}`);
+  if (multiplicityMismatch) blockers.push("union_multiplicity_mismatch");
   const rebaseFromSeq = input.storedMaxSeq
     ?? Math.max(0, ...input.storedMessages.map((row) => row.seq), ...input.storedTools.map((row) => row.seq));
   return {

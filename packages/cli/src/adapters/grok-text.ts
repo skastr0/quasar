@@ -273,3 +273,15 @@ export const grokSyntheticInstructionKind = (
   if (kind === "synthetic_recap_instruction") return "recap";
   return undefined;
 };
+
+/**
+ * Whether a chat history OPENS with a continuation bootstrap (a "this session
+ * is being continued" entry inside the leading injected run). Grok writes this
+ * when it compacts a session in place, so the projection is a replacement view
+ * whose stored prefix must be preserved by the ingest boundary. A session that
+ * merely started fresh never carries it.
+ */
+export const grokOpensWithContinuationSummary = (
+  values: readonly unknown[],
+  window = 8,
+): boolean => values.slice(0, window).some((value) => grokInjectedKind(value) === "continuation_summary");

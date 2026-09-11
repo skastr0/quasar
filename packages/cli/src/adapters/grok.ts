@@ -50,6 +50,7 @@ import {
 } from "./grok-schema";
 import {
   extractGrokProse,
+  grokOpensWithContinuationSummary,
   grokReasoningText,
   grokStandaloneReasoningText,
 } from "./grok-text";
@@ -492,17 +493,16 @@ const mergeToolResult = (
   return merged.id;
 };
 
-type GrokSessionBuild =
-  | {
-      readonly session: NormalizedSession;
-      readonly decodeDiagnostics: DecodeDiagnostic[];
-      readonly recoveryBlock?: undefined;
-    }
-  | {
-      readonly session: undefined;
-      readonly decodeDiagnostics: DecodeDiagnostic[];
-      readonly recoveryBlock: { readonly code: string; readonly message: string };
-    };
+type GrokSessionBuild = {
+  readonly session: NormalizedSession;
+  readonly decodeDiagnostics: DecodeDiagnostic[];
+  /**
+   * True when the projection is a compacted/continuation view. The ingest
+   * boundary must then preserve the stored canonical prefix (store-aware union)
+   * or fail the session closed; a plain replacement would drop stored history.
+   */
+  readonly preserveStoredPrefix: boolean;
+};
 
 const buildGrokSessionFromChatPath = (
   chatPath: string,
@@ -659,17 +659,15 @@ const buildGrokSessionFromChatPath = (
       compactionCheckpointUpdates,
     });
   for (const diagnostic of recovery.diagnostics) decodeDiagnostics.push(diagnostic);
-  if (recovery.block !== undefined) {
-    // Fail the session closed instead of projecting a shorter replacement over
-    // a stored canonical that current source metadata proves is unrecoverable
-    // from the available archive inputs.
-    return {
-      session: undefined,
-      decodeDiagnostics,
-      recoveryBlock: recovery.block,
-    };
-  }
-  const chatSources = recovery.sources;
+  // A blocked archive plan means source files cannot prove the historical
+  // prefix. Emit the live epoch and require the ingest boundary's store-aware
+  // preservation merge; the block diagnostic is surfaced as a warning. A plain
+  // replacement here would drop stored canonical turns.
+  const blocked = recovery.block !== undefined;
+  const chatSources = blocked ? currentChatSources : recovery.sources;
+  const preserveStoredPrefix = blocked
+    || recovery.recovered
+    || grokOpensWithContinuationSummary(chatSources.map((source) => source.value));
 
   const chatEvents = chatSources.flatMap((source, index) => {
     const value = source.value;
@@ -953,11 +951,11 @@ const buildGrokSessionFromChatPath = (
     sessionEdges,
     executionContexts,
     usageRecords,
-    artifacts: recoveryMode !== "live-epoch" && existsSync(hunkPath)
+    artifacts: !blocked && recoveryMode !== "live-epoch" && existsSync(hunkPath)
       ? grokArtifacts(sessionId, sessionDir, hunkPath, decodeDiagnostics)
       : [],
   });
-  return { session, decodeDiagnostics };
+  return { session, decodeDiagnostics, preserveStoredPrefix };
 };
 
 async function* streamGrok(options: AdapterOptions): AsyncGenerator<AdapterStreamItem> {
@@ -1041,37 +1039,7 @@ async function* streamGrok(options: AdapterOptions): AsyncGenerator<AdapterStrea
       lineageMap,
       options,
     );
-    if (built.recoveryBlock !== undefined) {
-      // Durable hold: source metadata proves the stored session cannot be
-      // faithfully replaced from available archive inputs. Emit an attributable
-      // ERROR (not a warning) and yield no session, so the ingest fails closed
-      // and the stored canonical is never overwritten on a normal cycle.
-      const nativeSessionId = basename(sessionDir);
-      yield {
-        type: "diagnostic",
-        diagnostic: {
-          adapterId: grokAdapter.id,
-          provider: "grok",
-          status: "unsupported",
-          severity: "error",
-          parserConfidence: "observed",
-          rootPath: sessionsRoot,
-          message: truncateDiagnosticMessage(
-            `${built.recoveryBlock.code} for grok session ${nativeSessionId} `
-            + `(fail-closed; stored session left unchanged): ${built.recoveryBlock.message}`,
-          ),
-          details: {
-            diagnostic: built.recoveryBlock.code,
-            sessionId: sessionIdFor("grok", GrokSessionId(nativeSessionId)),
-            sessionDir,
-            sourcePath: chatPath,
-            physicalPath: chatPath,
-          },
-        },
-      };
-      continue;
-    }
-    const { session, decodeDiagnostics } = built;
+    const { session, decodeDiagnostics, preserveStoredPrefix } = built;
     yield {
       type: "session",
       session,
@@ -1083,6 +1051,7 @@ async function* streamGrok(options: AdapterOptions): AsyncGenerator<AdapterStrea
         physicalPath: chatPath,
       },
       fingerprint,
+      ...(preserveStoredPrefix ? { preserveStoredPrefix: true } : {}),
     };
     sessionCount += 1;
     // work-item boundary doctrine: a malformed record or an unknown record type is

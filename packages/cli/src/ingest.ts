@@ -8,6 +8,7 @@ import { diagnosticSeverity, truncateDiagnosticMessage } from "./core/schemas";
 
 import type { AmpPollState, AmpStreamOptions } from "./adapters/amp";
 import { sourceFingerprintFor } from "./adapters/common";
+import { GrokPreserveError, preserveStoredPrefixWithLiveSuffix } from "./adapters/grok-epoch-merge";
 import { adaptersByProvider, defaultIngestProviders } from "./adapters/registry";
 import type { SessionParseProbe } from "./adapters/types";
 import { mapSession } from "./map";
@@ -629,6 +630,26 @@ const ingestProviderRemote = async (
     } catch (error) {
       failSession(item.session.id, "map_session_failed", errorMessage(error));
       continue;
+    }
+    if (item.preserveStoredPrefix === true) {
+      // Canonical preservation runs regardless of --force: a forced walk may
+      // skip the fingerprint probe, never the lossless-union proof. On any
+      // invariant gap the session fails closed and the stored rows survive.
+      try {
+        mapped = await preserveStoredPrefixWithLiveSuffix({
+          serverUrl,
+          mapped,
+          ...(options.ingestToken !== undefined ? { ingestToken: options.ingestToken } : {}),
+          ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+        });
+      } catch (error) {
+        failSession(
+          item.session.id,
+          error instanceof GrokPreserveError ? error.diagnostic : "grok.preserve.failed",
+          errorMessage(error),
+        );
+        continue;
+      }
     }
     try {
       const outcome = await postMappedSession(serverUrl, mapped, options);
