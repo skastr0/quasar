@@ -10,6 +10,7 @@ import {
   AMP_LIST_PAGE_STRIDE,
   AMP_POLL_POLICY,
   ampAdapter,
+  ampListPageContinuesPriorBoundary,
   decideAmpPoll,
   type AmpPollState,
   type AmpRunner,
@@ -1348,6 +1349,158 @@ describe("amp complete pagination", () => {
     expect(exports).toBe(0);
     expect(result.diagnostics.find((d) => diagnosticName(d) === "amp.list.boundary_mismatch")?.status).toBe("error");
   });
+
+  test("live Amp offset 499 (penultimate overlap) is a valid continuation, not an enumeration-URL session", async () => {
+    const page0 = makeListPage(0, Date.parse("2026-07-20T12:00:00.000Z"), 60_000);
+    const priorLast = page0[page0.length - 1] as { id: string; updated: string };
+    const priorPenultimate = page0[page0.length - 2] as { id: string; updated: string };
+    const exclusiveTail = {
+      id: "T-exclusive-tail",
+      title: "exclusive tail",
+      updated: "2026-01-01T00:00:00.000Z",
+      tree: "file:///Users/dev/projects/widget",
+      messageCount: 1,
+    };
+    // Measured Amp CLI 0.0.1789099241: offset 499 starts at the prior page's
+    // penultimate row; the last row is not repeated. The list URL is not a session.
+    const page1 = [page0[page0.length - 2]!, exclusiveTail];
+    expect(ampListPageContinuesPriorBoundary(
+      page1 as never,
+      {
+        lastIdentity: stableJsonHash({
+          id: priorLast.id,
+          updated: priorLast.updated,
+          title: `Thread p0-${AMP_LIST_PAGE_SIZE - 1}`,
+          tree: "file:///Users/dev/projects/widget",
+          messageCount: 1,
+        }),
+        lastPayloadIdentity: stableJsonHash({
+          updated: priorLast.updated,
+          title: `Thread p0-${AMP_LIST_PAGE_SIZE - 1}`,
+          tree: "file:///Users/dev/projects/widget",
+          messageCount: 1,
+        }),
+        penultimateIdentity: stableJsonHash({
+          id: priorPenultimate.id,
+          updated: priorPenultimate.updated,
+          title: `Thread p0-${AMP_LIST_PAGE_SIZE - 2}`,
+          tree: "file:///Users/dev/projects/widget",
+          messageCount: 1,
+        }),
+        ids: new Set((page0 as Array<{ id: string }>).map((row) => row.id)),
+      },
+    )).toBe(true);
+
+    const offsets: number[] = [];
+    const runner: AmpRunner = (args) => {
+      if (args[0] === "--version") return { ok: true, stdout: "ok\n" };
+      if (args[0] === "threads" && args[1] === "list") {
+        const offset = Number(args[args.indexOf("--offset") + 1]);
+        offsets.push(offset);
+        return { ok: true, stdout: JSON.stringify(offset === 0 ? page0 : page1) };
+      }
+      if (args[0] === "threads" && args[1] === "export") {
+        return {
+          ok: true,
+          stdout: JSON.stringify({
+            v: 24,
+            id: args[2],
+            messages: [],
+            created: 1_746_000_000_000,
+          }),
+        };
+      }
+      return { ok: false, reason: "command_failed" };
+    };
+    const result = await readAmp({
+      machine: MACHINE_A,
+      now: NOW,
+      ampRunner: runner,
+      ampSleep: noSleep,
+      exportSpacingMs: 0,
+      shouldParseSession: (probe) =>
+        probe.sessionId === sessionIdFor("amp", AmpSessionId("T-exclusive-tail")),
+    });
+    expect(offsets).toEqual([0, AMP_LIST_PAGE_STRIDE]);
+    expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.boundary_mismatch")).toBe(false);
+    expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.failed")).toBe(false);
+    expect(result.sessions.map((session) => session.nativeSessionId)).toEqual(["T-exclusive-tail"]);
+    expect(result.sessions[0]?.sourceRoot).toBe("https://ampcode.com/threads");
+    expect(result.sessions[0]?.sourcePath).toBe("https://ampcode.com/threads/T-exclusive-tail");
+  });
+
+  test("disjoint exclusive-offset page is a valid continuation", async () => {
+    const page0 = makeListPage(0, Date.parse("2026-07-20T12:00:00.000Z"), 60_000);
+    const page1 = [{
+      id: "T-disjoint-next",
+      title: "next",
+      updated: "2026-01-01T00:00:00.000Z",
+      tree: "file:///Users/dev/projects/widget",
+      messageCount: 0,
+    }];
+    const runner: AmpRunner = (args) => {
+      if (args[0] === "--version") return { ok: true, stdout: "ok\n" };
+      if (args[0] === "threads" && args[1] === "list") {
+        const offset = Number(args[args.indexOf("--offset") + 1]);
+        return { ok: true, stdout: JSON.stringify(offset === 0 ? page0 : page1) };
+      }
+      if (args[0] === "threads" && args[1] === "export") {
+        return {
+          ok: true,
+          stdout: JSON.stringify({
+            v: 24,
+            id: args[2],
+            messages: [],
+            created: 1_746_000_000_000,
+          }),
+        };
+      }
+      return { ok: false, reason: "command_failed" };
+    };
+    const result = await readAmp({
+      machine: MACHINE_A,
+      now: NOW,
+      ampRunner: runner,
+      ampSleep: noSleep,
+      exportSpacingMs: 0,
+      shouldParseSession: (probe) =>
+        probe.sessionId === sessionIdFor("amp", AmpSessionId("T-disjoint-next")),
+    });
+    expect(result.diagnostics.some((d) => diagnosticName(d) === "amp.list.boundary_mismatch")).toBe(false);
+    expect(result.sessions.map((session) => session.nativeSessionId)).toEqual(["T-disjoint-next"]);
+  });
+
+  test("enumeration URL object without a threads array remains malformed", async () => {
+    const runner: AmpRunner = (args) => {
+      if (args[0] === "--version") return { ok: true, stdout: "ok\n" };
+      if (args[0] === "threads" && args[1] === "list") {
+        return { ok: true, stdout: JSON.stringify({ url: "https://ampcode.com/threads" }) };
+      }
+      return { ok: false, reason: "command_failed" };
+    };
+    const result = await readAmp({ machine: MACHINE_A, now: NOW, ampRunner: runner, ampSleep: noSleep });
+    expect(result.sessions).toHaveLength(0);
+    expect(result.diagnostics.find((d) => diagnosticName(d) === "amp.list.invalid_envelope")?.status).toBe("error");
+    expect(result.diagnostics.find((d) => diagnosticName(d) === "amp.list.failed")?.status).toBe("error");
+  });
+
+  test("interior rewind of a prior page still fails closed", async () => {
+    const page0 = makeListPage(0, Date.parse("2026-07-20T12:00:00.000Z"), 60_000);
+    let exports = 0;
+    const runner: AmpRunner = (args) => {
+      if (args[0] === "--version") return { ok: true, stdout: "ok\n" };
+      if (args[0] === "threads" && args[1] === "list") {
+        const offset = Number(args[args.indexOf("--offset") + 1]);
+        return { ok: true, stdout: JSON.stringify(offset === 0 ? page0 : [page0[0]]) };
+      }
+      if (args[0] === "threads" && args[1] === "export") exports += 1;
+      return { ok: false, reason: "command_failed" };
+    };
+    const result = await readAmp({ machine: MACHINE_A, now: NOW, ampRunner: runner, ampSleep: noSleep });
+    expect(exports).toBe(0);
+    expect(result.diagnostics.find((d) => diagnosticName(d) === "amp.list.boundary_mismatch")?.status).toBe("error");
+  });
+
   test("walks every full page to the terminal page before fingerprint filtering", async () => {
     // The timestamps cross what used to be the early-stop cutoff. A complete
     // walk must still request the terminal page so older normalization

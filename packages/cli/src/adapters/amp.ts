@@ -283,6 +283,70 @@ const parseUpdatedMs = (updated: string): number | undefined => {
   return Number.isFinite(time) ? time : undefined;
 };
 
+const listEntryIdentity = (entry: AmpThreadListEntry): string =>
+  stableJsonHash({
+    id: entry.id,
+    updated: entry.updated,
+    title: entry.title ?? null,
+    tree: entry.tree ?? null,
+    messageCount: entry.messageCount ?? null,
+  });
+
+const listEntryPayloadIdentity = (entry: AmpThreadListEntry): string =>
+  stableJsonHash({
+    updated: entry.updated,
+    title: entry.title ?? null,
+    tree: entry.tree ?? null,
+    messageCount: entry.messageCount ?? null,
+  });
+
+type AmpListPageBoundary = {
+  readonly lastIdentity: string | undefined;
+  readonly lastPayloadIdentity: string | undefined;
+  readonly penultimateIdentity: string | undefined;
+  readonly ids: ReadonlySet<string>;
+};
+
+const listPageBoundary = (entries: readonly AmpThreadListEntry[]): AmpListPageBoundary => {
+  const last = entries[entries.length - 1];
+  const penultimate = entries.length >= 2 ? entries[entries.length - 2] : undefined;
+  return {
+    lastIdentity: last === undefined ? undefined : listEntryIdentity(last),
+    lastPayloadIdentity: last === undefined ? undefined : listEntryPayloadIdentity(last),
+    penultimateIdentity: penultimate === undefined ? undefined : listEntryIdentity(penultimate),
+    ids: new Set(entries.map((entry) => entry.id)),
+  };
+};
+
+/**
+ * Amp `threads list --offset` is a skip, not last-row overlap.
+ *
+ * Measured 2026-09-11 against Amp CLI `0.0.1789099241` (the CLI/server list
+ * protocol): offset `0`/`limit 500` then offset `499` returns the prior page's
+ * penultimate row first — one-row overlap, not the last row. Offset `500` is
+ * disjoint. The enumeration URL `https://ampcode.com/threads` is not a session.
+ *
+ * Accept last-row overlap (legacy), penultimate overlap (live), or a first id
+ * absent from the prior page (exclusive skip). Interior rewind still fails.
+ */
+export const ampListPageContinuesPriorBoundary = (
+  pageEntries: readonly AmpThreadListEntry[],
+  prior: AmpListPageBoundary,
+): boolean => {
+  const first = pageEntries[0];
+  if (first === undefined) return false;
+  const firstIdentity = listEntryIdentity(first);
+  if (firstIdentity === prior.lastIdentity) return true;
+  if (prior.penultimateIdentity !== undefined && firstIdentity === prior.penultimateIdentity) {
+    return true;
+  }
+  if (prior.ids.has(first.id)) return false;
+  // New id with the prior last row's payload is a boundary insert/delete, not
+  // an exclusive skip.
+  return prior.lastPayloadIdentity === undefined
+    || listEntryPayloadIdentity(first) !== prior.lastPayloadIdentity;
+};
+
 type EnumerateThreadsResult = {
   readonly threads: readonly AmpThreadListEntry[];
   readonly listFailed: boolean;
@@ -301,6 +365,10 @@ type EnumerateThreadsResult = {
  * Every run walks to a short terminal page. This is required so unchanged
  * older sessions still reach `shouldParseSession` after normalization changes.
  *
+ * Page continuation follows the live Amp list offset protocol (last-row
+ * overlap, penultimate overlap, or exclusive skip). See
+ * `ampListPageContinuesPriorBoundary`.
+ *
  * Exhausting `maxListPages` without a short page sets
  * `pageCapReached` so callers can emit a named truncation diagnostic.
  */
@@ -313,7 +381,7 @@ const enumerateThreads = async (
   let pagesFetched = 0;
   /** True when the loop exited because a short (terminal) page was returned. */
   let sawShortPage = false;
-  let previousPageLastIdentity: string | undefined;
+  let previousPage: AmpListPageBoundary | undefined;
 
   const fullPageSignatures = new Set<string>();
   for (let page = 0; maxListPages === undefined || page < maxListPages; page += 1) {
@@ -364,6 +432,11 @@ const enumerateThreads = async (
         pagesFetched,
       };
     }
+    if (rawEntries.length === 0) {
+      sawShortPage = true;
+      pagesFetched += 1;
+      break;
+    }
     if (rawEntries.length === LIST_PAGE_SIZE) {
       const signature = stableJsonHash(rawEntries);
       if (fullPageSignatures.has(signature)) {
@@ -381,31 +454,14 @@ const enumerateThreads = async (
       });
       if (isSignal(decision)) pageEntries.push(decision.value);
     }
-    if (previousPageLastIdentity !== undefined) {
-      const first = pageEntries[0];
-      const firstIdentity = first === undefined ? undefined : stableJsonHash({
-        id: first.id,
-        updated: first.updated,
-        title: first.title ?? null,
-        tree: first.tree ?? null,
-        messageCount: first.messageCount ?? null,
+    if (previousPage !== undefined && !ampListPageContinuesPriorBoundary(pageEntries, previousPage)) {
+      diagnostics.push({
+        name: "amp.list.boundary_mismatch",
+        message: `Amp list page at offset ${offset} does not continue the prior page under the Amp list offset protocol.`,
       });
-      if (firstIdentity !== previousPageLastIdentity) {
-        diagnostics.push({
-          name: "amp.list.boundary_mismatch",
-          message: `Amp list page at offset ${offset} does not overlap the prior page boundary.`,
-        });
-        return { threads: collected, listFailed: true, pageCapReached: false, pagesFetched };
-      }
+      return { threads: collected, listFailed: true, pageCapReached: false, pagesFetched };
     }
-    const last = pageEntries[pageEntries.length - 1];
-    previousPageLastIdentity = last === undefined ? undefined : stableJsonHash({
-      id: last.id,
-      updated: last.updated,
-      title: last.title ?? null,
-      tree: last.tree ?? null,
-      messageCount: last.messageCount ?? null,
-    });
+    previousPage = listPageBoundary(pageEntries);
     collected.push(...pageEntries);
     pagesFetched += 1;
 
