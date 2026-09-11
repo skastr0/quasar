@@ -58,10 +58,10 @@ bun scripts/server-ops.mjs exec -- sh -lc 'du -sh /data/quasar/*'
 
 ## Deploy / Update Flow
 
-For the normalization v13 ingestion/search upgrade, use the
-[staged upgrade handoff](staged-upgrade-normalization-v13.md) instead of the generic
-flow below. It covers sender shutdown, backup verification, isolated rehearsal,
-server-first deployment, gradual client resumption, and rollback gates.
+For incident repair, use the [session recovery procedure](session-recovery.md)
+instead of the generic flow below. Normalization stays at 12; fixing failed or
+missing sessions does not require corpus-wide replay. The procedure covers
+preservation, server-first deployment and source-to-store reconciliation.
 
 1. Pull or checkout the desired code:
    ```bash
@@ -384,9 +384,9 @@ writers, stop the server, retain the existing volume, restore the verified snaps
 into a new empty volume, then start the pinned recovery image against that volume.
 Do not delete the original volume or mix its WAL/SHM files with the snapshot.
 
-See the [staged upgrade rollback procedure](staged-upgrade-normalization-v13.md#rollback--never-replace-files-under-a-running-server)
-for image pinning, isolated restore rehearsal, volume overrides, client manifest
-recovery, and the approval gate for losing post-backup writes.
+See the [session recovery procedure](session-recovery.md#preserve-within-measured-storage)
+for measured-storage preservation and the prohibition on automatic destructive
+rollback or replacing a database beneath a running server.
 
 ---
 
