@@ -10,6 +10,31 @@ if [[ -z "$bun_version" ]]; then
   exit 1
 fi
 
+locate_orb_setup() {
+  local candidate
+  for candidate in \
+    "${repo_root}/../repos/orb-setup" \
+    "${repo_root}/../repos/skastr0/orb-setup" \
+    "${repo_root}/../orb-setup"; do
+    if [[ -x "${candidate}/bin/setup.sh" ]]; then
+      printf '%s' "$(cd "$candidate" && pwd)"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Shared runtime first: Tailscale, the published Quasar CLI, harnesses, and
+# universal CLIs. The published binary is ~/.local/bin/quasar. Workspace
+# tooling stays `bun run` / `quasar-dev` and is never installed as `quasar`.
+orb_setup="$(locate_orb_setup)" || {
+  printf '[setup] error: orb-setup checkout not found next to this repository\n' >&2
+  exit 1
+}
+printf '[setup] Using shared runtime at %s\n' "$orb_setup"
+bash "${orb_setup}/bin/setup.sh"
+export PATH="$HOME/.local/bin:$PATH"
+
 export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
 bun_bin="$BUN_INSTALL/bin/bun"
 toolchain_started=$SECONDS
@@ -53,31 +78,6 @@ printf '[setup] Installing workspace dependencies\n'
 bun install --frozen-lockfile --cpu='*' --os='*'
 printf '[setup] Workspace dependencies ready in %ss\n' "$((SECONDS - dependencies_started))"
 
-# Clients only. This checkout is not the Mac mini service; authentication
-# belongs in resume so it never lands in a shared snapshot.
-printf '[setup] Preparing Tailscale client\n'
-sudo install -d /etc/systemd/system/tailscaled.service.d
-sudo tee /etc/systemd/system/tailscaled.service.d/amp-orb.conf >/dev/null <<'EOF'
-[Service]
-Environment=TS_ASSUME_NETWORK_UP_FOR_TEST=true
-EOF
-if ! command -v tailscale >/dev/null 2>&1; then
-  curl -fsSL https://tailscale.com/install.sh | sh
-fi
-sudo systemctl daemon-reload
-# Do not restart an active daemon when setup runs again on a warm orb.
-sudo systemctl enable --now tailscaled
-
-# Published CLI talks to the remote service. Workspace tooling stays
-# `bun run` / `quasar-dev`; never install into this repository.
-quasar_version=0.5.3
-quasar_package="$HOME/.local/lib/node_modules/@skastr0/quasar-cli/package.json"
-if [[ ! -x "$HOME/.local/bin/quasar" ]] ||
-   [[ "$(node -p 'try { require(process.argv[1]).version } catch { "" }' "$quasar_package" 2>/dev/null || true)" != "$quasar_version" ]]; then
-  printf '[setup] Installing published @skastr0/quasar-cli@%s\n' "$quasar_version"
-  npm install --global --prefix "$HOME/.local" "@skastr0/quasar-cli@$quasar_version"
-else
-  printf '[setup] Published @skastr0/quasar-cli@%s already installed\n' "$quasar_version"
-fi
-
+# Keep the published CLI and the workspace binary distinct. install:dev links
+# dist/quasar as quasar-dev and leaves ~/.local/bin/quasar alone.
 printf '[setup] Complete\n'
