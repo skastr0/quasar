@@ -8,6 +8,18 @@ formats may still change.
 
 ## [Unreleased]
 
+## [0.5.9] - 2026-09-25
+
+### Added
+
+- Ingest ignore rules: an `ignore` object in the client config (`paths`,
+  `gitRemotes`, `projectKeys`, `models`) drops matching sessions on the
+  ingesting machine before they are mapped or sent to the server. Path and
+  remote rules also match any mention inside a session. Matching is
+  case-insensitive, and a malformed or misspelled rule set aborts ingest.
+- `quasar ignore-check [--provider name]` lists the sessions the ignore rules
+  exclude, reading local sources only.
+
 ## [0.5.8] - 2026-09-11
 
 ### Changed
