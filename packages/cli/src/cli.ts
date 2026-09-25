@@ -11,7 +11,7 @@ import { configuredIngestToken, configuredServerUrl, defaultClientConfigPath } f
 import { Provider } from "./core/schemas";
 import { daemonIngestProcess, daemonPlist, plistEnablesAmpIngest, plistHoldsGrok } from "./daemon-process";
 import { ingestFailureError, ingestReportPayload } from "./ingest-report";
-import { ingestRemote } from "./ingest";
+import { checkIgnoreRules, ingestRemote } from "./ingest";
 import { fail, ok, writeJson } from "./json";
 import {
   fetchWithRetry,
@@ -908,6 +908,21 @@ if (!rejectUnsupportedOptions(command)) {
     }
     break;
   }
+  case "ignore-check": {
+    if (!checkEnum("ignore-check", "--provider", INGEST_PROVIDERS)) break;
+    try {
+      const reports = await checkIgnoreRules((arg("--provider") ?? "all") as never);
+      writeJson(ok("ignore-check", {
+        sessionsSeen: reports.reduce((sum, report) => sum + report.sessionsSeen, 0),
+        sessionsIgnored: reports.reduce((sum, report) => sum + report.sessionsIgnored, 0),
+        providers: reports,
+      }));
+    } catch (error) {
+      writeJson(fail("ignore-check", error));
+      process.exitCode = 1;
+    }
+    break;
+  }
   case "stats": {
     await fetchServer("stats", "/status");
     break;
@@ -1179,6 +1194,7 @@ if (!rejectUnsupportedOptions(command)) {
   case "help": {
     const commands = [
       "ingest --provider all|codex|claude|opencode|grok|kimi|hermes|antigravity|omp|pi|prime|cursor|devin|amp [--server url] [--limit n] [--force] [--summary]",
+      "ignore-check [--provider name] (local; walks sources like ingest and lists sessions the config's ignore rules exclude; contacts no server)",
       "daemon install --server https://<quasar-service-tailnet-hostname> --ingest-token <token> [--interval-seconds 60] [--amp] [--hold-grok]",
       "daemon status",
       "daemon uninstall",
@@ -1213,7 +1229,7 @@ if (!rejectUnsupportedOptions(command)) {
           : commands.filter((entry) => entry === subcommandHelpTarget || entry.startsWith(`${subcommandHelpTarget} `)),
         env: {
           QUASAR_LOCAL_HOME: "override ~/.config/quasar/server",
-          QUASAR_CONFIG: "override ~/.config/quasar/config.json for default server/token routing",
+          QUASAR_CONFIG: "override ~/.config/quasar/config.json for default server/token routing and ingest ignore rules",
           QUASAR_LOCAL_SQLITE: "override SQLite file path",
           QUASAR_CODEX_ROOT: "override Codex history root",
           QUASAR_CLAUDE_ROOT: "override Claude history root",

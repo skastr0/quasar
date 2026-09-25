@@ -473,6 +473,38 @@ Configure your client once to talk to your Tailscale Service:
 }
 ```
 
+### Ingest Ignore Rules
+
+Sessions matching any `ignore` rule are dropped on the ingesting machine, before
+they are mapped or sent to the server, so they never reach the corpus, the search
+indexes, or the embedder:
+
+```json
+{
+  "ignore": {
+    "paths": ["~/Work/private"],
+    "gitRemotes": ["github.com/acme/private"],
+    "projectKeys": ["<project key>"],
+    "models": ["acme/*", "*/model-x-v2"]
+  }
+}
+```
+
+- `paths`: the session's working directory or source file is at or under the
+  directory, **or** the directory's path (absolute or `~/` form) appears anywhere
+  in the session. That includes messages, tool inputs and outputs, and artifacts,
+  so a session started elsewhere that touches the folder is dropped too.
+- `gitRemotes`: the session's resolved remote, or any mention of it.
+- `projectKeys`: the Quasar or provider-native project key.
+- `models`: `provider/model` globs checked against every recorded model.
+
+Matching is case-insensitive, so rules can only over-block. A config that cannot be
+read, a misspelled `ignore*` key, or a malformed entry aborts ingest before any
+provider is read. `quasar ignore-check [--provider name]` walks local sources the way
+ingest does and lists what the rules exclude, without contacting the server.
+The rules live on each ingesting machine; they do not remove sessions ingested
+before a rule was added.
+
 ---
 
 ## Repository Structure
