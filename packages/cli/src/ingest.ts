@@ -10,6 +10,7 @@ import type { AmpPollState, AmpStreamOptions } from "./adapters/amp";
 import { sourceFingerprintFor } from "./adapters/common";
 import { GrokPreserveError, preserveStoredPrefixWithLiveSuffix } from "./adapters/grok-epoch-merge";
 import { adaptersByProvider, defaultIngestProviders } from "./adapters/registry";
+import { configuredIgnoreRules, ignoreMatchFor, type IngestIgnoreKind, type IngestIgnoreRules } from "./ingest-ignore";
 import type { SessionParseProbe } from "./adapters/types";
 import { mapSession } from "./map";
 import type { MappedSession, MessageRole } from "./model";
@@ -415,6 +416,7 @@ const ingestProviderRemote = async (
   options: IngestOptions,
   serverUrl: string,
   manifest: IngestManifest,
+  ignoreRules: IngestIgnoreRules,
 ): Promise<{ report: IngestReport; manifestUpdates: IngestManifest }> => {
   const startedAt = Date.now();
   const adapter = adaptersByProvider.get(provider);
@@ -607,6 +609,22 @@ const ingestProviderRemote = async (
     }
     if (item.type !== "session") continue;
     sessionsSeen += 1;
+    // Ignore list: the session is dropped here, before it is mapped or leaves
+    // this machine. Only the session id and the matching rule are reported.
+    const exclusion = ignoreMatchFor(item.session, ignoreRules);
+    if (exclusion !== undefined) {
+      sessionsSkipped += 1;
+      tallyDiagnostic("ingest.session.ignored", "info", `${item.session.id} excluded by ignore.${exclusion.kind} entry ${exclusion.entry}`);
+      outcomes.push({
+        sessionId: item.session.id,
+        status: "skipped",
+        diagnostic: "ignored",
+        messagesWritten: 0,
+        toolCallsWritten: 0,
+        jobsEnqueued: 0,
+      });
+      continue;
+    }
     const itemPhysicalPath = item.sourceUnit?.physicalPath ?? item.session.sourcePath;
     const failSession = (sessionId: string, diagnostic: string, detail: string): void => {
       const capped = truncateDiagnosticMessage(detail);
@@ -742,6 +760,10 @@ export const ingestRemote = async (
       ? defaultIngestProviders()
       : [options.provider];
 
+  // Resolve the ignore list before any provider is read or the server is
+  // contacted: a malformed list aborts the whole run instead of ingesting.
+  const ignoreRules = configuredIgnoreRules();
+
   // Load manifest once; --force skips the stat gate but still persists updates
   // so the manifest stays current for the next non-forced run.
   const manifest = loadManifest(options.manifestPath);
@@ -757,7 +779,7 @@ export const ingestRemote = async (
     }, options);
     let result: { report: IngestReport; manifestUpdates: IngestManifest };
     try {
-      result = await ingestProviderRemote(provider, options, serverUrl, manifest);
+      result = await ingestProviderRemote(provider, options, serverUrl, manifest, ignoreRules);
     } catch (error) {
       try {
         await postIngestRun(serverUrl, {
@@ -793,5 +815,42 @@ export const ingestRemote = async (
     saveManifest(merged, options.manifestPath);
   }
 
+  return reports;
+};
+
+export interface IgnoreCheckReport {
+  readonly provider: Provider;
+  readonly sessionsSeen: number;
+  readonly sessionsIgnored: number;
+  readonly ignored: readonly { readonly sessionId: string; readonly kind: IngestIgnoreKind; readonly entry: string }[];
+}
+
+/**
+ * Walk local sources exactly as ingest does and report which sessions the
+ * ignore rules exclude. Nothing is sent anywhere; the server is not contacted.
+ */
+export const checkIgnoreRules = async (
+  provider: Provider | "all",
+): Promise<readonly IgnoreCheckReport[]> => {
+  const ignoreRules = configuredIgnoreRules();
+  const providers = provider === "all" ? defaultIngestProviders() : [provider];
+  const reports: IgnoreCheckReport[] = [];
+  for (const current of providers) {
+    const adapter = adaptersByProvider.get(current);
+    if (adapter?.stream === undefined) continue;
+    let sessionsSeen = 0;
+    const ignored: { sessionId: string; kind: IngestIgnoreKind; entry: string }[] = [];
+    for await (const item of adapter.stream({
+      machine: loadMachineIdentity(),
+      now: new Date().toISOString(),
+      roots: configuredRoots(),
+    })) {
+      if (item.type !== "session") continue;
+      sessionsSeen += 1;
+      const exclusion = ignoreMatchFor(item.session, ignoreRules);
+      if (exclusion !== undefined) ignored.push({ sessionId: item.session.id, ...exclusion });
+    }
+    reports.push({ provider: current, sessionsSeen, sessionsIgnored: ignored.length, ignored });
+  }
   return reports;
 };

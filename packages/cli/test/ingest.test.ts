@@ -1,3 +1,7 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import type { NormalizedSession } from "../src/core/schemas";
 import {
   NORMALIZATION_VERSION,
@@ -528,6 +532,79 @@ describe("ingestRemote", () => {
         messages: [], toolCalls: [], events: [], usageRecords: [], sessionEdges: [], artifacts: [], executionContexts: [],
       }, options)).rejects.toThrow();
     } finally {
+      server.stop(true);
+    }
+  });
+
+  test("sessions under an ignorePaths directory never reach the server", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "quasar-ingest-ignore-"));
+    const configPath = join(dir, "config.json");
+    writeFileSync(configPath, JSON.stringify({ ignore: { paths: ["/work/sensitive"] } }));
+    const base = session("allowed");
+    const sensitive: NormalizedSession = {
+      ...session("sensitive"),
+      projectIdentity: { ...base.projectIdentity, rawPath: "/work/sensitive/app" },
+    };
+    adaptersByProvider.set("claude", adapterFor([sensitive, base]));
+    const bodies: string[] = [];
+    const writes: string[] = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: async (request) => {
+        const body = await request.text();
+        bodies.push(body);
+        const path = new URL(request.url).pathname;
+        if (path === "/ingest/fingerprint") return Response.json({ ok: true, data: { unchanged: false } });
+        if (path === "/ingest/run") return Response.json({ ok: true, data: {} });
+        writes.push(body);
+        const payload = JSON.parse(body) as { session: { session: { sessionId: string } } };
+        return Response.json({
+          ok: true,
+          data: { outcome: { sessionId: payload.session.session.sessionId, status: "ok", messagesWritten: 2, toolCallsWritten: 1, jobsEnqueued: 1 } },
+        });
+      },
+    });
+    const previousConfig = process.env.QUASAR_CONFIG;
+    process.env.QUASAR_CONFIG = configPath;
+    try {
+      const reports = await ingestRemote(
+        { provider: "claude", ingestToken: "token-a", manifestPath: join(dir, "manifest.json") },
+        `http://127.0.0.1:${server.port}`,
+      );
+      expect(reports[0]?.sessionsWritten).toBe(1);
+      expect(reports[0]?.sessionsSkipped).toBe(1);
+      expect(reports[0]?.outcomes).toContainEqual(expect.objectContaining({ sessionId: "sensitive", status: "skipped", diagnostic: "ignored" }));
+      expect(reports[0]?.diagnostics).toContainEqual(expect.objectContaining({ name: "ingest.session.ignored", severity: "info", count: 1 }));
+      // Only the pre-parse fingerprint probe (session id + stat hash) may name it.
+      expect(writes).toHaveLength(1);
+      expect(writes.some((body) => body.includes("sensitive"))).toBe(false);
+      expect(bodies.some((body) => body.includes("/work/sensitive"))).toBe(false);
+    } finally {
+      if (previousConfig === undefined) delete process.env.QUASAR_CONFIG;
+      else process.env.QUASAR_CONFIG = previousConfig;
+      server.stop(true);
+    }
+  });
+
+  test("a malformed ignore list aborts ingest before the server is contacted", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "quasar-ingest-ignore-"));
+    const configPath = join(dir, "config.json");
+    writeFileSync(configPath, JSON.stringify({ ignore: { paths: ["relative/path"] } }));
+    adaptersByProvider.set("claude", adapterFor([session("any")]));
+    let requests = 0;
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => { requests += 1; return Response.json({ ok: true, data: {} }); } });
+    const previousConfig = process.env.QUASAR_CONFIG;
+    process.env.QUASAR_CONFIG = configPath;
+    try {
+      await expect(ingestRemote(
+        { provider: "claude", ingestToken: "token-a", manifestPath: join(dir, "manifest.json") },
+        `http://127.0.0.1:${server.port}`,
+      )).rejects.toThrow("ignore.paths");
+      expect(requests).toBe(0);
+    } finally {
+      if (previousConfig === undefined) delete process.env.QUASAR_CONFIG;
+      else process.env.QUASAR_CONFIG = previousConfig;
       server.stop(true);
     }
   });
